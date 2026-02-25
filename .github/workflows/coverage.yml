@@ -1,22 +1,72 @@
 name: Coverage
 
 # Code coverage tracking with threshold enforcement
-# Runs on every push and PR to main branch
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:  # Allow manual triggering
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      run_coverage: ${{ steps.classify.outputs.run_coverage }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed files
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            rust:
+              - 'src/**'
+              - 'tests/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+            workflow:
+              - '.github/workflows/coverage.yml'
+
+      - name: Classify coverage scope
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_coverage=false
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "${{ steps.filter.outputs.rust }}" == "true" || "${{ steps.filter.outputs.workflow }}" == "true" ]]; then
+            run_coverage=true
+          fi
+          echo "run_coverage=${run_coverage}" >> "${GITHUB_OUTPUT}"
+
+  fast-path:
+    name: Fast Path (coverage skipped)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run_coverage != 'true'
+
+    steps:
+      - name: Skip coverage
+        run: echo "No coverage-relevant changes detected; skipping coverage job."
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run_coverage == 'true'
 
     steps:
       - name: Checkout
@@ -30,33 +80,30 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Cache cargo registry and target
-        uses: actions/cache@v4
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            ~/.cargo/bin/cargo-llvm-cov
-          key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-coverage-
+          shared-key: coverage
 
-      - name: Generate coverage reports
-        run: |
-          cargo llvm-cov --all-features --workspace --html --output-dir html -- --test-threads=1
-          cargo llvm-cov --all-features --workspace --json --output-path coverage.json --summary-only -- --test-threads=1
+      - name: Run tests once for coverage data
+        run: cargo llvm-cov --all-features --workspace --no-report -- --test-threads=1
 
-      - name: Display coverage summary
+      - name: Generate coverage JSON summary
+        run: cargo llvm-cov report --all-features --workspace --json --summary-only --output-path coverage.json
+
+      - name: Display coverage report
         run: |
           echo "=== Coverage Summary ==="
-          cargo llvm-cov --all-features --workspace --summary-only -- --test-threads=1
+          cargo llvm-cov report --all-features --workspace
 
       - name: Check coverage threshold (65%)
         run: |
           echo "=== Checking Coverage Threshold ==="
-          cargo llvm-cov --all-features --workspace --summary-only --fail-under-lines 65 -- --test-threads=1
+          cargo llvm-cov report --all-features --workspace --fail-under-lines 65
           echo "✅ Coverage meets minimum threshold of 65%"
+
+      - name: Generate coverage HTML report
+        run: cargo llvm-cov report --all-features --workspace --html --output-dir html
 
       - name: Upload coverage JSON report
         uses: actions/upload-artifact@v4
