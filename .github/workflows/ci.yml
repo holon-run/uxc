@@ -8,7 +8,7 @@ on:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
-      workflow: ${{ steps.filter.outputs.workflow }}
+      workflow_ci: ${{ steps.filter.outputs.workflow_ci }}
       skills: ${{ steps.filter.outputs.skills }}
       run_rust_ci: ${{ steps.classify.outputs.run_rust_ci }}
 
@@ -40,8 +40,8 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
-            workflow:
-              - '.github/workflows/**'
+            workflow_ci:
+              - '.github/workflows/ci.yml'
             skills:
               - 'skills/**'
 
@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           run_rust_ci=false
-          if [[ "${{ steps.filter.outputs.rust }}" == "true" || "${{ steps.filter.outputs.workflow }}" == "true" ]]; then
+          if [[ "${{ steps.filter.outputs.rust }}" == "true" || "${{ steps.filter.outputs.workflow_ci }}" == "true" ]]; then
             run_rust_ci=true
           fi
           echo "run_rust_ci=${run_rust_ci}" >> "${GITHUB_OUTPUT}"
@@ -70,7 +70,7 @@ jobs:
     name: Lint (skills)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.skills == 'true' || needs.changes.outputs.workflow == 'true'
+    if: needs.changes.outputs.skills == 'true' || needs.changes.outputs.workflow_ci == 'true'
 
     steps:
       - name: Checkout
@@ -160,6 +160,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-security
+
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
 
@@ -178,8 +183,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -187,7 +190,7 @@ jobs:
           shared-key: ci-build-pr-linux
 
       - name: Build
-        run: cargo build --target x86_64-unknown-linux-gnu --release
+        run: cargo build --release
 
   build-main:
     name: Build (${{ matrix.os }}, ${{ matrix.target }})

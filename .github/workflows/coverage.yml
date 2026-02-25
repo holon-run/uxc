@@ -29,6 +29,7 @@ jobs:
 
       - name: Detect changed files
         id: filter
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         uses: dorny/paths-filter@v3
         with:
           filters: |
@@ -89,21 +90,21 @@ jobs:
         run: cargo llvm-cov --all-features --workspace --no-report -- --test-threads=1
 
       - name: Generate coverage JSON summary
-        run: cargo llvm-cov report --all-features --workspace --json --summary-only --output-path coverage.json
+        run: cargo llvm-cov report --json --summary-only --output-path coverage.json
 
       - name: Display coverage report
         run: |
           echo "=== Coverage Summary ==="
-          cargo llvm-cov report --all-features --workspace
+          cargo llvm-cov report
 
       - name: Check coverage threshold (65%)
         run: |
           echo "=== Checking Coverage Threshold ==="
-          cargo llvm-cov report --all-features --workspace --fail-under-lines 65
+          cargo llvm-cov report --fail-under-lines 65
           echo "✅ Coverage meets minimum threshold of 65%"
 
       - name: Generate coverage HTML report
-        run: cargo llvm-cov report --all-features --workspace --html --output-dir html
+        run: cargo llvm-cov report --html --output-dir html
 
       - name: Upload coverage JSON report
         uses: actions/upload-artifact@v4
