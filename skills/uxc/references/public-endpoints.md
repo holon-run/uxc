@@ -4,22 +4,22 @@ The following endpoints are practical no-key baselines for smoke checks. Availab
 
 ## OpenAPI
 
-- Endpoint: `https://petstore3.swagger.io/api/v3`
+- Endpoint: `petstore3.swagger.io/api/v3`
 - Check:
 
 ```bash
-uxc https://petstore3.swagger.io/api/v3 list
-uxc https://petstore3.swagger.io/api/v3 get:/store/inventory
+uxc petstore3.swagger.io/api/v3 list
+uxc petstore3.swagger.io/api/v3 get:/store/inventory
 ```
 
 ## GraphQL
 
-- Endpoint: `https://countries.trevorblades.com/`
+- Endpoint: `countries.trevorblades.com`
 - Check:
 
 ```bash
-uxc https://countries.trevorblades.com/ list
-uxc https://countries.trevorblades.com/ query/country --json '{"code":"US"}'
+uxc countries.trevorblades.com list
+uxc countries.trevorblades.com query/country --json '{"code":"US"}'
 ```
 
 ## gRPC
@@ -35,12 +35,12 @@ uxc grpcb.in:9000 addsvc.Add/Sum --json '{"a":1,"b":2}'
 
 ## MCP (HTTP)
 
-- Endpoint: `https://mcp.deepwiki.com/mcp`
+- Endpoint: `mcp.deepwiki.com/mcp`
 - Check:
 
 ```bash
-uxc https://mcp.deepwiki.com/mcp list
-uxc https://mcp.deepwiki.com/mcp describe ask_question
+uxc mcp.deepwiki.com/mcp list
+uxc mcp.deepwiki.com/mcp describe ask_question
 ```
 
 ## JSON-RPC

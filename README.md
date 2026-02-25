@@ -48,11 +48,12 @@ Schema becomes execution.
 UXC does not require registering server aliases.
 
 ```bash
-uxc https://api.example.com list
-uxc https://api.example.com get:/users/42
+uxc petstore3.swagger.io/api/v3 list
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} --json '{"petId":1}'
 ```
 
 Any compliant endpoint can be called directly.
+For common HTTP targets, UXC infers `https://` when the scheme is omitted.
 
 This makes UXC safe to use inside:
 
@@ -102,8 +103,8 @@ The CLI interface remains consistent across protocols.
   "ok": true,
   "kind": "call_result",
   "protocol": "openapi",
-  "endpoint": "https://api.example.com",
-  "operation": "get:/users/{id}",
+  "endpoint": "https://petstore3.swagger.io/api/v3",
+  "operation": "get:/pet/{petId}",
   "data": { ... },
   "meta": {
     "version": "v1",
@@ -164,16 +165,16 @@ This makes UXC ideal for:
 uxc cache stats
 
 # Clear cache for specific endpoint
-uxc cache clear https://api.example.com
+uxc cache clear petstore3.swagger.io/api/v3
 
 # Clear all cache
 uxc cache clear --all
 
 # Disable cache for this operation
-uxc https://api.example.com list --no-cache
+uxc petstore3.swagger.io/api/v3 list --no-cache
 
 # Use custom TTL (in seconds)
-uxc https://api.example.com list --cache-ttl 3600
+uxc petstore3.swagger.io/api/v3 list --cache-ttl 3600
 ```
 
 ## Debugging and Logging
@@ -182,19 +183,19 @@ UXC uses structured logging with the `tracing` crate. By default, only warnings 
 
 ```bash
 # Default: warnings and errors only
-uxc https://api.example.com list
+uxc petstore3.swagger.io/api/v3 list
 
 # Enable info logs (HTTP requests, responses, etc.)
-RUST_LOG=info uxc https://api.example.com list
+RUST_LOG=info uxc petstore3.swagger.io/api/v3 list
 
 # Enable debug logs (detailed debugging information)
-RUST_LOG=debug uxc https://api.example.com list
+RUST_LOG=debug uxc petstore3.swagger.io/api/v3 list
 
 # Enable trace logs (maximum verbosity)
-RUST_LOG=trace uxc https://api.example.com list
+RUST_LOG=trace uxc petstore3.swagger.io/api/v3 list
 
 # Enable logs for specific modules only
-RUST_LOG=uxc::adapters::openapi=debug uxc https://api.example.com list
+RUST_LOG=uxc::adapters::openapi=debug uxc petstore3.swagger.io/api/v3 list
 ```
 
 **Log Levels:**
@@ -263,6 +264,8 @@ After installation, restart Codex to load the skill.
 
 ## Example Usage
 
+Most HTTP examples omit the scheme for brevity. Add `https://` explicitly if you prefer strictness.
+
 ### Operation ID Conventions
 
 UXC uses protocol-native, machine-friendly `operation_id` values:
@@ -277,32 +280,31 @@ UXC uses protocol-native, machine-friendly `operation_id` values:
 
 ```bash
 # List available operations
-uxc https://api.example.com list
-uxc petstore3.swagger.io/api/v3 list  # scheme can be omitted for common HTTP targets
+uxc petstore3.swagger.io/api/v3 list
 
 # Schema-separated service: runtime endpoint and schema URL are different
-uxc https://api.github.com list \
+uxc api.github.com list \
   --schema-url https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json
 
 # Get operation help
-uxc https://api.example.com describe get:/users/{id}
-uxc https://api.example.com get:/users/{id} help
+uxc petstore3.swagger.io/api/v3 describe get:/pet/{petId}
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} help
 
 # Execute with parameters
-uxc https://api.example.com get:/users/{id} --json '{"id":42}'
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} --json '{"petId":1}'
 
 # Execute with JSON input
-uxc https://api.example.com call post:/users --json '{"name":"Alice","email":"alice@example.com"}'
+uxc petstore3.swagger.io/api/v3 call post:/pet --json '{"id":10001,"name":"codex-dog","photoUrls":["https://petstore3.swagger.io/favicon-32x32.png"],"status":"available"}'
 ```
 
 ### gRPC Services
 
 ```bash
 # List all services via reflection
-uxc grpc.example.com:9000 list
+uxc grpcb.in:9000 list
 
 # Call a unary RPC
-uxc grpc.example.com:9000 addsvc.Add/Sum --json '{"a":1,"b":2}'
+uxc grpcb.in:9000 addsvc.Add/Sum --json '{"a":1,"b":2}'
 ```
 
 Note: gRPC unary invocation uses the `grpcurl` binary at runtime.
@@ -311,27 +313,24 @@ Note: gRPC unary invocation uses the `grpcurl` binary at runtime.
 
 ```bash
 # List available queries/mutations/subscriptions
-uxc https://graphql.example.com list
+uxc countries.trevorblades.com list
 
 # Execute a query
-uxc https://graphql.example.com query/viewer
+uxc countries.trevorblades.com query/continents
 
 # Execute with parameters
-uxc https://graphql.example.com query/user --json '{"id":"42"}'
-
-# Execute a mutation
-uxc https://graphql.example.com mutation/addStar --json '{"starredId":"123"}'
+uxc countries.trevorblades.com query/country --json '{"code":"US"}'
 ```
 
 ### MCP (Model Context Protocol)
 
 ```bash
 # HTTP transport (recommended for production)
-uxc https://mcp-server.example.com list
-uxc https://mcp-server.example.com tool_name --json '{"param1":"value1"}'
+uxc mcp.deepwiki.com/mcp list
+uxc mcp.deepwiki.com/mcp ask_question --json '{"repoName":"holon-run/uxc","question":"What does this project do?"}'
 
 # If a tool name conflicts with CLI subcommands, use explicit call
-uxc https://mcp-server.example.com call help --json '{}'
+uxc mcp.deepwiki.com/mcp call <tool_name> --json '{...}'
 
 # stdio transport (for local development)
 uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list
@@ -342,13 +341,13 @@ uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list_directory --json 
 
 ```bash
 # Discover methods (requires rpc.discover or openrpc.json)
-uxc https://rpc.example.com list
+uxc fullnode.mainnet.sui.io list
 
 # Describe one method
-uxc https://rpc.example.com describe eth_getBalance
+uxc fullnode.mainnet.sui.io describe sui_getLatestCheckpointSequenceNumber
 
 # Execute a method
-uxc https://rpc.example.com eth_getBalance --json '{"address":"0xabc...","block":"latest"}'
+uxc fullnode.mainnet.sui.io sui_getLatestCheckpointSequenceNumber
 ```
 
 Note: JSON-RPC support is OpenRPC-driven for predictable `list/describe` discovery.
@@ -356,7 +355,7 @@ Note: JSON-RPC support is OpenRPC-driven for predictable `list/describe` discove
 ## Public Test Endpoints (No API Key)
 
 These endpoints are useful for protocol availability checks without API keys.
-Verified on 2026-02-23.
+Verified on 2026-02-25.
 
 ### OpenAPI
 

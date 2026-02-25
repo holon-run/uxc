@@ -12,7 +12,7 @@ Use this skill to query GitHub repository documentation and ask questions about 
 ## Prerequisites
 
 - `uxc` is installed and available in `PATH`.
-- Network access to `https://mcp.deepwiki.com/mcp`
+- Network access to `mcp.deepwiki.com/mcp`
 
 Note: Repositories must be indexed on DeepWiki first. Visit https://deepwiki.com to index a repository.
 
@@ -41,16 +41,16 @@ cargo install uxc
 ## Core Workflow
 
 1. List available tools:
-   - `uxc https://mcp.deepwiki.com/mcp list`
+   - `uxc mcp.deepwiki.com/mcp list`
 
 2. Ask a question about a repository:
-   - `uxc https://mcp.deepwiki.com/mcp ask_question --json '{"repoName":"owner/repo","question":"your question"}'`
+   - `uxc mcp.deepwiki.com/mcp ask_question --json '{"repoName":"owner/repo","question":"your question"}'`
 
 3. Read wiki structure:
-   - `uxc https://mcp.deepwiki.com/mcp read_wiki_structure --json '{"repoName":"owner/repo"}'`
+   - `uxc mcp.deepwiki.com/mcp read_wiki_structure --json '{"repoName":"owner/repo"}'`
 
 4. Read wiki contents:
-   - `uxc https://mcp.deepwiki.com/mcp read_wiki_contents --json '{"repoName":"owner/repo"}'`
+   - `uxc mcp.deepwiki.com/mcp read_wiki_contents --json '{"repoName":"owner/repo"}'`
 
 ## Available Tools
 
@@ -63,19 +63,19 @@ cargo install uxc
 ### Ask about a codebase
 
 ```bash
-uxc https://mcp.deepwiki.com/mcp ask_question --json '{"repoName":"facebook/react","question":"How does useState work?"}'
+uxc mcp.deepwiki.com/mcp ask_question --json '{"repoName":"facebook/react","question":"How does useState work?"}'
 ```
 
 ### Explore repository structure
 
 ```bash
-uxc https://mcp.deepwiki.com/mcp read_wiki_structure --json '{"repoName":"facebook/react"}'
+uxc mcp.deepwiki.com/mcp read_wiki_structure --json '{"repoName":"facebook/react"}'
 ```
 
 ### Read documentation
 
 ```bash
-uxc https://mcp.deepwiki.com/mcp read_wiki_contents --json '{"repoName":"facebook/react"}'
+uxc mcp.deepwiki.com/mcp read_wiki_contents --json '{"repoName":"facebook/react"}'
 ```
 
 ## Output Parsing
