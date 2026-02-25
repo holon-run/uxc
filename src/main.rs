@@ -4,7 +4,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs;
 use std::net::IpAddr;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 mod adapters;
@@ -116,6 +120,25 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         auth_command: AuthCommands,
+    },
+
+    /// Create a host-bound shortcut command
+    Link {
+        /// Shortcut command name (file name)
+        #[arg(value_name = "NAME")]
+        name: String,
+
+        /// Host/endpoint bound to this shortcut
+        #[arg(value_name = "HOST")]
+        host: String,
+
+        /// Directory to write the shortcut file (default: ~/.local/bin)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<String>,
+
+        /// Overwrite existing shortcut file
+        #[arg(long)]
+        force: bool,
     },
 
     /// Execute an operation explicitly
@@ -273,6 +296,15 @@ struct AuthListData {
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthRemoveData {
     profile: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LinkCreateData {
+    name: String,
+    host: String,
+    path: String,
+    overwritten: bool,
+    dir_in_path: bool,
 }
 
 #[tokio::main]
@@ -509,6 +541,16 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
         return handle_auth_command(auth_command).await;
     }
 
+    if let Some(Commands::Link {
+        name,
+        host,
+        dir,
+        force,
+    }) = &cli.command
+    {
+        return handle_link_command(name, host, dir.as_deref(), *force).await;
+    }
+
     let url = cli
         .url
         .clone()
@@ -684,6 +726,10 @@ fn global_help_envelope() -> Result<OutputEnvelope> {
                 about: "Manage authentication profiles".to_string(),
             },
             GlobalHelpCommand {
+                name: "link".to_string(),
+                about: "Create a host-bound shortcut command".to_string(),
+            },
+            GlobalHelpCommand {
                 name: "call".to_string(),
                 about: "Execute an operation explicitly".to_string(),
             },
@@ -810,6 +856,22 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             println!("Profile '{}' removed successfully.", data.profile);
             Ok(())
         }
+        Some("link_create_result") => {
+            let data: LinkCreateData = decode_envelope_data(envelope)?;
+            if data.overwritten {
+                println!("Updated shortcut '{}' -> {}", data.name, data.host);
+            } else {
+                println!("Created shortcut '{}' -> {}", data.name, data.host);
+            }
+            println!("Path: {}", data.path);
+            if !data.dir_in_path {
+                println!(
+                    "Note: shortcut directory is not in PATH. Add it before invoking '{}'.",
+                    data.name
+                );
+            }
+            Ok(())
+        }
         _ => {
             if let Some(data) = &envelope.data {
                 println!("{}", serde_json::to_string_pretty(data)?);
@@ -851,10 +913,12 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
             json: json.clone(),
         }),
         Some(Commands::External(tokens)) => parse_external_command(tokens, cli.help),
-        Some(Commands::Cache { .. }) | Some(Commands::Auth { .. }) => Err(
-            UxcError::InvalidArguments("Internal routing error for cache/auth command".to_string())
-                .into(),
-        ),
+        Some(Commands::Cache { .. })
+        | Some(Commands::Auth { .. })
+        | Some(Commands::Link { .. }) => Err(UxcError::InvalidArguments(
+            "Internal routing error for cache/auth/link command".to_string(),
+        )
+        .into()),
     }
 }
 
@@ -1125,6 +1189,160 @@ fn to_operation_summary(protocol: &str, op: &Operation) -> OperationSummary {
     }
 }
 
+async fn handle_link_command(
+    name: &str,
+    host: &str,
+    dir: Option<&str>,
+    force: bool,
+) -> Result<OutputEnvelope> {
+    validate_link_name(name)?;
+
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(UxcError::InvalidArguments("Host cannot be empty".to_string()).into());
+    }
+
+    let target_dir = resolve_link_dir(dir)?;
+    fs::create_dir_all(&target_dir)?;
+
+    let target_path = target_dir.join(name);
+    let target_exists = target_path.exists();
+    if target_exists && !force {
+        return Err(UxcError::InvalidArguments(format!(
+            "Shortcut '{}' already exists at {}. Use --force to overwrite.",
+            name,
+            target_path.display()
+        ))
+        .into());
+    }
+
+    let script = format!(
+        "#!/usr/bin/env sh\nexec uxc {} \"$@\"\n",
+        shell_single_quote(host)
+    );
+    fs::write(&target_path, script)?;
+
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(&target_path)?;
+        let mut perms = metadata.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&target_path, perms)?;
+    }
+
+    let data = serde_json::to_value(LinkCreateData {
+        name: name.to_string(),
+        host: host.to_string(),
+        path: target_path.display().to_string(),
+        overwritten: target_exists,
+        dir_in_path: is_dir_in_path(&target_dir),
+    })?;
+
+    Ok(OutputEnvelope::success(
+        "link_create_result",
+        "cli",
+        "uxc",
+        Some(name),
+        data,
+        None,
+    ))
+}
+
+fn validate_link_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(UxcError::InvalidArguments("Shortcut name cannot be empty".to_string()).into());
+    }
+    if name == "." || name == ".." {
+        return Err(
+            UxcError::InvalidArguments("Shortcut name cannot be '.' or '..'".to_string()).into(),
+        );
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(UxcError::InvalidArguments(
+            "Shortcut name cannot contain path separators".to_string(),
+        )
+        .into());
+    }
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
+    {
+        return Err(UxcError::InvalidArguments(
+            "Shortcut name may only contain letters, digits, '-', '_', and '.'".to_string(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn resolve_link_dir(dir: Option<&str>) -> Result<PathBuf> {
+    match dir {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(UxcError::InvalidArguments(
+                    "Shortcut directory cannot be empty".to_string(),
+                )
+                .into());
+            }
+            if trimmed == "~" || trimmed.starts_with("~/") {
+                let home = resolve_home_dir().ok_or_else(|| {
+                    UxcError::ExecutionFailed("Could not determine home directory".to_string())
+                })?;
+                if trimmed == "~" {
+                    Ok(home)
+                } else {
+                    Ok(home.join(trimmed.trim_start_matches("~/")))
+                }
+            } else {
+                Ok(PathBuf::from(trimmed))
+            }
+        }
+        None => {
+            let home = resolve_home_dir().ok_or_else(|| {
+                UxcError::ExecutionFailed("Could not determine home directory".to_string())
+            })?;
+            Ok(home.join(".local").join("bin"))
+        }
+    }
+}
+
+fn resolve_home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(PathBuf::from(home));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            return Some(PathBuf::from(profile));
+        }
+    }
+    None
+}
+
+fn shell_single_quote(input: &str) -> String {
+    if input.is_empty() {
+        "''".to_string()
+    } else {
+        format!("'{}'", input.replace('\'', "'\"'\"'"))
+    }
+}
+
+fn normalized_existing_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_dir_in_path(dir: &Path) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    let normalized_dir = normalized_existing_path(dir);
+    std::env::split_paths(&path_var)
+        .map(|entry| normalized_existing_path(&entry))
+        .any(|entry| entry == normalized_dir)
+}
+
 fn error_code(err: &anyhow::Error) -> &'static str {
     for cause in err.chain() {
         if let Some(uxc_error) = cause.downcast_ref::<UxcError>() {
@@ -1356,7 +1574,10 @@ fn inject_auth_if_supported(
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_scheme_for_endpoint, normalize_endpoint_url};
+    use super::{
+        infer_scheme_for_endpoint, normalize_endpoint_url, resolve_home_dir, resolve_link_dir,
+        shell_single_quote, validate_link_name,
+    };
 
     #[test]
     fn infer_scheme_for_public_host() {
@@ -1396,5 +1617,37 @@ mod tests {
     #[test]
     fn skip_ambiguous_host_port_without_path() {
         assert_eq!(infer_scheme_for_endpoint("grpcb.in:9000"), None);
+    }
+
+    #[test]
+    fn validate_link_name_rejects_invalid_values() {
+        assert!(validate_link_name("petcli").is_ok());
+        assert!(validate_link_name("acme-petcli").is_ok());
+        assert!(validate_link_name("acme_pet.cli").is_ok());
+        assert!(validate_link_name("").is_err());
+        assert!(validate_link_name(".").is_err());
+        assert!(validate_link_name("..").is_err());
+        assert!(validate_link_name("bad/name").is_err());
+        assert!(validate_link_name("bad name").is_err());
+    }
+
+    #[test]
+    fn shell_quote_wraps_values_safely() {
+        assert_eq!(
+            shell_single_quote("petstore3.swagger.io/api/v3"),
+            "'petstore3.swagger.io/api/v3'"
+        );
+        assert_eq!(shell_single_quote(""), "''");
+        assert_eq!(shell_single_quote("o'connor"), "'o'\"'\"'connor'");
+    }
+
+    #[test]
+    fn resolve_link_dir_expands_home_shortcuts() {
+        let home = resolve_home_dir().expect("home directory should exist in test environment");
+        assert_eq!(resolve_link_dir(Some("~")).expect("~ should resolve"), home);
+        assert_eq!(
+            resolve_link_dir(Some("~/bin")).expect("~/bin should resolve"),
+            home.join("bin")
+        );
     }
 }
