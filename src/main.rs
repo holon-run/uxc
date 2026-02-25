@@ -4,7 +4,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::fs;
+use std::io::Write;
 use std::net::IpAddr;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -132,7 +134,7 @@ enum Commands {
         #[arg(value_name = "HOST")]
         host: String,
 
-        /// Directory to write the shortcut file (default: ~/.local/bin)
+        /// Directory to write the shortcut file (default: ~/.local/bin on Unix, ~/.uxc/bin on Windows)
         #[arg(long, value_name = "DIR")]
         dir: Option<String>,
 
@@ -1205,36 +1207,17 @@ async fn handle_link_command(
     let target_dir = resolve_link_dir(dir)?;
     fs::create_dir_all(&target_dir)?;
 
-    let target_path = target_dir.join(name);
-    let target_exists = target_path.exists();
-    if target_exists && !force {
-        return Err(UxcError::InvalidArguments(format!(
-            "Shortcut '{}' already exists at {}. Use --force to overwrite.",
-            name,
-            target_path.display()
-        ))
-        .into());
-    }
-
-    let script = format!(
-        "#!/usr/bin/env sh\nexec uxc {} \"$@\"\n",
-        shell_single_quote(host)
-    );
-    fs::write(&target_path, script)?;
-
-    #[cfg(unix)]
-    {
-        let metadata = fs::metadata(&target_path)?;
-        let mut perms = metadata.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&target_path, perms)?;
-    }
+    let target_path = link_target_path(&target_dir, name);
+    let launcher = build_link_launcher(host);
+    let target_exists_before = target_path.exists();
+    write_link_file(&target_path, launcher.as_bytes(), force)?;
+    set_executable_if_unix(&target_path)?;
 
     let data = serde_json::to_value(LinkCreateData {
         name: name.to_string(),
         host: host.to_string(),
         path: target_path.display().to_string(),
-        overwritten: target_exists,
+        overwritten: target_exists_before,
         dir_in_path: is_dir_in_path(&target_dir),
     })?;
 
@@ -1246,6 +1229,108 @@ async fn handle_link_command(
         data,
         None,
     ))
+}
+
+fn link_target_path(dir: &Path, name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+            dir.join(name)
+        } else {
+            dir.join(format!("{}.cmd", name))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        dir.join(name)
+    }
+}
+
+fn build_link_launcher(host: &str) -> String {
+    #[cfg(windows)]
+    {
+        let escaped = host.replace('"', "\"\"");
+        return format!("@echo off\r\nuxc \"{}\" %*\r\n", escaped);
+    }
+    #[cfg(not(windows))]
+    {
+        format!("#!/usr/bin/env sh\nexec uxc {} \"$@\"\n", shell_single_quote(host))
+    }
+}
+
+fn write_link_file(target_path: &Path, content: &[u8], force: bool) -> Result<()> {
+    if !force {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(target_path)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    UxcError::InvalidArguments(format!(
+                        "Shortcut '{}' already exists at {}. Use --force to overwrite.",
+                        target_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("shortcut"),
+                        target_path.display()
+                    ))
+                } else {
+                    UxcError::IoError(err)
+                }
+            })?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        return Ok(());
+    }
+
+    let temp_path = temporary_link_path(target_path);
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+    }
+
+    #[cfg(windows)]
+    if target_path.exists() {
+        fs::remove_file(target_path)?;
+    }
+
+    fs::rename(&temp_path, target_path).map_err(|err| {
+        let _ = fs::remove_file(&temp_path);
+        UxcError::IoError(err)
+    })?;
+    Ok(())
+}
+
+fn temporary_link_path(target_path: &Path) -> PathBuf {
+    let parent = target_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = target_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("uxc-link");
+    let pid = std::process::id();
+    for nonce in 0..1000u32 {
+        let candidate = parent.join(format!(".{}.{}.{}.tmp", file_name, pid, nonce));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!(".{}.{}.tmp", file_name, pid))
+}
+
+fn set_executable_if_unix(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(path)?;
+        let mut perms = metadata.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
 }
 
 fn validate_link_name(name: &str) -> Result<()> {
@@ -1302,7 +1387,14 @@ fn resolve_link_dir(dir: Option<&str>) -> Result<PathBuf> {
             let home = resolve_home_dir().ok_or_else(|| {
                 UxcError::ExecutionFailed("Could not determine home directory".to_string())
             })?;
-            Ok(home.join(".local").join("bin"))
+            #[cfg(windows)]
+            {
+                Ok(home.join(".uxc").join("bin"))
+            }
+            #[cfg(not(windows))]
+            {
+                Ok(home.join(".local").join("bin"))
+            }
         }
     }
 }
@@ -1315,6 +1407,13 @@ fn resolve_home_dir() -> Option<PathBuf> {
     {
         if let Some(profile) = std::env::var_os("USERPROFILE") {
             return Some(PathBuf::from(profile));
+        }
+        let home_drive = std::env::var_os("HOMEDRIVE");
+        let home_path = std::env::var_os("HOMEPATH");
+        if let (Some(drive), Some(path)) = (home_drive, home_path) {
+            let mut combined = PathBuf::from(drive);
+            combined.push(path);
+            return Some(combined);
         }
     }
     None
@@ -1575,9 +1674,10 @@ fn inject_auth_if_supported(
 #[cfg(test)]
 mod tests {
     use super::{
-        infer_scheme_for_endpoint, normalize_endpoint_url, resolve_home_dir, resolve_link_dir,
-        shell_single_quote, validate_link_name,
+        infer_scheme_for_endpoint, link_target_path, normalize_endpoint_url, resolve_home_dir,
+        resolve_link_dir, shell_single_quote, validate_link_name,
     };
+    use std::path::Path;
 
     #[test]
     fn infer_scheme_for_public_host() {
@@ -1649,5 +1749,34 @@ mod tests {
             resolve_link_dir(Some("~/bin")).expect("~/bin should resolve"),
             home.join("bin")
         );
+    }
+
+    #[test]
+    fn resolve_link_dir_uses_platform_default_when_unspecified() {
+        let home = resolve_home_dir().expect("home directory should exist in test environment");
+        #[cfg(windows)]
+        assert_eq!(
+            resolve_link_dir(None).expect("default dir should resolve"),
+            home.join(".uxc").join("bin")
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            resolve_link_dir(None).expect("default dir should resolve"),
+            home.join(".local").join("bin")
+        );
+    }
+
+    #[test]
+    fn link_target_path_uses_platform_suffix() {
+        let dir = Path::new("/tmp");
+        #[cfg(windows)]
+        {
+            assert_eq!(link_target_path(dir, "petcli"), dir.join("petcli.cmd"));
+            assert_eq!(link_target_path(dir, "petcli.cmd"), dir.join("petcli.cmd"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(link_target_path(dir, "petcli"), dir.join("petcli"));
+        }
     }
 }
