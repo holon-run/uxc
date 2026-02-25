@@ -1,0 +1,4 @@
+interface:
+  display_name: "UXC"
+  short_description: "Discover and call remote schema APIs via UXC"
+  default_prompt: "Use $uxc to discover operations and call remote interfaces with the UXC CLI."
