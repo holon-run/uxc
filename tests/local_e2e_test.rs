@@ -1,0 +1,249 @@
+//! Local E2E tests using test servers
+//!
+//! These tests verify that uxc can correctly interact with local controllable
+//! test servers for each protocol.
+
+mod common;
+
+use common::{run_uxc, start_test_server};
+
+#[test]
+fn test_openapi_list_operations() {
+    let _server = start_test_server("openapi", "ok");
+
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "list"]);
+
+    assert!(result.is_ok(), "Failed to list OpenAPI operations: {:?}", result);
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "openapi");
+    assert!(json["data"]["operations"].as_array().unwrap().len() > 0);
+
+    // Check for expected operations
+    let ops: Vec<&str> = json["data"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["operation_id"].as_str())
+        .collect();
+
+    assert!(ops.contains(&"get:/health"), "Expected get:/health operation");
+    assert!(ops.contains(&"get:/users"), "Expected get:/users operation");
+    assert!(ops.contains(&"get:/users/{id}"), "Expected get:/users/{{id}} operation");
+}
+
+#[test]
+fn test_openapi_call_operation() {
+    let _server = start_test_server("openapi", "ok");
+
+    // Call the health check endpoint
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "get:/health"]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call OpenAPI operation: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "openapi");
+    assert_eq!(json["data"]["status"], "ok");
+}
+
+#[test]
+fn test_openapi_auth_required() {
+    let _server = start_test_server("openapi", "auth_required");
+
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "get:/health"]);
+
+    assert!(result.is_err(), "Expected auth error, but got success");
+
+    let err = result.unwrap_err();
+    assert!(err.contains("401") || err.contains("Unauthorized"), "Expected 401 error, got: {}", err);
+}
+
+#[test]
+fn test_graphql_list_operations() {
+    let _server = start_test_server("graphql", "ok");
+
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "list"]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to list GraphQL operations: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "graphql");
+    assert!(json["data"]["operations"].as_array().unwrap().len() > 0);
+
+    // Check for expected operations
+    let ops: Vec<&str> = json["data"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["operation_id"].as_str())
+        .collect();
+
+    assert!(ops.contains(&"query/health"), "Expected query/health operation");
+    assert!(ops.contains(&"query/users"), "Expected query/users operation");
+    assert!(ops.contains(&"query/user"), "Expected query/user operation");
+}
+
+#[test]
+fn test_graphql_call_query() {
+    let _server = start_test_server("graphql", "ok");
+
+    // Call the health query
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "query/health"]);
+
+    assert!(result.is_ok(), "Failed to call GraphQL query: {:?}", result);
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "graphql");
+    assert_eq!(json["data"]["data"]["health"]["status"], "ok");
+}
+
+#[test]
+fn test_graphql_call_with_args() {
+    let _server = start_test_server("graphql", "ok");
+
+    // Call the user query with an ID argument
+    let result = run_uxc(&[
+        &format!("http://{}/", _server.addr),
+        "query/user",
+        "--json",
+        r#"{"id":"1"}"#,
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call GraphQL query with args: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "graphql");
+    assert_eq!(json["data"]["data"]["user"]["id"], "1");
+    assert_eq!(json["data"]["data"]["user"]["name"], "Alice");
+}
+
+#[test]
+fn test_graphql_auth_required() {
+    let _server = start_test_server("graphql", "auth_required");
+
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "query/health"]);
+
+    assert!(result.is_err(), "Expected auth error, but got success");
+
+    let err = result.unwrap_err();
+    assert!(err.contains("401") || err.contains("Unauthorized"), "Expected 401 error, got: {}", err);
+}
+
+#[test]
+fn test_jsonrpc_list_operations() {
+    let _server = start_test_server("jsonrpc", "ok");
+
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "list"]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to list JSON-RPC operations: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "jsonrpc");
+    assert!(json["data"]["operations"].as_array().unwrap().len() > 0);
+
+    // Check for expected operations
+    let ops: Vec<&str> = json["data"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["operation_id"].as_str())
+        .collect();
+
+    assert!(ops.contains(&"health"), "Expected health operation");
+    assert!(ops.contains(&"list_users"), "Expected list_users operation");
+    assert!(ops.contains(&"get_user"), "Expected get_user operation");
+}
+
+#[test]
+fn test_jsonrpc_call_method() {
+    let _server = start_test_server("jsonrpc", "ok");
+
+    // Call the health method
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "health"]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call JSON-RPC method: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "jsonrpc");
+    assert_eq!(json["data"]["result"]["status"], "ok");
+}
+
+#[test]
+fn test_jsonrpc_call_with_args() {
+    let _server = start_test_server("jsonrpc", "ok");
+
+    // Call the get_user method with an ID argument
+    let result = run_uxc(&[
+        &format!("http://{}/", _server.addr),
+        "get_user",
+        "--json",
+        r#"{"id":1}"#,
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call JSON-RPC method with args: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "jsonrpc");
+    assert_eq!(json["data"]["result"]["id"], 1);
+    assert_eq!(json["data"]["result"]["name"], "Alice");
+}
+
+#[test]
+fn test_jsonrpc_auth_required() {
+    let _server = start_test_server("jsonrpc", "auth_required");
+
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "health"]);
+
+    assert!(result.is_err(), "Expected auth error, but got success");
+
+    let err = result.unwrap_err();
+    assert!(err.contains("401") || err.contains("Unauthorized"), "Expected 401 error, got: {}", err);
+}

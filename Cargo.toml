@@ -40,6 +40,9 @@ tokio-stream = "0.1"
 async-trait = "0.1"
 futures = "0.3"
 
+# Web server for test servers
+axum = { version = "0.7", optional = true }
+
 # Error Handling
 anyhow = "1.0"
 thiserror = "1.0"
@@ -80,9 +83,29 @@ predicates = "3.0"
 name = "uxc"
 path = "src/main.rs"
 
+# Test server binaries
+[[bin]]
+name = "uxc-test-openapi-server"
+path = "src/bin/uxc-test-openapi-server.rs"
+required-features = ["test-server"]
+
+[[bin]]
+name = "uxc-test-graphql-server"
+path = "src/bin/uxc-test-graphql-server.rs"
+required-features = ["test-server"]
+
+[[bin]]
+name = "uxc-test-jsonrpc-server"
+path = "src/bin/uxc-test-jsonrpc-server.rs"
+required-features = ["test-server"]
+
 [lib]
 name = "uxc"
 path = "src/lib.rs"
+
+[features]
+default = []
+test-server = ["axum"]
 
 [profile.release]
 opt-level = 3

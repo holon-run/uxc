@@ -13,6 +13,9 @@ pub mod output;
 pub mod protocol;
 pub mod schema_mapping;
 
+#[cfg(feature = "test-server")]
+pub mod test_server;
+
 pub use adapters::{Adapter, ProtocolType};
 pub use cache::{create_cache, create_default_cache, Cache, CacheConfig, CacheResult};
 pub use error::{Result, UxcError};

@@ -150,6 +150,35 @@ jobs:
         if: matrix.rust != 'stable'
         run: cargo check --all-targets --all-features
 
+  local-e2e:
+    name: Local E2E Tests
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run_rust_ci == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-local-e2e
+
+      - name: Build uxc and test servers
+        run: |
+          cargo build --release --bin uxc
+          cargo build --release --features test-server \
+            --bin uxc-test-openapi-server \
+            --bin uxc-test-graphql-server \
+            --bin uxc-test-jsonrpc-server
+
+      - name: Run local E2E tests
+        run: cargo test --test local_e2e_test --verbose -- --test-threads=1
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest
