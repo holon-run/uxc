@@ -303,3 +303,12 @@ fn test_jsonrpc_malformed_response() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["data"]["invalid"], "malformed");
 }
+
+// Note: Timeout scenario tests are not included here because they would
+// significantly slow down the test suite (servers sleep for 30 seconds).
+// The timeout scenario is implemented in the test servers and can be
+// tested manually if needed by running:
+//   uxc-test-openapi-server timeout
+//   uxc-test-graphql-server timeout
+//   uxc-test-jsonrpc-server timeout
+// and then attempting to make requests with a short client timeout.

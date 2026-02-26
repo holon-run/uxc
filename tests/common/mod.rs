@@ -108,7 +108,9 @@ pub fn start_test_server(protocol: &str, scenario: &str) -> TestServerHandle {
     }
 
     let addr = fs::read_to_string(&addr_file)
-        .unwrap_or_else(|_| panic!("Failed to read server address from {:?}", addr_file));
+        .unwrap_or_else(|_| panic!("Failed to read server address from {:?}", addr_file))
+        .trim()
+        .to_string();
     let _ = fs::remove_file(&addr_file);
 
     tracing::info!("{} test server started at {}", protocol, addr);
