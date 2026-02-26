@@ -199,6 +199,7 @@ pub struct ProtocolDetector;
 #[derive(Debug, Clone, Default)]
 pub struct DetectionOptions {
     pub schema_url: Option<String>,
+    pub auth_profile: Option<crate::auth::Profile>,
 }
 
 impl ProtocolDetector {
@@ -219,7 +220,11 @@ impl ProtocolDetector {
         options: &DetectionOptions,
     ) -> Result<AdapterEnum> {
         // Try MCP first (stdio commands are distinct)
-        let mcp_adapter = mcp::McpAdapter::new();
+        let mcp_adapter = if let Some(profile) = options.auth_profile.clone() {
+            mcp::McpAdapter::new().with_auth(profile)
+        } else {
+            mcp::McpAdapter::new()
+        };
         if mcp_adapter.can_handle(url).await? {
             return Ok(AdapterEnum::Mcp(mcp_adapter));
         }
@@ -256,5 +261,56 @@ impl ProtocolDetector {
 impl Default for ProtocolDetector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::{AuthType, Profile};
+
+    #[tokio::test]
+    async fn detector_uses_auth_profile_for_mcp_probe() {
+        let mut server = mockito::Server::new_async().await;
+        let _root = server
+            .mock("POST", "/")
+            .with_status(404)
+            .create_async()
+            .await;
+        let _well_known = server
+            .mock("POST", "/.well-known/mcp")
+            .with_status(404)
+            .create_async()
+            .await;
+        let _mcp = server
+            .mock("POST", "/mcp")
+            .match_header("authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+  "jsonrpc":"2.0",
+  "id":1,
+  "result":{
+    "protocolVersion":"2024-11-05",
+    "capabilities":{"tools":{}},
+    "serverInfo":{"name":"mock-mcp","version":"1.0.0"}
+  }
+}"#,
+            )
+            .create_async()
+            .await;
+
+        let detector = ProtocolDetector::new();
+        let options = DetectionOptions {
+            schema_url: None,
+            auth_profile: Some(Profile::new("test-token".to_string(), AuthType::Bearer)),
+        };
+
+        let adapter = detector
+            .detect_adapter_with_options(&server.url(), &options)
+            .await
+            .unwrap();
+        assert!(matches!(adapter, AdapterEnum::Mcp(_)));
     }
 }

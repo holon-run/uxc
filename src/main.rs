@@ -636,6 +636,7 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
     let detector = ProtocolDetector::new();
     let detection_options = DetectionOptions {
         schema_url: cli.schema_url.as_deref().map(normalize_endpoint_url),
+        auth_profile: auth_profile.clone(),
     };
     let mut adapter = detector
         .detect_adapter_with_options(&url, &detection_options)

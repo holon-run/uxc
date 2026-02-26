@@ -43,6 +43,11 @@ struct OAuthErrorResponse {
     error_description: Option<String>,
 }
 
+enum TokenEndpointResponse {
+    Token(OAuthTokenResponse),
+    Error(OAuthErrorResponse),
+}
+
 #[derive(Debug, Deserialize)]
 struct ResourceMetadataDocument {
     #[serde(default)]
@@ -286,35 +291,30 @@ pub async fn login_with_device_code(
             .await
             .context("Failed to poll OAuth token endpoint")?;
 
-        if response.status().is_success() {
-            let token = response
-                .json::<OAuthTokenResponse>()
-                .await
-                .context("Failed to decode OAuth token response")?;
-            return Ok(OAuthLoginResult { metadata, token });
-        }
-
-        let err = response
-            .json::<OAuthErrorResponse>()
+        let status = response.status();
+        let body = response
+            .text()
             .await
-            .unwrap_or(OAuthErrorResponse {
-                error: "unknown_error".to_string(),
-                error_description: None,
-            });
+            .context("Failed to read OAuth token response body")?;
 
-        if err.error == "authorization_pending" {
-            tokio::time::sleep(Duration::from_secs(poll_interval)).await;
-            continue;
+        match parse_token_endpoint_response(status, &body)? {
+            TokenEndpointResponse::Token(token) => return Ok(OAuthLoginResult { metadata, token }),
+            TokenEndpointResponse::Error(err) => {
+                if err.error == "authorization_pending" {
+                    tokio::time::sleep(Duration::from_secs(poll_interval)).await;
+                    continue;
+                }
+
+                if err.error == "slow_down" {
+                    // RFC 8628: increase polling interval when instructed by server.
+                    poll_interval = poll_interval.saturating_add(5);
+                    tokio::time::sleep(Duration::from_secs(poll_interval)).await;
+                    continue;
+                }
+
+                return Err(UxcError::OAuthTokenExchangeFailed(format_oauth_error(err)).into());
+            }
         }
-
-        if err.error == "slow_down" {
-            // RFC 8628: increase polling interval when instructed by server.
-            poll_interval = poll_interval.saturating_add(5);
-            tokio::time::sleep(Duration::from_secs(poll_interval)).await;
-            continue;
-        }
-
-        return Err(UxcError::OAuthTokenExchangeFailed(format_oauth_error(err)).into());
     }
 }
 
@@ -635,23 +635,40 @@ async fn exchange_token(
         .await
         .with_context(|| format!("Failed to call token endpoint: {}", token_endpoint))?;
 
-    if response.status().is_success() {
-        return response
-            .json::<OAuthTokenResponse>()
-            .await
-            .context("Failed to decode OAuth token response");
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("Failed to read OAuth token response body")?;
+
+    match parse_token_endpoint_response(status, &body)? {
+        TokenEndpointResponse::Token(token) => Ok(token),
+        TokenEndpointResponse::Error(err) => Err(anyhow!(format_oauth_error(err))),
+    }
+}
+
+fn parse_token_endpoint_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<TokenEndpointResponse> {
+    if status.is_success() {
+        if let Ok(token) = serde_json::from_str::<OAuthTokenResponse>(body) {
+            return Ok(TokenEndpointResponse::Token(token));
+        }
+        if let Ok(err) = serde_json::from_str::<OAuthErrorResponse>(body) {
+            return Ok(TokenEndpointResponse::Error(err));
+        }
+        return Err(anyhow!("Failed to decode OAuth token response"));
     }
 
-    let status = response.status();
-    let err = response
-        .json::<OAuthErrorResponse>()
-        .await
-        .unwrap_or(OAuthErrorResponse {
-            error: status.as_str().to_string(),
-            error_description: None,
-        });
+    if let Ok(err) = serde_json::from_str::<OAuthErrorResponse>(body) {
+        return Ok(TokenEndpointResponse::Error(err));
+    }
 
-    Err(anyhow!(format_oauth_error(err)))
+    Ok(TokenEndpointResponse::Error(OAuthErrorResponse {
+        error: status.as_str().to_string(),
+        error_description: None,
+    }))
 }
 
 fn update_oauth_tokens(oauth: &mut OAuthProfile, token: OAuthTokenResponse) {
@@ -737,5 +754,20 @@ mod tests {
             endpoint.as_deref(),
             Some("https://github.com/login/device/code")
         );
+    }
+
+    #[test]
+    fn parse_token_endpoint_response_supports_success_error_payload() {
+        let parsed = parse_token_endpoint_response(
+            reqwest::StatusCode::OK,
+            r#"{"error":"authorization_pending","error_description":"pending"}"#,
+        )
+        .unwrap();
+        match parsed {
+            TokenEndpointResponse::Error(err) => {
+                assert_eq!(err.error, "authorization_pending");
+            }
+            TokenEndpointResponse::Token(_) => panic!("expected OAuth error payload"),
+        }
     }
 }
