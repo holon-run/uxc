@@ -605,6 +605,11 @@ impl Adapter for OpenAPIAdapter {
 
         let full_url = format!("{}{}", url.trim_end_matches('/'), path);
 
+        // Determine if the method supports request body
+        // GET, HEAD, OPTIONS, TRACE typically don't send request bodies
+        // DELETE can but rarely does; POST, PUT, PATCH commonly do
+        let has_body_support = matches!(method.as_str(), "post" | "put" | "patch");
+
         let req = match method.as_str() {
             "get" => self.client.get(&full_url),
             "post" => self.client.post(&full_url),
@@ -630,8 +635,63 @@ impl Adapter for OpenAPIAdapter {
             req
         };
 
-        let resp = req.json(&args).send().await?;
-        let data: Value = resp.json().await?;
+        // Apply arguments based on HTTP method semantics
+        let req = if has_body_support {
+            // For POST/PUT/PATCH, send JSON body
+            req.json(&args)
+        } else {
+            // For GET/DELETE/HEAD/OPTIONS/TRACE, use query parameters
+            req.query(&args)
+        };
+
+        let resp = req.send().await?;
+        let status = resp.status();
+
+        // Check HTTP status and provide detailed error info
+        if !status.is_success() {
+            // Try to get response body for error context
+            let error_body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("[Failed to read error body: {}]", e));
+
+            // Truncate body if too long for error message
+            let truncated_body = if error_body.len() > 500 {
+                format!("{}...", &error_body[..500])
+            } else {
+                error_body
+            };
+
+            return Err(UxcError::HttpError {
+                status_code: status.as_u16(),
+                message: truncated_body,
+            }
+            .into());
+        }
+
+        // Parse JSON response only on success
+        // Handle empty responses (e.g., 204 No Content)
+        let data: Value = match status.as_u16() {
+            204 => serde_json::Value::Null,
+            _ => {
+                // Get content length to check for empty body
+                let content_length = resp
+                    .content_length()
+                    .unwrap_or(0);
+
+                if content_length == 0 {
+                    serde_json::Value::Null
+                } else {
+                    resp.json().await.with_context(|| {
+                        format!(
+                            "error decoding response body: HTTP {} from {}",
+                            status.as_u16(),
+                            full_url
+                        )
+                    })?
+                }
+            }
+        };
 
         Ok(ExecutionResult {
             data,

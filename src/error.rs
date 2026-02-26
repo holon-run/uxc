@@ -24,6 +24,9 @@ pub enum UxcError {
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
+    #[error("HTTP error {status_code}: {message}")]
+    HttpError { status_code: u16, message: String },
+
     #[error("OAuth required: {0}")]
     OAuthRequired(String),
 

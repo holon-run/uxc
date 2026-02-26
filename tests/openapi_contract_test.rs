@@ -6,6 +6,8 @@
 //!
 //! Reference: https://spec.openapis.org/oas/v3.0.0
 
+use serde_json::json;
+use std::collections::HashMap;
 use uxc::adapters::openapi::OpenAPIAdapter;
 use uxc::adapters::Adapter;
 
@@ -924,5 +926,608 @@ fn test_openapi_descriptions_fallback_to_summary() {
             .find(|op| op.operation_id == "post:/users")
             .unwrap();
         assert_eq!(post_op.description.as_ref().unwrap(), "Create a new user");
+    });
+}
+
+// ============================================================================
+// Execute Function Tests
+// ============================================================================
+
+#[test]
+fn test_execute_get_request_with_query_params() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/user": {
+                    "get": {
+                        "operationId": "getUser",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        // Mock schema endpoint
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        // Mock the actual GET /user endpoint
+        let _user_mock = server
+            .mock("GET", "/user")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("id".into(), "123".into()),
+                mockito::Matcher::UrlEncoded("verbose".into(), "true".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": 123, "name": "test"}"#)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let mut args = HashMap::new();
+        args.insert("id".into(), json!(123));
+        args.insert("verbose".into(), json!(true));
+
+        let result = rt
+            .block_on(async { adapter.execute(&server.url(), "get:/user", args).await })
+            .unwrap();
+
+        assert_eq!(result.data["id"], 123);
+        assert_eq!(result.data["name"], "test");
+        assert!(result.metadata.duration_ms < 1000);
+        assert_eq!(result.metadata.operation, "get:/user");
+    });
+}
+
+#[test]
+fn test_execute_post_request_with_json_body() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/users": {
+                    "post": {
+                        "operationId": "createUser",
+                        "responses": { "201": { "description": "Created" } }
+                    }
+                }
+            }
+        });
+
+        // Mock schema endpoint
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        // Mock the actual POST /users endpoint
+        let _users_mock = server
+            .mock("POST", "/users")
+            .match_body(mockito::Matcher::JsonString(
+                r#"{"name":"John","email":"john@example.com"}"#.to_string(),
+            ))
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": 456, "name": "John", "email": "john@example.com"}"#)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let mut args = HashMap::new();
+        args.insert("name".into(), json!("John"));
+        args.insert("email".into(), json!("john@example.com"));
+
+        let result = rt
+            .block_on(async { adapter.execute(&server.url(), "post:/users", args).await })
+            .unwrap();
+
+        assert_eq!(result.data["id"], 456);
+        assert_eq!(result.data["name"], "John");
+        assert_eq!(result.data["email"], "john@example.com");
+    });
+}
+
+#[test]
+fn test_execute_put_request_with_json_body() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/users/123": {
+                    "put": {
+                        "operationId": "updateUser",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let _mock = server
+            .mock("PUT", "/users/123")
+            .match_body(mockito::Matcher::JsonString(
+                r#"{"name":"Updated"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": 123, "name": "Updated"}"#)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let mut args = HashMap::new();
+        args.insert("name".into(), json!("Updated"));
+
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "put:/users/123", args)
+                    .await
+            })
+            .unwrap();
+
+        assert_eq!(result.data["id"], 123);
+        assert_eq!(result.data["name"], "Updated");
+    });
+}
+
+#[test]
+fn test_execute_patch_request_with_json_body() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/users/123": {
+                    "patch": {
+                        "operationId": "patchUser",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let _mock = server
+            .mock("PATCH", "/users/123")
+            .match_body(mockito::Matcher::JsonString(
+                r#"{"status":"active"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": 123, "status": "active"}"#)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let mut args = HashMap::new();
+        args.insert("status".into(), json!("active"));
+
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "patch:/users/123", args)
+                    .await
+            })
+            .unwrap();
+
+        assert_eq!(result.data["id"], 123);
+        assert_eq!(result.data["status"], "active");
+    });
+}
+
+#[test]
+fn test_execute_delete_request_with_query_params() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/users": {
+                    "delete": {
+                        "operationId": "deleteUser",
+                        "responses": { "204": { "description": "No Content" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let _mock = server
+            .mock("DELETE", "/users")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), "999".into()))
+            .with_status(204)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let mut args = HashMap::new();
+        args.insert("id".into(), json!(999));
+
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "delete:/users", args)
+                    .await
+            })
+            .unwrap();
+
+        // DELETE with 204 returns empty response
+        assert_eq!(result.data, json!(null));
+    });
+}
+
+#[test]
+fn test_execute_get_without_args_returns_empty_json() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/health": {
+                    "get": {
+                        "operationId": "getHealth",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let _mock = server
+            .mock("GET", "/health")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status": "ok"}"#)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let args = HashMap::new();
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "get:/health", args)
+                    .await
+            })
+            .unwrap();
+
+        assert_eq!(result.data["status"], "ok");
+    });
+}
+
+#[test]
+fn test_execute_handles_404_not_found() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/users": {
+                    "get": {
+                        "operationId": "getUser",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let _mock = server
+            .mock("GET", "/users")
+            .match_query(mockito::Matcher::UrlEncoded("id".into(), "999".into()))
+            .with_status(404)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": "User not found"}"#)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let mut args = HashMap::new();
+        args.insert("id".into(), json!(999));
+
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "get:/users", args)
+                    .await
+            });
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("HTTP error 404"));
+        assert!(err_msg.contains("User not found"));
+    });
+}
+
+#[test]
+fn test_execute_handles_401_unauthorized() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/protected": {
+                    "get": {
+                        "operationId": "getProtected",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let _mock = server
+            .mock("GET", "/protected")
+            .with_status(401)
+            .with_body(r#"{"error": "Unauthorized"}"#)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "get:/protected", HashMap::new())
+                    .await
+            });
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("HTTP error 401"));
+        assert!(err_msg.contains("Unauthorized"));
+    });
+}
+
+#[test]
+fn test_execute_handles_500_internal_server_error() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/error": {
+                    "get": {
+                        "operationId": "getError",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let _mock = server
+            .mock("GET", "/error")
+            .with_status(500)
+            .with_body(r#"Internal server error"#)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "get:/error", HashMap::new())
+                    .await
+            });
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("HTTP error 500"));
+        assert!(err_msg.contains("Internal server error"));
+    });
+}
+
+#[test]
+fn test_execute_handles_long_error_body_truncation() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/error": {
+                    "get": {
+                        "operationId": "getError",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        // Create a long error body (longer than 500 chars)
+        let long_error = "x".repeat(600);
+        let _mock = server
+            .mock("GET", "/error")
+            .with_status(500)
+            .with_body(&long_error)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "get:/error", HashMap::new())
+                    .await
+            });
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("HTTP error 500"));
+        // Should be truncated with "..." suffix
+        assert!(err_msg.contains("..."));
+    });
+}
+
+#[test]
+fn test_execute_handles_invalid_json_response() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/badjson": {
+                    "get": {
+                        "operationId": "getBadJson",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let _mock = server
+            .mock("GET", "/badjson")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("not valid json")
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "get:/badjson", HashMap::new())
+                    .await
+            });
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("error decoding response body"));
+        assert!(err_msg.contains("HTTP 200"));
+    });
+}
+
+#[test]
+fn test_execute_get_github_user_endpoint() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "API", "version": "1.0" },
+            "paths": {
+                "/user": {
+                    "get": {
+                        "operationId": "getUser",
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        // Mock GitHub GET /user endpoint response
+        let _user_mock = server
+            .mock("GET", "/user")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "id": 123456,
+                    "login": "testuser",
+                    "name": "Test User",
+                    "email": "test@example.com"
+                }"#,
+            )
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "get:/user", HashMap::new())
+                    .await
+            })
+            .unwrap();
+
+        assert_eq!(result.data["id"], 123456);
+        assert_eq!(result.data["login"], "testuser");
+        assert_eq!(result.data["name"], "Test User");
+        assert_eq!(result.data["email"], "test@example.com");
     });
 }

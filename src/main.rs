@@ -1558,6 +1558,7 @@ fn error_code(err: &anyhow::Error) -> &'static str {
                 }
                 UxcError::OperationNotFound(_) => "OPERATION_NOT_FOUND",
                 UxcError::InvalidArguments(_) => "INVALID_ARGUMENT",
+                UxcError::HttpError { .. } => "HTTP_ERROR",
                 UxcError::OAuthRequired(_) => "OAUTH_REQUIRED",
                 UxcError::OAuthDiscoveryFailed(_) => "OAUTH_DISCOVERY_FAILED",
                 UxcError::OAuthTokenExchangeFailed(_) => "OAUTH_TOKEN_EXCHANGE_FAILED",
