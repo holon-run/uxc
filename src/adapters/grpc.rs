@@ -1061,7 +1061,7 @@ impl GrpcurlAuthHeaders for Profile {
             crate::auth::AuthType::OAuth => {
                 let token = self
                     .bearer_token()
-                    .ok_or_else(|| anyhow::anyhow!("OAuth profile is missing access token"))?;
+                    .ok_or_else(|| anyhow!("OAuth profile is missing access token"))?;
                 format!("authorization: Bearer {}", token)
             }
         };

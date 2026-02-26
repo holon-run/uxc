@@ -148,16 +148,7 @@ impl McpHttpTransport {
             .header("Accept", "application/json, text/event-stream");
 
         if let Some(profile) = profile {
-            req = match profile.auth_type {
-                AuthType::OAuth => {
-                    if let Some(token) = profile.bearer_token() {
-                        crate::auth::apply_auth_to_request(req, &profile.auth_type, token)
-                    } else {
-                        req
-                    }
-                }
-                _ => crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key),
-            };
+            req = Self::apply_profile_auth(req, &profile);
         }
 
         req.json(request).send().await.map_err(Into::into)
@@ -222,14 +213,31 @@ impl McpHttpTransport {
         let mut stored = profile.clone();
         stored.name = None;
 
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<()> {
             let mut profiles = Profiles::load_profiles()?;
             profiles.set_profile(profile_name, stored)?;
             profiles.save_profiles()?;
-            Ok::<(), anyhow::Error>(())
+            Ok(())
         })
         .await
-        .context("Failed to join profile persistence task")?
+        .context("Failed to persist refreshed OAuth profile")??;
+        Ok(())
+    }
+
+    fn apply_profile_auth(
+        req: reqwest::RequestBuilder,
+        profile: &Profile,
+    ) -> reqwest::RequestBuilder {
+        match profile.auth_type {
+            AuthType::OAuth => {
+                if let Some(token) = profile.bearer_token() {
+                    crate::auth::apply_auth_to_request(req, &profile.auth_type, token)
+                } else {
+                    req
+                }
+            }
+            _ => crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key),
+        }
     }
 
     fn map_http_error(
@@ -253,9 +261,6 @@ impl McpHttpTransport {
                     return Err(UxcError::OAuthRequired(next_step).into());
                 }
             }
-            // If there's no explicit OAuth signal in WWW-Authenticate, do not
-            // emit OAuthRequired; instead, fall through to the generic error
-            // handling below.
         }
 
         if status == reqwest::StatusCode::FORBIDDEN {
@@ -326,16 +331,7 @@ impl McpHttpTransport {
             .header("Accept", "application/json, text/event-stream");
 
         if let Some(profile) = &auth_profile {
-            req = match profile.auth_type {
-                AuthType::OAuth => {
-                    if let Some(token) = profile.bearer_token() {
-                        crate::auth::apply_auth_to_request(req, &profile.auth_type, token)
-                    } else {
-                        req
-                    }
-                }
-                _ => crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key),
-            };
+            req = Self::apply_profile_auth(req, profile);
         }
 
         let response = match req.json(&request).send().await {
@@ -469,7 +465,52 @@ impl McpHttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{AuthType, Profile};
+    use crate::auth::{AuthType, OAuthFlow, OAuthProfile, Profile, Profiles};
+    use std::sync::{Mutex as StdMutex, MutexGuard, OnceLock};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
+
+    fn home_env_lock() -> &'static StdMutex<()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+    }
+
+    struct TestEnv {
+        _home_guard: MutexGuard<'static, ()>,
+        _temp_dir: TempDir,
+        previous_home: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            match &self.previous_home {
+                Some(prev) => std::env::set_var("HOME", prev),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn setup_test_env() -> TestEnv {
+        let guard = home_env_lock()
+            .lock()
+            .expect("Failed to lock HOME env guard");
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp_dir.path());
+
+        TestEnv {
+            _home_guard: guard,
+            _temp_dir: temp_dir,
+            previous_home,
+        }
+    }
+
+    fn now_unix() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_secs() as i64
+    }
 
     // ===== URL Validation Tests =====
 
@@ -791,6 +832,26 @@ data: invalid json
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("404"));
+    }
+
+    #[tokio::test]
+    async fn http_401_without_oauth_signal_returns_generic_http_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(401)
+            .with_body("Unauthorized")
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::new(server.url()).unwrap();
+
+        let result = transport.send_request("test", None).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("HTTP error"));
+        assert!(!err_msg.contains("OAuth required"));
     }
 
     #[tokio::test]
@@ -1507,6 +1568,130 @@ data: invalid json
 
         let result = transport.send_request("test", None).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn oauth_request_refreshes_before_expiry_and_uses_new_token() {
+        let mut server = mockito::Server::new_async().await;
+        let token_endpoint = format!("{}/token", server.url());
+
+        let _refresh_mock = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::Regex(
+                "grant_type=refresh_token".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "access_token":"refreshed-token",
+                    "token_type":"Bearer",
+                    "expires_in":3600,
+                    "refresh_token":"refresh-2"
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let _request_mock = server
+            .mock("POST", "/")
+            .match_header("authorization", "Bearer refreshed-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#)
+            .create_async()
+            .await;
+
+        let mut profile = Profile::new(String::new(), AuthType::OAuth);
+        profile.oauth = Some(OAuthProfile {
+            token_endpoint: Some(token_endpoint),
+            refresh_token: Some("refresh-1".to_string()),
+            access_token: Some("stale-token".to_string()),
+            token_type: Some("Bearer".to_string()),
+            expires_at: Some(now_unix() - 10),
+            oauth_flow: Some(OAuthFlow::DeviceCode),
+            ..Default::default()
+        });
+
+        let transport = McpHttpTransport::with_auth(server.url(), Some(profile)).unwrap();
+        let result = transport.send_request("test", None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn oauth_401_refresh_retry_updates_profile_persistence() {
+        let _env = setup_test_env();
+        let mut server = mockito::Server::new_async().await;
+        let token_endpoint = format!("{}/token", server.url());
+
+        let mut profiles = Profiles::new();
+        let mut persisted = Profile::new(String::new(), AuthType::OAuth);
+        persisted.oauth = Some(OAuthProfile {
+            token_endpoint: Some(token_endpoint.clone()),
+            refresh_token: Some("refresh-1".to_string()),
+            access_token: Some("old-token".to_string()),
+            token_type: Some("Bearer".to_string()),
+            expires_at: Some(now_unix() + 600),
+            oauth_flow: Some(OAuthFlow::DeviceCode),
+            ..Default::default()
+        });
+        profiles
+            .set_profile("oauth".to_string(), persisted.clone())
+            .unwrap();
+        profiles.save_profiles().unwrap();
+
+        let _first_request = server
+            .mock("POST", "/")
+            .match_header("authorization", "Bearer old-token")
+            .with_status(401)
+            .with_header(
+                "www-authenticate",
+                r#"Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource""#,
+            )
+            .with_body("Unauthorized")
+            .create_async()
+            .await;
+
+        let _refresh_mock = server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "access_token":"new-token",
+                    "token_type":"Bearer",
+                    "expires_in":3600,
+                    "refresh_token":"refresh-2"
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let _retry_request = server
+            .mock("POST", "/")
+            .match_header("authorization", "Bearer new-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#)
+            .create_async()
+            .await;
+
+        let mut runtime_profile = persisted;
+        runtime_profile.name = Some("oauth".to_string());
+        let transport = McpHttpTransport::with_auth(server.url(), Some(runtime_profile)).unwrap();
+        let result = transport.send_request("test", None).await;
+        assert!(result.is_ok());
+
+        let loaded = Profiles::load_profiles().unwrap();
+        let updated = loaded.get_profile("oauth").unwrap();
+        assert_eq!(
+            updated
+                .oauth
+                .as_ref()
+                .and_then(|oauth| oauth.access_token.clone())
+                .as_deref(),
+            Some("new-token")
+        );
     }
 
     #[tokio::test]

@@ -226,7 +226,7 @@ pub async fn login_with_device_code(
         eprintln!("Direct verification URL: {}", url);
     }
 
-    let interval = device.interval.unwrap_or(5);
+    let mut poll_interval = device.interval.unwrap_or(5);
     let deadline = now_unix() + device.expires_in.unwrap_or(600) as i64;
 
     let mut token_form: HashMap<&str, String> = HashMap::new();
@@ -265,15 +265,15 @@ pub async fn login_with_device_code(
                 error_description: None,
             });
 
-        if err.error == "authorization_pending" || err.error == "slow_down" {
-            // Per RFC 8628, on slow_down the client should increase the polling
-            // interval (typically by +5 seconds) to avoid rate limiting.
-            let sleep_duration = if err.error == "slow_down" {
-                Duration::from_secs(interval + 5)
-            } else {
-                Duration::from_secs(interval)
-            };
-            tokio::time::sleep(sleep_duration).await;
+        if err.error == "authorization_pending" {
+            tokio::time::sleep(Duration::from_secs(poll_interval)).await;
+            continue;
+        }
+
+        if err.error == "slow_down" {
+            // RFC 8628: increase polling interval when instructed by server.
+            poll_interval = poll_interval.saturating_add(5);
+            tokio::time::sleep(Duration::from_secs(poll_interval)).await;
             continue;
         }
 
