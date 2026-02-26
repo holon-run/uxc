@@ -1,14 +1,13 @@
 //! GraphQL test server for E2E testing
 
-use super::common::{Scenario, ServerHandle, bind_available, write_addr_file};
+use super::common::{bind_available, write_addr_file, Scenario, ServerHandle};
 use anyhow::Result;
 use axum::{
     extract::State,
     http::StatusCode,
-    Json,
     response::{IntoResponse, Response},
     routing::get,
-    Router,
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -120,6 +119,26 @@ async fn execute_query(
                             {"id": "1", "name": "Alice", "email": "alice@example.com"},
                             {"id": "2", "name": "Bob", "email": "bob@example.com"}
                         ]
+                    })),
+                    errors: None,
+                });
+            }
+
+            // Create user mutation
+            if query.contains("createUser") {
+                let name = req
+                    .variables
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Charlie");
+                let email = req
+                    .variables
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("charlie@example.com");
+                return Ok(GraphQLResponse {
+                    data: Some(json!({
+                        "createUser": {"id": "3", "name": name, "email": email}
                     })),
                     errors: None,
                 });

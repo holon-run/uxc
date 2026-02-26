@@ -1,14 +1,13 @@
 //! OpenAPI test server for E2E testing
 
-use super::common::{Scenario, ServerHandle, bind_available, write_addr_file};
+use super::common::{bind_available, write_addr_file, Scenario, ServerHandle};
 use anyhow::Result;
 use axum::{
     extract::{Path as AxumPath, State},
     http::StatusCode,
-    Json,
     response::{IntoResponse, Response},
     routing::get,
-    Router,
+    Json, Router,
 };
 use serde_json::json;
 use tokio::signal::ctrl_c;
@@ -71,6 +70,42 @@ fn create_router(state: ServerState) -> Router {
                               "name": {"type": "string"},
                               "email": {"type": "string"}
                             }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "post": {
+                "operationId": "create_user",
+                "summary": "Create a new user",
+                "requestBody": {
+                  "required": true,
+                  "content": {
+                    "application/json": {
+                      "schema": {
+                        "type": "object",
+                        "required": ["name", "email"],
+                        "properties": {
+                          "name": {"type": "string"},
+                          "email": {"type": "string"}
+                        }
+                      }
+                    }
+                  }
+                },
+                "responses": {
+                  "201": {
+                    "description": "User created",
+                    "content": {
+                      "application/json": {
+                        "schema": {
+                          "type": "object",
+                          "properties": {
+                            "id": {"type": "integer"},
+                            "name": {"type": "string"},
+                            "email": {"type": "string"}
                           }
                         }
                       }
@@ -142,15 +177,46 @@ fn create_router(state: ServerState) -> Router {
                 Ok(Json(json!(users)).into_response())
             }
             Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
-            Scenario::Malformed => {
-                Ok(Response::builder()
-                    .header("content-type", "application/json")
-                    .body("[{broken}".into())
-                    .unwrap())
-            }
+            Scenario::Malformed => Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body("[{broken}".into())
+                .unwrap()),
             Scenario::Timeout => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                 Ok(Json(json!([])).into_response())
+            }
+        }
+    }
+
+    // Create user endpoint
+    async fn create_user(
+        State(state): State<ServerState>,
+        Json(payload): Json<serde_json::Value>,
+    ) -> Result<Response, StatusCode> {
+        match state.scenario {
+            Scenario::Ok => {
+                let name = payload
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown");
+                let email = payload
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown@example.com");
+                Ok((
+                    StatusCode::CREATED,
+                    Json(json!({"id": 3, "name": name, "email": email})),
+                )
+                    .into_response())
+            }
+            Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
+            Scenario::Malformed => Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body("{created".into())
+                .unwrap()),
+            Scenario::Timeout => {
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                Err(StatusCode::REQUEST_TIMEOUT)
             }
         }
     }
@@ -163,22 +229,24 @@ fn create_router(state: ServerState) -> Router {
         match state.scenario {
             Scenario::Ok => {
                 if id == 1 {
-                    Ok(Json(json!({"id": 1, "name": "Alice", "email": "alice@example.com"}))
-                        .into_response())
+                    Ok(
+                        Json(json!({"id": 1, "name": "Alice", "email": "alice@example.com"}))
+                            .into_response(),
+                    )
                 } else if id == 2 {
-                    Ok(Json(json!({"id": 2, "name": "Bob", "email": "bob@example.com"}))
-                        .into_response())
+                    Ok(
+                        Json(json!({"id": 2, "name": "Bob", "email": "bob@example.com"}))
+                            .into_response(),
+                    )
                 } else {
                     Err(StatusCode::NOT_FOUND)
                 }
             }
             Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
-            Scenario::Malformed => {
-                Ok(Response::builder()
-                    .header("content-type", "application/json")
-                    .body("{invalid".into())
-                    .unwrap())
-            }
+            Scenario::Malformed => Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body("{invalid".into())
+                .unwrap()),
             Scenario::Timeout => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                 Err(StatusCode::NOT_FOUND)
@@ -189,7 +257,7 @@ fn create_router(state: ServerState) -> Router {
     Router::new()
         .route("/openapi.json", get(serve_schema))
         .route("/health", get(health_check))
-        .route("/users", get(list_users))
+        .route("/users", get(list_users).post(create_user))
         .route("/users/:id", get(get_user))
         .with_state(state)
 }

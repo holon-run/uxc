@@ -13,7 +13,11 @@ fn test_openapi_list_operations() {
 
     let result = run_uxc(&[&format!("http://{}/", _server.addr), "list"]);
 
-    assert!(result.is_ok(), "Failed to list OpenAPI operations: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Failed to list OpenAPI operations: {:?}",
+        result
+    );
 
     let output = result.unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -30,9 +34,15 @@ fn test_openapi_list_operations() {
         .filter_map(|v| v["operation_id"].as_str())
         .collect();
 
-    assert!(ops.contains(&"get:/health"), "Expected get:/health operation");
+    assert!(
+        ops.contains(&"get:/health"),
+        "Expected get:/health operation"
+    );
     assert!(ops.contains(&"get:/users"), "Expected get:/users operation");
-    assert!(ops.contains(&"get:/users/{id}"), "Expected get:/users/{{id}} operation");
+    assert!(
+        ops.contains(&"get:/users/{id}"),
+        "Expected get:/users/{{id}} operation"
+    );
 }
 
 #[test]
@@ -65,7 +75,11 @@ fn test_openapi_auth_required() {
     assert!(result.is_err(), "Expected auth error, but got success");
 
     let err = result.unwrap_err();
-    assert!(err.contains("401") || err.contains("Unauthorized"), "Expected 401 error, got: {}", err);
+    assert!(
+        err.contains("401") || err.contains("Unauthorized"),
+        "Expected 401 error, got: {}",
+        err
+    );
 }
 
 #[test]
@@ -144,7 +158,11 @@ fn test_graphql_auth_required() {
     assert!(result.is_err(), "Expected auth error, but got success");
 
     let err = result.unwrap_err();
-    assert!(err.contains("401") || err.contains("Unauthorized"), "Expected 401 error, got: {}", err);
+    assert!(
+        err.contains("401") || err.contains("Unauthorized"),
+        "Expected 401 error, got: {}",
+        err
+    );
 }
 
 #[test]
@@ -236,5 +254,52 @@ fn test_jsonrpc_auth_required() {
     assert!(result.is_err(), "Expected auth error, but got success");
 
     let err = result.unwrap_err();
-    assert!(err.contains("401") || err.contains("Unauthorized"), "Expected 401 error, got: {}", err);
+    assert!(
+        err.contains("401") || err.contains("Unauthorized"),
+        "Expected 401 error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_openapi_malformed_response() {
+    let _server = start_test_server("openapi", "malformed");
+
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "get:/health"]);
+    assert!(
+        result.is_err(),
+        "Expected malformed OpenAPI response to fail, got success"
+    );
+}
+
+#[test]
+fn test_graphql_malformed_response() {
+    let _server = start_test_server("graphql", "malformed");
+
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "query/health"]);
+    assert!(
+        result.is_ok(),
+        "Expected GraphQL malformed scenario to return response envelope"
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert!(json["data"]["invalid"].is_string());
+}
+
+#[test]
+fn test_jsonrpc_malformed_response() {
+    let _server = start_test_server("jsonrpc", "malformed");
+
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "health"]);
+    assert!(
+        result.is_ok(),
+        "Expected JSON-RPC malformed scenario to return response envelope"
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["invalid"], "malformed");
 }

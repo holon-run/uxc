@@ -1,14 +1,13 @@
 //! JSON-RPC test server for E2E testing
 
-use super::common::{Scenario, ServerHandle, bind_available, write_addr_file};
+use super::common::{bind_available, write_addr_file, Scenario, ServerHandle};
 use anyhow::Result;
 use axum::{
     extract::State,
     http::StatusCode,
-    Json,
     response::{IntoResponse, Response},
     routing::get,
-    Router,
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -116,6 +115,33 @@ fn schema_value() -> serde_json::Value {
               }
             }
           }
+        },
+        {
+          "name": "create_user",
+          "summary": "Create a new user",
+          "params": [
+            {
+              "name": "name",
+              "schema": {"type": "string"},
+              "required": true
+            },
+            {
+              "name": "email",
+              "schema": {"type": "string"},
+              "required": true
+            }
+          ],
+          "result": {
+            "name": "user",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "id": {"type": "integer"},
+                "name": {"type": "string"},
+                "email": {"type": "string"}
+              }
+            }
+          }
         }
       ]
     })
@@ -152,6 +178,35 @@ async fn execute_method(
                         Some(2) => json!({"id": 2, "name": "Bob", "email": "bob@example.com"}),
                         _ => json!(null),
                     }
+                }
+                "create_user" => {
+                    let (name, email) = if let Some(arr) = params.as_array() {
+                        (
+                            arr.first()
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown")
+                                .to_string(),
+                            arr.get(1)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown@example.com")
+                                .to_string(),
+                        )
+                    } else if let Some(obj) = params.as_object() {
+                        (
+                            obj.get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown")
+                                .to_string(),
+                            obj.get("email")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown@example.com")
+                                .to_string(),
+                        )
+                    } else {
+                        ("Unknown".to_string(), "unknown@example.com".to_string())
+                    };
+
+                    json!({"id": 3, "name": name, "email": email})
                 }
                 _ => {
                     return Ok(JsonRpcResponse {

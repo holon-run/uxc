@@ -25,7 +25,10 @@ impl Scenario {
             "auth_required" => Ok(Self::AuthRequired),
             "malformed" => Ok(Self::Malformed),
             "timeout" => Ok(Self::Timeout),
-            _ => anyhow::bail!("Unknown scenario: {}. Use: ok, auth_required, malformed, timeout", s),
+            _ => anyhow::bail!(
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout",
+                s
+            ),
         }
     }
 }

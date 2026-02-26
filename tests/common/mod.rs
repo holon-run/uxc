@@ -48,8 +48,12 @@ pub fn test_server_binary(name: &str) -> PathBuf {
         }
     }
 
-    let bin_path = format!("target/debug/uxc-test-{}-server", name);
-    PathBuf::from(bin_path)
+    let release_bin_path = format!("target/release/uxc-test-{}-server", name);
+    if std::path::Path::new(&release_bin_path).exists() {
+        return PathBuf::from(release_bin_path);
+    }
+
+    PathBuf::from(format!("target/debug/uxc-test-{}-server", name))
 }
 
 /// Handle to a running test server process
@@ -89,7 +93,9 @@ pub fn start_test_server(protocol: &str, scenario: &str) -> TestServerHandle {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let child = cmd.spawn().expect(&format!("Failed to start {} test server", protocol));
+    let child = cmd
+        .spawn()
+        .expect(&format!("Failed to start {} test server", protocol));
 
     // Wait a bit for server to start
     std::thread::sleep(Duration::from_millis(500));

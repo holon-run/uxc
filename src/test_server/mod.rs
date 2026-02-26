@@ -4,8 +4,8 @@
 //! with controllable scenarios (ok, auth_required, malformed, timeout).
 
 pub mod common;
-pub mod openapi;
 pub mod graphql;
 pub mod jsonrpc;
+pub mod openapi;
 
 pub use common::{Scenario, ServerHandle};
