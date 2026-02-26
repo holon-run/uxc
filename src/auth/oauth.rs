@@ -61,6 +61,15 @@ struct OpenIdConfiguration {
 }
 
 #[derive(Debug, Deserialize)]
+struct AuthorizationServerMetadata {
+    #[serde(default)]
+    issuer: Option<String>,
+    token_endpoint: String,
+    #[serde(default)]
+    device_authorization_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct DeviceAuthorizationResponse {
     device_code: String,
     user_code: String,
@@ -151,14 +160,40 @@ pub async fn discover_provider_metadata(
         )
     })?;
 
-    let openid = fetch_openid_configuration(&issuer, client).await?;
+    let authorization_server_metadata = fetch_authorization_server_metadata(&issuer, client)
+        .await
+        .ok();
+    let openid = fetch_openid_configuration(&issuer, client).await.ok();
+
+    let token_endpoint = authorization_server_metadata
+        .as_ref()
+        .map(|meta| meta.token_endpoint.clone())
+        .or_else(|| openid.as_ref().map(|config| config.token_endpoint.clone()))
+        .ok_or_else(|| {
+            UxcError::OAuthDiscoveryFailed(
+                "Could not determine token_endpoint from authorization server metadata".to_string(),
+            )
+        })?;
+
+    let provider_issuer = authorization_server_metadata
+        .as_ref()
+        .and_then(|meta| meta.issuer.clone())
+        .or_else(|| openid.as_ref().and_then(|config| config.issuer.clone()))
+        .or(Some(issuer.clone()));
+    let device_authorization_endpoint =
+        infer_device_authorization_endpoint(&issuer, authorization_server_metadata.as_ref())
+            .or_else(|| {
+                openid
+                    .as_ref()
+                    .and_then(|config| config.device_authorization_endpoint.clone())
+            });
 
     Ok(OAuthProviderMetadata {
-        provider_issuer: openid.issuer.or(Some(issuer.clone())),
+        provider_issuer,
         resource_metadata_url,
         authorization_server: Some(issuer),
-        token_endpoint: openid.token_endpoint,
-        device_authorization_endpoint: openid.device_authorization_endpoint,
+        token_endpoint,
+        device_authorization_endpoint,
     })
 }
 
@@ -210,6 +245,7 @@ pub async fn login_with_device_code(
 
     let device = client
         .post(&device_endpoint)
+        .header("Accept", "application/json")
         .form(&form)
         .send()
         .await
@@ -244,6 +280,7 @@ pub async fn login_with_device_code(
 
         let response = client
             .post(&metadata.token_endpoint)
+            .header("Accept", "application/json")
             .form(&token_form)
             .send()
             .await
@@ -404,36 +441,185 @@ async fn resolve_token_endpoint(oauth: &mut OAuthProfile, client: &Client) -> Re
             )
         })?;
 
-    let config = fetch_openid_configuration(&issuer, client)
-        .await
-        .map_err(|err| UxcError::OAuthRefreshFailed(err.to_string()))?;
+    let authorization_server_metadata = fetch_authorization_server_metadata(&issuer, client).await;
+    let openid = fetch_openid_configuration(&issuer, client).await;
 
-    oauth.token_endpoint = Some(config.token_endpoint.clone());
+    let token_endpoint = authorization_server_metadata
+        .as_ref()
+        .ok()
+        .map(|meta| meta.token_endpoint.clone())
+        .or_else(|| {
+            openid
+                .as_ref()
+                .ok()
+                .map(|config| config.token_endpoint.clone())
+        })
+        .ok_or_else(|| {
+            UxcError::OAuthRefreshFailed(
+                "Could not determine token endpoint from provider metadata".to_string(),
+            )
+        })?;
+
+    oauth.token_endpoint = Some(token_endpoint.clone());
     if oauth.device_authorization_endpoint.is_none() {
-        oauth.device_authorization_endpoint = config.device_authorization_endpoint;
+        oauth.device_authorization_endpoint = infer_device_authorization_endpoint(
+            &issuer,
+            authorization_server_metadata.as_ref().ok(),
+        )
+        .or_else(|| {
+            openid
+                .as_ref()
+                .ok()
+                .and_then(|config| config.device_authorization_endpoint.clone())
+        });
     }
     if oauth.provider_issuer.is_none() {
-        oauth.provider_issuer = config.issuer;
+        oauth.provider_issuer = authorization_server_metadata
+            .as_ref()
+            .ok()
+            .and_then(|meta| meta.issuer.clone())
+            .or_else(|| {
+                openid
+                    .as_ref()
+                    .ok()
+                    .and_then(|config| config.issuer.clone())
+            })
+            .or(Some(issuer));
     }
 
-    Ok(config.token_endpoint)
+    Ok(token_endpoint)
 }
 
 async fn fetch_openid_configuration(issuer: &str, client: &Client) -> Result<OpenIdConfiguration> {
-    let issuer = issuer.trim_end_matches('/');
-    let url = format!("{}/.well-known/openid-configuration", issuer);
+    let candidates = metadata_candidates(issuer, ".well-known/openid-configuration")?;
+    let mut last_error: Option<anyhow::Error> = None;
 
-    client
-        .get(url)
-        .send()
-        .await
-        .context("Failed to fetch OAuth OpenID configuration")?
-        .error_for_status()
-        .context("OAuth OpenID configuration request failed")?
-        .json::<OpenIdConfiguration>()
-        .await
-        .context("Failed to decode OAuth OpenID configuration")
-        .map_err(|err| UxcError::OAuthDiscoveryFailed(err.to_string()).into())
+    for url in candidates {
+        let response = client
+            .get(url.clone())
+            .header("Accept", "application/json")
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                return resp
+                    .json::<OpenIdConfiguration>()
+                    .await
+                    .context("Failed to decode OAuth OpenID configuration")
+                    .map_err(|err| UxcError::OAuthDiscoveryFailed(err.to_string()).into());
+            }
+            Ok(resp) => {
+                last_error = Some(anyhow!(
+                    "OAuth OpenID configuration request failed at {}: {}",
+                    url,
+                    resp.status()
+                ));
+            }
+            Err(err) => {
+                last_error = Some(err.into());
+            }
+        }
+    }
+
+    Err(UxcError::OAuthDiscoveryFailed(
+        last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "Failed to fetch OAuth OpenID configuration".to_string()),
+    )
+    .into())
+}
+
+async fn fetch_authorization_server_metadata(
+    issuer: &str,
+    client: &Client,
+) -> Result<AuthorizationServerMetadata> {
+    let candidates = metadata_candidates(issuer, ".well-known/oauth-authorization-server")?;
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for url in candidates {
+        let response = client
+            .get(url.clone())
+            .header("Accept", "application/json")
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                return resp
+                    .json::<AuthorizationServerMetadata>()
+                    .await
+                    .context("Failed to decode OAuth authorization server metadata")
+                    .map_err(|err| UxcError::OAuthDiscoveryFailed(err.to_string()).into());
+            }
+            Ok(resp) => {
+                last_error = Some(anyhow!(
+                    "OAuth authorization server metadata request failed at {}: {}",
+                    url,
+                    resp.status()
+                ));
+            }
+            Err(err) => {
+                last_error = Some(err.into());
+            }
+        }
+    }
+
+    Err(UxcError::OAuthDiscoveryFailed(
+        last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "Failed to fetch OAuth authorization server metadata".to_string()),
+    )
+    .into())
+}
+
+fn metadata_candidates(issuer: &str, well_known: &str) -> Result<Vec<String>> {
+    let issuer_url = reqwest::Url::parse(issuer.trim_end_matches('/'))
+        .with_context(|| format!("Invalid issuer URL: {}", issuer))?;
+    let mut candidates = Vec::new();
+
+    let mut root = issuer_url.clone();
+    root.set_path("/");
+    root.set_query(None);
+    root.set_fragment(None);
+    let mut path_aware = format!("{}/{}", root.as_str().trim_end_matches('/'), well_known);
+    let issuer_path = issuer_url.path().trim_start_matches('/');
+    if !issuer_path.is_empty() {
+        path_aware.push('/');
+        path_aware.push_str(issuer_path);
+    }
+    candidates.push(path_aware);
+
+    let mut legacy = issuer_url;
+    let mut legacy_path = legacy.path().trim_end_matches('/').to_string();
+    if legacy_path.is_empty() {
+        legacy_path = "/".to_string();
+    }
+    legacy_path.push_str(&format!("/{}", well_known));
+    legacy.set_path(&legacy_path);
+    legacy.set_query(None);
+    legacy.set_fragment(None);
+    let legacy_str = legacy.to_string();
+    if !candidates.contains(&legacy_str) {
+        candidates.push(legacy_str);
+    }
+
+    Ok(candidates)
+}
+
+fn infer_device_authorization_endpoint(
+    issuer: &str,
+    metadata: Option<&AuthorizationServerMetadata>,
+) -> Option<String> {
+    if let Some(endpoint) = metadata.and_then(|m| m.device_authorization_endpoint.clone()) {
+        return Some(endpoint);
+    }
+
+    if issuer.trim_end_matches('/') == "https://github.com/login/oauth" {
+        return Some("https://github.com/login/device/code".to_string());
+    }
+
+    None
 }
 
 async fn exchange_token(
@@ -443,6 +629,7 @@ async fn exchange_token(
 ) -> Result<OAuthTokenResponse> {
     let response = client
         .post(token_endpoint)
+        .header("Accept", "application/json")
         .form(form)
         .send()
         .await
@@ -524,5 +711,31 @@ mod tests {
             ..Default::default()
         };
         assert!(should_refresh_token(&oauth, 60));
+    }
+
+    #[test]
+    fn metadata_candidates_support_path_issuer() {
+        let candidates = metadata_candidates(
+            "https://github.com/login/oauth",
+            ".well-known/oauth-authorization-server",
+        )
+        .unwrap();
+        assert_eq!(
+            candidates[0],
+            "https://github.com/.well-known/oauth-authorization-server/login/oauth"
+        );
+        assert_eq!(
+            candidates[1],
+            "https://github.com/login/oauth/.well-known/oauth-authorization-server"
+        );
+    }
+
+    #[test]
+    fn infer_github_device_endpoint_when_missing_in_metadata() {
+        let endpoint = infer_device_authorization_endpoint("https://github.com/login/oauth", None);
+        assert_eq!(
+            endpoint.as_deref(),
+            Some("https://github.com/login/device/code")
+        );
     }
 }
