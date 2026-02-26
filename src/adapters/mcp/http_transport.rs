@@ -148,7 +148,16 @@ impl McpHttpTransport {
             .header("Accept", "application/json, text/event-stream");
 
         if let Some(profile) = profile {
-            req = crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key);
+            req = match profile.auth_type {
+                AuthType::OAuth => {
+                    if let Some(token) = profile.bearer_token() {
+                        crate::auth::apply_auth_to_request(req, &profile.auth_type, token)
+                    } else {
+                        req
+                    }
+                }
+                _ => crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key),
+            };
         }
 
         req.json(request).send().await.map_err(Into::into)
@@ -199,13 +208,13 @@ impl McpHttpTransport {
         }
 
         oauth::refresh_oauth_profile(&mut profile, &self.client).await?;
-        self.persist_profile_update(&profile)?;
+        self.persist_profile_update(&profile).await?;
         *self.auth_profile.lock().await = Some(profile);
 
         Ok(())
     }
 
-    fn persist_profile_update(&self, profile: &Profile) -> Result<()> {
+    async fn persist_profile_update(&self, profile: &Profile) -> Result<()> {
         let Some(profile_name) = profile.name.clone() else {
             return Ok(());
         };
@@ -213,10 +222,14 @@ impl McpHttpTransport {
         let mut stored = profile.clone();
         stored.name = None;
 
-        let mut profiles = Profiles::load_profiles()?;
-        profiles.set_profile(profile_name, stored)?;
-        profiles.save_profiles()?;
-        Ok(())
+        tokio::task::spawn_blocking(move || {
+            let mut profiles = Profiles::load_profiles()?;
+            profiles.set_profile(profile_name, stored)?;
+            profiles.save_profiles()?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("Failed to join profile persistence task")?
     }
 
     fn map_http_error(
@@ -224,22 +237,25 @@ impl McpHttpTransport {
         body: &str,
         www_authenticate: Option<&str>,
     ) -> Result<JsonValue> {
+        // Only treat 401 as OAuth-required when the server explicitly advertises
+        // OAuth-related metadata in the WWW-Authenticate header. Otherwise, fall
+        // back to a generic HTTP/auth failure to avoid misleading users of
+        // non-OAuth authentication schemes.
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            let next_step = if let Some(header) = www_authenticate {
+            if let Some(header) = www_authenticate {
                 if let Some(resource_metadata) =
                     oauth::parse_resource_metadata_from_www_authenticate(header)
                 {
-                    format!(
+                    let next_step = format!(
                         "OAuth required. Login with: uxc auth oauth login <profile> --endpoint <mcp_url> --client-id <id> (resource_metadata: {})",
                         resource_metadata
-                    )
-                } else {
-                    "OAuth required. Login with: uxc auth oauth login <profile> --endpoint <mcp_url> --client-id <id>".to_string()
+                    );
+                    return Err(UxcError::OAuthRequired(next_step).into());
                 }
-            } else {
-                "OAuth required. Login with: uxc auth oauth login <profile> --endpoint <mcp_url> --client-id <id>".to_string()
-            };
-            return Err(UxcError::OAuthRequired(next_step).into());
+            }
+            // If there's no explicit OAuth signal in WWW-Authenticate, do not
+            // emit OAuthRequired; instead, fall through to the generic error
+            // handling below.
         }
 
         if status == reqwest::StatusCode::FORBIDDEN {
@@ -310,7 +326,16 @@ impl McpHttpTransport {
             .header("Accept", "application/json, text/event-stream");
 
         if let Some(profile) = &auth_profile {
-            req = crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key);
+            req = match profile.auth_type {
+                AuthType::OAuth => {
+                    if let Some(token) = profile.bearer_token() {
+                        crate::auth::apply_auth_to_request(req, &profile.auth_type, token)
+                    } else {
+                        req
+                    }
+                }
+                _ => crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key),
+            };
         }
 
         let response = match req.json(&request).send().await {
@@ -1602,5 +1627,103 @@ data: {"jsonrpc":"2.0","id":1,"result":{}}
         });
         let result = transport.send_request("test", Some(params)).await;
         assert!(result.is_ok());
+    }
+
+    // ===== OAuth Tests =====
+
+    #[tokio::test]
+    async fn send_request_with_oauth_uses_bearer_token() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Exact("Bearer oauth-access-token".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)
+            .create_async()
+            .await;
+
+        let oauth_profile = crate::auth::OAuthProfile {
+            access_token: Some("oauth-access-token".to_string()),
+            ..Default::default()
+        };
+        let profile = Profile::new("stale-api-key".to_string(), AuthType::OAuth)
+            .with_oauth(oauth_profile);
+        let transport = McpHttpTransport::with_auth(server.url(), Some(profile)).unwrap();
+
+        let result = transport.send_request("test", None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn send_request_with_oauth_missing_token_skips_auth() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)
+            .create_async()
+            .await;
+
+        let oauth_profile = crate::auth::OAuthProfile {
+            access_token: None,
+            ..Default::default()
+        };
+        let profile = Profile::new("stale-api-key".to_string(), AuthType::OAuth)
+            .with_oauth(oauth_profile);
+        let transport = McpHttpTransport::with_auth(server.url(), Some(profile)).unwrap();
+
+        let result = transport.send_request("test", None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn map_http_error_401_with_resource_metadata_emits_oauth_required() {
+        let err = McpHttpTransport::map_http_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "Access denied",
+            Some("Bearer resource_metadata=\"https://example.com/metadata\""),
+        );
+
+        assert!(err.is_err());
+        let err_msg = err.unwrap_err().to_string();
+        assert!(err_msg.contains("OAuth required"));
+        assert!(err_msg.contains("resource_metadata"));
+    }
+
+    #[tokio::test]
+    async fn map_http_error_401_without_resource_metadata_falls_through() {
+        let err = McpHttpTransport::map_http_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "Invalid token",
+            Some("Bearer realm=\"api\""),
+        );
+
+        assert!(err.is_err());
+        let err_msg = err.unwrap_err().to_string();
+        assert!(!err_msg.contains("OAuth required"));
+        assert!(err_msg.contains("HTTP error"));
+        assert!(err_msg.contains("401"));
+    }
+
+    #[tokio::test]
+    async fn map_http_error_401_without_www_authenticate_falls_through() {
+        let err = McpHttpTransport::map_http_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "Invalid credentials",
+            None,
+        );
+
+        assert!(err.is_err());
+        let err_msg = err.unwrap_err().to_string();
+        assert!(!err_msg.contains("OAuth required"));
+        assert!(err_msg.contains("HTTP error"));
+        assert!(err_msg.contains("401"));
     }
 }

@@ -266,7 +266,14 @@ pub async fn login_with_device_code(
             });
 
         if err.error == "authorization_pending" || err.error == "slow_down" {
-            tokio::time::sleep(Duration::from_secs(interval)).await;
+            // Per RFC 8628, on slow_down the client should increase the polling
+            // interval (typically by +5 seconds) to avoid rate limiting.
+            let sleep_duration = if err.error == "slow_down" {
+                Duration::from_secs(interval + 5)
+            } else {
+                Duration::from_secs(interval)
+            };
+            tokio::time::sleep(sleep_duration).await;
             continue;
         }
 
