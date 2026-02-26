@@ -51,7 +51,11 @@ struct JsonRpcError {
 
 /// Serve OpenRPC schema
 async fn serve_schema() -> Json<serde_json::Value> {
-    Json(json!({
+    Json(schema_value())
+}
+
+fn schema_value() -> serde_json::Value {
+    json!({
       "openrpc": "1.2.6",
       "info": {
         "title": "UXC Test JSON-RPC API",
@@ -114,7 +118,7 @@ async fn serve_schema() -> Json<serde_json::Value> {
           }
         }
       ]
-    }))
+    })
 }
 
 /// Execute JSON-RPC method
@@ -127,6 +131,7 @@ async fn execute_method(
     match state.scenario {
         Scenario::Ok => {
             let result = match method {
+                "rpc.discover" => schema_value(),
                 "health" => json!({"status": "ok"}),
                 "list_users" => json!([
                     {"id": 1, "name": "Alice", "email": "alice@example.com"},
@@ -208,15 +213,17 @@ fn create_router(state: ServerState) -> Router {
         }
     }
 
-    // Handle GET requests to other endpoints (return 404 for MCP probe)
+    // Handle MCP probe endpoints (return 404)
     async fn not_found() -> StatusCode {
         StatusCode::NOT_FOUND
     }
 
     Router::new()
         .route("/", get(serve_schema).post(jsonrpc_handler))
-        .route("/.well-known/mcp", get(not_found))
-        .route("/mcp", get(not_found))
+        .route("/openrpc.json", get(serve_schema))
+        .route("/.well-known/openrpc.json", get(serve_schema))
+        .route("/.well-known/mcp", get(not_found).post(not_found))
+        .route("/mcp", get(not_found).post(not_found))
         .with_state(state)
 }
 
@@ -229,7 +236,7 @@ pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
     info!("JSON-RPC test server listening on http://{}", addr);
     write_addr_file(addr, "jsonrpc")?;
 
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         shutdown_rx.await.ok();

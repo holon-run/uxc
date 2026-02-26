@@ -7,11 +7,10 @@ use axum::{
     http::StatusCode,
     Json,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
     Router,
 };
 use serde_json::json;
-use std::sync::Arc;
 use tokio::signal::ctrl_c;
 use tracing::info;
 
@@ -204,7 +203,7 @@ pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
     info!("OpenAPI test server listening on http://{}", addr);
     write_addr_file(addr, "openapi")?;
 
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         shutdown_rx.await.ok();

@@ -45,12 +45,14 @@ pub async fn bind_available() -> Result<(TcpListener, SocketAddr)> {
 
 /// Write server address to a file for test discovery
 pub fn write_addr_file(addr: SocketAddr, name: &str) -> Result<()> {
-    let dir = std::env::var("UXC_TEST_SERVER_DIR")
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
-
-    std::fs::create_dir_all(&dir)?;
-
-    let path = std::path::PathBuf::from(dir).join(format!("{}.addr", name));
+    let path = if let Ok(path) = std::env::var("UXC_TEST_SERVER_ADDR_FILE") {
+        std::path::PathBuf::from(path)
+    } else {
+        let dir = std::env::var("UXC_TEST_SERVER_DIR")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+        std::fs::create_dir_all(&dir)?;
+        std::path::PathBuf::from(dir).join(format!("{}.addr", name))
+    };
     std::fs::write(path, addr.to_string())?;
 
     tracing::info!("Wrote server address for {} to {}", name, addr);

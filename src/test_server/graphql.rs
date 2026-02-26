@@ -28,8 +28,6 @@ struct GraphQLRequest {
     query: String,
     #[serde(default)]
     variables: HashMap<String, serde_json::Value>,
-    #[serde(default)]
-    operation_name: Option<String>,
 }
 
 /// GraphQL response
@@ -87,12 +85,19 @@ async fn execute_query(
     req: GraphQLRequest,
     state: ServerState,
 ) -> Result<GraphQLResponse, StatusCode> {
-    match state.scenario {
-        Scenario::Ok => {
-            let query = req.query.trim();
+    let query = req.query.trim();
 
+    // Keep introspection available even in auth_required mode so protocol detection can succeed.
+    if matches!(state.scenario, Scenario::AuthRequired)
+        && !(query.contains("__schema") || query.contains("__type("))
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    match state.scenario {
+        Scenario::Ok | Scenario::AuthRequired => {
             // Introspection query
-            if query.contains("__schema") || query.contains("__type") {
+            if query.contains("__schema") || query.contains("__type(") {
                 return Ok(GraphQLResponse {
                     data: Some(introspection_schema()["data"].clone()),
                     errors: None,
@@ -120,10 +125,18 @@ async fn execute_query(
                 });
             }
 
-            // User query with ID
-            if query.contains("user") && query.contains("id:") {
-                // Extract ID from variables
-                let id = req.variables.get("id").and_then(|v| v.as_str()).unwrap_or("1");
+            // User query (optionally with ID variable)
+            if query.contains("user") && !query.contains("users") {
+                // Extract ID from variables, accept both string and number.
+                let id = req
+                    .variables
+                    .get("id")
+                    .and_then(|v| {
+                        v.as_str()
+                            .map(ToString::to_string)
+                            .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    })
+                    .unwrap_or_else(|| "1".to_string());
 
                 if id == "1" {
                     return Ok(GraphQLResponse {
@@ -153,7 +166,6 @@ async fn execute_query(
                 errors: Some(vec![json!({"message": "Unknown query"})]),
             })
         }
-        Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
         Scenario::Malformed => Ok(GraphQLResponse {
             data: Some(json!({"invalid": "<unterminated"})),
             errors: None,
@@ -207,7 +219,7 @@ pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
     info!("GraphQL test server listening on http://{}", addr);
     write_addr_file(addr, "graphql")?;
 
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         shutdown_rx.await.ok();
