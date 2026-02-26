@@ -573,10 +573,10 @@ Examples:
 
 ```bash
 # Create a bearer credential (literal secret)
-uxc auth credential set deepwiki --type bearer --secret "$DEEPWIKI_TOKEN"
+uxc auth credential set deepwiki --auth-type bearer --secret "$DEEPWIKI_TOKEN"
 
 # Or reference an environment variable
-uxc auth credential set github --type bearer --secret-env GITHUB_TOKEN
+uxc auth credential set github --auth-type bearer --secret-env GITHUB_TOKEN
 
 # Bind endpoint to a credential (auto-match at runtime)
 uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mcp --scheme https --credential deepwiki --priority 100

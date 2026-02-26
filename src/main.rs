@@ -452,6 +452,22 @@ struct AuthBindingMatchData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct AuthBindingSetData {
+    id: String,
+    credential: String,
+    host: String,
+    path_prefix: Option<String>,
+    scheme: Option<String>,
+    priority: i32,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthBindingRemoveData {
+    binding_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct LinkCreateData {
     name: String,
     host: String,
@@ -1072,6 +1088,25 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             } else {
                 println!("No binding matched {}", data.endpoint);
             }
+            Ok(())
+        }
+        Some("auth_binding_set_result") => {
+            let data: AuthBindingSetData = decode_envelope_data(envelope)?;
+            println!(
+                "Created binding '{}' -> credential '{}' (host={}, path_prefix={}, scheme={}, priority={}, enabled={}).",
+                data.id,
+                data.credential,
+                data.host,
+                data.path_prefix.unwrap_or_else(|| "/".to_string()),
+                data.scheme.unwrap_or_else(|| "*".to_string()),
+                data.priority,
+                data.enabled
+            );
+            Ok(())
+        }
+        Some("auth_binding_remove_result") => {
+            let data: AuthBindingRemoveData = decode_envelope_data(envelope)?;
+            println!("Removed binding '{}'.", data.binding_id);
             Ok(())
         }
         Some("link_create_result") => {
@@ -1881,26 +1916,27 @@ fn handle_auth_binding_command(command: &AuthBindingCommands) -> Result<OutputEn
             }
 
             let mut bindings = AuthBindings::load_bindings()?;
-            bindings.add_binding(AuthBindingRule {
+            bindings
+                .add_binding(AuthBindingRule {
+                    id: id.clone(),
+                    host: host.clone(),
+                    path_prefix: path_prefix.clone(),
+                    scheme: scheme.clone(),
+                    credential: credential.clone(),
+                    priority: *priority,
+                    enabled: !disabled,
+                })
+                .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+            bindings.save_bindings()?;
+
+            let data = serde_json::to_value(AuthBindingSetData {
                 id: id.clone(),
+                credential: credential.clone(),
                 host: host.clone(),
                 path_prefix: path_prefix.clone(),
                 scheme: scheme.clone(),
-                credential: credential.clone(),
                 priority: *priority,
                 enabled: !disabled,
-            })?;
-            bindings.save_bindings()?;
-
-            let data = serde_json::to_value(AuthBindingMatchData {
-                endpoint: format!(
-                    "{}://{}{}",
-                    scheme.clone().unwrap_or_else(|| "https".to_string()),
-                    host,
-                    path_prefix.clone().unwrap_or_else(|| "/".to_string())
-                ),
-                matched: true,
-                binding: bindings.bindings.into_iter().find(|item| item.id == *id),
             })?;
             Ok(OutputEnvelope::success(
                 "auth_binding_set_result",
@@ -1913,9 +1949,13 @@ fn handle_auth_binding_command(command: &AuthBindingCommands) -> Result<OutputEn
         }
         AuthBindingCommands::Remove { binding_id } => {
             let mut bindings = AuthBindings::load_bindings()?;
-            bindings.remove_binding(binding_id)?;
+            bindings
+                .remove_binding(binding_id)
+                .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
             bindings.save_bindings()?;
-            let data = serde_json::to_value(json!({ "binding_id": binding_id }))?;
+            let data = serde_json::to_value(AuthBindingRemoveData {
+                binding_id: binding_id.clone(),
+            })?;
             Ok(OutputEnvelope::success(
                 "auth_binding_remove_result",
                 "cli",
@@ -1926,6 +1966,13 @@ fn handle_auth_binding_command(command: &AuthBindingCommands) -> Result<OutputEn
             ))
         }
         AuthBindingCommands::Match { endpoint } => {
+            if url::Url::parse(endpoint).is_err() {
+                return Err(UxcError::InvalidArguments(format!(
+                    "Invalid endpoint URL '{}'. Use a full URL such as https://api.example.com/path",
+                    endpoint
+                ))
+                .into());
+            }
             let bindings = AuthBindings::load_bindings()?;
             let matched = bindings.matching_rule(endpoint).cloned();
             let data = serde_json::to_value(AuthBindingMatchData {

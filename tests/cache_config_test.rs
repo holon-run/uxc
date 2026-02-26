@@ -105,6 +105,21 @@ max_size = -100
 
     let result = CacheConfig::load_from_file();
     assert!(result.is_ok(), "Should succeed with fallback defaults");
+
+    let config = result.unwrap();
+    let default_config = CacheConfig::default();
+    assert_eq!(
+        config.enabled, default_config.enabled,
+        "Invalid 'enabled' should fall back to default"
+    );
+    assert_eq!(
+        config.ttl, default_config.ttl,
+        "Invalid 'ttl' should fall back to default"
+    );
+    assert_eq!(
+        config.max_size, default_config.max_size,
+        "Invalid 'max_size' should fall back to default"
+    );
 }
 
 #[test]

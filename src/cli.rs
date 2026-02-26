@@ -59,16 +59,16 @@ impl From<anyhow::Error> for CliError {
 }
 
 /// Trait for loading authentication credentials (abstracted for testing)
-pub trait AuthProfileLoader: Send + Sync {
+pub trait AuthCredentialLoader: Send + Sync {
     /// Load a credential by ID
-    fn load_profile(&self, name: Option<String>) -> Result<Option<Profile>>;
+    fn load_credential(&self, name: Option<String>) -> Result<Option<Profile>>;
 }
 
 /// Default auth credential loader
-pub struct DefaultAuthProfileLoader;
+pub struct DefaultAuthCredentialLoader;
 
-impl AuthProfileLoader for DefaultAuthProfileLoader {
-    fn load_profile(&self, cli_credential: Option<String>) -> Result<Option<Profile>> {
+impl AuthCredentialLoader for DefaultAuthCredentialLoader {
+    fn load_credential(&self, cli_credential: Option<String>) -> Result<Option<Profile>> {
         let Some(credential_id) = cli_credential else {
             return Ok(None);
         };
@@ -230,8 +230,8 @@ mod tests {
         profile: Option<Profile>,
     }
 
-    impl AuthProfileLoader for MockAuthLoader {
-        fn load_profile(&self, _name: Option<String>) -> Result<Option<Profile>> {
+    impl AuthCredentialLoader for MockAuthLoader {
+        fn load_credential(&self, _name: Option<String>) -> Result<Option<Profile>> {
             Ok(self.profile.clone())
         }
     }
@@ -380,14 +380,14 @@ mod tests {
                 crate::auth::AuthType::Bearer,
             )),
         };
-        let profile = loader.load_profile(Some("test".to_string())).unwrap();
+        let profile = loader.load_credential(Some("test".to_string())).unwrap();
         assert!(profile.is_some());
     }
 
     #[test]
     fn test_mock_auth_loader_no_profile() {
         let loader = MockAuthLoader { profile: None };
-        let profile = loader.load_profile(Some("test".to_string())).unwrap();
+        let profile = loader.load_credential(Some("test".to_string())).unwrap();
         assert!(profile.is_none());
     }
 
