@@ -26,6 +26,7 @@ pub struct McpAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,
     auth_profile: Option<Profile>,
     discovered_http_endpoints: Arc<RwLock<HashMap<String, String>>>,
+    last_probe_diagnostics: Arc<RwLock<Option<String>>>,
 }
 
 impl McpAdapter {
@@ -34,6 +35,7 @@ impl McpAdapter {
             cache: None,
             auth_profile: None,
             discovered_http_endpoints: Arc::new(RwLock::new(HashMap::new())),
+            last_probe_diagnostics: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -119,12 +121,17 @@ impl McpAdapter {
     async fn resolve_http_endpoint(&self, url: &str) -> Option<String> {
         let normalized = Self::normalize_http_url(url);
         {
+            let mut diag = self.last_probe_diagnostics.write().await;
+            *diag = None;
+        }
+        {
             let cache = self.discovered_http_endpoints.read().await;
             if let Some(endpoint) = cache.get(&normalized) {
                 return Some(endpoint.clone());
             }
         }
 
+        let mut reasons = Vec::new();
         for candidate in Self::http_endpoint_candidates(url) {
             match McpHttpTransport::probe_initialize_with_reason(
                 &candidate,
@@ -137,29 +144,6 @@ impl McpAdapter {
                     cache.insert(normalized, candidate.clone());
                     return Some(candidate);
                 }
-                Ok(http_transport::ProbeInitializeOutcome::NotMcp(_)) => {}
-                Err(_) => {}
-            }
-        }
-
-        None
-    }
-
-    pub async fn diagnose_http_endpoint(
-        url: &str,
-        auth_profile: Option<Profile>,
-    ) -> Option<String> {
-        if !Self::is_http_url(url) {
-            return None;
-        }
-
-        let mut reasons = Vec::new();
-        for candidate in Self::http_endpoint_candidates(url) {
-            let outcome =
-                McpHttpTransport::probe_initialize_with_reason(&candidate, auth_profile.clone())
-                    .await;
-            match outcome {
-                Ok(http_transport::ProbeInitializeOutcome::Success) => return None,
                 Ok(http_transport::ProbeInitializeOutcome::NotMcp(reason)) => {
                     reasons.push(format!("{} => {}", candidate, reason));
                 }
@@ -167,11 +151,16 @@ impl McpAdapter {
             }
         }
 
-        if reasons.is_empty() {
-            None
-        } else {
-            Some(reasons.join("; "))
+        if !reasons.is_empty() {
+            let mut diag = self.last_probe_diagnostics.write().await;
+            *diag = Some(reasons.join("; "));
         }
+
+        None
+    }
+
+    pub async fn latest_probe_diagnostics(&self) -> Option<String> {
+        self.last_probe_diagnostics.read().await.clone()
     }
 }
 

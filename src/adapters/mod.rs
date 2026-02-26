@@ -255,9 +255,7 @@ impl ProtocolDetector {
         }
 
         let mut message = format!("No adapter found for URL: {}", url);
-        if let Some(diag) =
-            mcp::McpAdapter::diagnose_http_endpoint(url, options.auth_profile.clone()).await
-        {
+        if let Some(diag) = mcp_adapter.latest_probe_diagnostics().await {
             message.push_str(&format!(". MCP probe diagnostics: {}", diag));
         }
 

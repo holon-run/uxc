@@ -315,10 +315,11 @@ impl McpHttpTransport {
     fn summarize_body(body: &str) -> String {
         const MAX_CHARS: usize = 240;
         let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
-        if compact.len() <= MAX_CHARS {
+        if compact.chars().count() <= MAX_CHARS {
             compact
         } else {
-            format!("{}...", &compact[..MAX_CHARS])
+            let truncated: String = compact.chars().take(MAX_CHARS).collect();
+            format!("{}...", truncated)
         }
     }
 
