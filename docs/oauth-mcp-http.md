@@ -2,12 +2,15 @@
 
 This document describes OAuth support for MCP HTTP in `uxc`.
 
+OAuth tokens are stored in a credential (`credentials.json`). Runtime selection can use
+`--auth <credential_id>` or endpoint binding auto-match (`auth_bindings.json`).
+
 ## Scope
 
 Implemented in MVP:
 
 - OAuth login via `device_code` and `client_credentials`
-- Token persistence in `~/.uxc/profiles.toml`
+- Token persistence in `~/.uxc/credentials.json`
 - Auto refresh before expiry (60s skew)
 - One-time refresh + retry on `401 Unauthorized`
 - Structured error codes for OAuth failures
@@ -17,7 +20,7 @@ Implemented in MVP:
 Login with Device Code:
 
 ```bash
-uxc auth oauth login <profile> \
+uxc auth oauth login <credential_id> \
   --endpoint <mcp_url> \
   --flow device_code \
   --client-id <client_id> \
@@ -27,7 +30,7 @@ uxc auth oauth login <profile> \
 Login with Client Credentials:
 
 ```bash
-uxc auth oauth login <profile> \
+uxc auth oauth login <credential_id> \
   --endpoint <mcp_url> \
   --flow client_credentials \
   --client-id <client_id> \
@@ -38,24 +41,24 @@ uxc auth oauth login <profile> \
 Refresh token manually:
 
 ```bash
-uxc auth oauth refresh <profile>
+uxc auth oauth refresh <credential_id>
 ```
 
-Inspect OAuth profile:
+Inspect OAuth credential:
 
 ```bash
-uxc auth oauth info <profile>
+uxc auth oauth info <credential_id>
 ```
 
-Logout (clear OAuth token data in the profile):
+Logout (clear OAuth token data in the credential):
 
 ```bash
-uxc auth oauth logout <profile>
+uxc auth oauth logout <credential_id>
 ```
 
 ## Runtime behavior
 
-When calling MCP HTTP with an OAuth profile:
+When calling MCP HTTP with an OAuth credential:
 
 1. If token is near expiry, `uxc` refreshes first.
 2. If server returns `401`, `uxc` refreshes once and retries once.
@@ -71,5 +74,5 @@ When calling MCP HTTP with an OAuth profile:
 
 ## Notes
 
-- OAuth profile data is currently stored in plaintext (same as existing profile storage).
+- OAuth credential data is currently stored in plaintext (same as existing credential storage).
 - Local encrypted storage is tracked separately (Issue #29).

@@ -1,7 +1,7 @@
-//! Integration tests for authentication profile storage
+//! Integration tests for authentication credential storage
 //!
-//! These tests verify that the profile storage system works correctly
-//! including file I/O, TOML parsing, and profile management.
+//! These tests verify that the credential storage system works correctly
+//! including file I/O, JSON parsing, and credential management.
 
 use std::fs;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -77,8 +77,8 @@ fn test_save_and_load_profiles() {
     profiles.save_profiles().expect("Failed to save profiles");
 
     // Verify the file was created
-    let profiles_path = temp_dir.temp_dir.path().join(".uxc/profiles.toml");
-    assert!(profiles_path.exists(), "Profiles file should exist");
+    let profiles_path = temp_dir.temp_dir.path().join(".uxc/credentials.json");
+    assert!(profiles_path.exists(), "Credentials file should exist");
 
     // Load profiles and verify
     let loaded_profiles = Profiles::load_profiles().expect("Failed to load profiles");
@@ -240,7 +240,7 @@ fn test_profile_auth_types() {
 }
 
 #[test]
-fn test_toml_format() {
+fn test_json_format() {
     let temp_dir = setup_test_env();
 
     let mut profiles = Profiles::new();
@@ -251,16 +251,18 @@ fn test_toml_format() {
 
     profiles.save_profiles().expect("Failed to save profiles");
 
-    // Read and verify the TOML format
-    let profiles_path = temp_dir.temp_dir.path().join(".uxc/profiles.toml");
+    // Read and verify JSON format
+    let profiles_path = temp_dir.temp_dir.path().join(".uxc/credentials.json");
     let contents = fs::read_to_string(&profiles_path).expect("Failed to read profiles file");
 
     // Verify the format contains expected elements
-    assert!(contents.contains("[default]"));
-    assert!(contents.contains("api_key"));
-    assert!(contents.contains("sk-test-1234"));
-    assert!(contents.contains("type"));
-    assert!(contents.contains("bearer"));
+    assert!(contents.contains("\"version\": 1"));
+    assert!(contents.contains("\"credentials\""));
+    assert!(contents.contains("\"default\""));
+    assert!(contents.contains("\"auth_type\": \"bearer\""));
+    assert!(contents.contains("\"secret_source\""));
+    assert!(contents.contains("\"kind\": \"literal\""));
+    assert!(contents.contains("\"value\": \"sk-test-1234\""));
 }
 
 #[test]

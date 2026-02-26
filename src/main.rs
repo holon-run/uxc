@@ -22,7 +22,7 @@ mod output;
 mod schema_mapping;
 
 use adapters::{Adapter, DetectionOptions, Operation, OperationDetail, ProtocolDetector};
-use auth::{AuthType, OAuthFlow, Profile, Profiles};
+use auth::{AuthBindingRule, AuthBindings, AuthType, OAuthFlow, Profile, Profiles};
 use cache::CacheConfig;
 use error::UxcError;
 use output::OutputEnvelope;
@@ -50,9 +50,9 @@ struct Cli {
     #[arg(short = 'h', long = "help", global = true)]
     help: bool,
 
-    /// Authentication profile name (default: "default", overrides UXC_PROFILE env var)
+    /// Explicit credential ID for this request (overrides endpoint binding auto-match)
     #[arg(long, global = true)]
-    profile: Option<String>,
+    auth: Option<String>,
 
     /// Disable cache for this operation
     #[arg(long, global = true)]
@@ -118,7 +118,7 @@ enum Commands {
         cache_command: CacheCommands,
     },
 
-    /// Manage authentication profiles
+    /// Manage authentication credentials and bindings
     Auth {
         #[command(subcommand)]
         auth_command: AuthCommands,
@@ -181,43 +181,19 @@ enum CacheCommands {
 
 #[derive(Subcommand)]
 enum AuthCommands {
-    /// List all authentication profiles
-    List,
-
-    /// Show information about a specific profile
-    Info {
-        /// Profile name
-        #[arg(value_name = "PROFILE")]
-        profile: String,
+    /// Manage credentials
+    Credential {
+        #[command(subcommand)]
+        credential_command: AuthCredentialCommands,
     },
 
-    /// Set or update an authentication profile
-    Set {
-        /// Profile name
-        #[arg(value_name = "PROFILE")]
-        profile: String,
-
-        /// API key or token
-        #[arg(long)]
-        api_key: String,
-
-        /// Authentication type (bearer, api_key, basic)
-        #[arg(short = 't', long, default_value = "bearer")]
-        auth_type: String,
-
-        /// Profile description
-        #[arg(long)]
-        description: Option<String>,
+    /// Manage endpoint auth bindings
+    Binding {
+        #[command(subcommand)]
+        binding_command: AuthBindingCommands,
     },
 
-    /// Remove an authentication profile
-    Remove {
-        /// Profile name
-        #[arg(value_name = "PROFILE")]
-        profile: String,
-    },
-
-    /// Manage OAuth authentication profiles
+    /// Manage OAuth credentials
     Oauth {
         #[command(subcommand)]
         oauth_command: AuthOauthCommands,
@@ -225,12 +201,106 @@ enum AuthCommands {
 }
 
 #[derive(Subcommand)]
+enum AuthCredentialCommands {
+    /// List all credentials
+    List,
+
+    /// Show information about a specific credential
+    Info {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
+    },
+
+    /// Set or update a credential
+    Set {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
+
+        /// Authentication type (bearer, api_key, basic, oauth)
+        #[arg(short = 't', long, default_value = "bearer")]
+        auth_type: String,
+
+        /// Literal secret value
+        #[arg(long, conflicts_with = "secret_env")]
+        secret: Option<String>,
+
+        /// Environment variable key containing secret
+        #[arg(long, conflicts_with = "secret")]
+        secret_env: Option<String>,
+
+        /// Credential description
+        #[arg(long)]
+        description: Option<String>,
+    },
+
+    /// Remove a credential
+    Remove {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthBindingCommands {
+    /// List all endpoint auth bindings
+    List,
+
+    /// Add a binding rule
+    Add {
+        /// Binding ID
+        #[arg(long, value_name = "BINDING_ID")]
+        id: String,
+
+        /// Endpoint host (exact match)
+        #[arg(long)]
+        host: String,
+
+        /// Optional path prefix
+        #[arg(long)]
+        path_prefix: Option<String>,
+
+        /// Optional URL scheme (http/https)
+        #[arg(long)]
+        scheme: Option<String>,
+
+        /// Credential ID to bind
+        #[arg(long)]
+        credential: String,
+
+        /// Priority (higher wins)
+        #[arg(long, default_value_t = 0)]
+        priority: i32,
+
+        /// Disable binding
+        #[arg(long)]
+        disabled: bool,
+    },
+
+    /// Remove a binding rule
+    Remove {
+        /// Binding ID
+        #[arg(value_name = "BINDING_ID")]
+        binding_id: String,
+    },
+
+    /// Match endpoint against bindings
+    Match {
+        /// Endpoint URL
+        #[arg(value_name = "ENDPOINT")]
+        endpoint: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum AuthOauthCommands {
     /// Login with OAuth and save tokens
     Login {
-        /// Profile name
-        #[arg(value_name = "PROFILE")]
-        profile: String,
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
 
         /// MCP HTTP endpoint URL
         #[arg(long)]
@@ -255,23 +325,23 @@ enum AuthOauthCommands {
 
     /// Refresh OAuth token
     Refresh {
-        /// Profile name
-        #[arg(value_name = "PROFILE")]
-        profile: String,
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
     },
 
-    /// Show OAuth profile information
+    /// Show OAuth credential information
     Info {
-        /// Profile name
-        #[arg(value_name = "PROFILE")]
-        profile: String,
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
     },
 
-    /// Remove OAuth token data from profile
+    /// Remove OAuth token data from credential
     Logout {
-        /// Profile name
-        #[arg(value_name = "PROFILE")]
-        profile: String,
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
     },
 }
 
@@ -359,13 +429,26 @@ struct AuthOAuthView {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthListData {
-    profiles: Vec<AuthProfileView>,
+    credentials: Vec<AuthProfileView>,
     count: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthRemoveData {
-    profile: String,
+    credential: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthBindingListData {
+    bindings: Vec<AuthBindingRule>,
+    count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthBindingMatchData {
+    endpoint: String,
+    matched: bool,
+    binding: Option<AuthBindingRule>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -480,10 +563,10 @@ fn normalize_global_args(raw_args: Vec<String>) -> Vec<String> {
         let is_global_bool = matches!(arg.as_str(), "--text" | "--no-cache");
         let is_global_kv = matches!(
             arg.as_str(),
-            "--format" | "--profile" | "--cache-ttl" | "--schema-url"
+            "--format" | "--auth" | "--cache-ttl" | "--schema-url"
         );
         let is_global_inline = arg.starts_with("--format=")
-            || arg.starts_with("--profile=")
+            || arg.starts_with("--auth=")
             || arg.starts_with("--cache-ttl=")
             || arg.starts_with("--schema-url=");
 
@@ -630,7 +713,7 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
     info!("UXC v{} - connecting to {}", env!("CARGO_PKG_VERSION"), url);
 
     let endpoint_command = resolve_endpoint_command(cli)?;
-    let auth_profile = load_auth_profile(cli.profile.clone())?;
+    let auth_profile = auth::resolve_auth_for_endpoint(&url, cli.auth.clone())?;
     let cache = cache::create_cache(cache_config)?;
 
     let detector = ProtocolDetector::new();
@@ -794,7 +877,7 @@ fn global_help_envelope() -> Result<OutputEnvelope> {
             },
             GlobalHelpCommand {
                 name: "auth".to_string(),
-                about: "Manage authentication profiles".to_string(),
+                about: "Manage credentials, bindings, and OAuth".to_string(),
             },
             GlobalHelpCommand {
                 name: "link".to_string(),
@@ -894,18 +977,18 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
         }
         Some("auth_list") => {
             let data: AuthListData = decode_envelope_data(envelope)?;
-            if data.profiles.is_empty() {
-                println!("No profiles found.");
-                println!("\nCreate a profile with: uxc auth set <profile> --api-key <key>");
+            if data.credentials.is_empty() {
+                println!("No credentials found.");
+                println!("\nCreate one with: uxc auth credential set <id> --secret <value>");
                 return Ok(());
             }
 
-            println!("Authentication Profiles:\n");
-            for profile in data.profiles {
-                println!("  {}", profile.name);
-                println!("    Type: {}", profile.auth_type);
-                println!("    API Key: {}", profile.api_key_masked);
-                if let Some(oauth) = profile.oauth {
+            println!("Credentials:\n");
+            for credential in data.credentials {
+                println!("  {}", credential.name);
+                println!("    Type: {}", credential.auth_type);
+                println!("    Secret: {}", credential.api_key_masked);
+                if let Some(oauth) = credential.oauth {
                     println!(
                         "    OAuth Flow: {}",
                         oauth.flow.unwrap_or_else(|| "unknown".to_string())
@@ -914,7 +997,7 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
                         println!("    OAuth Issuer: {}", issuer);
                     }
                 }
-                if let Some(desc) = profile.description {
+                if let Some(desc) = credential.description {
                     println!("    Description: {}", desc);
                 }
                 println!();
@@ -922,11 +1005,11 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             Ok(())
         }
         Some("auth_info") | Some("auth_set_result") => {
-            let profile: AuthProfileView = decode_envelope_data(envelope)?;
-            println!("Profile: {}", profile.name);
-            println!("  Type: {}", profile.auth_type);
-            println!("  API Key: {}", profile.api_key_masked);
-            if let Some(oauth) = profile.oauth {
+            let credential: AuthProfileView = decode_envelope_data(envelope)?;
+            println!("Credential: {}", credential.name);
+            println!("  Type: {}", credential.auth_type);
+            println!("  Secret: {}", credential.api_key_masked);
+            if let Some(oauth) = credential.oauth {
                 println!(
                     "  OAuth Flow: {}",
                     oauth.flow.unwrap_or_else(|| "unknown".to_string())
@@ -949,14 +1032,46 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
                     }
                 );
             }
-            if let Some(desc) = profile.description {
+            if let Some(desc) = credential.description {
                 println!("  Description: {}", desc);
             }
             Ok(())
         }
         Some("auth_remove_result") => {
             let data: AuthRemoveData = decode_envelope_data(envelope)?;
-            println!("Profile '{}' removed successfully.", data.profile);
+            println!("Credential '{}' removed successfully.", data.credential);
+            Ok(())
+        }
+        Some("auth_binding_list") => {
+            let data: AuthBindingListData = decode_envelope_data(envelope)?;
+            if data.bindings.is_empty() {
+                println!("No auth bindings found.");
+                return Ok(());
+            }
+            for binding in data.bindings {
+                println!(
+                    "{} -> {} (host={}, path_prefix={}, scheme={}, priority={}, enabled={})",
+                    binding.id,
+                    binding.credential,
+                    binding.host,
+                    binding.path_prefix.unwrap_or_else(|| "/".to_string()),
+                    binding.scheme.unwrap_or_else(|| "*".to_string()),
+                    binding.priority,
+                    binding.enabled
+                );
+            }
+            Ok(())
+        }
+        Some("auth_binding_match") => {
+            let data: AuthBindingMatchData = decode_envelope_data(envelope)?;
+            if let Some(binding) = data.binding {
+                println!(
+                    "Matched '{}' for {} -> credential '{}'",
+                    binding.id, data.endpoint, binding.credential
+                );
+            } else {
+                println!("No binding matched {}", data.endpoint);
+            }
             Ok(())
         }
         Some("link_create_result") => {
@@ -1119,50 +1234,6 @@ fn parse_arguments(
     }
 
     Ok(args_map)
-}
-
-fn load_auth_profile(cli_profile: Option<String>) -> Result<Option<Profile>> {
-    let (profile_name, profile_explicitly_selected) = if let Some(profile) = cli_profile {
-        (profile, true)
-    } else if let Ok(profile) = std::env::var("UXC_PROFILE") {
-        (profile, true)
-    } else {
-        ("default".to_string(), false)
-    };
-
-    match Profiles::load_profiles() {
-        Ok(profiles) => match profiles.get_profile(&profile_name) {
-            Ok(profile) => {
-                let mut profile = profile.clone();
-                profile.name = Some(profile_name);
-                Ok(Some(profile))
-            }
-            Err(e) => {
-                if !profile_explicitly_selected && profile_name == "default" {
-                    info!("No 'default' profile found, continuing without authentication");
-                    Ok(None)
-                } else {
-                    Err(e)
-                }
-            }
-        },
-        Err(e) => {
-            if !profile_explicitly_selected && profile_name == "default" {
-                info!(
-                    "Could not load profiles: {}, continuing without authentication",
-                    e
-                );
-                Ok(None)
-            } else {
-                Err(anyhow::anyhow!(
-                    "Failed to load profile '{}': {}. Please run 'uxc auth set {} --api-key <key>' to create it.",
-                    profile_name,
-                    e,
-                    profile_name
-                ))
-            }
-        }
-    }
 }
 
 fn print_json(envelope: &OutputEnvelope) -> Result<()> {
@@ -1642,7 +1713,19 @@ async fn handle_cache_command(
 
 async fn handle_auth_command(command: &AuthCommands) -> Result<OutputEnvelope> {
     match command {
-        AuthCommands::List => {
+        AuthCommands::Credential { credential_command } => {
+            handle_auth_credential_command(credential_command).await
+        }
+        AuthCommands::Binding { binding_command } => handle_auth_binding_command(binding_command),
+        AuthCommands::Oauth { oauth_command } => handle_auth_oauth_command(oauth_command).await,
+    }
+}
+
+async fn handle_auth_credential_command(
+    command: &AuthCredentialCommands,
+) -> Result<OutputEnvelope> {
+    match command {
+        AuthCredentialCommands::List => {
             let profiles = Profiles::load_profiles()?;
             let mut rendered = Vec::new();
             for name in profiles.profile_names() {
@@ -1651,7 +1734,7 @@ async fn handle_auth_command(command: &AuthCommands) -> Result<OutputEnvelope> {
             }
             let data = serde_json::to_value(AuthListData {
                 count: rendered.len(),
-                profiles: rendered,
+                credentials: rendered,
             })?;
             Ok(OutputEnvelope::success(
                 "auth_list",
@@ -1662,44 +1745,62 @@ async fn handle_auth_command(command: &AuthCommands) -> Result<OutputEnvelope> {
                 None,
             ))
         }
-        AuthCommands::Info { profile } => {
+        AuthCredentialCommands::Info { credential_id } => {
             let profiles = Profiles::load_profiles()?;
-            let profile_data = profiles.get_profile(profile)?;
-            let data = serde_json::to_value(to_auth_profile_view(profile, profile_data))?;
+            let profile_data = profiles.get_profile(credential_id)?;
+            let data = serde_json::to_value(to_auth_profile_view(credential_id, profile_data))?;
             Ok(OutputEnvelope::success(
                 "auth_info",
                 "cli",
                 "uxc",
-                Some(profile),
+                Some(credential_id),
                 data,
                 None,
             ))
         }
-        AuthCommands::Set {
-            profile,
-            api_key,
+        AuthCredentialCommands::Set {
+            credential_id,
             auth_type,
+            secret,
+            secret_env,
             description,
         } => {
             let auth_type = auth_type
                 .parse::<AuthType>()
                 .map_err(|e| anyhow::anyhow!("Invalid auth type: {}", e))?;
 
-            let api_key_display = api_key.clone();
-            let auth_type_display = auth_type.clone();
+            if auth_type != AuthType::OAuth && secret.is_none() && secret_env.is_none() {
+                return Err(UxcError::InvalidArguments(
+                    "Credential set requires either --secret or --secret-env".to_string(),
+                )
+                .into());
+            }
 
-            let mut profile_obj = Profile::new(api_key.clone(), auth_type);
+            let mut profile_obj = match (&secret, &secret_env) {
+                (Some(value), None) => Profile::new(value.clone(), auth_type.clone()),
+                (None, Some(env_key)) => {
+                    Profile::new(String::new(), auth_type.clone()).with_secret_env(env_key.clone())
+                }
+                (None, None) => Profile::new(String::new(), auth_type.clone()),
+                _ => {
+                    return Err(UxcError::InvalidArguments(
+                        "Use only one of --secret or --secret-env".to_string(),
+                    )
+                    .into());
+                }
+            };
             if let Some(desc) = description {
                 profile_obj = profile_obj.with_description(desc.clone());
             }
 
             let mut profiles = Profiles::load_profiles()?;
-            profiles.set_profile(profile.clone(), profile_obj)?;
+            profiles.set_profile(credential_id.clone(), profile_obj)?;
             profiles.save_profiles()?;
+            let profile_data = profiles.get_profile(credential_id)?;
             let view = AuthProfileView {
-                name: profile.clone(),
-                auth_type: auth_type_display.to_string(),
-                api_key_masked: Profile::new(api_key_display, auth_type_display).mask_api_key(),
+                name: credential_id.clone(),
+                auth_type: auth_type.to_string(),
+                api_key_masked: profile_data.mask_api_key(),
                 description: description.clone(),
                 oauth: None,
             };
@@ -1708,45 +1809,146 @@ async fn handle_auth_command(command: &AuthCommands) -> Result<OutputEnvelope> {
                 "auth_set_result",
                 "cli",
                 "uxc",
-                Some(profile),
+                Some(credential_id),
                 data,
                 None,
             ))
         }
-        AuthCommands::Remove { profile } => {
+        AuthCredentialCommands::Remove { credential_id } => {
             let mut profiles = Profiles::load_profiles()?;
 
-            if !profiles.has_profile(profile) {
+            if !profiles.has_profile(credential_id) {
                 return Err(UxcError::InvalidArguments(format!(
-                    "Profile '{}' not found. Available profiles: {}",
-                    profile,
+                    "Credential '{}' not found. Available credentials: {}",
+                    credential_id,
                     profiles.list_names()
                 ))
                 .into());
             }
 
-            profiles.remove_profile(profile)?;
+            profiles.remove_profile(credential_id)?;
             profiles.save_profiles()?;
             let data = serde_json::to_value(AuthRemoveData {
-                profile: profile.clone(),
+                credential: credential_id.clone(),
             })?;
             Ok(OutputEnvelope::success(
                 "auth_remove_result",
                 "cli",
                 "uxc",
-                Some(profile),
+                Some(credential_id),
                 data,
                 None,
             ))
         }
-        AuthCommands::Oauth { oauth_command } => handle_auth_oauth_command(oauth_command).await,
+    }
+}
+
+fn handle_auth_binding_command(command: &AuthBindingCommands) -> Result<OutputEnvelope> {
+    match command {
+        AuthBindingCommands::List => {
+            let mut bindings = AuthBindings::load_bindings()?;
+            bindings.bindings.sort_by(|a, b| a.id.cmp(&b.id));
+            let data = serde_json::to_value(AuthBindingListData {
+                count: bindings.bindings.len(),
+                bindings: bindings.bindings,
+            })?;
+            Ok(OutputEnvelope::success(
+                "auth_binding_list",
+                "cli",
+                "uxc",
+                None,
+                data,
+                None,
+            ))
+        }
+        AuthBindingCommands::Add {
+            id,
+            host,
+            path_prefix,
+            scheme,
+            credential,
+            priority,
+            disabled,
+        } => {
+            let profiles = Profiles::load_profiles()?;
+            if !profiles.has_profile(credential) {
+                return Err(UxcError::InvalidArguments(format!(
+                    "Credential '{}' not found. Available credentials: {}",
+                    credential,
+                    profiles.list_names()
+                ))
+                .into());
+            }
+
+            let mut bindings = AuthBindings::load_bindings()?;
+            bindings.add_binding(AuthBindingRule {
+                id: id.clone(),
+                host: host.clone(),
+                path_prefix: path_prefix.clone(),
+                scheme: scheme.clone(),
+                credential: credential.clone(),
+                priority: *priority,
+                enabled: !disabled,
+            })?;
+            bindings.save_bindings()?;
+
+            let data = serde_json::to_value(AuthBindingMatchData {
+                endpoint: format!(
+                    "{}://{}{}",
+                    scheme.clone().unwrap_or_else(|| "https".to_string()),
+                    host,
+                    path_prefix.clone().unwrap_or_else(|| "/".to_string())
+                ),
+                matched: true,
+                binding: bindings.bindings.into_iter().find(|item| item.id == *id),
+            })?;
+            Ok(OutputEnvelope::success(
+                "auth_binding_set_result",
+                "cli",
+                "uxc",
+                Some(id),
+                data,
+                None,
+            ))
+        }
+        AuthBindingCommands::Remove { binding_id } => {
+            let mut bindings = AuthBindings::load_bindings()?;
+            bindings.remove_binding(binding_id)?;
+            bindings.save_bindings()?;
+            let data = serde_json::to_value(json!({ "binding_id": binding_id }))?;
+            Ok(OutputEnvelope::success(
+                "auth_binding_remove_result",
+                "cli",
+                "uxc",
+                Some(binding_id),
+                data,
+                None,
+            ))
+        }
+        AuthBindingCommands::Match { endpoint } => {
+            let bindings = AuthBindings::load_bindings()?;
+            let matched = bindings.matching_rule(endpoint).cloned();
+            let data = serde_json::to_value(AuthBindingMatchData {
+                endpoint: endpoint.clone(),
+                matched: matched.is_some(),
+                binding: matched,
+            })?;
+            Ok(OutputEnvelope::success(
+                "auth_binding_match",
+                "cli",
+                "uxc",
+                None,
+                data,
+                None,
+            ))
+        }
     }
 }
 
 async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<OutputEnvelope> {
     match command {
         AuthOauthCommands::Login {
-            profile,
+            credential_id,
             endpoint,
             flow,
             scope,
@@ -1806,10 +2008,10 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
 
             let mut profiles = Profiles::load_profiles()?;
             let mut profile_obj = profiles
-                .get_profile(profile)
+                .get_profile(credential_id)
                 .cloned()
                 .unwrap_or_else(|_| Profile::new(String::new(), AuthType::OAuth));
-            profile_obj.name = Some(profile.clone());
+            profile_obj.name = Some(credential_id.clone());
             auth::oauth::apply_token_to_profile(
                 &mut profile_obj,
                 flow,
@@ -1819,78 +2021,78 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                 resolved_client_secret,
                 scopes,
             );
-            profiles.set_profile(profile.clone(), profile_obj.clone())?;
+            profiles.set_profile(credential_id.clone(), profile_obj.clone())?;
             profiles.save_profiles()?;
 
-            let data = serde_json::to_value(to_auth_profile_view(profile, &profile_obj))?;
+            let data = serde_json::to_value(to_auth_profile_view(credential_id, &profile_obj))?;
             Ok(OutputEnvelope::success(
                 "auth_set_result",
                 "cli",
                 "uxc",
-                Some(profile),
+                Some(credential_id),
                 data,
                 None,
             ))
         }
-        AuthOauthCommands::Refresh { profile } => {
+        AuthOauthCommands::Refresh { credential_id } => {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?;
             let mut profiles = Profiles::load_profiles()?;
-            let mut profile_data = profiles.get_profile(profile)?.clone();
-            profile_data.name = Some(profile.clone());
+            let mut profile_data = profiles.get_profile(credential_id)?.clone();
+            profile_data.name = Some(credential_id.clone());
             if profile_data.auth_type != AuthType::OAuth {
                 return Err(UxcError::InvalidArguments(format!(
-                    "Profile '{}' is not an oauth profile",
-                    profile
+                    "Credential '{}' is not an oauth credential",
+                    credential_id
                 ))
                 .into());
             }
 
             auth::oauth::refresh_oauth_profile(&mut profile_data, &client).await?;
-            profiles.set_profile(profile.clone(), profile_data.clone())?;
+            profiles.set_profile(credential_id.clone(), profile_data.clone())?;
             profiles.save_profiles()?;
 
-            let data = serde_json::to_value(to_auth_profile_view(profile, &profile_data))?;
+            let data = serde_json::to_value(to_auth_profile_view(credential_id, &profile_data))?;
             Ok(OutputEnvelope::success(
                 "auth_set_result",
                 "cli",
                 "uxc",
-                Some(profile),
+                Some(credential_id),
                 data,
                 None,
             ))
         }
-        AuthOauthCommands::Info { profile } => {
+        AuthOauthCommands::Info { credential_id } => {
             let profiles = Profiles::load_profiles()?;
-            let profile_data = profiles.get_profile(profile)?;
-            let data = serde_json::to_value(to_auth_profile_view(profile, profile_data))?;
+            let profile_data = profiles.get_profile(credential_id)?;
+            let data = serde_json::to_value(to_auth_profile_view(credential_id, profile_data))?;
             Ok(OutputEnvelope::success(
                 "auth_info",
                 "cli",
                 "uxc",
-                Some(profile),
+                Some(credential_id),
                 data,
                 None,
             ))
         }
-        AuthOauthCommands::Logout { profile } => {
+        AuthOauthCommands::Logout { credential_id } => {
             let mut profiles = Profiles::load_profiles()?;
-            let mut profile_data = profiles.get_profile(profile)?.clone();
+            let mut profile_data = profiles.get_profile(credential_id)?.clone();
             profile_data.oauth = None;
             profile_data.api_key.clear();
             profile_data.auth_type = AuthType::OAuth;
-            profiles.set_profile(profile.clone(), profile_data)?;
+            profiles.set_profile(credential_id.clone(), profile_data)?;
             profiles.save_profiles()?;
 
             let data = serde_json::to_value(AuthRemoveData {
-                profile: profile.clone(),
+                credential: credential_id.clone(),
             })?;
             Ok(OutputEnvelope::success(
                 "auth_remove_result",
                 "cli",
                 "uxc",
-                Some(profile),
+                Some(credential_id),
                 data,
                 None,
             ))

@@ -64,10 +64,14 @@ fn cache_and_auth_commands_default_to_json() {
 
     let auth_output = uxc_command()
         .arg("auth")
+        .arg("credential")
         .arg("list")
         .output()
-        .expect("failed to run uxc auth list");
-    assert!(auth_output.status.success(), "auth list should succeed");
+        .expect("failed to run uxc auth credential list");
+    assert!(
+        auth_output.status.success(),
+        "auth credential list should succeed"
+    );
     let auth_json: serde_json::Value =
         serde_json::from_slice(&auth_output.stdout).expect("stdout should be valid JSON");
     assert_eq!(auth_json["ok"], true);

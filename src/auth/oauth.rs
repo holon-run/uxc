@@ -374,7 +374,7 @@ pub async fn refresh_oauth_profile(profile: &mut Profile, client: &Client) -> Re
     }
 
     Err(UxcError::OAuthRequired(
-        "No refresh token available. Run 'uxc auth oauth login <profile> --endpoint <mcp_url>'"
+        "No refresh token available. Run 'uxc auth oauth login <credential_id> --endpoint <mcp_url>'"
             .to_string(),
     )
     .into())

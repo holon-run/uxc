@@ -562,6 +562,26 @@ Because execution should be dynamic.
 
 UXC makes remote schema executable.
 
+## Auth Model
+
+UXC uses two auth resources:
+
+- **Credentials**: secret material and auth type
+- **Bindings**: endpoint matching rules (`scheme` + `host` + optional `path_prefix`) pointing to a credential
+
+Examples:
+
+```bash
+# Create a bearer credential (literal secret)
+uxc auth credential set deepwiki --type bearer --secret "$DEEPWIKI_TOKEN"
+
+# Or reference an environment variable
+uxc auth credential set github --type bearer --secret-env GITHUB_TOKEN
+
+# Bind endpoint to a credential (auto-match at runtime)
+uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mcp --scheme https --credential deepwiki --priority 100
+```
+
 ## OAuth For MCP HTTP
 
 `uxc` now supports OAuth for MCP HTTP endpoints with login, token persistence, refresh, and retry.
@@ -588,9 +608,9 @@ uxc auth oauth login mcp-ci \
 Manual management commands:
 
 ```bash
-uxc auth oauth info <profile>
-uxc auth oauth refresh <profile>
-uxc auth oauth logout <profile>
+uxc auth oauth info <credential_id>
+uxc auth oauth refresh <credential_id>
+uxc auth oauth logout <credential_id>
 ```
 
 OAuth runtime errors are emitted as structured codes:

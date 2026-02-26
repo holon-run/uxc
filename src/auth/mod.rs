@@ -1,35 +1,28 @@
-//! Authentication profile storage module
+//! Authentication storage and resolution.
 //!
-//! Provides filesystem-based storage for authentication profiles.
-//! Profiles are stored in ~/.uxc/profiles.toml in plain text (encryption in Phase 2).
-//!
-//! # Profile Structure
-//!
-//! ```toml
-//! [default]
-//! api_key = "sk-..."
-//! auth_type = "bearer"
-//!
-//! [production]
-//! api_key = "sk-prod-..."
-//! auth_type = "bearer"
-//! ```
+//! Credentials are stored in `~/.uxc/credentials.json`.
+//! Endpoint-to-credential bindings are stored in `~/.uxc/auth_bindings.json`.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
 pub mod oauth;
 
-/// Default profiles directory relative to home directory
-pub const DEFAULT_PROFILES_DIR: &str = ".uxc";
+/// Default auth directory relative to home directory.
+pub const DEFAULT_AUTH_DIR: &str = ".uxc";
+/// Credentials file name.
+pub const CREDENTIALS_FILE: &str = "credentials.json";
+/// Endpoint binding file name.
+pub const AUTH_BINDINGS_FILE: &str = "auth_bindings.json";
 
-/// Default profiles file name
-pub const PROFILES_FILE: &str = "profiles.toml";
+const CREDENTIALS_FILE_ENV: &str = "UXC_CREDENTIALS_FILE";
+const AUTH_BINDINGS_FILE_ENV: &str = "UXC_AUTH_BINDINGS_FILE";
 
-/// Authentication type
+/// Authentication type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthType {
     /// Bearer token authentication
@@ -149,40 +142,72 @@ pub struct OAuthProfile {
     pub oauth_flow: Option<OAuthFlow>,
 }
 
-/// Authentication profile
+/// Secret source for non-OAuth credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SecretSource {
+    Literal { value: String },
+    Env { key: String },
+}
+
+impl SecretSource {
+    fn resolve(&self) -> Option<String> {
+        match self {
+            SecretSource::Literal { value } => Some(value.clone()),
+            SecretSource::Env { key } => std::env::var(key).ok(),
+        }
+    }
+}
+
+/// Runtime authentication credential.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
-    /// API key or token
+    /// Active API key/token used for request execution.
+    #[serde(default)]
     pub api_key: String,
 
-    /// Authentication type
+    /// Authentication type.
     #[serde(default)]
     pub auth_type: AuthType,
 
-    /// Optional description
+    /// Optional description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthProfile>,
 
+    /// Runtime-only identifier.
     #[serde(skip)]
     pub name: Option<String>,
+
+    /// Optional secret source for non-OAuth credentials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_source: Option<SecretSource>,
 }
 
 impl Profile {
-    /// Create a new profile
+    /// Create a new credential with literal secret.
     pub fn new(api_key: String, auth_type: AuthType) -> Self {
+        let secret_source = if auth_type == AuthType::OAuth {
+            None
+        } else {
+            Some(SecretSource::Literal {
+                value: api_key.clone(),
+            })
+        };
+
         Self {
             api_key,
             auth_type,
             description: None,
             oauth: None,
             name: None,
+            secret_source,
         }
     }
 
-    /// Create a new profile with description
+    /// Create a new credential with description.
     pub fn with_description(mut self, description: String) -> Self {
         self.description = Some(description);
         self
@@ -190,6 +215,37 @@ impl Profile {
 
     pub fn with_oauth(mut self, oauth: OAuthProfile) -> Self {
         self.oauth = Some(oauth);
+        self
+    }
+
+    pub fn with_secret_env(mut self, key: String) -> Self {
+        self.secret_source = Some(SecretSource::Env { key });
+        self.api_key.clear();
+        self
+    }
+
+    /// Resolve runtime secret from secret_source.
+    pub fn resolve_secret(&self) -> Option<String> {
+        if self.auth_type == AuthType::OAuth {
+            return self.oauth.as_ref()?.access_token.clone();
+        }
+
+        if let Some(source) = &self.secret_source {
+            return source.resolve();
+        }
+
+        if !self.api_key.is_empty() {
+            return Some(self.api_key.clone());
+        }
+
+        None
+    }
+
+    /// Materialize secret into `api_key`.
+    pub fn materialize(mut self) -> Self {
+        if let Some(secret) = self.resolve_secret() {
+            self.api_key = secret;
+        }
         self
     }
 
@@ -204,29 +260,119 @@ impl Profile {
 
     pub fn bearer_token(&self) -> Option<&str> {
         match self.auth_type {
-            AuthType::Bearer => Some(self.api_key.as_str()),
+            AuthType::Bearer => {
+                if self.api_key.is_empty() {
+                    None
+                } else {
+                    Some(self.api_key.as_str())
+                }
+            }
             AuthType::OAuth => self.oauth.as_ref()?.access_token.as_deref(),
             _ => None,
         }
     }
 
-    fn active_secret_for_masking(&self) -> &str {
+    fn active_secret_for_masking(&self) -> String {
         if let Some(token) = self.bearer_token() {
-            return token;
+            return token.to_string();
         }
-        &self.api_key
+
+        if !self.api_key.is_empty() {
+            return self.api_key.clone();
+        }
+
+        if let Some(secret) = self.resolve_secret() {
+            return secret;
+        }
+
+        String::new()
     }
 }
 
-/// Profiles collection
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct CredentialsDocument {
+    #[serde(default = "default_version")]
+    version: u32,
+    #[serde(default)]
+    credentials: HashMap<String, StoredCredential>,
+}
+
+fn default_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredCredential {
+    #[serde(default)]
+    auth_type: AuthType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oauth: Option<OAuthProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_source: Option<SecretSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
+}
+
+impl StoredCredential {
+    fn from_runtime(profile: &Profile) -> Self {
+        let secret_source = if profile.auth_type == AuthType::OAuth {
+            None
+        } else {
+            profile.secret_source.clone().or_else(|| {
+                Some(SecretSource::Literal {
+                    value: profile.api_key.clone(),
+                })
+            })
+        };
+
+        let api_key = if profile.auth_type == AuthType::OAuth {
+            profile
+                .oauth
+                .as_ref()
+                .and_then(|oauth| oauth.access_token.clone())
+        } else {
+            None
+        };
+
+        Self {
+            auth_type: profile.auth_type.clone(),
+            description: profile.description.clone(),
+            oauth: profile.oauth.clone(),
+            secret_source,
+            api_key,
+        }
+    }
+
+    fn to_runtime(&self, name: &str) -> Profile {
+        let mut profile = Profile {
+            api_key: String::new(),
+            auth_type: self.auth_type.clone(),
+            description: self.description.clone(),
+            oauth: self.oauth.clone(),
+            name: Some(name.to_string()),
+            secret_source: self.secret_source.clone(),
+        };
+
+        if profile.auth_type == AuthType::OAuth {
+            profile.api_key = profile
+                .oauth
+                .as_ref()
+                .and_then(|oauth| oauth.access_token.clone())
+                .or_else(|| self.api_key.clone())
+                .unwrap_or_default();
+        } else if let Some(secret) = profile.resolve_secret() {
+            profile.api_key = secret;
+        }
+
+        profile
+    }
+}
+
+/// Credentials collection.
+#[derive(Debug, Clone)]
 pub struct Profiles {
-    /// Map of profile name to strongly typed profile values.
-    ///
-    /// Keeping this as `Profile` (instead of an untyped JSON value) keeps TOML
-    /// storage and runtime representation consistent and avoids mixed
-    /// serialization semantics.
-    #[serde(flatten)]
     pub profiles: HashMap<String, Profile>,
 }
 
@@ -237,22 +383,24 @@ impl Default for Profiles {
 }
 
 impl Profiles {
-    /// Create a new empty profiles collection
+    /// Create a new empty credentials collection.
     pub fn new() -> Self {
         Self {
             profiles: HashMap::new(),
         }
     }
 
-    /// Get the profiles file path
+    /// Resolve credentials file path.
     fn profiles_path() -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os(CREDENTIALS_FILE_ENV) {
+            return Ok(PathBuf::from(path));
+        }
+
         let home = dirs::home_dir().context("Could not determine home directory")?;
-        Ok(home.join(DEFAULT_PROFILES_DIR).join(PROFILES_FILE))
+        Ok(home.join(DEFAULT_AUTH_DIR).join(CREDENTIALS_FILE))
     }
 
-    /// Load profiles from ~/.uxc/profiles.toml
-    ///
-    /// If the file doesn't exist, returns an empty profiles collection.
+    /// Load credentials from disk.
     pub fn load_profiles() -> Result<Self> {
         let path = Self::profiles_path()?;
 
@@ -261,52 +409,64 @@ impl Profiles {
         }
 
         let contents = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read profiles file: {:?}", path))?;
+            .with_context(|| format!("Failed to read credentials file: {:?}", path))?;
 
-        // Deserialize directly from TOML - #[serde(flatten)] handles the structure
-        toml::from_str(&contents)
-            .with_context(|| format!("Failed to parse profiles file: {:?}", path))
+        let document: CredentialsDocument = serde_json::from_str(&contents)
+            .with_context(|| format!("Failed to parse credentials file: {:?}", path))?;
+
+        let profiles = document
+            .credentials
+            .iter()
+            .map(|(name, stored)| (name.clone(), stored.to_runtime(name)))
+            .collect();
+
+        Ok(Self { profiles })
     }
 
-    /// Save profiles to ~/.uxc/profiles.toml
+    /// Save credentials to disk.
     pub fn save_profiles(&self) -> Result<()> {
         let path = Self::profiles_path()?;
 
-        // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             if !parent.exists() {
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("Failed to create profiles directory: {:?}", parent)
-                })?;
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create auth directory: {:?}", parent))?;
             }
         }
 
-        // Serialize directly to TOML - #[serde(flatten)] will handle the structure
-        let toml_string =
-            toml::to_string_pretty(&self).context("Failed to serialize profiles to TOML")?;
+        let credentials = self
+            .profiles
+            .iter()
+            .map(|(name, profile)| (name.clone(), StoredCredential::from_runtime(profile)))
+            .collect();
 
-        fs::write(&path, toml_string)
-            .with_context(|| format!("Failed to write profiles file: {:?}", path))?;
+        let document = CredentialsDocument {
+            version: 1,
+            credentials,
+        };
+
+        let json = serde_json::to_string_pretty(&document)
+            .context("Failed to serialize credentials to JSON")?;
+
+        fs::write(&path, json)
+            .with_context(|| format!("Failed to write credentials file: {:?}", path))?;
 
         Ok(())
     }
 
-    /// Get a profile by name
+    /// Get a credential by ID.
     pub fn get_profile(&self, name: &str) -> Result<&Profile> {
         self.profiles.get(name).context(format!(
-            "Profile '{}' not found. Available profiles: {}",
+            "Credential '{}' not found. Available credentials: {}",
             name,
             self.list_names()
         ))
     }
 
-    /// Validate a profile name for TOML compatibility
-    ///
-    /// Restricts profile names to safe characters for TOML table names.
-    /// Allows only ASCII letters, digits, underscores, and hyphens.
+    /// Validate a credential ID.
     fn validate_profile_name(name: &str) -> Result<()> {
         if name.is_empty() {
-            anyhow::bail!("Profile name cannot be empty");
+            anyhow::bail!("Credential ID cannot be empty");
         }
 
         if !name
@@ -314,69 +474,317 @@ impl Profiles {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
             anyhow::bail!(
-                "Profile name '{}' contains invalid characters. Allowed characters: letters, digits, '_', '-'",
+                "Credential ID '{}' contains invalid characters. Allowed: letters, digits, '_', '-'",
                 name
             );
         }
 
-        // Ensure name doesn't start with a digit (TOML table names shouldn't)
         if name
             .chars()
             .next()
             .map(|c| c.is_ascii_digit())
             .unwrap_or(false)
         {
-            anyhow::bail!("Profile name '{}' cannot start with a digit", name);
+            anyhow::bail!("Credential ID '{}' cannot start with a digit", name);
         }
 
         Ok(())
     }
 
-    /// Set a profile
-    pub fn set_profile(&mut self, name: String, profile: Profile) -> Result<()> {
-        // Validate profile name before inserting
+    /// Set a credential.
+    pub fn set_profile(&mut self, name: String, mut profile: Profile) -> Result<()> {
         Self::validate_profile_name(&name)?;
-
-        self.profiles.insert(name, profile);
+        profile.name = Some(name.clone());
+        self.profiles.insert(name, profile.materialize());
         Ok(())
     }
 
-    /// Remove a profile
+    /// Remove a credential.
     pub fn remove_profile(&mut self, name: &str) -> Result<()> {
         self.profiles
             .remove(name)
-            .context(format!("Profile '{}' not found", name))?;
+            .context(format!("Credential '{}' not found", name))?;
         Ok(())
     }
 
-    /// List all profile names
+    /// List all credential IDs.
     pub fn list_names(&self) -> String {
         let mut names: Vec<_> = self.profiles.keys().cloned().collect();
         names.sort();
         names.join(", ")
     }
 
-    /// Get all profile names
+    /// Get all credential IDs.
     pub fn profile_names(&self) -> Vec<String> {
         let mut names: Vec<_> = self.profiles.keys().cloned().collect();
         names.sort();
         names
     }
 
-    /// Check if a profile exists
+    /// Check if a credential exists.
     pub fn has_profile(&self, name: &str) -> bool {
         self.profiles.contains_key(name)
     }
 
-    /// Get the number of profiles
+    /// Get credential count.
     pub fn count(&self) -> usize {
         self.profiles.len()
     }
 }
 
-/// Apply authentication to a reqwest request builder
-///
-/// This function applies the appropriate authentication headers based on the AuthType.
+/// Endpoint auth binding rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthBindingRule {
+    pub id: String,
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    pub credential: String,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuthBindingsDocument {
+    #[serde(default = "default_version")]
+    version: u32,
+    #[serde(default)]
+    bindings: Vec<AuthBindingRule>,
+}
+
+/// Endpoint binding collection.
+#[derive(Debug, Clone, Default)]
+pub struct AuthBindings {
+    pub bindings: Vec<AuthBindingRule>,
+}
+
+impl AuthBindings {
+    pub fn new() -> Self {
+        Self {
+            bindings: Vec::new(),
+        }
+    }
+
+    fn bindings_path() -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os(AUTH_BINDINGS_FILE_ENV) {
+            return Ok(PathBuf::from(path));
+        }
+
+        let home = dirs::home_dir().context("Could not determine home directory")?;
+        Ok(home.join(DEFAULT_AUTH_DIR).join(AUTH_BINDINGS_FILE))
+    }
+
+    pub fn load_bindings() -> Result<Self> {
+        let path = Self::bindings_path()?;
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read auth bindings file: {:?}", path))?;
+
+        let document: AuthBindingsDocument = serde_json::from_str(&contents)
+            .with_context(|| format!("Failed to parse auth bindings file: {:?}", path))?;
+
+        Ok(Self {
+            bindings: document.bindings,
+        })
+    }
+
+    pub fn save_bindings(&self) -> Result<()> {
+        let path = Self::bindings_path()?;
+
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create auth directory: {:?}", parent))?;
+            }
+        }
+
+        let document = AuthBindingsDocument {
+            version: 1,
+            bindings: self.bindings.clone(),
+        };
+        let json = serde_json::to_string_pretty(&document)
+            .context("Failed to serialize auth bindings to JSON")?;
+
+        fs::write(&path, json)
+            .with_context(|| format!("Failed to write auth bindings file: {:?}", path))?;
+
+        Ok(())
+    }
+
+    pub fn add_binding(&mut self, mut rule: AuthBindingRule) -> Result<()> {
+        validate_binding_id(&rule.id)?;
+        if self.bindings.iter().any(|item| item.id == rule.id) {
+            anyhow::bail!("Binding '{}' already exists", rule.id);
+        }
+
+        rule.host = rule.host.trim().to_ascii_lowercase();
+        if let Some(scheme) = &rule.scheme {
+            rule.scheme = Some(scheme.trim().to_ascii_lowercase());
+        }
+        if let Some(prefix) = &rule.path_prefix {
+            rule.path_prefix = Some(normalize_path_prefix(prefix));
+        }
+
+        self.bindings.push(rule);
+        Ok(())
+    }
+
+    pub fn remove_binding(&mut self, id: &str) -> Result<()> {
+        let before = self.bindings.len();
+        self.bindings.retain(|rule| rule.id != id);
+        if self.bindings.len() == before {
+            anyhow::bail!("Binding '{}' not found", id);
+        }
+        Ok(())
+    }
+
+    pub fn matching_rule(&self, endpoint: &str) -> Option<&AuthBindingRule> {
+        let target = url::Url::parse(endpoint).ok()?;
+        let host = target.host_str()?.to_ascii_lowercase();
+        let scheme = target.scheme().to_ascii_lowercase();
+        let path = target.path();
+
+        self.bindings
+            .iter()
+            .filter(|rule| rule.enabled)
+            .filter(|rule| rule.host.eq_ignore_ascii_case(&host))
+            .filter(|rule| {
+                rule.scheme
+                    .as_ref()
+                    .map(|s| s.eq_ignore_ascii_case(&scheme))
+                    .unwrap_or(true)
+            })
+            .filter(|rule| {
+                rule.path_prefix
+                    .as_ref()
+                    .map(|prefix| path.starts_with(prefix))
+                    .unwrap_or(true)
+            })
+            .max_by(compare_binding_rules)
+    }
+}
+
+fn compare_binding_rules(a: &&AuthBindingRule, b: &&AuthBindingRule) -> Ordering {
+    let pa = a.priority;
+    let pb = b.priority;
+    if pa != pb {
+        return pa.cmp(&pb);
+    }
+
+    let la = a.path_prefix.as_ref().map_or(0usize, |value| value.len());
+    let lb = b.path_prefix.as_ref().map_or(0usize, |value| value.len());
+    if la != lb {
+        return la.cmp(&lb);
+    }
+
+    a.id.cmp(&b.id)
+}
+
+fn normalize_path_prefix(prefix: &str) -> String {
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        return "/".to_string();
+    }
+    if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed)
+    }
+}
+
+fn validate_binding_id(id: &str) -> Result<()> {
+    if id.is_empty() {
+        anyhow::bail!("Binding ID cannot be empty");
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        anyhow::bail!(
+            "Binding ID '{}' contains invalid characters. Allowed: letters, digits, '_', '-'",
+            id
+        );
+    }
+    Ok(())
+}
+
+/// Resolve auth credential for endpoint.
+pub fn resolve_auth_for_endpoint(
+    endpoint: &str,
+    explicit_credential: Option<String>,
+) -> Result<Option<Profile>> {
+    let profiles = Profiles::load_profiles()?;
+
+    if let Some(id) = explicit_credential {
+        let profile = profiles.get_profile(&id)?.clone().materialize();
+        validate_ready(&profile)?;
+        return Ok(Some(profile));
+    }
+
+    let bindings = AuthBindings::load_bindings()?;
+    let Some(rule) = bindings.matching_rule(endpoint) else {
+        return Ok(None);
+    };
+
+    let profile = profiles
+        .get_profile(&rule.credential)
+        .with_context(|| {
+            format!(
+                "Binding '{}' references missing credential '{}'",
+                rule.id, rule.credential
+            )
+        })?
+        .clone()
+        .materialize();
+
+    validate_ready(&profile)?;
+    Ok(Some(profile))
+}
+
+fn validate_ready(profile: &Profile) -> Result<()> {
+    match profile.auth_type {
+        AuthType::OAuth => {
+            if profile
+                .oauth
+                .as_ref()
+                .and_then(|oauth| oauth.access_token.as_ref())
+                .is_none()
+            {
+                anyhow::bail!("OAuth credential is missing access token. Run `uxc auth oauth login <credential_id> ...`");
+            }
+        }
+        _ => {
+            if profile.api_key.is_empty() {
+                if let Some(SecretSource::Env { key }) = &profile.secret_source {
+                    anyhow::bail!(
+                        "Credential '{}' expects env var '{}' but it is not set",
+                        profile.name.as_deref().unwrap_or("unknown"),
+                        key
+                    );
+                }
+                anyhow::bail!(
+                    "Credential '{}' does not have a usable secret",
+                    profile.name.as_deref().unwrap_or("unknown")
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply authentication to a reqwest request builder.
 pub fn apply_auth_to_request(
     request_builder: reqwest::RequestBuilder,
     auth_type: &AuthType,
@@ -386,13 +794,10 @@ pub fn apply_auth_to_request(
         AuthType::Bearer => request_builder.bearer_auth(api_key),
         AuthType::ApiKey => request_builder.header("X-API-Key", api_key),
         AuthType::Basic => {
-            // For basic auth, api_key should be in format "username:password"
-            // Split on first colon only
             let parts: Vec<&str> = api_key.splitn(2, ':').collect();
             if parts.len() == 2 {
                 request_builder.basic_auth(parts[0], Some(parts[1]))
             } else {
-                // If no colon, treat as username with no password
                 request_builder.basic_auth(api_key, Option::<&str>::None)
             }
         }
@@ -400,10 +805,7 @@ pub fn apply_auth_to_request(
     }
 }
 
-/// Convert auth profile to tonic metadata map for gRPC
-///
-/// This function creates a metadata map with appropriate authentication headers.
-/// Returns an error if the auth credentials cannot be encoded as valid gRPC metadata.
+/// Convert auth credential to tonic metadata map for gRPC.
 #[allow(dead_code)]
 pub fn auth_to_metadata(
     auth_type: &AuthType,
@@ -428,7 +830,6 @@ pub fn auth_to_metadata(
             metadata.insert("x-api-key", value);
         }
         AuthType::Basic => {
-            // For basic auth, api_key should be in format "username:password"
             let parts: Vec<&str> = api_key.splitn(2, ':').collect();
             let creds = if parts.len() == 2 {
                 base64::engine::general_purpose::STANDARD
@@ -456,24 +857,21 @@ pub fn auth_to_metadata(
     Ok(metadata)
 }
 
-/// Get the home directory
+/// Get home directory.
 mod dirs {
     use std::path::PathBuf;
 
     pub fn home_dir() -> Option<PathBuf> {
-        // Try HOME environment variable first (Unix-like systems)
         if let Some(home) = std::env::var_os("HOME") {
             return Some(PathBuf::from(home));
         }
 
-        // Try USERPROFILE on Windows
         #[cfg(windows)]
         {
             if let Some(user_profile) = std::env::var_os("USERPROFILE") {
                 return Some(PathBuf::from(user_profile));
             }
 
-            // Fallback to HOMEDRIVE + HOMEPATH on Windows
             if let Some(home_drive) = std::env::var_os("HOMEDRIVE") {
                 if let Some(home_path) = std::env::var_os("HOMEPATH") {
                     let mut path = PathBuf::from(&home_drive);
@@ -585,5 +983,45 @@ mod tests {
         let names = profiles.profile_names();
         assert_eq!(names, vec!["dev", "prod"]);
         assert_eq!(profiles.list_names(), "dev, prod");
+    }
+
+    #[test]
+    fn binding_priority_prefers_higher_priority_then_longer_path() {
+        let bindings = AuthBindings {
+            bindings: vec![
+                AuthBindingRule {
+                    id: "root".to_string(),
+                    host: "api.example.com".to_string(),
+                    path_prefix: Some("/".to_string()),
+                    scheme: Some("https".to_string()),
+                    credential: "a".to_string(),
+                    priority: 10,
+                    enabled: true,
+                },
+                AuthBindingRule {
+                    id: "admin".to_string(),
+                    host: "api.example.com".to_string(),
+                    path_prefix: Some("/admin".to_string()),
+                    scheme: Some("https".to_string()),
+                    credential: "b".to_string(),
+                    priority: 10,
+                    enabled: true,
+                },
+                AuthBindingRule {
+                    id: "priority".to_string(),
+                    host: "api.example.com".to_string(),
+                    path_prefix: Some("/admin".to_string()),
+                    scheme: Some("https".to_string()),
+                    credential: "c".to_string(),
+                    priority: 20,
+                    enabled: true,
+                },
+            ],
+        };
+
+        let matched = bindings
+            .matching_rule("https://api.example.com/admin/users")
+            .unwrap();
+        assert_eq!(matched.id, "priority");
     }
 }
