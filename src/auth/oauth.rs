@@ -171,7 +171,7 @@ pub async fn discover_provider_metadata(
         .or_else(|| openid.as_ref().map(|config| config.token_endpoint.clone()))
         .ok_or_else(|| {
             UxcError::OAuthDiscoveryFailed(
-                "Could not determine token_endpoint from authorization server metadata".to_string(),
+                "Could not determine token_endpoint from provider metadata".to_string(),
             )
         })?;
 
