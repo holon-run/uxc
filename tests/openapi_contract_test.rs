@@ -974,7 +974,7 @@ fn test_execute_get_request_with_query_params() {
 
         let mut args = HashMap::new();
         args.insert("id".into(), json!(123));
-        args.insert("verbose".into(), json!(true));
+        args.insert("verbose".into(), json!("true"));
 
         let result = rt
             .block_on(async { adapter.execute(&server.url(), "get:/user", args).await })
@@ -1079,11 +1079,7 @@ fn test_execute_put_request_with_json_body() {
         args.insert("name".into(), json!("Updated"));
 
         let result = rt
-            .block_on(async {
-                adapter
-                    .execute(&server.url(), "put:/users/123", args)
-                    .await
-            })
+            .block_on(async { adapter.execute(&server.url(), "put:/users/123", args).await })
             .unwrap();
 
         assert_eq!(result.data["id"], 123);
@@ -1179,11 +1175,7 @@ fn test_execute_delete_request_with_query_params() {
         args.insert("id".into(), json!(999));
 
         let result = rt
-            .block_on(async {
-                adapter
-                    .execute(&server.url(), "delete:/users", args)
-                    .await
-            })
+            .block_on(async { adapter.execute(&server.url(), "delete:/users", args).await })
             .unwrap();
 
         // DELETE with 204 returns empty response
@@ -1226,11 +1218,7 @@ fn test_execute_get_without_args_returns_empty_json() {
 
         let args = HashMap::new();
         let result = rt
-            .block_on(async {
-                adapter
-                    .execute(&server.url(), "get:/health", args)
-                    .await
-            })
+            .block_on(async { adapter.execute(&server.url(), "get:/health", args).await })
             .unwrap();
 
         assert_eq!(result.data["status"], "ok");
@@ -1274,12 +1262,8 @@ fn test_execute_handles_404_not_found() {
         let mut args = HashMap::new();
         args.insert("id".into(), json!(999));
 
-        let result = rt
-            .block_on(async {
-                adapter
-                    .execute(&server.url(), "get:/users", args)
-                    .await
-            });
+        let result =
+            rt.block_on(async { adapter.execute(&server.url(), "get:/users", args).await });
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1320,12 +1304,11 @@ fn test_execute_handles_401_unauthorized() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = OpenAPIAdapter::new();
 
-        let result = rt
-            .block_on(async {
-                adapter
-                    .execute(&server.url(), "get:/protected", HashMap::new())
-                    .await
-            });
+        let result = rt.block_on(async {
+            adapter
+                .execute(&server.url(), "get:/protected", HashMap::new())
+                .await
+        });
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1366,12 +1349,11 @@ fn test_execute_handles_500_internal_server_error() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = OpenAPIAdapter::new();
 
-        let result = rt
-            .block_on(async {
-                adapter
-                    .execute(&server.url(), "get:/error", HashMap::new())
-                    .await
-            });
+        let result = rt.block_on(async {
+            adapter
+                .execute(&server.url(), "get:/error", HashMap::new())
+                .await
+        });
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1414,12 +1396,11 @@ fn test_execute_handles_long_error_body_truncation() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = OpenAPIAdapter::new();
 
-        let result = rt
-            .block_on(async {
-                adapter
-                    .execute(&server.url(), "get:/error", HashMap::new())
-                    .await
-            });
+        let result = rt.block_on(async {
+            adapter
+                .execute(&server.url(), "get:/error", HashMap::new())
+                .await
+        });
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1462,12 +1443,11 @@ fn test_execute_handles_invalid_json_response() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = OpenAPIAdapter::new();
 
-        let result = rt
-            .block_on(async {
-                adapter
-                    .execute(&server.url(), "get:/badjson", HashMap::new())
-                    .await
-            });
+        let result = rt.block_on(async {
+            adapter
+                .execute(&server.url(), "get:/badjson", HashMap::new())
+                .await
+        });
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();

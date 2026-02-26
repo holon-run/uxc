@@ -674,15 +674,19 @@ impl Adapter for OpenAPIAdapter {
         let data: Value = match status.as_u16() {
             204 => serde_json::Value::Null,
             _ => {
-                // Get content length to check for empty body
-                let content_length = resp
-                    .content_length()
-                    .unwrap_or(0);
+                // Read the response body and detect emptiness from the actual bytes
+                let bytes = resp.bytes().await.with_context(|| {
+                    format!(
+                        "error reading response body: HTTP {} from {}",
+                        status.as_u16(),
+                        full_url
+                    )
+                })?;
 
-                if content_length == 0 {
+                if bytes.is_empty() {
                     serde_json::Value::Null
                 } else {
-                    resp.json().await.with_context(|| {
+                    serde_json::from_slice::<Value>(&bytes).with_context(|| {
                         format!(
                             "error decoding response body: HTTP {} from {}",
                             status.as_u16(),
