@@ -4,8 +4,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs::OpenOptions;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::IpAddr;
 #[cfg(unix)]
@@ -22,7 +22,7 @@ mod output;
 mod schema_mapping;
 
 use adapters::{Adapter, DetectionOptions, Operation, OperationDetail, ProtocolDetector};
-use auth::{AuthType, Profile, Profiles};
+use auth::{AuthType, OAuthFlow, Profile, Profiles};
 use cache::CacheConfig;
 use error::UxcError;
 use output::OutputEnvelope;
@@ -216,6 +216,63 @@ enum AuthCommands {
         #[arg(value_name = "PROFILE")]
         profile: String,
     },
+
+    /// Manage OAuth authentication profiles
+    Oauth {
+        #[command(subcommand)]
+        oauth_command: AuthOauthCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthOauthCommands {
+    /// Login with OAuth and save tokens
+    Login {
+        /// Profile name
+        #[arg(value_name = "PROFILE")]
+        profile: String,
+
+        /// MCP HTTP endpoint URL
+        #[arg(long)]
+        endpoint: String,
+
+        /// OAuth flow type
+        #[arg(long, default_value = "device_code")]
+        flow: String,
+
+        /// OAuth scope (can be repeated)
+        #[arg(long)]
+        scope: Vec<String>,
+
+        /// OAuth client ID
+        #[arg(long)]
+        client_id: Option<String>,
+
+        /// OAuth client secret
+        #[arg(long)]
+        client_secret: Option<String>,
+    },
+
+    /// Refresh OAuth token
+    Refresh {
+        /// Profile name
+        #[arg(value_name = "PROFILE")]
+        profile: String,
+    },
+
+    /// Show OAuth profile information
+    Info {
+        /// Profile name
+        #[arg(value_name = "PROFILE")]
+        profile: String,
+    },
+
+    /// Remove OAuth token data from profile
+    Logout {
+        /// Profile name
+        #[arg(value_name = "PROFILE")]
+        profile: String,
+    },
 }
 
 enum EndpointCommand {
@@ -287,6 +344,17 @@ struct AuthProfileView {
     auth_type: String,
     api_key_masked: String,
     description: Option<String>,
+    oauth: Option<AuthOAuthView>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthOAuthView {
+    flow: Option<String>,
+    provider_issuer: Option<String>,
+    resource_metadata_url: Option<String>,
+    scopes: Vec<String>,
+    expires_at: Option<i64>,
+    has_refresh_token: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -836,6 +904,15 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
                 println!("  {}", profile.name);
                 println!("    Type: {}", profile.auth_type);
                 println!("    API Key: {}", profile.api_key_masked);
+                if let Some(oauth) = profile.oauth {
+                    println!(
+                        "    OAuth Flow: {}",
+                        oauth.flow.unwrap_or_else(|| "unknown".to_string())
+                    );
+                    if let Some(issuer) = oauth.provider_issuer {
+                        println!("    OAuth Issuer: {}", issuer);
+                    }
+                }
                 if let Some(desc) = profile.description {
                     println!("    Description: {}", desc);
                 }
@@ -848,6 +925,29 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             println!("Profile: {}", profile.name);
             println!("  Type: {}", profile.auth_type);
             println!("  API Key: {}", profile.api_key_masked);
+            if let Some(oauth) = profile.oauth {
+                println!(
+                    "  OAuth Flow: {}",
+                    oauth.flow.unwrap_or_else(|| "unknown".to_string())
+                );
+                if let Some(issuer) = oauth.provider_issuer {
+                    println!("  OAuth Issuer: {}", issuer);
+                }
+                if !oauth.scopes.is_empty() {
+                    println!("  OAuth Scopes: {}", oauth.scopes.join(", "));
+                }
+                if let Some(expires_at) = oauth.expires_at {
+                    println!("  OAuth Expires At: {}", expires_at);
+                }
+                println!(
+                    "  OAuth Refresh Token: {}",
+                    if oauth.has_refresh_token {
+                        "available"
+                    } else {
+                        "none"
+                    }
+                );
+            }
             if let Some(desc) = profile.description {
                 println!("  Description: {}", desc);
             }
@@ -1031,7 +1131,11 @@ fn load_auth_profile(cli_profile: Option<String>) -> Result<Option<Profile>> {
 
     match Profiles::load_profiles() {
         Ok(profiles) => match profiles.get_profile(&profile_name) {
-            Ok(profile) => Ok(Some(profile.clone())),
+            Ok(profile) => {
+                let mut profile = profile.clone();
+                profile.name = Some(profile_name);
+                Ok(Some(profile))
+            }
             Err(e) => {
                 if !profile_explicitly_selected && profile_name == "default" {
                     info!("No 'default' profile found, continuing without authentication");
@@ -1255,7 +1359,10 @@ fn build_link_launcher(host: &str) -> String {
     }
     #[cfg(not(windows))]
     {
-        format!("#!/usr/bin/env sh\nexec uxc {} \"$@\"\n", shell_single_quote(host))
+        format!(
+            "#!/usr/bin/env sh\nexec uxc {} \"$@\"\n",
+            shell_single_quote(host)
+        )
     }
 }
 
@@ -1451,6 +1558,11 @@ fn error_code(err: &anyhow::Error) -> &'static str {
                 }
                 UxcError::OperationNotFound(_) => "OPERATION_NOT_FOUND",
                 UxcError::InvalidArguments(_) => "INVALID_ARGUMENT",
+                UxcError::OAuthRequired(_) => "OAUTH_REQUIRED",
+                UxcError::OAuthDiscoveryFailed(_) => "OAUTH_DISCOVERY_FAILED",
+                UxcError::OAuthTokenExchangeFailed(_) => "OAUTH_TOKEN_EXCHANGE_FAILED",
+                UxcError::OAuthRefreshFailed(_) => "OAUTH_REFRESH_FAILED",
+                UxcError::OAuthScopeInsufficient(_) => "OAUTH_SCOPE_INSUFFICIENT",
                 UxcError::ExecutionFailed(_)
                 | UxcError::SchemaRetrievalFailed(_)
                 | UxcError::NetworkError(_)
@@ -1587,6 +1699,7 @@ async fn handle_auth_command(command: &AuthCommands) -> Result<OutputEnvelope> {
                 auth_type: auth_type_display.to_string(),
                 api_key_masked: Profile::new(api_key_display, auth_type_display).mask_api_key(),
                 description: description.clone(),
+                oauth: None,
             };
             let data = serde_json::to_value(view)?;
             Ok(OutputEnvelope::success(
@@ -1624,15 +1737,196 @@ async fn handle_auth_command(command: &AuthCommands) -> Result<OutputEnvelope> {
                 None,
             ))
         }
+        AuthCommands::Oauth { oauth_command } => handle_auth_oauth_command(oauth_command).await,
+    }
+}
+
+async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<OutputEnvelope> {
+    match command {
+        AuthOauthCommands::Login {
+            profile,
+            endpoint,
+            flow,
+            scope,
+            client_id,
+            client_secret,
+        } => {
+            let flow = parse_oauth_flow(flow)?;
+            let scopes = auth::oauth::parse_scopes(scope);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?;
+
+            let (metadata, token, resolved_client_id, resolved_client_secret) = match flow {
+                OAuthFlow::DeviceCode => {
+                    let client_id = client_id.clone().ok_or_else(|| {
+                        UxcError::InvalidArguments(
+                            "device_code flow requires --client-id".to_string(),
+                        )
+                    })?;
+                    let login =
+                        auth::oauth::login_with_device_code(endpoint, &client, &client_id, &scopes)
+                            .await?;
+                    (
+                        login.metadata,
+                        login.token,
+                        Some(client_id),
+                        client_secret.clone(),
+                    )
+                }
+                OAuthFlow::ClientCredentials => {
+                    let client_id = client_id.clone().ok_or_else(|| {
+                        UxcError::InvalidArguments(
+                            "client_credentials flow requires --client-id".to_string(),
+                        )
+                    })?;
+                    let client_secret = client_secret.clone().ok_or_else(|| {
+                        UxcError::InvalidArguments(
+                            "client_credentials flow requires --client-secret".to_string(),
+                        )
+                    })?;
+                    let login = auth::oauth::login_with_client_credentials(
+                        endpoint,
+                        &client,
+                        &client_id,
+                        &client_secret,
+                        &scopes,
+                    )
+                    .await?;
+                    (
+                        login.metadata,
+                        login.token,
+                        Some(client_id),
+                        Some(client_secret),
+                    )
+                }
+            };
+
+            let mut profiles = Profiles::load_profiles()?;
+            let mut profile_obj = profiles
+                .get_profile(profile)
+                .cloned()
+                .unwrap_or_else(|_| Profile::new(String::new(), AuthType::OAuth));
+            profile_obj.name = Some(profile.clone());
+            auth::oauth::apply_token_to_profile(
+                &mut profile_obj,
+                flow,
+                metadata,
+                token,
+                resolved_client_id,
+                resolved_client_secret,
+                scopes,
+            );
+            profiles.set_profile(profile.clone(), profile_obj.clone())?;
+            profiles.save_profiles()?;
+
+            let data = serde_json::to_value(to_auth_profile_view(profile, &profile_obj))?;
+            Ok(OutputEnvelope::success(
+                "auth_set_result",
+                "cli",
+                "uxc",
+                Some(profile),
+                data,
+                None,
+            ))
+        }
+        AuthOauthCommands::Refresh { profile } => {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?;
+            let mut profiles = Profiles::load_profiles()?;
+            let mut profile_data = profiles.get_profile(profile)?.clone();
+            profile_data.name = Some(profile.clone());
+            if profile_data.auth_type != AuthType::OAuth {
+                return Err(UxcError::InvalidArguments(format!(
+                    "Profile '{}' is not an oauth profile",
+                    profile
+                ))
+                .into());
+            }
+
+            auth::oauth::refresh_oauth_profile(&mut profile_data, &client).await?;
+            profiles.set_profile(profile.clone(), profile_data.clone())?;
+            profiles.save_profiles()?;
+
+            let data = serde_json::to_value(to_auth_profile_view(profile, &profile_data))?;
+            Ok(OutputEnvelope::success(
+                "auth_set_result",
+                "cli",
+                "uxc",
+                Some(profile),
+                data,
+                None,
+            ))
+        }
+        AuthOauthCommands::Info { profile } => {
+            let profiles = Profiles::load_profiles()?;
+            let profile_data = profiles.get_profile(profile)?;
+            let data = serde_json::to_value(to_auth_profile_view(profile, profile_data))?;
+            Ok(OutputEnvelope::success(
+                "auth_info",
+                "cli",
+                "uxc",
+                Some(profile),
+                data,
+                None,
+            ))
+        }
+        AuthOauthCommands::Logout { profile } => {
+            let mut profiles = Profiles::load_profiles()?;
+            let mut profile_data = profiles.get_profile(profile)?.clone();
+            profile_data.oauth = None;
+            profile_data.api_key.clear();
+            profile_data.auth_type = AuthType::OAuth;
+            profiles.set_profile(profile.clone(), profile_data)?;
+            profiles.save_profiles()?;
+
+            let data = serde_json::to_value(AuthRemoveData {
+                profile: profile.clone(),
+            })?;
+            Ok(OutputEnvelope::success(
+                "auth_remove_result",
+                "cli",
+                "uxc",
+                Some(profile),
+                data,
+                None,
+            ))
+        }
     }
 }
 
 fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
+    let oauth = profile.oauth.as_ref().map(|oauth| AuthOAuthView {
+        flow: oauth.oauth_flow.as_ref().map(|flow| match flow {
+            OAuthFlow::DeviceCode => "device_code".to_string(),
+            OAuthFlow::ClientCredentials => "client_credentials".to_string(),
+        }),
+        provider_issuer: oauth.provider_issuer.clone(),
+        resource_metadata_url: oauth.resource_metadata_url.clone(),
+        scopes: oauth.scopes.clone(),
+        expires_at: oauth.expires_at,
+        has_refresh_token: oauth.refresh_token.is_some(),
+    });
+
     AuthProfileView {
         name: name.to_string(),
         auth_type: profile.auth_type.to_string(),
         api_key_masked: profile.mask_api_key(),
         description: profile.description.clone(),
+        oauth,
+    }
+}
+
+fn parse_oauth_flow(value: &str) -> Result<OAuthFlow> {
+    match value.to_ascii_lowercase().as_str() {
+        "device_code" => Ok(OAuthFlow::DeviceCode),
+        "client_credentials" => Ok(OAuthFlow::ClientCredentials),
+        _ => Err(UxcError::InvalidArguments(format!(
+            "Invalid oauth flow '{}'. Valid values: device_code, client_credentials",
+            value
+        ))
+        .into()),
     }
 }
 

@@ -21,6 +21,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+pub mod oauth;
+
 /// Default profiles directory relative to home directory
 pub const DEFAULT_PROFILES_DIR: &str = ".uxc";
 
@@ -36,6 +38,8 @@ pub enum AuthType {
     ApiKey,
     /// Basic authentication
     Basic,
+    /// OAuth2 authentication
+    OAuth,
 }
 
 impl serde::Serialize for AuthType {
@@ -47,6 +51,7 @@ impl serde::Serialize for AuthType {
             AuthType::Bearer => "bearer",
             AuthType::ApiKey => "api_key",
             AuthType::Basic => "basic",
+            AuthType::OAuth => "oauth",
         };
         serializer.serialize_str(s)
     }
@@ -62,8 +67,9 @@ impl<'de> serde::Deserialize<'de> for AuthType {
             "bearer" => Ok(AuthType::Bearer),
             "api_key" => Ok(AuthType::ApiKey),
             "basic" => Ok(AuthType::Basic),
+            "oauth" => Ok(AuthType::OAuth),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid auth type: {}. Valid values: bearer, api_key, basic",
+                "Invalid auth type: {}. Valid values: bearer, api_key, basic, oauth",
                 s
             ))),
         }
@@ -83,6 +89,7 @@ impl std::fmt::Display for AuthType {
             AuthType::Bearer => write!(f, "bearer"),
             AuthType::ApiKey => write!(f, "api_key"),
             AuthType::Basic => write!(f, "basic"),
+            AuthType::OAuth => write!(f, "oauth"),
         }
     }
 }
@@ -95,12 +102,51 @@ impl std::str::FromStr for AuthType {
             "bearer" => Ok(AuthType::Bearer),
             "api_key" => Ok(AuthType::ApiKey),
             "basic" => Ok(AuthType::Basic),
+            "oauth" => Ok(AuthType::OAuth),
             _ => anyhow::bail!(
-                "Invalid auth type: {}. Valid values: bearer, api_key, basic",
+                "Invalid auth type: {}. Valid values: bearer, api_key, basic, oauth",
                 s
             ),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OAuthFlow {
+    #[serde(rename = "device_code")]
+    DeviceCode,
+    #[serde(rename = "client_credentials")]
+    ClientCredentials,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OAuthProfile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_metadata_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_authorization_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_flow: Option<OAuthFlow>,
 }
 
 /// Authentication profile
@@ -116,6 +162,12 @@ pub struct Profile {
     /// Optional description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthProfile>,
+
+    #[serde(skip)]
+    pub name: Option<String>,
 }
 
 impl Profile {
@@ -125,6 +177,8 @@ impl Profile {
             api_key,
             auth_type,
             description: None,
+            oauth: None,
+            name: None,
         }
     }
 
@@ -134,13 +188,33 @@ impl Profile {
         self
     }
 
+    pub fn with_oauth(mut self, oauth: OAuthProfile) -> Self {
+        self.oauth = Some(oauth);
+        self
+    }
+
     /// Mask the API key for display (show only first 8 and last 4 characters)
     pub fn mask_api_key(&self) -> String {
-        let key = &self.api_key;
+        let key = self.active_secret_for_masking();
         if key.len() <= 12 {
             return "*".repeat(key.len());
         }
         format!("{}...{}", &key[..8], &key[key.len() - 4..])
+    }
+
+    pub fn bearer_token(&self) -> Option<&str> {
+        match self.auth_type {
+            AuthType::Bearer => Some(self.api_key.as_str()),
+            AuthType::OAuth => self.oauth.as_ref()?.access_token.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn active_secret_for_masking(&self) -> &str {
+        if let Some(token) = self.bearer_token() {
+            return token;
+        }
+        &self.api_key
     }
 }
 
@@ -322,6 +396,7 @@ pub fn apply_auth_to_request(
                 request_builder.basic_auth(api_key, Option::<&str>::None)
             }
         }
+        AuthType::OAuth => request_builder.bearer_auth(api_key),
     }
 }
 
@@ -366,6 +441,13 @@ pub fn auth_to_metadata(
                     anyhow::anyhow!(
                         "Invalid Basic auth credentials: contains invalid metadata characters"
                     )
+                })?;
+            metadata.insert("authorization", value);
+        }
+        AuthType::OAuth => {
+            let value = tonic::metadata::MetadataValue::try_from(&format!("Bearer {}", api_key))
+                .map_err(|_| {
+                    anyhow::anyhow!("Invalid OAuth token: contains invalid metadata characters")
                 })?;
             metadata.insert("authorization", value);
         }
@@ -443,6 +525,7 @@ mod tests {
         assert_eq!(AuthType::from_str("BEARER").unwrap(), AuthType::Bearer);
         assert_eq!(AuthType::from_str("api_key").unwrap(), AuthType::ApiKey);
         assert_eq!(AuthType::from_str("basic").unwrap(), AuthType::Basic);
+        assert_eq!(AuthType::from_str("oauth").unwrap(), AuthType::OAuth);
         assert!(AuthType::from_str("invalid").is_err());
     }
 

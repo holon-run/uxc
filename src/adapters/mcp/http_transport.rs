@@ -3,7 +3,8 @@
 #![allow(dead_code)]
 
 use super::types::*;
-use crate::auth::Profile;
+use crate::auth::{oauth, AuthType, Profile, Profiles};
+use crate::error::UxcError;
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde_json::Value as JsonValue;
@@ -20,7 +21,9 @@ pub struct McpHttpTransport {
     /// Request ID counter
     next_id: Arc<Mutex<i64>>,
     /// Authentication profile
-    auth_profile: Option<Profile>,
+    auth_profile: Arc<Mutex<Option<Profile>>>,
+    /// Lock for OAuth refresh operations
+    oauth_refresh_lock: Arc<Mutex<()>>,
 }
 
 impl McpHttpTransport {
@@ -51,12 +54,15 @@ impl McpHttpTransport {
             client,
             server_url: url,
             next_id: Arc::new(Mutex::new(1i64)),
-            auth_profile,
+            auth_profile: Arc::new(Mutex::new(auth_profile)),
+            oauth_refresh_lock: Arc::new(Mutex::new(())),
         })
     }
 
     /// Send a request and wait for response
     pub async fn send_request(&self, method: &str, params: Option<JsonValue>) -> Result<JsonValue> {
+        self.maybe_refresh_oauth_token().await?;
+
         // Generate request ID
         let id = {
             let mut next_id = self.next_id.lock().await;
@@ -79,24 +85,25 @@ impl McpHttpTransport {
             self.server_url
         );
 
-        // Build request with authentication if profile is set
-        let mut req = self
-            .client
-            .post(&self.server_url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream");
-
-        if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key);
-        }
-
-        let response = req
-            .json(&request)
-            .send()
+        let mut response = self
+            .send_jsonrpc_request(&request)
             .await
             .context("Failed to send HTTP request to MCP server")?;
 
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.is_oauth_profile().await {
+            self.force_refresh_oauth_token().await?;
+            response = self
+                .send_jsonrpc_request(&request)
+                .await
+                .context("Failed to send HTTP retry request to MCP server")?;
+        }
+
         let status = response.status();
+        let www_authenticate = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -109,7 +116,7 @@ impl McpHttpTransport {
 
         // Check HTTP status
         if !status.is_success() {
-            bail!("MCP server returned HTTP error: {} - {}", status, body);
+            return Self::map_http_error(status, &body, www_authenticate.as_deref());
         }
 
         // Parse JSON or streamable HTTP (SSE) response
@@ -129,6 +136,121 @@ impl McpHttpTransport {
         json_response
             .result
             .context("MCP server response missing result field")
+    }
+
+    async fn send_jsonrpc_request(&self, request: &JsonRpcRequest) -> Result<reqwest::Response> {
+        let profile = self.auth_profile.lock().await.clone();
+
+        let mut req = self
+            .client
+            .post(&self.server_url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+
+        if let Some(profile) = profile {
+            req = crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key);
+        }
+
+        req.json(request).send().await.map_err(Into::into)
+    }
+
+    async fn is_oauth_profile(&self) -> bool {
+        self.auth_profile
+            .lock()
+            .await
+            .as_ref()
+            .map(|profile| profile.auth_type == AuthType::OAuth)
+            .unwrap_or(false)
+    }
+
+    async fn maybe_refresh_oauth_token(&self) -> Result<()> {
+        let should_refresh = {
+            let guard = self.auth_profile.lock().await;
+            if let Some(profile) = guard.as_ref() {
+                if profile.auth_type == AuthType::OAuth {
+                    if let Some(oauth_profile) = &profile.oauth {
+                        oauth::should_refresh_token(oauth_profile, 60)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if should_refresh {
+            self.force_refresh_oauth_token().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn force_refresh_oauth_token(&self) -> Result<()> {
+        let _refresh_guard = self.oauth_refresh_lock.lock().await;
+        let mut profile = self.auth_profile.lock().await.clone().ok_or_else(|| {
+            UxcError::OAuthRequired("No authentication profile available".to_string())
+        })?;
+
+        if profile.auth_type != AuthType::OAuth {
+            return Ok(());
+        }
+
+        oauth::refresh_oauth_profile(&mut profile, &self.client).await?;
+        self.persist_profile_update(&profile)?;
+        *self.auth_profile.lock().await = Some(profile);
+
+        Ok(())
+    }
+
+    fn persist_profile_update(&self, profile: &Profile) -> Result<()> {
+        let Some(profile_name) = profile.name.clone() else {
+            return Ok(());
+        };
+
+        let mut stored = profile.clone();
+        stored.name = None;
+
+        let mut profiles = Profiles::load_profiles()?;
+        profiles.set_profile(profile_name, stored)?;
+        profiles.save_profiles()?;
+        Ok(())
+    }
+
+    fn map_http_error(
+        status: reqwest::StatusCode,
+        body: &str,
+        www_authenticate: Option<&str>,
+    ) -> Result<JsonValue> {
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let next_step = if let Some(header) = www_authenticate {
+                if let Some(resource_metadata) =
+                    oauth::parse_resource_metadata_from_www_authenticate(header)
+                {
+                    format!(
+                        "OAuth required. Login with: uxc auth oauth login <profile> --endpoint <mcp_url> --client-id <id> (resource_metadata: {})",
+                        resource_metadata
+                    )
+                } else {
+                    "OAuth required. Login with: uxc auth oauth login <profile> --endpoint <mcp_url> --client-id <id>".to_string()
+                }
+            } else {
+                "OAuth required. Login with: uxc auth oauth login <profile> --endpoint <mcp_url> --client-id <id>".to_string()
+            };
+            return Err(UxcError::OAuthRequired(next_step).into());
+        }
+
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return Err(UxcError::OAuthScopeInsufficient(format!(
+                "MCP server returned HTTP error: {} - {}",
+                status, body
+            ))
+            .into());
+        }
+
+        bail!("MCP server returned HTTP error: {} - {}", status, body)
     }
 
     fn parse_jsonrpc_response(content_type: Option<&str>, body: &str) -> Result<JsonRpcResponse> {
@@ -373,19 +495,14 @@ mod tests {
     #[test]
     fn with_auth_succeeds() {
         let profile = Profile::new("test-key".to_string(), AuthType::Bearer);
-        let transport = McpHttpTransport::with_auth(
-            "https://example.com/mcp".to_string(),
-            Some(profile),
-        );
+        let transport =
+            McpHttpTransport::with_auth("https://example.com/mcp".to_string(), Some(profile));
         assert!(transport.is_ok());
     }
 
     #[test]
     fn with_auth_none_succeeds() {
-        let transport = McpHttpTransport::with_auth(
-            "https://example.com/mcp".to_string(),
-            None,
-        );
+        let transport = McpHttpTransport::with_auth("https://example.com/mcp".to_string(), None);
         assert!(transport.is_ok());
     }
 
@@ -471,7 +588,10 @@ data: invalid json
 
         let result = McpHttpTransport::parse_jsonrpc_response(Some("text/event-stream"), sse);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No JSON-RPC payload found"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No JSON-RPC payload found"));
     }
 
     #[test]
@@ -510,8 +630,7 @@ data: invalid json
     fn parse_json_response_without_content_type() {
         let json = r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#;
 
-        let response =
-            McpHttpTransport::parse_jsonrpc_response(None, json).unwrap();
+        let response = McpHttpTransport::parse_jsonrpc_response(None, json).unwrap();
         assert_eq!(response.jsonrpc, "2.0");
     }
 
@@ -530,10 +649,12 @@ data: invalid json
     fn parse_invalid_json_response_fails() {
         let invalid = "not json at all";
 
-        let result =
-            McpHttpTransport::parse_jsonrpc_response(Some("application/json"), invalid);
+        let result = McpHttpTransport::parse_jsonrpc_response(Some("application/json"), invalid);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("neither JSON-RPC JSON nor JSON-RPC SSE"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("neither JSON-RPC JSON nor JSON-RPC SSE"));
     }
 
     #[test]
@@ -569,14 +690,16 @@ data: invalid json
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let mock2 = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"jsonrpc":"2.0","id":2,"result":{}}"#)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -596,7 +719,8 @@ data: invalid json
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -613,7 +737,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(500)
             .with_body("Internal Server Error")
-            .create_async().await;
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -632,7 +757,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(404)
             .with_body("Not Found")
-            .create_async().await;
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -650,8 +776,11 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#)
-            .create_async().await;
+            .with_body(
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -671,13 +800,17 @@ data: invalid json
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"jsonrpc":"2.0","id":1}"#)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
         let result = transport.send_request("test", None).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("missing result field"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing result field"));
     }
 
     #[tokio::test]
@@ -689,7 +822,8 @@ data: invalid json
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body("invalid json{{{")
-            .create_async().await;
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -700,7 +834,8 @@ data: invalid json
     #[tokio::test]
     async fn network_failure_returns_error() {
         // Use an invalid URL to simulate network failure
-        let transport = McpHttpTransport::new("http://localhost:59999/nonexistent".to_string()).unwrap();
+        let transport =
+            McpHttpTransport::new("http://localhost:59999/nonexistent".to_string()).unwrap();
 
         let result = transport.send_request("test", None).await;
         assert!(result.is_err());
@@ -724,7 +859,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
@@ -737,8 +873,10 @@ data: invalid json
                         "version":"1.0.0"
                     }
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -777,15 +915,18 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "error":{
                     "code":-32600,
                     "message":"Invalid Request"
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -801,20 +942,26 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
                     "invalid":"data"
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
         let result = transport.initialize().await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to parse initialize result"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to parse initialize result"));
     }
 
     // ===== Tool Listing Tests =====
@@ -827,14 +974,17 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
                     "tools":[]
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -852,7 +1002,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
@@ -869,8 +1020,10 @@ data: invalid json
                         }
                     ]
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -912,7 +1065,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
@@ -923,8 +1077,10 @@ data: invalid json
                         }
                     ]
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -942,7 +1098,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
@@ -953,8 +1110,10 @@ data: invalid json
                         }
                     ]
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -971,15 +1130,18 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "error":{
                     "code":-32602,
                     "message":"Invalid params"
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -996,15 +1158,18 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
                     "content":[],
                     "isError":true
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -1024,7 +1189,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
@@ -1036,8 +1202,10 @@ data: invalid json
                         }
                     ]
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -1056,15 +1224,18 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
                     "uri":"file:///test.txt",
                     "text":"Resource content"
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -1084,7 +1255,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
@@ -1095,8 +1267,10 @@ data: invalid json
                         }
                     ]
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -1115,7 +1289,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
@@ -1127,8 +1302,10 @@ data: invalid json
                         }
                     ]
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -1148,7 +1325,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
@@ -1159,8 +1337,10 @@ data: invalid json
                         "version":"1.0"
                     }
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let result = McpHttpTransport::probe_initialize(&server.url(), None).await;
         assert!(result.is_ok());
@@ -1175,14 +1355,17 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
                     "invalid":"data"
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let result = McpHttpTransport::probe_initialize(&server.url(), None).await;
         assert!(result.is_ok());
@@ -1191,7 +1374,8 @@ data: invalid json
 
     #[tokio::test]
     async fn probe_initialize_with_network_error_returns_false() {
-        let result = McpHttpTransport::probe_initialize("http://localhost:59999/nonexistent", None).await;
+        let result =
+            McpHttpTransport::probe_initialize("http://localhost:59999/nonexistent", None).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), false);
     }
@@ -1204,7 +1388,8 @@ data: invalid json
             .mock("POST", "/")
             .with_status(500)
             .with_body("Internal Server Error")
-            .create_async().await;
+            .create_async()
+            .await;
 
         let result = McpHttpTransport::probe_initialize(&server.url(), None).await;
         assert!(result.is_ok());
@@ -1219,15 +1404,18 @@ data: invalid json
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "error":{
                     "code":-32600,
                     "message":"Invalid Request"
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let result = McpHttpTransport::probe_initialize(&server.url(), None).await;
         assert!(result.is_ok());
@@ -1259,11 +1447,15 @@ data: invalid json
 
         let _mock = server
             .mock("POST", "/")
-            .match_header("authorization", mockito::Matcher::Regex("Bearer .*".to_string()))
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("Bearer .*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let profile = Profile::new("test-token".to_string(), AuthType::Bearer);
         let transport = McpHttpTransport::with_auth(server.url(), Some(profile)).unwrap();
@@ -1282,7 +1474,8 @@ data: invalid json
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let profile = Profile::new("test-key".to_string(), AuthType::ApiKey);
         let transport = McpHttpTransport::with_auth(server.url(), Some(profile)).unwrap();
@@ -1297,10 +1490,14 @@ data: invalid json
 
         let _mock = server
             .mock("POST", "/")
-            .match_header("authorization", mockito::Matcher::Regex("Bearer .*".to_string()))
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("Bearer .*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "jsonrpc":"2.0",
                 "id":1,
                 "result":{
@@ -1308,8 +1505,10 @@ data: invalid json
                     "capabilities":{},
                     "serverInfo":{"name":"test","version":"1.0"}
                 }
-            }"#)
-            .create_async().await;
+            }"#,
+            )
+            .create_async()
+            .await;
 
         let profile = Profile::new("test-token".to_string(), AuthType::Bearer);
         let result = McpHttpTransport::probe_initialize(&server.url(), Some(profile)).await;
@@ -1324,7 +1523,8 @@ data: invalid json
         let json = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
 
         let response =
-            McpHttpTransport::parse_jsonrpc_response(Some("application/json; charset=utf-8"), json).unwrap();
+            McpHttpTransport::parse_jsonrpc_response(Some("application/json; charset=utf-8"), json)
+                .unwrap();
         assert_eq!(response.jsonrpc, "2.0");
     }
 
@@ -1334,7 +1534,8 @@ data: invalid json
 "#;
 
         let response =
-            McpHttpTransport::parse_jsonrpc_response(Some("text/event-stream; charset=utf-8"), sse).unwrap();
+            McpHttpTransport::parse_jsonrpc_response(Some("text/event-stream; charset=utf-8"), sse)
+                .unwrap();
         assert_eq!(response.jsonrpc, "2.0");
     }
 
@@ -1370,7 +1571,8 @@ data: {"jsonrpc":"2.0","id":1,"result":{}}
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 
@@ -1387,7 +1589,8 @@ data: {"jsonrpc":"2.0","id":1,"result":{}}
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}"#)
-            .create_async().await;
+            .create_async()
+            .await;
 
         let transport = McpHttpTransport::new(server.url()).unwrap();
 

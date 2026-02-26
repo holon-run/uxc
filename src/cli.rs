@@ -80,10 +80,16 @@ impl AuthProfileLoader for DefaultAuthProfileLoader {
 
         match Profiles::load_profiles() {
             Ok(profiles) => match profiles.get_profile(&profile_name) {
-                Ok(profile) => Ok(Some(profile.clone())),
+                Ok(profile) => {
+                    let mut profile = profile.clone();
+                    profile.name = Some(profile_name);
+                    Ok(Some(profile))
+                }
                 Err(e) => {
                     if !profile_explicitly_selected && profile_name == "default" {
-                        tracing::info!("No 'default' profile found, continuing without authentication");
+                        tracing::info!(
+                            "No 'default' profile found, continuing without authentication"
+                        );
                         Ok(None)
                     } else {
                         Err(e)
@@ -342,14 +348,12 @@ mod tests {
             operation_id: "query/viewer".to_string(),
             display_name: "viewer".to_string(),
             description: None,
-            parameters: vec![
-                crate::adapters::Parameter {
-                    name: "id".to_string(),
-                    param_type: "ID!".to_string(),
-                    required: true,
-                    description: Some("User ID".to_string()),
-                }
-            ],
+            parameters: vec![crate::adapters::Parameter {
+                name: "id".to_string(),
+                param_type: "ID!".to_string(),
+                required: true,
+                description: Some("User ID".to_string()),
+            }],
             return_type: Some("User".to_string()),
         };
 
@@ -400,7 +404,10 @@ mod tests {
     #[test]
     fn test_mock_auth_loader() {
         let loader = MockAuthLoader {
-            profile: Some(Profile::new("key".to_string(), crate::auth::AuthType::Bearer)),
+            profile: Some(Profile::new(
+                "key".to_string(),
+                crate::auth::AuthType::Bearer,
+            )),
         };
         let profile = loader.load_profile(Some("test".to_string())).unwrap();
         assert!(profile.is_some());

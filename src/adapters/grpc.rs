@@ -1058,6 +1058,7 @@ impl GrpcurlAuthHeaders for Profile {
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&self.api_key);
                 format!("authorization: Basic {}", encoded)
             }
+            crate::auth::AuthType::OAuth => format!("authorization: Bearer {}", self.api_key),
         };
 
         Ok(vec![header])

@@ -562,6 +562,47 @@ Because execution should be dynamic.
 
 UXC makes remote schema executable.
 
+## OAuth For MCP HTTP
+
+`uxc` now supports OAuth for MCP HTTP endpoints with login, token persistence, refresh, and retry.
+
+Quick examples:
+
+```bash
+# Device Code flow
+uxc auth oauth login mcp-prod \
+  --endpoint https://example.com/mcp \
+  --flow device_code \
+  --client-id your-client-id \
+  --scope "openid profile"
+
+# Client Credentials flow
+uxc auth oauth login mcp-ci \
+  --endpoint https://example.com/mcp \
+  --flow client_credentials \
+  --client-id your-client-id \
+  --client-secret your-client-secret \
+  --scope "tools.read"
+```
+
+Manual management commands:
+
+```bash
+uxc auth oauth info <profile>
+uxc auth oauth refresh <profile>
+uxc auth oauth logout <profile>
+```
+
+OAuth runtime errors are emitted as structured codes:
+
+- `OAUTH_REQUIRED`
+- `OAUTH_DISCOVERY_FAILED`
+- `OAUTH_TOKEN_EXCHANGE_FAILED`
+- `OAUTH_REFRESH_FAILED`
+- `OAUTH_SCOPE_INSUFFICIENT`
+
+See [docs/oauth-mcp-http.md](docs/oauth-mcp-http.md) for details.
+
 ---
 
 ## Development Status

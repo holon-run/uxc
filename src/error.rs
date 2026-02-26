@@ -24,6 +24,21 @@ pub enum UxcError {
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
+    #[error("OAuth required: {0}")]
+    OAuthRequired(String),
+
+    #[error("OAuth discovery failed: {0}")]
+    OAuthDiscoveryFailed(String),
+
+    #[error("OAuth token exchange failed: {0}")]
+    OAuthTokenExchangeFailed(String),
+
+    #[error("OAuth refresh failed: {0}")]
+    OAuthRefreshFailed(String),
+
+    #[error("OAuth scope insufficient: {0}")]
+    OAuthScopeInsufficient(String),
+
     #[error("Network error: {0}")]
     NetworkError(#[from] reqwest::Error),
 
