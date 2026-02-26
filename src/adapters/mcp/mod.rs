@@ -126,18 +126,52 @@ impl McpAdapter {
         }
 
         for candidate in Self::http_endpoint_candidates(url) {
-            match McpHttpTransport::probe_initialize(&candidate, self.auth_profile.clone()).await {
-                Ok(true) => {
+            match McpHttpTransport::probe_initialize_with_reason(
+                &candidate,
+                self.auth_profile.clone(),
+            )
+            .await
+            {
+                Ok(http_transport::ProbeInitializeOutcome::Success) => {
                     let mut cache = self.discovered_http_endpoints.write().await;
                     cache.insert(normalized, candidate.clone());
                     return Some(candidate);
                 }
-                Ok(false) => {}
+                Ok(http_transport::ProbeInitializeOutcome::NotMcp(_)) => {}
                 Err(_) => {}
             }
         }
 
         None
+    }
+
+    pub async fn diagnose_http_endpoint(
+        url: &str,
+        auth_profile: Option<Profile>,
+    ) -> Option<String> {
+        if !Self::is_http_url(url) {
+            return None;
+        }
+
+        let mut reasons = Vec::new();
+        for candidate in Self::http_endpoint_candidates(url) {
+            let outcome =
+                McpHttpTransport::probe_initialize_with_reason(&candidate, auth_profile.clone())
+                    .await;
+            match outcome {
+                Ok(http_transport::ProbeInitializeOutcome::Success) => return None,
+                Ok(http_transport::ProbeInitializeOutcome::NotMcp(reason)) => {
+                    reasons.push(format!("{} => {}", candidate, reason));
+                }
+                Err(err) => reasons.push(format!("{} => {}", candidate, err)),
+            }
+        }
+
+        if reasons.is_empty() {
+            None
+        } else {
+            Some(reasons.join("; "))
+        }
     }
 }
 

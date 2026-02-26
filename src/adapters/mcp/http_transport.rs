@@ -11,6 +11,14 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+const PROBE_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeInitializeOutcome {
+    Success,
+    NotMcp(String),
+}
+
 /// MCP HTTP transport client
 #[derive(Debug)]
 pub struct McpHttpTransport {
@@ -304,10 +312,23 @@ impl McpHttpTransport {
         bail!("No JSON-RPC payload found in SSE response")
     }
 
+    fn summarize_body(body: &str) -> String {
+        const MAX_CHARS: usize = 240;
+        let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        if compact.len() <= MAX_CHARS {
+            compact
+        } else {
+            format!("{}...", &compact[..MAX_CHARS])
+        }
+    }
+
     /// Lightweight MCP HTTP probe used for endpoint discovery.
-    pub async fn probe_initialize(url: &str, auth_profile: Option<Profile>) -> Result<bool> {
+    pub async fn probe_initialize_with_reason(
+        url: &str,
+        auth_profile: Option<Profile>,
+    ) -> Result<ProbeInitializeOutcome> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS))
             .build()
             .context("Failed to create MCP probe HTTP client")?;
 
@@ -336,11 +357,22 @@ impl McpHttpTransport {
 
         let response = match req.json(&request).send().await {
             Ok(response) => response,
-            Err(_) => return Ok(false),
+            Err(err) => {
+                return Ok(ProbeInitializeOutcome::NotMcp(format!(
+                    "request failed: {}",
+                    err
+                )));
+            }
         };
 
-        if !response.status().is_success() {
-            return Ok(false);
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Ok(ProbeInitializeOutcome::NotMcp(format!(
+                "HTTP {}: {}",
+                status,
+                Self::summarize_body(&body)
+            )));
         }
 
         let content_type = response
@@ -348,22 +380,54 @@ impl McpHttpTransport {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let body = response.text().await.unwrap_or_default();
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(err) => {
+                return Ok(ProbeInitializeOutcome::NotMcp(format!(
+                    "failed to read response body: {}",
+                    err
+                )));
+            }
+        };
 
         let response = match Self::parse_jsonrpc_response(content_type.as_deref(), &body) {
             Ok(response) => response,
-            Err(_) => return Ok(false),
+            Err(err) => {
+                return Ok(ProbeInitializeOutcome::NotMcp(format!(
+                    "invalid JSON-RPC payload: {}",
+                    err
+                )));
+            }
         };
 
-        if response.error.is_some() {
-            return Ok(false);
+        if let Some(error) = response.error {
+            return Ok(ProbeInitializeOutcome::NotMcp(format!(
+                "JSON-RPC error {}: {}",
+                error.code, error.message
+            )));
         }
 
         let Some(result) = response.result else {
-            return Ok(false);
+            return Ok(ProbeInitializeOutcome::NotMcp(
+                "missing JSON-RPC result field".to_string(),
+            ));
         };
 
-        Ok(serde_json::from_value::<InitializeResult>(result).is_ok())
+        match serde_json::from_value::<InitializeResult>(result) {
+            Ok(_) => Ok(ProbeInitializeOutcome::Success),
+            Err(err) => Ok(ProbeInitializeOutcome::NotMcp(format!(
+                "invalid initialize result: {}",
+                err
+            ))),
+        }
+    }
+
+    /// Lightweight MCP HTTP probe used for endpoint discovery.
+    pub async fn probe_initialize(url: &str, auth_profile: Option<Profile>) -> Result<bool> {
+        Ok(matches!(
+            Self::probe_initialize_with_reason(url, auth_profile).await?,
+            ProbeInitializeOutcome::Success
+        ))
     }
 
     /// Initialize the MCP session
