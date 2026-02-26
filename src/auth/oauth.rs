@@ -770,4 +770,50 @@ mod tests {
             TokenEndpointResponse::Token(_) => panic!("expected OAuth error payload"),
         }
     }
+
+    #[test]
+    fn parse_token_endpoint_response_supports_success_token_payload() {
+        let parsed = parse_token_endpoint_response(
+            reqwest::StatusCode::OK,
+            r#"{"access_token":"token","token_type":"bearer","expires_in":3600}"#,
+        )
+        .unwrap();
+        match parsed {
+            TokenEndpointResponse::Token(token) => {
+                assert_eq!(token.access_token, "token");
+                assert_eq!(token.token_type.as_deref(), Some("bearer"));
+                assert_eq!(token.expires_in, Some(3600));
+            }
+            TokenEndpointResponse::Error(_) => panic!("expected OAuth token payload"),
+        }
+    }
+
+    #[test]
+    fn parse_token_endpoint_response_supports_error_status_error_payload() {
+        let parsed = parse_token_endpoint_response(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid_grant","error_description":"bad grant"}"#,
+        )
+        .unwrap();
+        match parsed {
+            TokenEndpointResponse::Error(err) => {
+                assert_eq!(err.error, "invalid_grant");
+                assert_eq!(err.error_description.as_deref(), Some("bad grant"));
+            }
+            TokenEndpointResponse::Token(_) => panic!("expected OAuth error payload"),
+        }
+    }
+
+    #[test]
+    fn parse_token_endpoint_response_falls_back_to_status_for_invalid_error_body() {
+        let parsed =
+            parse_token_endpoint_response(reqwest::StatusCode::UNAUTHORIZED, "{}").unwrap();
+        match parsed {
+            TokenEndpointResponse::Error(err) => {
+                assert_eq!(err.error, "401");
+                assert!(err.error_description.is_none());
+            }
+            TokenEndpointResponse::Token(_) => panic!("expected OAuth error payload"),
+        }
+    }
 }

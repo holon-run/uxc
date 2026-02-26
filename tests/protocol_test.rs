@@ -396,6 +396,7 @@ fn test_protocol_router_get_adapter_with_schema_url_override() {
         let router = ProtocolRouter::new();
         let options = DetectionOptions {
             schema_url: Some(schema_url),
+            auth_profile: None,
         };
         router
             .get_adapter_for_url_with_options(&base_url, &options)
@@ -719,7 +720,10 @@ fn test_detection_options_schema_url_none() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(async {
         let detector = ProtocolDetector::new();
-        let options = DetectionOptions { schema_url: None };
+        let options = DetectionOptions {
+            schema_url: None,
+            auth_profile: None,
+        };
         detector.detect_adapter_with_options(&url, &options).await
     });
 
@@ -767,6 +771,7 @@ fn test_detection_options_schema_url_some() {
         let detector = ProtocolDetector::new();
         let options = DetectionOptions {
             schema_url: Some(schema_url),
+            auth_profile: None,
         };
         detector
             .detect_adapter_with_options(&base_url, &options)
