@@ -102,7 +102,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -111,6 +111,9 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy -- -D warnings -A non_camel_case_types -A unused_variables -A unused_imports -A dead_code -A clippy::upper_case_acronyms -A clippy::enum_variant_names -A clippy::vec_init_then_push -A clippy::type_complexity
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
   test:
     name: Test (${{ matrix.rust }})

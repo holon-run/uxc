@@ -148,7 +148,10 @@ fn test_openapi_tries_multiple_schema_endpoints() {
         let result = rt.block_on(async { adapter.can_handle(&server.url()).await });
 
         assert!(result.is_ok());
-        assert!(result.unwrap(), "Should try multiple endpoints and find schema");
+        assert!(
+            result.unwrap(),
+            "Should try multiple endpoints and find schema"
+        );
     });
 }
 
@@ -202,11 +205,21 @@ fn test_openapi_lists_all_http_methods() {
             .unwrap();
 
         assert_eq!(operations.len(), 5);
-        assert!(operations.iter().any(|op| op.operation_id == "get:/resource"));
-        assert!(operations.iter().any(|op| op.operation_id == "post:/resource"));
-        assert!(operations.iter().any(|op| op.operation_id == "put:/resource"));
-        assert!(operations.iter().any(|op| op.operation_id == "patch:/resource"));
-        assert!(operations.iter().any(|op| op.operation_id == "delete:/resource"));
+        assert!(operations
+            .iter()
+            .any(|op| op.operation_id == "get:/resource"));
+        assert!(operations
+            .iter()
+            .any(|op| op.operation_id == "post:/resource"));
+        assert!(operations
+            .iter()
+            .any(|op| op.operation_id == "put:/resource"));
+        assert!(operations
+            .iter()
+            .any(|op| op.operation_id == "patch:/resource"));
+        assert!(operations
+            .iter()
+            .any(|op| op.operation_id == "delete:/resource"));
     });
 }
 
@@ -497,7 +510,11 @@ fn test_openapi_parses_request_body_schema() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = OpenAPIAdapter::new();
         let detail = rt
-            .block_on(async { adapter.describe_operation(&server.url(), "post:/users").await })
+            .block_on(async {
+                adapter
+                    .describe_operation(&server.url(), "post:/users")
+                    .await
+            })
             .unwrap();
 
         assert!(detail.input_schema.is_some());
@@ -544,7 +561,11 @@ fn test_openapi_request_body_with_multiple_content_types() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = OpenAPIAdapter::new();
         let detail = rt
-            .block_on(async { adapter.describe_operation(&server.url(), "post:/upload").await })
+            .block_on(async {
+                adapter
+                    .describe_operation(&server.url(), "post:/upload")
+                    .await
+            })
             .unwrap();
 
         assert!(detail.input_schema.is_some());
@@ -602,7 +623,11 @@ fn test_openapi_resolves_local_refs() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = OpenAPIAdapter::new();
         let detail = rt
-            .block_on(async { adapter.describe_operation(&server.url(), "post:/users").await })
+            .block_on(async {
+                adapter
+                    .describe_operation(&server.url(), "post:/users")
+                    .await
+            })
             .unwrap();
 
         assert!(detail.input_schema.is_some());
@@ -664,7 +689,11 @@ fn test_openapi_handles_nested_refs() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = OpenAPIAdapter::new();
         let detail = rt
-            .block_on(async { adapter.describe_operation(&server.url(), "post:/users").await })
+            .block_on(async {
+                adapter
+                    .describe_operation(&server.url(), "post:/users")
+                    .await
+            })
             .unwrap();
 
         assert!(detail.input_schema.is_some());
@@ -672,7 +701,10 @@ fn test_openapi_handles_nested_refs() {
         let expanded = &schema["content"]["application/json"]["schema"];
         // Nested refs should be expanded
         assert_eq!(expanded["properties"]["user"]["type"], "object");
-        assert_eq!(expanded["properties"]["user"]["properties"]["id"]["type"], "integer");
+        assert_eq!(
+            expanded["properties"]["user"]["properties"]["id"]["type"],
+            "integer"
+        );
     });
 }
 
@@ -706,7 +738,9 @@ fn test_openapi_handles_missing_operation() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = OpenAPIAdapter::new();
         let result = rt.block_on(async {
-            adapter.describe_operation(&server.url(), "get:/nonexistent").await
+            adapter
+                .describe_operation(&server.url(), "get:/nonexistent")
+                .await
         });
 
         assert!(result.is_err());
@@ -738,7 +772,11 @@ fn test_openapi_handles_invalid_operation_id_format() {
         assert!(result.is_err());
 
         // Invalid: wrong format
-        let result = rt.block_on(async { adapter.describe_operation(&server.url(), "GET /users").await });
+        let result = rt.block_on(async {
+            adapter
+                .describe_operation(&server.url(), "GET /users")
+                .await
+        });
         assert!(result.is_err());
     });
 }
@@ -761,10 +799,17 @@ fn test_openapi_handles_unsupported_http_method() {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = OpenAPIAdapter::new();
-        let result = rt.block_on(async { adapter.describe_operation(&server.url(), "invalid:/path").await });
+        let result = rt.block_on(async {
+            adapter
+                .describe_operation(&server.url(), "invalid:/path")
+                .await
+        });
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unsupported HTTP method"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported HTTP method"));
     });
 }
 
@@ -868,10 +913,16 @@ fn test_openapi_descriptions_fallback_to_summary() {
             .unwrap();
 
         assert_eq!(operations.len(), 2);
-        let get_op = operations.iter().find(|op| op.operation_id == "get:/users").unwrap();
+        let get_op = operations
+            .iter()
+            .find(|op| op.operation_id == "get:/users")
+            .unwrap();
         assert_eq!(get_op.description.as_ref().unwrap(), "List all users");
 
-        let post_op = operations.iter().find(|op| op.operation_id == "post:/users").unwrap();
+        let post_op = operations
+            .iter()
+            .find(|op| op.operation_id == "post:/users")
+            .unwrap();
         assert_eq!(post_op.description.as_ref().unwrap(), "Create a new user");
     });
 }

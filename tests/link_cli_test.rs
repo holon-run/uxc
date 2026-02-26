@@ -239,11 +239,8 @@ fn link_shortcut_is_runnable_and_forwards_args() {
         .expect("uxc link should run");
     assert!(create.status.success(), "link creation should succeed");
 
-    fs::write(
-        &fake_uxc_path,
-        "#!/usr/bin/env sh\nprintf '%s\\n' \"$@\"\n",
-    )
-    .expect("fake uxc should be written");
+    fs::write(&fake_uxc_path, "#!/usr/bin/env sh\nprintf '%s\\n' \"$@\"\n")
+        .expect("fake uxc should be written");
     let mut perms = fs::metadata(&fake_uxc_path)
         .expect("fake uxc metadata should be readable")
         .permissions();

@@ -13,14 +13,14 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 pub use client::McpStdioClient;
 pub use http_transport::McpHttpTransport;
-pub use transport::{DefaultStdioProcessExecutor, SpawnedProcess, StdioProcessExecutor};
-#[cfg(test)]
-pub use transport::MockStdioExecutor;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
+#[cfg(test)]
+pub use transport::MockStdioExecutor;
+pub use transport::{DefaultStdioProcessExecutor, SpawnedProcess, StdioProcessExecutor};
 
 pub struct McpAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,

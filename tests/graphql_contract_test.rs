@@ -52,7 +52,10 @@ fn test_graphql_introspection_detects_valid_endpoint() {
         let result = rt.block_on(async { adapter.can_handle(&server.url()).await });
 
         assert!(result.is_ok());
-        assert!(result.unwrap(), "Should detect GraphQL endpoint via introspection");
+        assert!(
+            result.unwrap(),
+            "Should detect GraphQL endpoint via introspection"
+        );
     });
 }
 
@@ -105,7 +108,10 @@ fn test_graphql_introspection_handles_errors_response() {
         let result = rt.block_on(async { adapter.can_handle(&server.url()).await });
 
         assert!(result.is_ok());
-        assert!(result.unwrap(), "GraphQL errors in response still indicate GraphQL endpoint");
+        assert!(
+            result.unwrap(),
+            "GraphQL errors in response still indicate GraphQL endpoint"
+        );
     });
 }
 
@@ -182,7 +188,10 @@ fn test_graphql_parses_query_fields() {
         assert!(operations.iter().any(|op| op.operation_id == "query/user"));
         assert!(operations.iter().any(|op| op.operation_id == "query/users"));
 
-        let user_op = operations.iter().find(|op| op.operation_id == "query/user").unwrap();
+        let user_op = operations
+            .iter()
+            .find(|op| op.operation_id == "query/user")
+            .unwrap();
         assert_eq!(user_op.description.as_ref().unwrap(), "Get a user by ID");
         assert_eq!(user_op.parameters.len(), 1);
         assert_eq!(user_op.parameters[0].name, "id");
@@ -242,7 +251,10 @@ fn test_graphql_parses_mutation_fields() {
 
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0].operation_id, "mutation/createUser");
-        assert_eq!(operations[0].description.as_ref().unwrap(), "Create a new user");
+        assert_eq!(
+            operations[0].description.as_ref().unwrap(),
+            "Create a new user"
+        );
         assert_eq!(operations[0].parameters.len(), 2);
         assert!(operations[0].parameters[0].required);
         assert!(!operations[0].parameters[1].required);
@@ -296,7 +308,10 @@ fn test_graphql_parses_subscription_fields() {
 
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0].operation_id, "subscription/userUpdated");
-        assert_eq!(operations[0].description.as_ref().unwrap(), "Subscribe to user updates");
+        assert_eq!(
+            operations[0].description.as_ref().unwrap(),
+            "Subscribe to user updates"
+        );
     });
 }
 
@@ -361,19 +376,34 @@ fn test_graphql_parses_scalar_types() {
             .unwrap();
 
         assert_eq!(operations.len(), 5);
-        let int_op = operations.iter().find(|op| op.operation_id == "query/intField").unwrap();
+        let int_op = operations
+            .iter()
+            .find(|op| op.operation_id == "query/intField")
+            .unwrap();
         assert_eq!(int_op.parameters[0].param_type, "Int");
 
-        let float_op = operations.iter().find(|op| op.operation_id == "query/floatField").unwrap();
+        let float_op = operations
+            .iter()
+            .find(|op| op.operation_id == "query/floatField")
+            .unwrap();
         assert_eq!(float_op.parameters[0].param_type, "Float");
 
-        let string_op = operations.iter().find(|op| op.operation_id == "query/stringField").unwrap();
+        let string_op = operations
+            .iter()
+            .find(|op| op.operation_id == "query/stringField")
+            .unwrap();
         assert_eq!(string_op.parameters[0].param_type, "String");
 
-        let bool_op = operations.iter().find(|op| op.operation_id == "query/boolField").unwrap();
+        let bool_op = operations
+            .iter()
+            .find(|op| op.operation_id == "query/boolField")
+            .unwrap();
         assert_eq!(bool_op.parameters[0].param_type, "Boolean");
 
-        let id_op = operations.iter().find(|op| op.operation_id == "query/idField").unwrap();
+        let id_op = operations
+            .iter()
+            .find(|op| op.operation_id == "query/idField")
+            .unwrap();
         assert_eq!(id_op.parameters[0].param_type, "ID");
     });
 }
@@ -576,7 +606,11 @@ fn test_graphql_builds_input_schema_for_query() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = GraphQLAdapter::new();
         let detail = rt
-            .block_on(async { adapter.describe_operation(&server.url(), "query/user").await })
+            .block_on(async {
+                adapter
+                    .describe_operation(&server.url(), "query/user")
+                    .await
+            })
             .unwrap();
 
         assert!(detail.input_schema.is_some());
@@ -645,15 +679,28 @@ fn test_graphql_builds_input_schema_with_input_object() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = GraphQLAdapter::new();
         let detail = rt
-            .block_on(async { adapter.describe_operation(&server.url(), "query/search").await })
+            .block_on(async {
+                adapter
+                    .describe_operation(&server.url(), "query/search")
+                    .await
+            })
             .unwrap();
 
         assert!(detail.input_schema.is_some());
         let schema = detail.input_schema.unwrap();
         assert!(schema["properties"]["filter"]["properties"]["limit"].is_object());
-        assert_eq!(schema["properties"]["filter"]["properties"]["limit"]["type"], "integer");
-        assert_eq!(schema["properties"]["filter"]["properties"]["limit"]["description"], "Max results");
-        assert_eq!(schema["properties"]["filter"]["properties"]["query"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["filter"]["properties"]["limit"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            schema["properties"]["filter"]["properties"]["limit"]["description"],
+            "Max results"
+        );
+        assert_eq!(
+            schema["properties"]["filter"]["properties"]["query"]["type"],
+            "string"
+        );
     });
 }
 
@@ -706,7 +753,11 @@ fn test_graphql_builds_input_schema_with_enum() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = GraphQLAdapter::new();
         let detail = rt
-            .block_on(async { adapter.describe_operation(&server.url(), "query/items").await })
+            .block_on(async {
+                adapter
+                    .describe_operation(&server.url(), "query/items")
+                    .await
+            })
             .unwrap();
 
         assert!(detail.input_schema.is_some());
@@ -751,7 +802,9 @@ fn test_graphql_handles_missing_operation() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = GraphQLAdapter::new();
         let result = rt.block_on(async {
-            adapter.describe_operation(&server.url(), "query/nonexistent").await
+            adapter
+                .describe_operation(&server.url(), "query/nonexistent")
+                .await
         });
 
         assert!(result.is_err());
@@ -788,7 +841,11 @@ fn test_graphql_handles_invalid_operation_format() {
         assert!(result.is_err(), "Should fail for operation without prefix");
 
         // Invalid prefix - should fail with format error
-        let result = rt.block_on(async { adapter.describe_operation(&server.url(), "invalid/user").await });
+        let result = rt.block_on(async {
+            adapter
+                .describe_operation(&server.url(), "invalid/user")
+                .await
+        });
         assert!(result.is_err(), "Should fail for invalid operation type");
         let err_msg = result.unwrap_err().to_string();
         // Check that error message mentions the invalid operation
@@ -821,7 +878,10 @@ fn test_graphql_handles_introspection_errors() {
         let result = rt.block_on(async { adapter.fetch_schema(&server.url()).await });
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("GraphQL introspection failed"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("GraphQL introspection failed"));
     });
 }
 
@@ -949,13 +1009,22 @@ fn test_graphql_return_type_display_names() {
             .block_on(async { adapter.list_operations(&server.url()).await })
             .unwrap();
 
-        let simple = operations.iter().find(|op| op.operation_id == "query/simple").unwrap();
+        let simple = operations
+            .iter()
+            .find(|op| op.operation_id == "query/simple")
+            .unwrap();
         assert_eq!(simple.return_type.as_ref().unwrap(), "String");
 
-        let required = operations.iter().find(|op| op.operation_id == "query/required").unwrap();
+        let required = operations
+            .iter()
+            .find(|op| op.operation_id == "query/required")
+            .unwrap();
         assert_eq!(required.return_type.as_ref().unwrap(), "String!");
 
-        let list = operations.iter().find(|op| op.operation_id == "query/listOfRequired").unwrap();
+        let list = operations
+            .iter()
+            .find(|op| op.operation_id == "query/listOfRequired")
+            .unwrap();
         assert_eq!(list.return_type.as_ref().unwrap(), "[Int!]");
     });
 }
@@ -1003,10 +1072,16 @@ fn test_graphql_description_optional_fields() {
             .unwrap();
 
         assert_eq!(operations.len(), 2);
-        let with_desc = operations.iter().find(|op| op.operation_id == "query/withDescription").unwrap();
+        let with_desc = operations
+            .iter()
+            .find(|op| op.operation_id == "query/withDescription")
+            .unwrap();
         assert_eq!(with_desc.description.as_ref().unwrap(), "Has description");
 
-        let without_desc = operations.iter().find(|op| op.operation_id == "query/withoutDescription").unwrap();
+        let without_desc = operations
+            .iter()
+            .find(|op| op.operation_id == "query/withoutDescription")
+            .unwrap();
         assert!(without_desc.description.is_none());
     });
 }
@@ -1061,7 +1136,11 @@ fn test_graphql_handles_circular_type_references() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = GraphQLAdapter::new();
         let detail = rt
-            .block_on(async { adapter.describe_operation(&server.url(), "query/node").await })
+            .block_on(async {
+                adapter
+                    .describe_operation(&server.url(), "query/node")
+                    .await
+            })
             .unwrap();
 
         // Should handle circular references without infinite recursion

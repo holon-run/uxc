@@ -1836,8 +1836,8 @@ data: {"jsonrpc":"2.0","id":1,"result":{}}
             access_token: Some("oauth-access-token".to_string()),
             ..Default::default()
         };
-        let profile = Profile::new("stale-api-key".to_string(), AuthType::OAuth)
-            .with_oauth(oauth_profile);
+        let profile =
+            Profile::new("stale-api-key".to_string(), AuthType::OAuth).with_oauth(oauth_profile);
         let transport = McpHttpTransport::with_auth(server.url(), Some(profile)).unwrap();
 
         let result = transport.send_request("test", None).await;
@@ -1860,8 +1860,8 @@ data: {"jsonrpc":"2.0","id":1,"result":{}}
             access_token: None,
             ..Default::default()
         };
-        let profile = Profile::new("stale-api-key".to_string(), AuthType::OAuth)
-            .with_oauth(oauth_profile);
+        let profile =
+            Profile::new("stale-api-key".to_string(), AuthType::OAuth).with_oauth(oauth_profile);
         let transport = McpHttpTransport::with_auth(server.url(), Some(profile)).unwrap();
 
         let result = transport.send_request("test", None).await;

@@ -267,7 +267,10 @@ fn test_jsonrpc_method_parsing_parameters() {
 
         assert_eq!(method.parameters[0].name, "query");
         assert!(method.parameters[0].required);
-        assert_eq!(method.parameters[0].description.as_ref().unwrap(), "Search query string");
+        assert_eq!(
+            method.parameters[0].description.as_ref().unwrap(),
+            "Search query string"
+        );
 
         assert_eq!(method.parameters[1].name, "limit");
         assert!(!method.parameters[1].required);
@@ -317,10 +320,16 @@ fn test_jsonrpc_method_return_type() {
             .unwrap();
 
         assert_eq!(operations.len(), 2);
-        let data_method = operations.iter().find(|op| op.operation_id == "getData").unwrap();
+        let data_method = operations
+            .iter()
+            .find(|op| op.operation_id == "getData")
+            .unwrap();
         assert_eq!(data_method.return_type.as_ref().unwrap(), "object");
 
-        let string_method = operations.iter().find(|op| op.operation_id == "getString").unwrap();
+        let string_method = operations
+            .iter()
+            .find(|op| op.operation_id == "getString")
+            .unwrap();
         assert_eq!(string_method.return_type.as_ref().unwrap(), "string");
     });
 }
@@ -432,7 +441,11 @@ fn test_jsonrpc_param_structure_either_default() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = JsonRpcAdapter::new();
         let detail = rt
-            .block_on(async { adapter.describe_operation(&server.url(), "methodWithEither").await })
+            .block_on(async {
+                adapter
+                    .describe_operation(&server.url(), "methodWithEither")
+                    .await
+            })
             .unwrap();
 
         assert!(detail.input_schema.is_some());
@@ -601,7 +614,9 @@ fn test_jsonrpc_standard_error_codes() {
         let adapter = JsonRpcAdapter::new();
 
         let result = rt.block_on(async {
-            adapter.execute(&url, "nonexistent", std::collections::HashMap::new()).await
+            adapter
+                .execute(&url, "nonexistent", std::collections::HashMap::new())
+                .await
         });
 
         // Should fail with an error
@@ -656,7 +671,9 @@ fn test_jsonrpc_error_with_data() {
         let adapter = JsonRpcAdapter::new();
 
         let result = rt.block_on(async {
-            adapter.execute(&url, "failingMethod", std::collections::HashMap::new()).await
+            adapter
+                .execute(&url, "failingMethod", std::collections::HashMap::new())
+                .await
         });
 
         assert!(result.is_err());
@@ -697,7 +714,13 @@ fn test_jsonrpc_missing_required_parameter() {
 
         // Call without required parameter
         let result = rt.block_on(async {
-            adapter.execute(&url, "methodWithRequiredParam", std::collections::HashMap::new()).await
+            adapter
+                .execute(
+                    &url,
+                    "methodWithRequiredParam",
+                    std::collections::HashMap::new(),
+                )
+                .await
         });
 
         assert!(result.is_err());
@@ -786,7 +809,9 @@ fn test_jsonrpc_missing_result_field() {
         let adapter = JsonRpcAdapter::new();
 
         let result = rt.block_on(async {
-            adapter.execute(&url, "noResult", std::collections::HashMap::new()).await
+            adapter
+                .execute(&url, "noResult", std::collections::HashMap::new())
+                .await
         });
 
         assert!(result.is_err());
@@ -814,7 +839,11 @@ fn test_jsonrpc_handles_missing_operation() {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = JsonRpcAdapter::new();
-        let result = rt.block_on(async { adapter.describe_operation(&server.url(), "nonexistent").await });
+        let result = rt.block_on(async {
+            adapter
+                .describe_operation(&server.url(), "nonexistent")
+                .await
+        });
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
@@ -901,7 +930,9 @@ fn test_jsonrpc_url_resolution_from_servers_field() {
         let adapter = JsonRpcAdapter::new();
 
         let result = rt.block_on(async {
-            adapter.execute(&url, "test", std::collections::HashMap::new()).await
+            adapter
+                .execute(&url, "test", std::collections::HashMap::new())
+                .await
         });
 
         assert!(result.is_ok());
@@ -944,10 +975,16 @@ fn test_jsonrpc_description_fallback_to_summary() {
             .unwrap();
 
         assert_eq!(operations.len(), 2);
-        let m1 = operations.iter().find(|op| op.operation_id == "method1").unwrap();
+        let m1 = operations
+            .iter()
+            .find(|op| op.operation_id == "method1")
+            .unwrap();
         assert_eq!(m1.description.as_ref().unwrap(), "Has description");
 
-        let m2 = operations.iter().find(|op| op.operation_id == "method2").unwrap();
+        let m2 = operations
+            .iter()
+            .find(|op| op.operation_id == "method2")
+            .unwrap();
         assert_eq!(m2.description.as_ref().unwrap(), "Has summary");
     });
 }
@@ -1050,11 +1087,14 @@ fn test_jsonrpc_request_id_generation() {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": "success"
-            }).to_string())
+            .with_body(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": "success"
+                })
+                .to_string(),
+            )
             .create();
 
         let url = server.url();
@@ -1062,7 +1102,9 @@ fn test_jsonrpc_request_id_generation() {
         let adapter = JsonRpcAdapter::new();
 
         let result = rt.block_on(async {
-            adapter.execute(&url, "test", std::collections::HashMap::new()).await
+            adapter
+                .execute(&url, "test", std::collections::HashMap::new())
+                .await
         });
 
         assert!(result.is_ok());

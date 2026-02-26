@@ -25,7 +25,8 @@ impl McpStdioClient {
         args: &[String],
         executor: Arc<dyn StdioProcessExecutor>,
     ) -> Result<Self> {
-        let mut transport = McpStdioTransport::connect_with_executor(command, args, executor).await?;
+        let mut transport =
+            McpStdioTransport::connect_with_executor(command, args, executor).await?;
 
         // Initialize the session
         let client_info = ClientInfo {
@@ -260,10 +261,9 @@ mod tests {
             done
         "#;
 
-        let client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         assert!(!client.supports_tools());
     }
@@ -276,10 +276,9 @@ mod tests {
             while read line; do sleep 1; done
         "#;
 
-        let client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         assert!(client.supports_tools());
     }
@@ -292,10 +291,9 @@ mod tests {
             while read line; do sleep 1; done
         "#;
 
-        let client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         assert!(client.supports_resources());
     }
@@ -308,10 +306,9 @@ mod tests {
             while read line; do sleep 1; done
         "#;
 
-        let client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         assert!(client.supports_prompts());
     }
@@ -324,14 +321,16 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":2,"result":{}}'
         "#;
 
-        let mut client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         let result = client.list_tools().await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not support tools"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not support tools"));
     }
 
     #[tokio::test]
@@ -343,10 +342,9 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"test_tool","description":"A test tool","inputSchema":{"type":"object"}}]}}'
         "#;
 
-        let mut client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         let tools = client.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);
@@ -363,10 +361,9 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Tool executed successfully"}]}}'
         "#;
 
-        let mut client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         let args = serde_json::json!({"param1": "value1"});
         let result = client.call_tool("test_tool", Some(args)).await.unwrap();
@@ -385,14 +382,16 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1.0"}}}'
         "#;
 
-        let mut client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         let result = client.call_tool("test", None).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not support tools"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not support tools"));
     }
 
     #[tokio::test]
@@ -402,14 +401,16 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
         "#;
 
-        let mut client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         let result = client.list_resources().await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not support resources"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not support resources"));
     }
 
     #[tokio::test]
@@ -421,10 +422,9 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":2,"result":{"resources":[{"name":"test_resource","uri":"test://resource","description":"A test resource"}]}}'
         "#;
 
-        let mut client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         let resources = client.list_resources().await.unwrap();
         assert_eq!(resources.len(), 1);
@@ -441,22 +441,27 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"test://resource"}]}}'
         "#;
 
-        let mut client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         // The response structure has a "contents" array, so we need to handle that
         let result = client
             .transport
-            .send_request("resources/read", Some(serde_json::json!({"uri": "test://resource"})))
+            .send_request(
+                "resources/read",
+                Some(serde_json::json!({"uri": "test://resource"})),
+            )
             .await
             .unwrap();
 
         // Parse the contents array
         let contents_array = result.get("contents").and_then(|v| v.as_array()).unwrap();
         let first_content = &contents_array[0];
-        assert_eq!(first_content.get("uri").unwrap().as_str().unwrap(), "test://resource");
+        assert_eq!(
+            first_content.get("uri").unwrap().as_str().unwrap(),
+            "test://resource"
+        );
     }
 
     #[tokio::test]
@@ -466,14 +471,16 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
         "#;
 
-        let mut client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         let result = client.list_prompts().await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not support prompts"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not support prompts"));
     }
 
     #[tokio::test]
@@ -485,10 +492,9 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"test_prompt","description":"A test prompt"}]}}'
         "#;
 
-        let mut client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         let prompts = client.list_prompts().await.unwrap();
         assert_eq!(prompts.len(), 1);
@@ -504,10 +510,9 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":2,"result":{"description":"Test prompt","messages":[{"role":"user","content":"Test content"}]}}'
         "#;
 
-        let mut client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         let result = client.get_prompt("test_prompt", None).await.unwrap();
         assert_eq!(result.description, "Test prompt");
@@ -524,10 +529,9 @@ mod tests {
             while read line; do sleep 1; done
         "#;
 
-        let client =
-            McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         assert!(client.supports_tools());
         assert!(client.supports_resources());

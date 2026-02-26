@@ -9,13 +9,11 @@
 //! Note: Due to mockito 1.2 compatibility issues with tokio::test,
 //! HTTP-based tests use a manual runtime pattern.
 
-use uxc::adapters::{
-    Adapter, AdapterEnum, DetectionOptions, ProtocolDetector, ProtocolType,
-};
 use uxc::adapters::graphql::GraphQLAdapter;
-use uxc::adapters::openapi::OpenAPIAdapter;
 use uxc::adapters::jsonrpc::JsonRpcAdapter;
 use uxc::adapters::mcp::McpAdapter;
+use uxc::adapters::openapi::OpenAPIAdapter;
+use uxc::adapters::{Adapter, AdapterEnum, DetectionOptions, ProtocolDetector, ProtocolType};
 use uxc::protocol::ProtocolRouter;
 
 /// Helper to run async code with a mock server
@@ -172,7 +170,9 @@ fn test_protocol_router_detect_mcp_stdio() {
     // Test npx command
     let result = rt.block_on(async {
         let router = ProtocolRouter::new();
-        router.detect_protocol("npx @modelcontextprotocol/server-everything").await
+        router
+            .detect_protocol("npx @modelcontextprotocol/server-everything")
+            .await
     });
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), ProtocolType::Mcp);
@@ -397,7 +397,9 @@ fn test_protocol_router_get_adapter_with_schema_url_override() {
         let options = DetectionOptions {
             schema_url: Some(schema_url),
         };
-        router.get_adapter_for_url_with_options(&base_url, &options).await
+        router
+            .get_adapter_for_url_with_options(&base_url, &options)
+            .await
     });
 
     assert!(result.is_ok());
@@ -470,12 +472,8 @@ fn test_protocol_detector_http_vs_stdio() {
     let detector = ProtocolDetector::new();
 
     // These should not be detected as MCP stdio
-    let http_result = rt.block_on(async {
-        detector.detect_adapter(http_url).await
-    });
-    let https_result = rt.block_on(async {
-        detector.detect_adapter(https_url).await
-    });
+    let http_result = rt.block_on(async { detector.detect_adapter(http_url).await });
+    let https_result = rt.block_on(async { detector.detect_adapter(https_url).await });
 
     // Both should fail (no actual server), but not because of stdio detection
     assert!(http_result.is_err() || https_result.is_err());
@@ -770,7 +768,9 @@ fn test_detection_options_schema_url_some() {
         let options = DetectionOptions {
             schema_url: Some(schema_url),
         };
-        detector.detect_adapter_with_options(&base_url, &options).await
+        detector
+            .detect_adapter_with_options(&base_url, &options)
+            .await
     });
 
     assert!(result.is_ok());
@@ -919,12 +919,7 @@ fn test_empty_url() {
 fn test_invalid_url_format() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let invalid_urls = vec![
-        "not-a-url",
-        "://invalid",
-        "http://",
-        "://example.com",
-    ];
+    let invalid_urls = vec!["not-a-url", "://invalid", "http://", "://example.com"];
 
     for url in invalid_urls {
         let result = rt.block_on(async {
@@ -999,7 +994,10 @@ fn test_graphql_adapter_can_handle() {
     });
 
     assert!(result.is_ok());
-    assert!(result.unwrap(), "GraphQL adapter should handle GraphQL endpoint");
+    assert!(
+        result.unwrap(),
+        "GraphQL adapter should handle GraphQL endpoint"
+    );
 }
 
 #[test]
@@ -1098,7 +1096,9 @@ fn test_jsonrpc_adapter_can_handle() {
 #[test]
 fn test_mcp_adapter_is_stdio_command() {
     // Test various stdio command patterns
-    assert!(McpAdapter::is_stdio_command("npx @modelcontextprotocol/server"));
+    assert!(McpAdapter::is_stdio_command(
+        "npx @modelcontextprotocol/server"
+    ));
     assert!(McpAdapter::is_stdio_command("node server.js"));
     assert!(McpAdapter::is_stdio_command("python3 server.py"));
     assert!(McpAdapter::is_stdio_command("./my-server"));

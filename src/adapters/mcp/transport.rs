@@ -59,7 +59,11 @@ impl StdioProcessExecutor for DefaultStdioProcessExecutor {
         let stdin = child.stdin.take().context("Failed to get stdin handle")?;
         let stdout = child.stdout.take().context("Failed to get stdout handle")?;
 
-        Ok(SpawnedProcess { child, stdin, stdout })
+        Ok(SpawnedProcess {
+            child,
+            stdin,
+            stdout,
+        })
     }
 }
 
@@ -136,7 +140,11 @@ impl StdioProcessExecutor for MockStdioExecutor {
         let stdin = child.stdin.take().context("Failed to get stdin handle")?;
         let stdout = child.stdout.take().context("Failed to get stdout handle")?;
 
-        Ok(SpawnedProcess { child, stdin, stdout })
+        Ok(SpawnedProcess {
+            child,
+            stdin,
+            stdout,
+        })
     }
 }
 
@@ -185,7 +193,11 @@ impl McpStdioTransport {
         args: &[String],
         executor: Arc<dyn StdioProcessExecutor>,
     ) -> Result<Self> {
-        let SpawnedProcess { child, stdin, stdout } = executor.spawn(command, args).await?;
+        let SpawnedProcess {
+            child,
+            stdin,
+            stdout,
+        } = executor.spawn(command, args).await?;
 
         // Create channels for sending requests
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutboundMessage>();
@@ -479,7 +491,10 @@ mod tests {
     #[tokio::test]
     async fn parse_command_handles_command_with_args() {
         let parts = parse_command("npx @modelcontextprotocol/server-everything");
-        assert_eq!(parts, vec!["npx", "@modelcontextprotocol/server-everything"]);
+        assert_eq!(
+            parts,
+            vec!["npx", "@modelcontextprotocol/server-everything"]
+        );
     }
 
     #[tokio::test]
@@ -659,7 +674,8 @@ mod tests {
 
     #[tokio::test]
     async fn initialized_sends_notification() {
-        let script = "while read line; do echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'; done";
+        let script =
+            "while read line; do echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'; done";
         let mut transport =
             McpStdioTransport::connect("sh", &["-c".to_string(), script.to_string()])
                 .await
@@ -679,8 +695,7 @@ mod tests {
     #[tokio::test]
     async fn connect_with_mock_executor_succeeds() {
         let mock = Arc::new(MockStdioExecutor::new());
-        let result =
-            McpStdioTransport::connect_with_executor("test", &[], mock).await;
+        let result = McpStdioTransport::connect_with_executor("test", &[], mock).await;
         // The mock will spawn a real echo process, so this should succeed
         // but may fail on initialization - that's ok for this test
         // We're just testing that the executor is being used
@@ -690,19 +705,18 @@ mod tests {
     #[tokio::test]
     async fn connect_with_failing_mock_executor_fails() {
         let mock = Arc::new(MockStdioExecutor::with_spawn_failure());
-        let result =
-            McpStdioTransport::connect_with_executor("test", &[], mock).await;
+        let result = McpStdioTransport::connect_with_executor("test", &[], mock).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("failed to spawn"));
     }
 
     #[tokio::test]
     async fn request_id_increments_with_each_request() {
-        let script = "while read line; do echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'; done";
-        let transport =
-            McpStdioTransport::connect("sh", &["-c".to_string(), script.to_string()])
-                .await
-                .unwrap();
+        let script =
+            "while read line; do echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'; done";
+        let transport = McpStdioTransport::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
 
         // Check that ID counter starts at 1 and increments
         let id1 = {
