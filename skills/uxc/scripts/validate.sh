@@ -67,8 +67,18 @@ if ! rg -q 'uxc <host> describe <operation>' "${SKILL_FILE}"; then
   exit 1
 fi
 
-if ! rg -q "uxc <host> <operation> --json '<payload-json>'" "${SKILL_FILE}"; then
+if ! rg -q "uxc <host> <operation> --input-json '<payload-json>'" "${SKILL_FILE}"; then
   echo "SKILL.md must document execute workflow"
+  exit 1
+fi
+
+if ! rg -q "uxc <host> <operation> '<payload-json>'" "${SKILL_FILE}"; then
+  echo "SKILL.md must document bare JSON execute workflow"
+  exit 1
+fi
+
+if ! rg -q -- '--json`?\s+has been removed' "${SKILL_FILE}"; then
+  echo "SKILL.md must include migration note for removed --json"
   exit 1
 fi
 

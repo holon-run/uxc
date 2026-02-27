@@ -20,10 +20,10 @@ Use this skill to query library documentation and code examples.
    - `uxc https://mcp.context7.com/mcp list`
 
 2. Resolve a library name to get library ID:
-   - `uxc https://mcp.context7.com/mcp resolve-library-id --json '{"libraryName":"react","query":"useState hook"}'`
+   - `uxc https://mcp.context7.com/mcp resolve-library-id --input-json '{"libraryName":"react","query":"useState hook"}'`
 
 3. Query documentation:
-   - `uxc https://mcp.context7.com/mcp query-docs --json '{"libraryId":"/reactjs/react.dev","query":"how to use useState"}'`
+   - `uxc https://mcp.context7.com/mcp query-docs --input-json '{"libraryId":"/reactjs/react.dev","query":"how to use useState"}'`
 
 ## Available Tools
 
@@ -36,19 +36,19 @@ Use this skill to query library documentation and code examples.
 
 ```bash
 # First resolve the library
-uxc https://mcp.context7.com/mcp resolve-library-id --json '{"libraryName":"react","query":"React useState hook"}'
+uxc https://mcp.context7.com/mcp resolve-library-id --input-json '{"libraryName":"react","query":"React useState hook"}'
 ```
 
 ### Query specific documentation
 
 ```bash
-uxc https://mcp.context7.com/mcp query-docs --json '{"libraryId":"/reactjs/react.dev","query":"how to use useEffect"}'
+uxc https://mcp.context7.com/mcp query-docs --input-json '{"libraryId":"/reactjs/react.dev","query":"how to use useEffect"}'
 ```
 
 ### Query Node.js documentation
 
 ```bash
-uxc https://mcp.context7.com/mcp resolve-library-id --json '{"libraryName":"node","query":"file system"}'
+uxc https://mcp.context7.com/mcp resolve-library-id --input-json '{"libraryName":"node","query":"file system"}'
 ```
 
 ## Notes

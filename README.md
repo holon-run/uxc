@@ -49,7 +49,7 @@ UXC does not require registering server aliases.
 
 ```bash
 uxc petstore3.swagger.io/api/v3 list
-uxc petstore3.swagger.io/api/v3 get:/pet/{petId} --json '{"petId":1}'
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} --input-json '{"petId":1}'
 ```
 
 Any compliant endpoint can be called directly.
@@ -146,7 +146,8 @@ uxc --text help
 If an operation ID conflicts with a CLI keyword (for example `help`/`list`), use explicit `call`:
 
 ```bash
-uxc <host> call <operation_id> [--json '{...}']
+uxc <host> call <operation_id> --input-json '{...}'
+uxc <host> call <operation_id> '{...}'
 ```
 
 This makes UXC ideal for:
@@ -318,10 +319,13 @@ uxc petstore3.swagger.io/api/v3 describe get:/pet/{petId}
 uxc petstore3.swagger.io/api/v3 get:/pet/{petId} help
 
 # Execute with parameters
-uxc petstore3.swagger.io/api/v3 get:/pet/{petId} --json '{"petId":1}'
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} --input-json '{"petId":1}'
+
+# Execute with bare JSON positional payload
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} '{"petId":1}'
 
 # Execute with JSON input
-uxc petstore3.swagger.io/api/v3 call post:/pet --json '{"id":10001,"name":"codex-dog","photoUrls":["https://petstore3.swagger.io/favicon-32x32.png"],"status":"available"}'
+uxc petstore3.swagger.io/api/v3 call post:/pet --input-json '{"id":10001,"name":"codex-dog","photoUrls":["https://petstore3.swagger.io/favicon-32x32.png"],"status":"available"}'
 ```
 
 ### gRPC Services
@@ -331,7 +335,7 @@ uxc petstore3.swagger.io/api/v3 call post:/pet --json '{"id":10001,"name":"codex
 uxc grpcb.in:9000 list
 
 # Call a unary RPC
-uxc grpcb.in:9000 addsvc.Add/Sum --json '{"a":1,"b":2}'
+uxc grpcb.in:9000 addsvc.Add/Sum --input-json '{"a":1,"b":2}'
 ```
 
 Note: gRPC unary invocation uses the `grpcurl` binary at runtime.
@@ -346,7 +350,7 @@ uxc countries.trevorblades.com list
 uxc countries.trevorblades.com query/continents
 
 # Execute with parameters
-uxc countries.trevorblades.com query/country --json '{"code":"US"}'
+uxc countries.trevorblades.com query/country --input-json '{"code":"US"}'
 ```
 
 ### MCP (Model Context Protocol)
@@ -354,14 +358,14 @@ uxc countries.trevorblades.com query/country --json '{"code":"US"}'
 ```bash
 # HTTP transport (recommended for production)
 uxc mcp.deepwiki.com/mcp list
-uxc mcp.deepwiki.com/mcp ask_question --json '{"repoName":"holon-run/uxc","question":"What does this project do?"}'
+uxc mcp.deepwiki.com/mcp ask_question --input-json '{"repoName":"holon-run/uxc","question":"What does this project do?"}'
 
 # If a tool name conflicts with CLI subcommands, use explicit call
-uxc mcp.deepwiki.com/mcp call <tool_name> --json '{...}'
+uxc mcp.deepwiki.com/mcp call <tool_name> --input-json '{...}'
 
 # stdio transport (for local development)
 uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list
-uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list_directory --json '{"path":"/tmp"}'
+uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list_directory --input-json '{"path":"/tmp"}'
 ```
 
 ### JSON-RPC (OpenRPC)

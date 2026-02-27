@@ -27,6 +27,8 @@ Always parse `ok` first.
 - Actions:
   - inspect `describe` schema
   - start from minimal required payload
+  - ensure you are using `--input-json` (not removed `--json`)
+  - do not combine positional JSON and `--input-json` in one command
 
 4. Runtime transport failure
 - Symptoms: timeout, connection reset, TLS error

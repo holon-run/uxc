@@ -17,13 +17,13 @@ uxc <host> describe <operation>
 3. Execute with minimal valid payload:
 
 ```bash
-uxc <host> <operation> --json '{"field":"value"}'
+uxc <host> <operation> --input-json '{"field":"value"}'
 ```
 
 4. Parse success/failure envelope:
 
 ```bash
-uxc <host> <operation> --json '{"field":"value"}' | jq '.ok, .kind, .data'
+uxc <host> <operation> --input-json '{"field":"value"}' | jq '.ok, .kind, .data'
 ```
 
 ## Conflict-Safe Flow
@@ -31,8 +31,31 @@ uxc <host> <operation> --json '{"field":"value"}' | jq '.ok, .kind, .data'
 If operation name collides with CLI keywords (`help`, `list`, `describe`), use explicit `call`:
 
 ```bash
-uxc <host> call <operation> --json '{"field":"value"}'
+uxc <host> call <operation> --input-json '{"field":"value"}'
 ```
+
+## Input Modes
+
+### Bare JSON positional payload
+
+```bash
+uxc <host> <operation> '{"field":"value"}'
+uxc <host> call <operation> '{"field":"value"}'
+```
+
+### Key-value arguments
+
+```bash
+uxc <host> <operation> field=value
+uxc <host> <operation> --args field=value
+```
+
+### Precedence and conflict
+
+- Use exactly one JSON payload source:
+  - bare positional JSON, or
+  - `--input-json`
+- Supplying both should fail with `INVALID_ARGUMENT`.
 
 ## Host-Level Help
 
