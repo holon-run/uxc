@@ -1,0 +1,4 @@
+interface:
+  display_name: "Notion MCP"
+  short_description: "Operate Notion workspace via UXC + MCP OAuth"
+  default_prompt: "Use $notion-mcp-skill to search, read, and write Notion content through Notion MCP with UXC, following OAuth and safe-write guardrails."
