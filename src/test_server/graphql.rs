@@ -190,7 +190,7 @@ async fn execute_query(
             errors: None,
         }),
         Scenario::Timeout => {
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            tokio::time::sleep(super::common::timeout_duration()).await;
             Ok(GraphQLResponse {
                 data: Some(json!({"health": {"status": "ok"}})),
                 errors: None,

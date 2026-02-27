@@ -160,7 +160,7 @@ fn create_router(state: ServerState) -> Router {
                     .unwrap())
             }
             Scenario::Timeout => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(super::common::timeout_duration()).await;
                 Ok(Json(json!({"status": "ok"})).into_response())
             }
         }
@@ -182,7 +182,7 @@ fn create_router(state: ServerState) -> Router {
                 .body("[{broken}".into())
                 .unwrap()),
             Scenario::Timeout => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(super::common::timeout_duration()).await;
                 Ok(Json(json!([])).into_response())
             }
         }
@@ -215,7 +215,7 @@ fn create_router(state: ServerState) -> Router {
                 .body("{created".into())
                 .unwrap()),
             Scenario::Timeout => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(super::common::timeout_duration()).await;
                 Err(StatusCode::REQUEST_TIMEOUT)
             }
         }
@@ -248,7 +248,7 @@ fn create_router(state: ServerState) -> Router {
                 .body("{invalid".into())
                 .unwrap()),
             Scenario::Timeout => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(super::common::timeout_duration()).await;
                 Err(StatusCode::NOT_FOUND)
             }
         }

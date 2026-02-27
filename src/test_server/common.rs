@@ -62,3 +62,12 @@ pub fn write_addr_file(addr: SocketAddr, name: &str) -> Result<()> {
 
     Ok(())
 }
+
+/// Scenario timeout duration (milliseconds), configurable for tests
+pub fn timeout_duration() -> std::time::Duration {
+    let ms = std::env::var("UXC_TEST_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(30_000);
+    std::time::Duration::from_millis(ms)
+}

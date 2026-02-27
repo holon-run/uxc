@@ -5,7 +5,16 @@
 
 mod common;
 
-use common::{run_uxc, start_test_server};
+use common::{run_uxc, start_test_server, test_server_binary};
+use std::process::Command;
+
+fn grpcurl_available() -> bool {
+    Command::new("grpcurl")
+        .arg("-help")
+        .output()
+        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+        .unwrap_or(false)
+}
 
 #[test]
 fn test_openapi_list_operations() {
@@ -304,11 +313,201 @@ fn test_jsonrpc_malformed_response() {
     assert_eq!(json["data"]["invalid"], "malformed");
 }
 
-// Note: Timeout scenario tests are not included here because they would
-// significantly slow down the test suite (servers sleep for 30 seconds).
-// The timeout scenario is implemented in the test servers and can be
-// tested manually if needed by running:
+#[test]
+fn test_grpc_list_operations() {
+    let _server = start_test_server("grpc", "ok");
+
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "list"]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to list gRPC operations: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "grpc");
+
+    let ops: Vec<&str> = json["data"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["operation_id"].as_str())
+        .collect();
+
+    assert!(
+        ops.contains(&"addsvc.Add/Sum"),
+        "Expected addsvc.Add/Sum operation"
+    );
+}
+
+#[test]
+fn test_grpc_call_method() {
+    if !grpcurl_available() {
+        eprintln!("Skipping gRPC call test because grpcurl is not installed");
+        return;
+    }
+
+    let _server = start_test_server("grpc", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}", _server.addr),
+        "addsvc.Add/Sum",
+        "--json",
+        r#"{"a":1,"b":2}"#,
+    ]);
+
+    assert!(result.is_ok(), "Failed to call gRPC method: {:?}", result);
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "grpc");
+    assert!(json["data"]["v"] == 3 || json["data"]["v"] == "3");
+}
+
+#[test]
+fn test_grpc_auth_required() {
+    let _server = start_test_server("grpc", "auth_required");
+
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "list"]);
+
+    assert!(
+        result.is_err(),
+        "Expected gRPC auth/reflection error, got success"
+    );
+}
+
+#[test]
+fn test_mcp_http_list_operations() {
+    let _server = start_test_server("mcp-http", "ok");
+
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "list"]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to list MCP HTTP tools: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+
+    let ops: Vec<&str> = json["data"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["operation_id"].as_str())
+        .collect();
+
+    assert!(ops.contains(&"echo"), "Expected echo MCP tool");
+}
+
+#[test]
+fn test_mcp_http_call_tool() {
+    let _server = start_test_server("mcp-http", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}", _server.addr),
+        "echo",
+        "--json",
+        r#"{"message":"hello mcp"}"#,
+    ]);
+
+    assert!(result.is_ok(), "Failed to call MCP HTTP tool: {:?}", result);
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["content"][0]["text"], "hello mcp");
+}
+
+#[test]
+fn test_mcp_http_auth_required() {
+    let _server = start_test_server("mcp-http", "auth_required");
+
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "list"]);
+
+    assert!(result.is_err(), "Expected MCP HTTP auth error, got success");
+}
+
+#[test]
+fn test_mcp_stdio_list_operations() {
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} ok", bin.display());
+
+    let result = run_uxc(&[&endpoint, "list"]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to list MCP stdio tools: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+
+    let ops: Vec<&str> = json["data"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["operation_id"].as_str())
+        .collect();
+
+    assert!(ops.contains(&"echo"), "Expected echo MCP stdio tool");
+}
+
+#[test]
+fn test_mcp_stdio_call_tool() {
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} ok", bin.display());
+
+    let result = run_uxc(&[&endpoint, "echo", "--json", r#"{"message":"from stdio"}"#]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call MCP stdio tool: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["content"][0]["text"], "from stdio");
+}
+
+#[test]
+fn test_mcp_stdio_auth_required() {
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} auth_required", bin.display());
+
+    let result = run_uxc(&[&endpoint, "echo", "--json", r#"{"message":"x"}"#]);
+
+    assert!(result.is_err(), "Expected MCP stdio auth error");
+}
+
+// Note: Timeout scenario tests are not included here to keep the suite fast.
+// Timeout behavior is implemented in all test servers and can be validated
+// manually (or in dedicated tests) with UXC_TEST_TIMEOUT_MS.
+// Example:
 //   uxc-test-openapi-server timeout
 //   uxc-test-graphql-server timeout
 //   uxc-test-jsonrpc-server timeout
+//   uxc-test-grpc-server timeout
+//   uxc-test-mcp-http-server timeout
+//   uxc-test-mcp-stdio-server timeout
 // and then attempting to make requests with a short client timeout.

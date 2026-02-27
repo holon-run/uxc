@@ -107,8 +107,28 @@ path = "src/lib.rs"
 default = []
 test-server = ["axum"]
 
+
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.10"
+
+[[bin]]
+name = "uxc-test-grpc-server"
+path = "src/bin/uxc-test-grpc-server.rs"
+required-features = ["test-server"]
+
+[[bin]]
+name = "uxc-test-mcp-http-server"
+path = "src/bin/uxc-test-mcp-http-server.rs"
+required-features = ["test-server"]
+
+[[bin]]
+name = "uxc-test-mcp-stdio-server"
+path = "src/bin/uxc-test-mcp-stdio-server.rs"
+required-features = ["test-server"]

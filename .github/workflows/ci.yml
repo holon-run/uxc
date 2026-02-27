@@ -163,6 +163,16 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install grpcurl
+        run: |
+          go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.1
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -174,7 +184,10 @@ jobs:
           cargo build --release --features test-server \
             --bin uxc-test-openapi-server \
             --bin uxc-test-graphql-server \
-            --bin uxc-test-jsonrpc-server
+            --bin uxc-test-jsonrpc-server \
+            --bin uxc-test-grpc-server \
+            --bin uxc-test-mcp-http-server \
+            --bin uxc-test-mcp-stdio-server
 
       - name: Run local E2E tests
         run: cargo test --test local_e2e_test --verbose -- --test-threads=1

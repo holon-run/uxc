@@ -260,7 +260,7 @@ jobs:
             if OUTPUT=$($UXC grpcb.in:9000 addsvc.Add/Sum --json '{"a":1,"b":2}' 2>&1); then
               if echo "$OUTPUT" | jq -e '.ok == true and .protocol == "grpc" and .data.v == "3"' >/dev/null; then
                 echo "✓ Call operation succeeded"
-                echo "Result: 1 + 2 = $($UXC grpcb.in:9000 addsvc.Add/Sum --json '{"a":1,"b":2}' | jq -r '.data.v')"
+                echo "Result: 1 + 2 = $(echo \"$OUTPUT\" | jq -r '.data.v')"
                 break
               else
                 echo "✗ Call operation returned unexpected output:"

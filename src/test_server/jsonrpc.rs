@@ -236,7 +236,7 @@ async fn execute_method(
             error: None,
         }),
         Scenario::Timeout => {
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            tokio::time::sleep(super::common::timeout_duration()).await;
             Ok(JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,

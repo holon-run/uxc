@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package addsvc;
+
+service Add {
+  rpc Sum(SumRequest) returns (SumReply);
+}
+
+message SumRequest {
+  int64 a = 1;
+  int64 b = 2;
+}
+
+message SumReply {
+  int64 v = 1;
+}
