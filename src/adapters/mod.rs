@@ -406,7 +406,9 @@ mod tests {
             auth_profile: Some(profile),
         };
 
-        let result = detector.detect_adapter_with_options(&endpoint, &options).await;
+        let result = detector
+            .detect_adapter_with_options(&endpoint, &options)
+            .await;
         assert!(result.is_err());
         let err = result.err().expect("expected oauth refresh error");
         let oauth_err = err
