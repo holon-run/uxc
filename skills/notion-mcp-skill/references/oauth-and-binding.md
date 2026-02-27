@@ -4,6 +4,17 @@
 
 Authenticate once with OAuth and let `uxc` auto-attach credentials to `https://mcp.notion.com/mcp`.
 
+## Probe First (No Auth Assumption)
+
+Before starting OAuth, check whether endpoint access already works via existing binding/credential:
+
+```bash
+uxc https://mcp.notion.com/mcp describe notion-fetch
+```
+
+If probe succeeds, skip OAuth login and continue with normal calls.
+If probe fails with auth-related error, continue with OAuth login below.
+
 ## Recommended Login (Dynamic Client Registration First)
 
 ```bash
@@ -59,18 +70,44 @@ Validate match:
 uxc auth binding match https://mcp.notion.com/mcp
 ```
 
+## Duplicate Binding Handling
+
+If multiple bindings target the same endpoint, default calls may hit a stale token.
+
+Detect duplicates:
+
+```bash
+uxc auth binding list
+```
+
+If more than one binding matches `https://mcp.notion.com/mcp`:
+1. Verify with explicit credential first:
+   - `uxc --auth <credential_id> https://mcp.notion.com/mcp describe notion-fetch`
+2. Remove stale binding(s) that point to invalid credentials:
+   - `uxc auth binding remove <stale_binding_id>`
+3. Re-check default path:
+   - `uxc https://mcp.notion.com/mcp describe notion-fetch`
+
 ## Runtime Use
 
-After binding, normal MCP calls can omit `--auth`:
+After binding, verify runtime works with a lightweight probe:
+
+```bash
+uxc https://mcp.notion.com/mcp describe notion-fetch
+```
+
+Recommended shortcut for repeated usage:
+
+```bash
+uxc link notion-mcp-cli https://mcp.notion.com/mcp
+```
+
+Then run operation discovery/calls:
 
 ```bash
 uxc https://mcp.notion.com/mcp list
-```
-
-Optional explicit auth:
-
-```bash
-uxc --auth notion-mcp https://mcp.notion.com/mcp list
+notion-mcp-cli list
+notion-mcp-cli describe notion-fetch
 ```
 
 ## Refresh And Logout

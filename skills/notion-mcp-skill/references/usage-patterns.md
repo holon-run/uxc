@@ -1,6 +1,17 @@
 # Usage Patterns
 
 All commands assume endpoint `https://mcp.notion.com/mcp`.
+If shortcut exists, prefer:
+
+```bash
+notion-mcp-cli <operation> ...
+```
+
+Create shortcut:
+
+```bash
+uxc link notion-mcp-cli https://mcp.notion.com/mcp
+```
 
 ## Discover And Inspect
 

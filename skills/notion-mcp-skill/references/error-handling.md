@@ -15,6 +15,10 @@ Handle these codes explicitly:
 - `OAUTH_REFRESH_FAILED`
 - `OAUTH_SCOPE_INSUFFICIENT`
 
+## Additional Common Failures
+
+- `PROTOCOL_DETECTION_FAILED` with `401 invalid_token` in MCP probe diagnostics
+
 ## Recovery Playbook
 
 `OAUTH_REQUIRED`:
@@ -38,6 +42,11 @@ Handle these codes explicitly:
 
 `OAUTH_SCOPE_INSUFFICIENT`:
 1. Re-login with broader scopes (for Notion MCP generally include `read` and `write`).
+
+`PROTOCOL_DETECTION_FAILED` + `invalid_token`:
+1. Check for duplicate endpoint bindings (`uxc auth binding list`).
+2. Validate default probe path (`uxc https://mcp.notion.com/mcp describe notion-fetch`).
+3. Remove stale duplicate binding(s) and retry probe.
 
 ## Write-Safety Failures
 
