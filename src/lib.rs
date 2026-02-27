@@ -9,6 +9,7 @@ pub mod auth;
 pub mod cache;
 pub mod cli;
 pub mod error;
+pub mod http_client;
 pub mod output;
 pub mod protocol;
 pub mod schema_mapping;

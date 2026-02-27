@@ -5,6 +5,7 @@
 use super::types::*;
 use crate::auth::{oauth, AuthType, Profile, Profiles};
 use crate::error::UxcError;
+use crate::http_client::build_resilient_http_client;
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde_json::Value as JsonValue;
@@ -56,10 +57,8 @@ impl McpHttpTransport {
             );
         }
 
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .context("Failed to create HTTP client")?;
+        let client =
+            build_resilient_http_client(std::time::Duration::from_secs(30), "MCP HTTP transport")?;
 
         Ok(Self {
             client,
@@ -374,10 +373,10 @@ impl McpHttpTransport {
         url: &str,
         auth_profile: Option<Profile>,
     ) -> Result<ProbeInitializeOutcome> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS))
-            .build()
-            .context("Failed to create MCP probe HTTP client")?;
+        let client = build_resilient_http_client(
+            std::time::Duration::from_secs(PROBE_TIMEOUT_SECS),
+            "MCP HTTP probe",
+        )?;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),

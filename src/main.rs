@@ -18,6 +18,7 @@ mod auth;
 mod cache;
 pub mod cli;
 mod error;
+mod http_client;
 mod output;
 mod schema_mapping;
 
@@ -25,6 +26,7 @@ use adapters::{Adapter, DetectionOptions, Operation, OperationDetail, ProtocolDe
 use auth::{AuthBindingRule, AuthBindings, AuthType, OAuthFlow, Profile, Profiles};
 use cache::CacheConfig;
 use error::UxcError;
+use http_client::build_resilient_http_client;
 use output::OutputEnvelope;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -2014,9 +2016,10 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
         } => {
             let flow = parse_oauth_flow(flow)?;
             let scopes = auth::oauth::parse_scopes(scope);
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()?;
+            let client = build_resilient_http_client(
+                std::time::Duration::from_secs(30),
+                "OAuth login command",
+            )?;
 
             let (metadata, token, resolved_client_id, resolved_client_secret) = match flow {
                 OAuthFlow::DeviceCode => {
@@ -2115,9 +2118,10 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
             ))
         }
         AuthOauthCommands::Refresh { credential_id } => {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()?;
+            let client = build_resilient_http_client(
+                std::time::Duration::from_secs(30),
+                "OAuth refresh command",
+            )?;
             let mut profiles = Profiles::load_profiles()?;
             let mut profile_data = profiles.get_profile(credential_id)?.clone();
             profile_data.name = Some(credential_id.clone());
