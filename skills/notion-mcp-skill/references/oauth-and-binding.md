@@ -4,16 +4,22 @@
 
 Authenticate once with OAuth and let `uxc` auto-attach credentials to `https://mcp.notion.com/mcp`.
 
-## Probe First (No Auth Assumption)
+## Check Local State First (Cache-Safe)
 
-Before starting OAuth, check whether endpoint access already works via existing binding/credential:
+Before starting OAuth, check endpoint binding state:
 
 ```bash
-uxc https://mcp.notion.com/mcp describe notion-fetch
+uxc auth binding match https://mcp.notion.com/mcp
 ```
 
-If probe succeeds, skip OAuth login and continue with normal calls.
-If probe fails with auth-related error, continue with OAuth login below.
+If a valid binding match exists, continue with normal calls.
+If binding is missing (or clearly stale), continue with OAuth login below.
+
+## Runtime Validation Strategy
+
+Do not add a dedicated preflight probe by default.
+Use the first real read operation as runtime validation.
+If that call fails with auth-related errors (`401`, `OAUTH_REQUIRED`, `invalid_token`), run OAuth recovery flow.
 
 ## Recommended Login (Dynamic Client Registration First)
 
@@ -37,14 +43,14 @@ For agent-driven/manual runs:
 2. Ask the user to open the URL and approve access.
 3. Ask the user to paste the full callback URL (for example: `http://127.0.0.1:8788/callback?code=...&state=...`).
 4. Paste that callback URL into the waiting `uxc` login prompt.
-5. Verify with `uxc auth oauth info notion-mcp`.
+5. Optionally verify with `uxc auth oauth info <credential_id>` when you know the credential id.
 
 Do not request users to extract raw access tokens from browser/network logs.
 
-## Verify Credential
+## Verify Credential (Optional)
 
 ```bash
-uxc auth oauth info notion-mcp
+uxc auth oauth info <credential_id>
 ```
 
 Expect:
@@ -82,19 +88,15 @@ uxc auth binding list
 
 If more than one binding matches `https://mcp.notion.com/mcp`:
 1. Verify with explicit credential first:
-   - `uxc --auth <credential_id> https://mcp.notion.com/mcp describe notion-fetch`
+   - `uxc --auth <credential_id> https://mcp.notion.com/mcp notion-fetch --input-json '{"id":"https://notion.so/your-page-url"}'`
 2. Remove stale binding(s) that point to invalid credentials:
    - `uxc auth binding remove <stale_binding_id>`
 3. Re-check default path:
-   - `uxc https://mcp.notion.com/mcp describe notion-fetch`
+   - retry your original read call (for example, `notion-fetch` or `notion-search`)
 
 ## Runtime Use
 
-After binding, verify runtime works with a lightweight probe:
-
-```bash
-uxc https://mcp.notion.com/mcp describe notion-fetch
-```
+After binding, continue with your intended read operation and treat it as runtime validation.
 
 Recommended shortcut for repeated usage:
 
@@ -120,6 +122,6 @@ uxc auth oauth logout notion-mcp
 Cleanup:
 
 ```bash
-uxc auth binding remove notion-mcp
-uxc auth credential remove notion-mcp
+uxc auth binding remove <binding_id>
+uxc auth credential remove <credential_id>
 ```

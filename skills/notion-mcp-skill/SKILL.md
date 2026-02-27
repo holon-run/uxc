@@ -18,10 +18,10 @@ Always use the `uxc` skill (trigger: `$uxc`) as the execution layer for discover
 
 ## Core Workflow
 
-1. Probe access without auth assumptions:
-   - `uxc https://mcp.notion.com/mcp describe notion-fetch`
-   - If this succeeds, keep current auth/binding state and continue.
-2. If probe fails due to auth, run OAuth authorization code flow (dynamic client registration first):
+1. Check local auth state first (cache-safe):
+   - `uxc auth binding match https://mcp.notion.com/mcp`
+   - If binding match is valid, continue with normal calls.
+2. If local check fails due to auth, run OAuth authorization code flow (dynamic client registration first):
    - `uxc auth oauth login notion-mcp --endpoint https://mcp.notion.com/mcp --flow authorization_code --redirect-uri http://127.0.0.1:8788/callback --scope read --scope write`
    - Prompt user to open the printed authorization URL.
    - Ask user to paste the full callback URL after consent.
@@ -29,15 +29,13 @@ Always use the `uxc` skill (trigger: `$uxc`) as the execution layer for discover
    - `uxc auth binding add --id notion-mcp --host mcp.notion.com --path-prefix /mcp --scheme https --credential notion-mcp --priority 100`
 4. Recommend creating a local shortcut command for repeated calls:
    - `uxc link notion-mcp-cli https://mcp.notion.com/mcp`
-5. Verify runtime path after binding:
-   - `uxc https://mcp.notion.com/mcp describe notion-fetch`
-6. Discover tools and inspect schema before execution:
+5. Discover tools and inspect schema before execution:
    - `uxc https://mcp.notion.com/mcp list`
    - `uxc https://mcp.notion.com/mcp describe notion-fetch`
    - Common operations include `notion-search`, `notion-fetch`, and `notion-update-page`.
-7. Prefer read path first:
+6. Prefer read path first:
    - Search/fetch current state before any write.
-8. Execute writes only after explicit user confirmation:
+7. Execute writes only after explicit user confirmation:
    - For `notion-update-page` operations that may delete content, always confirm intent first.
 
 ## OAuth Interaction Template
@@ -50,8 +48,8 @@ Use this exact operator-facing flow:
    - Copy the full callback URL from browser address bar.
    - Paste the callback URL back in chat.
 3. Resume the waiting `uxc` login prompt with the pasted callback URL.
-4. Confirm success with:
-   - `uxc auth oauth info notion-mcp`
+4. Optionally confirm success with:
+   - `uxc auth oauth info <credential_id>`
 
 Do not ask user to manually extract or copy bearer tokens. Token exchange is handled by `uxc`.
 

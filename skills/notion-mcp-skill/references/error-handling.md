@@ -17,13 +17,13 @@ Handle these codes explicitly:
 
 ## Additional Common Failures
 
-- `PROTOCOL_DETECTION_FAILED` with `401 invalid_token` in MCP probe diagnostics
+- First real call fails with `401 invalid_token`
 
 ## Recovery Playbook
 
 `OAUTH_REQUIRED`:
-1. Ensure credential exists (`uxc auth oauth info notion-mcp`).
-2. Ensure endpoint binding matches (`uxc auth binding match https://mcp.notion.com/mcp`).
+1. Ensure endpoint binding matches (`uxc auth binding match https://mcp.notion.com/mcp`).
+2. If you know the credential id, inspect it (`uxc auth oauth info <credential_id>`).
 3. Re-login if needed.
 
 `OAUTH_DISCOVERY_FAILED`:
@@ -37,16 +37,20 @@ Handle these codes explicitly:
 3. If dynamic registration was used, try explicit `--client-id`.
 
 `OAUTH_REFRESH_FAILED`:
-1. Try `uxc auth oauth refresh notion-mcp`.
+1. Try `uxc auth oauth refresh <credential_id>`.
 2. If refresh token invalid/expired, perform login again.
 
 `OAUTH_SCOPE_INSUFFICIENT`:
 1. Re-login with broader scopes (for Notion MCP generally include `read` and `write`).
 
-`PROTOCOL_DETECTION_FAILED` + `invalid_token`:
+First real call + `invalid_token`:
 1. Check for duplicate endpoint bindings (`uxc auth binding list`).
-2. Validate default probe path (`uxc https://mcp.notion.com/mcp describe notion-fetch`).
-3. Remove stale duplicate binding(s) and retry probe.
+2. Confirm the binding that currently matches:
+   - `uxc auth binding match https://mcp.notion.com/mcp`
+3. If multiple candidates exist, verify each candidate with explicit credential:
+   - `uxc --auth <credential_id> https://mcp.notion.com/mcp <same_read_operation> ...`
+4. Remove only the binding(s) confirmed stale/invalid.
+5. Retry the original read call that failed.
 
 ## Write-Safety Failures
 
