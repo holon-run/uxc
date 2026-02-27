@@ -19,6 +19,19 @@ const MAX_STREAM_BODY_BYTES: usize = 1024 * 1024;
 pub enum ProbeInitializeOutcome {
     Success,
     NotMcp(String),
+    AuthFailed(ProbeAuthFailure),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeAuthFailure {
+    pub code: ProbeAuthFailureCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeAuthFailureCode {
+    OAuthRequired,
+    OAuthRefreshFailed,
 }
 
 /// MCP HTTP transport client
@@ -392,33 +405,96 @@ impl McpHttpTransport {
             id: RequestId::Number(1),
         };
 
+        let mut auth_profile = auth_profile;
+
+        match Self::probe_initialize_once(url, &client, &request, auth_profile.as_ref()).await {
+            ProbeAttemptResult::Success => Ok(ProbeInitializeOutcome::Success),
+            ProbeAttemptResult::Unauthorized(reason) => {
+                let is_oauth = auth_profile
+                    .as_ref()
+                    .map(|profile| profile.auth_type == AuthType::OAuth)
+                    .unwrap_or(false);
+
+                if !is_oauth {
+                    return Ok(ProbeInitializeOutcome::NotMcp(reason));
+                }
+
+                let Some(profile) = auth_profile.as_mut() else {
+                    return Ok(ProbeInitializeOutcome::AuthFailed(ProbeAuthFailure {
+                        code: ProbeAuthFailureCode::OAuthRequired,
+                        message: "MCP probe received unauthorized response and no auth profile was available".to_string(),
+                    }));
+                };
+
+                if let Err(err) = oauth::refresh_oauth_profile(profile, &client).await {
+                    return Ok(Self::probe_auth_failure_from_refresh_error(err));
+                }
+
+                if let Err(err) = Self::persist_probe_refresh(profile).await {
+                    return Ok(ProbeInitializeOutcome::AuthFailed(ProbeAuthFailure {
+                        code: ProbeAuthFailureCode::OAuthRefreshFailed,
+                        message: format!("Failed to persist refreshed OAuth profile: {}", err),
+                    }));
+                }
+
+                match Self::probe_initialize_once(url, &client, &request, Some(profile)).await {
+                    ProbeAttemptResult::Success => Ok(ProbeInitializeOutcome::Success),
+                    ProbeAttemptResult::Unauthorized(retry_reason) => {
+                        Ok(ProbeInitializeOutcome::AuthFailed(ProbeAuthFailure {
+                            code: ProbeAuthFailureCode::OAuthRequired,
+                            message: format!(
+                                "OAuth token rejected after refresh during MCP probe: {}",
+                                retry_reason
+                            ),
+                        }))
+                    }
+                    ProbeAttemptResult::NotMcp(reason) => {
+                        Ok(ProbeInitializeOutcome::NotMcp(reason))
+                    }
+                }
+            }
+            ProbeAttemptResult::NotMcp(reason) => Ok(ProbeInitializeOutcome::NotMcp(reason)),
+        }
+    }
+
+    async fn probe_initialize_once(
+        url: &str,
+        client: &Client,
+        request: &JsonRpcRequest,
+        auth_profile: Option<&Profile>,
+    ) -> ProbeAttemptResult {
         let mut req = client
             .post(url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream");
 
-        if let Some(profile) = &auth_profile {
+        if let Some(profile) = auth_profile {
             req = Self::apply_profile_auth(req, profile);
         }
 
-        let mut response = match req.json(&request).send().await {
+        let mut response = match req.json(request).send().await {
             Ok(response) => response,
             Err(err) => {
-                return Ok(ProbeInitializeOutcome::NotMcp(format!(
-                    "request failed: {}",
-                    err
-                )));
+                return ProbeAttemptResult::NotMcp(format!("request failed: {}", err));
             }
         };
 
         let status = response.status();
-        if !status.is_success() {
+        if status == reqwest::StatusCode::UNAUTHORIZED {
             let body = response.text().await.unwrap_or_default();
-            return Ok(ProbeInitializeOutcome::NotMcp(format!(
+            return ProbeAttemptResult::Unauthorized(format!(
                 "HTTP {}: {}",
                 status,
                 Self::summarize_body(&body)
-            )));
+            ));
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return ProbeAttemptResult::NotMcp(format!(
+                "HTTP {}: {}",
+                status,
+                Self::summarize_body(&body)
+            ));
         }
 
         let content_type = response
@@ -429,43 +505,72 @@ impl McpHttpTransport {
         let body = match Self::read_response_body(&mut response, content_type.as_deref()).await {
             Ok(body) => body,
             Err(err) => {
-                return Ok(ProbeInitializeOutcome::NotMcp(format!(
+                return ProbeAttemptResult::NotMcp(format!(
                     "failed to read response body: {}",
                     err
-                )));
+                ));
             }
         };
 
         let response = match Self::parse_jsonrpc_response(content_type.as_deref(), &body) {
             Ok(response) => response,
             Err(err) => {
-                return Ok(ProbeInitializeOutcome::NotMcp(format!(
-                    "invalid JSON-RPC payload: {}",
-                    err
-                )));
+                return ProbeAttemptResult::NotMcp(format!("invalid JSON-RPC payload: {}", err));
             }
         };
 
         if let Some(error) = response.error {
-            return Ok(ProbeInitializeOutcome::NotMcp(format!(
+            return ProbeAttemptResult::NotMcp(format!(
                 "JSON-RPC error {}: {}",
                 error.code, error.message
-            )));
+            ));
         }
 
         let Some(result) = response.result else {
-            return Ok(ProbeInitializeOutcome::NotMcp(
-                "missing JSON-RPC result field".to_string(),
-            ));
+            return ProbeAttemptResult::NotMcp("missing JSON-RPC result field".to_string());
         };
 
         match serde_json::from_value::<InitializeResult>(result) {
-            Ok(_) => Ok(ProbeInitializeOutcome::Success),
-            Err(err) => Ok(ProbeInitializeOutcome::NotMcp(format!(
-                "invalid initialize result: {}",
-                err
-            ))),
+            Ok(_) => ProbeAttemptResult::Success,
+            Err(err) => ProbeAttemptResult::NotMcp(format!("invalid initialize result: {}", err)),
         }
+    }
+
+    fn probe_auth_failure_from_refresh_error(err: anyhow::Error) -> ProbeInitializeOutcome {
+        let code = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<UxcError>())
+            .map(|uxc_err| match uxc_err {
+                UxcError::OAuthRequired(_) => ProbeAuthFailureCode::OAuthRequired,
+                UxcError::OAuthRefreshFailed(_) => ProbeAuthFailureCode::OAuthRefreshFailed,
+                _ => ProbeAuthFailureCode::OAuthRefreshFailed,
+            })
+            .unwrap_or(ProbeAuthFailureCode::OAuthRefreshFailed);
+
+        ProbeInitializeOutcome::AuthFailed(ProbeAuthFailure {
+            code,
+            message: format!("OAuth refresh failed during MCP probe: {}", err),
+        })
+    }
+
+    async fn persist_probe_refresh(profile: &Profile) -> Result<()> {
+        let Some(profile_name) = profile.name.clone() else {
+            return Ok(());
+        };
+
+        let mut stored = profile.clone();
+        stored.name = None;
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut profiles = Profiles::load_profiles()?;
+            profiles.set_profile(profile_name, stored)?;
+            profiles.save_profiles()?;
+            Ok(())
+        })
+        .await
+        .context("Failed to persist refreshed OAuth profile")??;
+
+        Ok(())
     }
 
     /// Lightweight MCP HTTP probe used for endpoint discovery.
@@ -575,6 +680,12 @@ impl McpHttpTransport {
 
         serde_json::from_value(result).context("Failed to parse prompts/get result")
     }
+}
+
+enum ProbeAttemptResult {
+    Success,
+    Unauthorized(String),
+    NotMcp(String),
 }
 
 #[cfg(test)]
@@ -1839,6 +1950,109 @@ data: invalid json
         let result = McpHttpTransport::probe_initialize(&server.url(), Some(profile)).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), true);
+    }
+
+    #[tokio::test]
+    async fn probe_initialize_oauth_401_refreshes_and_succeeds() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = format!("{}/mcp", server.url());
+        let token_endpoint = format!("{}/token", server.url());
+
+        let _first = server
+            .mock("POST", "/mcp")
+            .match_header("authorization", "Bearer old-token")
+            .with_status(401)
+            .with_body(r#"{"error":"invalid_token","error_description":"Invalid access token"}"#)
+            .create_async()
+            .await;
+        let _refresh = server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "access_token":"new-token",
+                    "token_type":"Bearer",
+                    "expires_in":3600,
+                    "refresh_token":"refresh-2"
+                }"#,
+            )
+            .create_async()
+            .await;
+        let _retry = server
+            .mock("POST", "/mcp")
+            .match_header("authorization", "Bearer new-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":1,
+                "result":{
+                    "protocolVersion":"2024-11-05",
+                    "capabilities":{},
+                    "serverInfo":{"name":"test","version":"1.0"}
+                }
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let mut profile = Profile::new(String::new(), AuthType::OAuth);
+        profile.oauth = Some(OAuthProfile {
+            token_endpoint: Some(token_endpoint),
+            refresh_token: Some("refresh-1".to_string()),
+            access_token: Some("old-token".to_string()),
+            token_type: Some("Bearer".to_string()),
+            expires_at: Some(now_unix() + 600),
+            oauth_flow: Some(OAuthFlow::AuthorizationCode),
+            ..Default::default()
+        });
+
+        let result = McpHttpTransport::probe_initialize_with_reason(&endpoint, Some(profile)).await;
+        assert!(matches!(result.unwrap(), ProbeInitializeOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn probe_initialize_oauth_401_refresh_failed_returns_auth_failed() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = format!("{}/mcp", server.url());
+        let token_endpoint = format!("{}/token", server.url());
+
+        let _first = server
+            .mock("POST", "/mcp")
+            .match_header("authorization", "Bearer old-token")
+            .with_status(401)
+            .with_body(r#"{"error":"invalid_token","error_description":"Invalid access token"}"#)
+            .create_async()
+            .await;
+        let _refresh = server
+            .mock("POST", "/token")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"invalid_grant","error_description":"bad grant"}"#)
+            .create_async()
+            .await;
+
+        let mut profile = Profile::new(String::new(), AuthType::OAuth);
+        profile.oauth = Some(OAuthProfile {
+            token_endpoint: Some(token_endpoint),
+            refresh_token: Some("refresh-1".to_string()),
+            access_token: Some("old-token".to_string()),
+            token_type: Some("Bearer".to_string()),
+            expires_at: Some(now_unix() + 600),
+            oauth_flow: Some(OAuthFlow::AuthorizationCode),
+            ..Default::default()
+        });
+
+        let result = McpHttpTransport::probe_initialize_with_reason(&endpoint, Some(profile)).await;
+        match result.unwrap() {
+            ProbeInitializeOutcome::AuthFailed(failure) => {
+                assert_eq!(failure.code, ProbeAuthFailureCode::OAuthRefreshFailed);
+                assert!(failure.message.contains("OAuth refresh failed"));
+            }
+            other => panic!("expected AuthFailed outcome, got {:?}", other),
+        }
     }
 
     // ===== Content Type Tests =====

@@ -9,6 +9,7 @@ pub mod types;
 
 use super::{Adapter, ExecutionResult, Operation, OperationDetail, ProtocolType};
 use crate::auth::Profile;
+use crate::error::UxcError;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 pub use client::McpStdioClient;
@@ -125,7 +126,7 @@ impl McpAdapter {
         candidates
     }
 
-    async fn resolve_http_endpoint(&self, url: &str) -> Option<String> {
+    async fn resolve_http_endpoint(&self, url: &str) -> Result<Option<String>> {
         let normalized = Self::normalize_http_url(url);
         {
             let mut diag = self.last_probe_diagnostics.write().await;
@@ -134,7 +135,7 @@ impl McpAdapter {
         {
             let cache = self.discovered_http_endpoints.read().await;
             if let Some(endpoint) = cache.get(&normalized) {
-                return Some(endpoint.clone());
+                return Ok(Some(endpoint.clone()));
             }
         }
 
@@ -149,7 +150,21 @@ impl McpAdapter {
                 Ok(http_transport::ProbeInitializeOutcome::Success) => {
                     let mut cache = self.discovered_http_endpoints.write().await;
                     cache.insert(normalized, candidate.clone());
-                    return Some(candidate);
+                    return Ok(Some(candidate));
+                }
+                Ok(http_transport::ProbeInitializeOutcome::AuthFailed(failure)) => {
+                    let detail = format!(
+                        "MCP authentication probe failed for {}: {}",
+                        candidate, failure.message
+                    );
+                    return match failure.code {
+                        http_transport::ProbeAuthFailureCode::OAuthRequired => {
+                            Err(UxcError::OAuthRequired(detail).into())
+                        }
+                        http_transport::ProbeAuthFailureCode::OAuthRefreshFailed => {
+                            Err(UxcError::OAuthRefreshFailed(detail).into())
+                        }
+                    };
                 }
                 Ok(http_transport::ProbeInitializeOutcome::NotMcp(reason)) => {
                     reasons.push(format!("{} => {}", candidate, reason));
@@ -163,7 +178,7 @@ impl McpAdapter {
             *diag = Some(reasons.join("; "));
         }
 
-        None
+        Ok(None)
     }
 
     pub async fn latest_probe_diagnostics(&self) -> Option<String> {
@@ -208,7 +223,7 @@ impl Adapter for McpAdapter {
         }
 
         if Self::is_http_url(url) {
-            return Ok(self.resolve_http_endpoint(url).await.is_some());
+            return Ok(self.resolve_http_endpoint(url).await?.is_some());
         }
 
         Ok(false)
@@ -267,7 +282,7 @@ impl Adapter for McpAdapter {
 
         // For HTTP-based MCP, connect and get server info
         if Self::is_http_url(url) {
-            let endpoint = self.resolve_http_endpoint(url).await.ok_or_else(|| {
+            let endpoint = self.resolve_http_endpoint(url).await?.ok_or_else(|| {
                 anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
             })?;
             let transport = McpHttpTransport::with_auth(endpoint, self.auth_profile.clone())?;
@@ -341,7 +356,7 @@ impl Adapter for McpAdapter {
 
         // For HTTP-based MCP
         if Self::is_http_url(url) {
-            let endpoint = self.resolve_http_endpoint(url).await.ok_or_else(|| {
+            let endpoint = self.resolve_http_endpoint(url).await?.ok_or_else(|| {
                 anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
             })?;
             let transport = McpHttpTransport::with_auth(endpoint, self.auth_profile.clone())?;
@@ -409,7 +424,7 @@ impl Adapter for McpAdapter {
 
         // For HTTP-based MCP
         if Self::is_http_url(url) {
-            let endpoint = self.resolve_http_endpoint(url).await.ok_or_else(|| {
+            let endpoint = self.resolve_http_endpoint(url).await?.ok_or_else(|| {
                 anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
             })?;
             let transport = McpHttpTransport::with_auth(endpoint, self.auth_profile.clone())?;
@@ -474,7 +489,7 @@ impl Adapter for McpAdapter {
 
         // For HTTP-based MCP
         if Self::is_http_url(url) {
-            let endpoint = self.resolve_http_endpoint(url).await.ok_or_else(|| {
+            let endpoint = self.resolve_http_endpoint(url).await?.ok_or_else(|| {
                 anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
             })?;
             let transport = McpHttpTransport::with_auth(endpoint, self.auth_profile.clone())?;
@@ -634,7 +649,11 @@ mod tests {
         let adapter = McpAdapter::new();
         assert!(adapter.can_handle(&server.url()).await.unwrap());
 
-        let resolved = adapter.resolve_http_endpoint(&server.url()).await.unwrap();
+        let resolved = adapter
+            .resolve_http_endpoint(&server.url())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(resolved.ends_with("/mcp"));
     }
 }

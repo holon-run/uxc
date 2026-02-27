@@ -273,7 +273,8 @@ impl Default for ProtocolDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{AuthType, Profile};
+    use crate::auth::{AuthType, OAuthFlow, OAuthProfile, Profile};
+    use crate::error::UxcError;
 
     #[tokio::test]
     async fn detector_uses_auth_profile_for_mcp_probe() {
@@ -365,5 +366,53 @@ mod tests {
             Ok(adapter) => assert!(!matches!(adapter, AdapterEnum::Mcp(_))),
             Err(_) => {}
         }
+    }
+
+    #[tokio::test]
+    async fn detector_surfaces_oauth_refresh_failure_from_mcp_probe() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = format!("{}/mcp", server.url());
+        let token_endpoint = format!("{}/token", server.url());
+
+        let _mcp = server
+            .mock("POST", "/mcp")
+            .match_header("authorization", "Bearer old-token")
+            .with_status(401)
+            .with_body(r#"{"error":"invalid_token","error_description":"Invalid access token"}"#)
+            .create_async()
+            .await;
+        let _refresh = server
+            .mock("POST", "/token")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"invalid_grant","error_description":"bad grant"}"#)
+            .create_async()
+            .await;
+
+        let mut profile = Profile::new(String::new(), AuthType::OAuth);
+        profile.oauth = Some(OAuthProfile {
+            token_endpoint: Some(token_endpoint),
+            refresh_token: Some("refresh-token".to_string()),
+            access_token: Some("old-token".to_string()),
+            token_type: Some("Bearer".to_string()),
+            expires_at: Some(i64::MAX),
+            oauth_flow: Some(OAuthFlow::AuthorizationCode),
+            ..Default::default()
+        });
+
+        let detector = ProtocolDetector::new();
+        let options = DetectionOptions {
+            schema_url: None,
+            auth_profile: Some(profile),
+        };
+
+        let result = detector.detect_adapter_with_options(&endpoint, &options).await;
+        assert!(result.is_err());
+        let err = result.err().expect("expected oauth refresh error");
+        let oauth_err = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<UxcError>());
+
+        assert!(matches!(oauth_err, Some(UxcError::OAuthRefreshFailed(_))));
     }
 }
