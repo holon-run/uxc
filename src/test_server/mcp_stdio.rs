@@ -77,7 +77,8 @@ pub fn run(scenario: Scenario) -> Result<()> {
                         "result": {
                             "protocolVersion": "2024-11-05",
                             "capabilities": {"tools": {"listChanged": false}},
-                            "serverInfo": {"name": "uxc-test-mcp-stdio", "version": "1.0.0"}
+                            "serverInfo": {"name": "uxc-test-mcp-stdio", "version": "1.0.0"},
+                            "instructions": "MCP stdio test server for local e2e"
                         }
                     }),
                 )?;

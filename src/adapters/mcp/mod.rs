@@ -209,6 +209,8 @@ impl Adapter for McpAdapter {
         if Self::is_stdio_command(url) {
             let (cmd, args) = Self::parse_stdio_command(url)?;
             let client = McpStdioClient::connect(&cmd, &args).await?;
+            let server_info = client.server_info().cloned();
+            let instructions = client.instructions().map(ToString::to_string);
 
             // Build schema from server capabilities
             let schema = serde_json::json!({
@@ -216,6 +218,8 @@ impl Adapter for McpAdapter {
                 "protocolVersion": "2024-11-05",
                 "transport": "stdio",
                 "command": cmd,
+                "serverInfo": server_info,
+                "instructions": instructions,
                 "capabilities": {
                     "tools": client.supports_tools(),
                     "resources": client.supports_resources(),
@@ -249,6 +253,7 @@ impl Adapter for McpAdapter {
                 "transport": "http",
                 "url": url,
                 "serverInfo": init_result.serverInfo,
+                "instructions": init_result.instructions,
                 "capabilities": init_result.capabilities
             });
 

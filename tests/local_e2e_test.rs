@@ -541,6 +541,38 @@ fn test_mcp_http_auth_required() {
 }
 
 #[test]
+fn test_mcp_http_host_help_includes_service_metadata() {
+    let _server = start_test_server("mcp-http", "ok");
+
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "help"]);
+    assert!(result.is_ok(), "Failed to run MCP HTTP help: {:?}", result);
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "host_help");
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["service"]["name"], "uxc-test-mcp-http");
+    assert_eq!(
+        json["data"]["service"]["description"],
+        "MCP HTTP test server for local e2e"
+    );
+}
+
+#[test]
+fn test_mcp_http_text_help_prints_service_summary() {
+    let _server = start_test_server("mcp-http", "ok");
+
+    let result = run_uxc(&["--text", &format!("http://{}", _server.addr), "help"]);
+    assert!(result.is_ok(), "Failed to run MCP HTTP help: {:?}", result);
+
+    let output = result.unwrap();
+    assert!(output.contains("Service:"));
+    assert!(output.contains("Name: uxc-test-mcp-http"));
+    assert!(output.contains("Description: MCP HTTP test server for local e2e"));
+}
+
+#[test]
 fn test_mcp_stdio_list_operations() {
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} ok", bin.display());

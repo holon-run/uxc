@@ -11,6 +11,8 @@ use std::sync::Arc;
 pub struct McpStdioClient {
     transport: McpStdioTransport,
     server_capabilities: Option<ServerCapabilities>,
+    server_info: Option<ServerInfo>,
+    instructions: Option<String>,
 }
 
 impl McpStdioClient {
@@ -55,6 +57,8 @@ impl McpStdioClient {
         Ok(Self {
             transport,
             server_capabilities: Some(init_result.capabilities),
+            server_info: init_result.serverInfo,
+            instructions: init_result.instructions,
         })
     }
 
@@ -80,6 +84,14 @@ impl McpStdioClient {
             .as_ref()
             .and_then(|c| c.prompts.as_ref())
             .is_some()
+    }
+
+    pub fn server_info(&self) -> Option<&ServerInfo> {
+        self.server_info.as_ref()
+    }
+
+    pub fn instructions(&self) -> Option<&str> {
+        self.instructions.as_deref()
     }
 
     /// List available tools

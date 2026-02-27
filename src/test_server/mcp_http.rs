@@ -67,7 +67,8 @@ async fn mcp_handler(
             "serverInfo": {
                 "name": "uxc-test-mcp-http",
                 "version": "1.0.0"
-            }
+            },
+            "instructions": "MCP HTTP test server for local e2e"
         }),
         "tools/list" => json!({
             "tools": [

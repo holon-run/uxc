@@ -392,6 +392,16 @@ struct HostHelpData {
     operations: Vec<OperationSummary>,
     count: usize,
     next: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service: Option<ServiceSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ServiceSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -762,6 +772,7 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
             let start = std::time::Instant::now();
             let operations = adapter.list_operations(&url).await?;
             let protocol = adapter.protocol_type().as_str();
+            let service = resolve_host_help_service(protocol, &url, &adapter).await;
             let duration_ms = start.elapsed().as_millis() as u64;
             let summaries = operations
                 .iter()
@@ -771,6 +782,7 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
                 count: summaries.len(),
                 operations: summaries,
                 next: host_help_next_commands(),
+                service,
             })?;
             OutputEnvelope::success("host_help", protocol, &url, None, data, Some(duration_ms))
         }
@@ -951,7 +963,13 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             let endpoint = envelope.endpoint.as_deref().unwrap_or("unknown");
             let protocol = envelope.protocol.as_deref().unwrap_or("unknown");
             let data: HostHelpData = decode_envelope_data(envelope)?;
-            print_host_help_text_from_summaries(protocol, endpoint, &data.operations, &data.next);
+            print_host_help_text_from_summaries(
+                protocol,
+                endpoint,
+                &data.operations,
+                &data.next,
+                &data.service,
+            );
             Ok(())
         }
         Some("operation_list") => {
@@ -1373,14 +1391,63 @@ fn host_help_next_commands() -> Vec<String> {
     ]
 }
 
+async fn resolve_host_help_service(
+    protocol: &str,
+    endpoint: &str,
+    adapter: &dyn Adapter,
+) -> Option<ServiceSummary> {
+    if protocol != "mcp" {
+        return None;
+    }
+
+    let schema = match adapter.fetch_schema(endpoint).await {
+        Ok(schema) => schema,
+        Err(err) => {
+            tracing::debug!(
+                "Failed to fetch schema for host_help service metadata (endpoint={}): {}",
+                endpoint,
+                err
+            );
+            return None;
+        }
+    };
+
+    let name = schema
+        .get("serverInfo")
+        .and_then(|v| v.get("name"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let description = schema
+        .get("instructions")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    if name.is_none() && description.is_none() {
+        return None;
+    }
+
+    Some(ServiceSummary { name, description })
+}
+
 fn print_host_help_text_from_summaries(
     protocol: &str,
     endpoint: &str,
     operations: &[OperationSummary],
     next: &[String],
+    service: &Option<ServiceSummary>,
 ) {
     println!("Protocol: {}", protocol);
     println!("Endpoint: {}", endpoint);
+    if let Some(service) = service {
+        println!();
+        println!("Service:");
+        if let Some(name) = &service.name {
+            println!("  Name: {}", name);
+        }
+        if let Some(description) = &service.description {
+            println!("  Description: {}", description);
+        }
+    }
     println!();
     println!("Available operations:");
     for op in operations {
