@@ -133,7 +133,7 @@ fn call_operation_uses_positional_params() {
     let output = uxc_command()
         .arg(server.url())
         .arg("subtract")
-        .arg("--json")
+        .arg("--input-json")
         .arg(r#"{"minuend":42,"subtrahend":23}"#)
         .output()
         .expect("failed to run uxc");

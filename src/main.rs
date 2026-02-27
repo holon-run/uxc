@@ -156,11 +156,15 @@ enum Commands {
         args: Vec<String>,
 
         /// JSON input payload
-        #[arg(long)]
-        json: Option<String>,
+        #[arg(long = "input-json")]
+        input_json: Option<String>,
+
+        /// Positional input (`key=value` or a single JSON object payload)
+        #[arg(value_name = "INPUT")]
+        input: Option<String>,
     },
 
-    /// Dynamic operation execution: `uxc <url> <operation_id> [--json ...] [--args k=v]`
+    /// Dynamic operation execution: `uxc <url> <operation_id> [--input-json ...] [--args k=v]`
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -369,7 +373,7 @@ enum EndpointCommand {
     Execute {
         operation_id: String,
         args: Vec<String>,
-        json: Option<String>,
+        input_json: Option<String>,
     },
 }
 
@@ -769,7 +773,7 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
                 next: vec![
                     "uxc <host> list".to_string(),
                     "uxc <host> describe <operation_id>".to_string(),
-                    "uxc <host> call <operation_id> --json '{...}'".to_string(),
+                    "uxc <host> call <operation_id> --input-json '{...}'".to_string(),
                 ],
             })?;
             OutputEnvelope::success("host_help", protocol, &url, None, data, Some(duration_ms))
@@ -838,9 +842,9 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
         EndpointCommand::Execute {
             operation_id,
             args,
-            json,
+            input_json,
         } => {
-            let args_map = parse_arguments(args, json)?;
+            let args_map = parse_arguments(args, input_json)?;
             let result = adapter.execute(&url, &operation_id, args_map).await?;
             let protocol = adapter.protocol_type().as_str();
             OutputEnvelope::success(
@@ -1169,12 +1173,22 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
         Some(Commands::Call {
             operation_id,
             args,
-            json,
-        }) => Ok(EndpointCommand::Execute {
-            operation_id: operation_id.clone(),
-            args: args.clone(),
-            json: json.clone(),
-        }),
+            input_json,
+            input,
+        }) => {
+            let positional = input.clone().into_iter().collect::<Vec<_>>();
+            let (resolved_args, resolved_input_json) = normalize_operation_inputs(
+                operation_id,
+                args.clone(),
+                input_json.clone(),
+                &positional,
+            )?;
+            Ok(EndpointCommand::Execute {
+                operation_id: operation_id.clone(),
+                args: resolved_args,
+                input_json: resolved_input_json,
+            })
+        }
         Some(Commands::External(tokens)) => parse_external_command(tokens, cli.help),
         Some(Commands::Cache { .. })
         | Some(Commands::Auth { .. })
@@ -1207,7 +1221,8 @@ fn parse_external_command(tokens: &[String], global_help: bool) -> Result<Endpoi
     }
 
     let mut args = Vec::new();
-    let mut json_payload = None;
+    let mut input_json = None;
+    let mut positional = Vec::new();
     let mut idx = 1;
 
     while idx < tokens.len() {
@@ -1222,19 +1237,22 @@ fn parse_external_command(tokens: &[String], global_help: bool) -> Result<Endpoi
                 })?;
                 args.push(arg.clone());
             }
-            "--json" => {
+            "--input-json" => {
                 idx += 1;
                 let payload = tokens.get(idx).ok_or_else(|| {
-                    UxcError::InvalidArguments("Missing value for --json".to_string())
+                    UxcError::InvalidArguments("Missing value for --input-json".to_string())
                 })?;
-                json_payload = Some(payload.clone());
+                input_json = Some(payload.clone());
             }
             token if token.contains('=') && !token.starts_with('-') => {
                 args.push(token.to_string());
             }
+            token if !token.starts_with('-') => {
+                positional.push(token.to_string());
+            }
             unknown => {
                 return Err(UxcError::InvalidArguments(format!(
-                    "Unknown argument '{}' for operation '{}'. Use --json or --args",
+                    "Unknown argument '{}' for operation '{}'. Use --input-json or --args",
                     unknown, operation_id
                 ))
                 .into());
@@ -1244,20 +1262,74 @@ fn parse_external_command(tokens: &[String], global_help: bool) -> Result<Endpoi
         idx += 1;
     }
 
+    let (args, input_json) =
+        normalize_operation_inputs(&operation_id, args, input_json, &positional)?;
+
     Ok(EndpointCommand::Execute {
         operation_id,
         args,
-        json: json_payload,
+        input_json,
     })
+}
+
+fn normalize_operation_inputs(
+    operation_id: &str,
+    mut args: Vec<String>,
+    explicit_input_json: Option<String>,
+    positional: &[String],
+) -> Result<(Vec<String>, Option<String>)> {
+    let mut bare_json_payload = None;
+
+    for token in positional {
+        if token.contains('=') && !token.starts_with('-') {
+            args.push(token.clone());
+            continue;
+        }
+
+        if token.starts_with('-') {
+            return Err(UxcError::InvalidArguments(format!(
+                "Unknown argument '{}' for operation '{}'. Use --input-json or --args",
+                token, operation_id
+            ))
+            .into());
+        }
+
+        if bare_json_payload.is_some() {
+            return Err(UxcError::InvalidArguments(format!(
+                "Unexpected argument '{}' for operation '{}'",
+                token, operation_id
+            ))
+            .into());
+        }
+
+        if serde_json::from_str::<Value>(token).is_err() {
+            return Err(UxcError::InvalidArguments(format!(
+                "Unknown argument '{}' for operation '{}'. Use --input-json or --args",
+                token, operation_id
+            ))
+            .into());
+        }
+
+        bare_json_payload = Some(token.clone());
+    }
+
+    if explicit_input_json.is_some() && bare_json_payload.is_some() {
+        return Err(UxcError::InvalidArguments(
+            "Cannot provide both --input-json and positional JSON payload".to_string(),
+        )
+        .into());
+    }
+
+    Ok((args, explicit_input_json.or(bare_json_payload)))
 }
 
 fn parse_arguments(
     args: Vec<String>,
-    json_payload: Option<String>,
+    input_json: Option<String>,
 ) -> Result<HashMap<String, Value>> {
     let mut args_map = HashMap::new();
 
-    if let Some(json_str) = json_payload {
+    if let Some(json_str) = input_json {
         let value: Value = serde_json::from_str(&json_str)
             .map_err(|e| UxcError::InvalidArguments(format!("Invalid JSON payload: {}", e)))?;
         if let Some(obj) = value.as_object() {
