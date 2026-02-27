@@ -419,12 +419,10 @@ impl McpHttpTransport {
                     return Ok(ProbeInitializeOutcome::NotMcp(reason));
                 }
 
-                let Some(profile) = auth_profile.as_mut() else {
-                    return Ok(ProbeInitializeOutcome::AuthFailed(ProbeAuthFailure {
-                        code: ProbeAuthFailureCode::OAuthRequired,
-                        message: "MCP probe received unauthorized response and no auth profile was available".to_string(),
-                    }));
-                };
+                // Safe to expect: when `is_oauth` is true, `auth_profile` must be `Some`.
+                let profile = auth_profile
+                    .as_mut()
+                    .expect("oauth probe path requires auth profile");
 
                 if let Err(err) = oauth::refresh_oauth_profile(profile, &client).await {
                     return Ok(Self::probe_auth_failure_from_refresh_error(err));
