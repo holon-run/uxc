@@ -44,13 +44,18 @@ Login with Authorization Code + PKCE:
 uxc auth oauth login <credential_id> \
   --endpoint <mcp_url> \
   --flow authorization_code \
-  --client-id <client_id> \
   --redirect-uri <redirect_uri> \
   --scope "openid profile"
 ```
 
 Use `--authorization-code` to provide the code directly, or run interactively and paste the
 authorization code / callback URL when prompted.
+
+Notes:
+- `--client-id` is optional for `authorization_code`.
+- When omitted, `uxc` will attempt OAuth Dynamic Client Registration via provider
+  `registration_endpoint` (RFC 7591).
+- If provider does not expose registration, pass `--client-id` explicitly.
 
 Refresh token manually:
 

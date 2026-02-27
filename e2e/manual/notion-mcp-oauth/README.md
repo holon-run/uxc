@@ -26,10 +26,13 @@ Verify OAuth login and MCP calls against Notion MCP using `authorization_code` f
 target/debug/uxc auth oauth login notion-mcp-oauth \
   --endpoint https://mcp.notion.com/mcp \
   --flow authorization_code \
-  --client-id <notion_client_id> \
   --redirect-uri http://127.0.0.1:8788/callback \
   --scope "read write"
 ```
+
+Notes:
+- `--client-id` can be omitted to use dynamic client registration.
+- If your workspace policy requires pre-created OAuth apps, pass `--client-id` explicitly.
 
 2. Open the printed authorization URL and complete consent.
 

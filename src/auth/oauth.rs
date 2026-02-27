@@ -19,6 +19,7 @@ pub struct OAuthProviderMetadata {
     pub resource_metadata_url: Option<String>,
     pub authorization_server: Option<String>,
     pub authorization_endpoint: Option<String>,
+    pub registration_endpoint: Option<String>,
     pub token_endpoint: String,
     pub device_authorization_endpoint: Option<String>,
 }
@@ -40,6 +41,13 @@ pub struct OAuthTokenResponse {
 pub struct OAuthLoginResult {
     pub metadata: OAuthProviderMetadata,
     pub token: OAuthTokenResponse,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorizationCodeLoginResult {
+    pub login: OAuthLoginResult,
+    pub client_id: String,
+    pub client_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +76,8 @@ struct OpenIdConfiguration {
     issuer: Option<String>,
     #[serde(default)]
     authorization_endpoint: Option<String>,
+    #[serde(default)]
+    registration_endpoint: Option<String>,
     token_endpoint: String,
     #[serde(default)]
     device_authorization_endpoint: Option<String>,
@@ -79,6 +89,8 @@ struct AuthorizationServerMetadata {
     issuer: Option<String>,
     #[serde(default)]
     authorization_endpoint: Option<String>,
+    #[serde(default)]
+    registration_endpoint: Option<String>,
     token_endpoint: String,
     #[serde(default)]
     device_authorization_endpoint: Option<String>,
@@ -202,6 +214,14 @@ pub async fn discover_provider_metadata(
                 .as_ref()
                 .and_then(|config| config.authorization_endpoint.clone())
         });
+    let registration_endpoint = authorization_server_metadata
+        .as_ref()
+        .and_then(|meta| meta.registration_endpoint.clone())
+        .or_else(|| {
+            openid
+                .as_ref()
+                .and_then(|config| config.registration_endpoint.clone())
+        });
 
     let provider_issuer = authorization_server_metadata
         .as_ref()
@@ -221,6 +241,7 @@ pub async fn discover_provider_metadata(
         resource_metadata_url,
         authorization_server: Some(issuer),
         authorization_endpoint,
+        registration_endpoint,
         token_endpoint,
         device_authorization_endpoint,
     })
@@ -229,18 +250,22 @@ pub async fn discover_provider_metadata(
 pub async fn login_with_authorization_code(
     endpoint: &str,
     client: &Client,
-    client_id: &str,
+    client_id: Option<&str>,
     client_secret: Option<&str>,
     scopes: &[String],
     redirect_uri: &str,
     authorization_code: Option<String>,
-) -> Result<OAuthLoginResult> {
+) -> Result<AuthorizationCodeLoginResult> {
     let metadata = discover_provider_metadata(endpoint, client).await?;
     let authorization_endpoint = metadata.authorization_endpoint.clone().ok_or_else(|| {
         UxcError::OAuthDiscoveryFailed(
             "OAuth provider does not expose authorization_endpoint".to_string(),
         )
     })?;
+    let (resolved_client_id, resolved_client_secret) = match client_id {
+        Some(id) => (id.to_string(), client_secret.map(|s| s.to_string())),
+        None => dynamic_client_registration(&metadata, client, redirect_uri, scopes).await?,
+    };
 
     let state = random_urlsafe(24)?;
     let code_verifier = random_urlsafe(64)?;
@@ -252,7 +277,7 @@ pub async fn login_with_authorization_code(
     };
     let authorize_url = build_authorize_url(
         &authorization_endpoint,
-        client_id,
+        &resolved_client_id,
         redirect_uri,
         scope_value.as_deref(),
         &state,
@@ -289,17 +314,108 @@ pub async fn login_with_authorization_code(
     form.insert("grant_type", "authorization_code".to_string());
     form.insert("code", code);
     form.insert("redirect_uri", redirect_uri.to_string());
-    form.insert("client_id", client_id.to_string());
+    form.insert("client_id", resolved_client_id.clone());
     form.insert("code_verifier", code_verifier);
-    if let Some(secret) = client_secret {
-        form.insert("client_secret", secret.to_string());
+    if let Some(secret) = resolved_client_secret.clone() {
+        form.insert("client_secret", secret);
     }
 
     let token = exchange_token(client, &metadata.token_endpoint, &form)
         .await
         .map_err(|err| UxcError::OAuthTokenExchangeFailed(err.to_string()))?;
 
-    Ok(OAuthLoginResult { metadata, token })
+    Ok(AuthorizationCodeLoginResult {
+        login: OAuthLoginResult { metadata, token },
+        client_id: resolved_client_id,
+        client_secret: resolved_client_secret,
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DynamicClientRegistrationRequest {
+    client_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_uri: Option<String>,
+    redirect_uris: Vec<String>,
+    grant_types: Vec<String>,
+    response_types: Vec<String>,
+    token_endpoint_auth_method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DynamicClientRegistrationResponse {
+    client_id: String,
+    #[serde(default)]
+    client_secret: Option<String>,
+}
+
+async fn dynamic_client_registration(
+    metadata: &OAuthProviderMetadata,
+    client: &Client,
+    redirect_uri: &str,
+    scopes: &[String],
+) -> Result<(String, Option<String>)> {
+    let registration_endpoint = metadata.registration_endpoint.clone().ok_or_else(|| {
+        UxcError::OAuthDiscoveryFailed(
+            "OAuth provider does not expose registration_endpoint and --client-id was not provided"
+                .to_string(),
+        )
+    })?;
+
+    let request = DynamicClientRegistrationRequest {
+        client_name: "uxc".to_string(),
+        client_uri: Some(env!("CARGO_PKG_HOMEPAGE").to_string()),
+        redirect_uris: vec![redirect_uri.to_string()],
+        grant_types: vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ],
+        response_types: vec!["code".to_string()],
+        token_endpoint_auth_method: "none".to_string(),
+        scope: if scopes.is_empty() {
+            None
+        } else {
+            Some(scopes.join(" "))
+        },
+    };
+
+    let response = client
+        .post(&registration_endpoint)
+        .header("Accept", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to call dynamic client registration endpoint: {}",
+                registration_endpoint
+            )
+        })?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("Failed to read dynamic client registration response body")?;
+
+    if !status.is_success() {
+        return Err(UxcError::OAuthTokenExchangeFailed(format!(
+            "Dynamic client registration failed: {} {}",
+            status, body
+        ))
+        .into());
+    }
+
+    let result: DynamicClientRegistrationResponse = serde_json::from_str(&body).map_err(|err| {
+        UxcError::OAuthTokenExchangeFailed(format!(
+            "Failed to decode dynamic client registration response: {}",
+            err
+        ))
+    })?;
+
+    Ok((result.client_id, result.client_secret))
 }
 
 pub async fn login_with_client_credentials(
@@ -1015,6 +1131,26 @@ mod tests {
     fn endpoint_origin_extracts_host_and_scheme() {
         let origin = endpoint_origin("https://mcp.notion.com/mcp").unwrap();
         assert_eq!(origin, "https://mcp.notion.com");
+    }
+
+    #[test]
+    fn dynamic_registration_request_uses_expected_defaults() {
+        let req = DynamicClientRegistrationRequest {
+            client_name: "uxc".to_string(),
+            client_uri: Some("https://example.com".to_string()),
+            redirect_uris: vec!["http://127.0.0.1/callback".to_string()],
+            grant_types: vec![
+                "authorization_code".to_string(),
+                "refresh_token".to_string(),
+            ],
+            response_types: vec!["code".to_string()],
+            token_endpoint_auth_method: "none".to_string(),
+            scope: Some("read write".to_string()),
+        };
+        let json = serde_json::to_value(req).unwrap();
+        assert_eq!(json["token_endpoint_auth_method"], "none");
+        assert_eq!(json["grant_types"][0], "authorization_code");
+        assert_eq!(json["grant_types"][1], "refresh_token");
     }
 
     #[test]

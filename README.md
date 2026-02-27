@@ -608,10 +608,12 @@ uxc auth oauth login mcp-ci \
 uxc auth oauth login notion-mcp \
   --endpoint https://mcp.notion.com/mcp \
   --flow authorization_code \
-  --client-id your-client-id \
   --redirect-uri http://127.0.0.1:8788/callback \
   --scope "read write"
 ```
+
+`--client-id` is optional for `authorization_code`. If omitted, `uxc` will try dynamic client
+registration from provider metadata.
 
 Manual management commands:
 

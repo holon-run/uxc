@@ -2036,11 +2036,6 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                     )
                 }
                 OAuthFlow::AuthorizationCode => {
-                    let client_id = client_id.clone().ok_or_else(|| {
-                        UxcError::InvalidArguments(
-                            "authorization_code flow requires --client-id".to_string(),
-                        )
-                    })?;
                     let redirect_uri = redirect_uri.clone().ok_or_else(|| {
                         UxcError::InvalidArguments(
                             "authorization_code flow requires --redirect-uri".to_string(),
@@ -2049,7 +2044,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                     let login = auth::oauth::login_with_authorization_code(
                         endpoint,
                         &client,
-                        &client_id,
+                        client_id.as_deref(),
                         client_secret.as_deref(),
                         &scopes,
                         &redirect_uri,
@@ -2057,10 +2052,10 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                     )
                     .await?;
                     (
-                        login.metadata,
-                        login.token,
-                        Some(client_id),
-                        client_secret.clone(),
+                        login.login.metadata,
+                        login.login.token,
+                        Some(login.client_id),
+                        login.client_secret,
                     )
                 }
                 OAuthFlow::ClientCredentials => {
