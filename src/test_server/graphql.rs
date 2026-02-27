@@ -43,8 +43,20 @@ fn extract_inline_arg(query: &str, arg_name: &str) -> Option<String> {
     let rest = query[marker_pos + marker.len()..].trim_start();
 
     if let Some(stripped) = rest.strip_prefix('"') {
-        let end = stripped.find('"')?;
-        return Some(stripped[..end].to_string());
+        // Find an unescaped closing quote, so strings like
+        // "Alice \"Bob\"" are parsed as a single argument value.
+        let mut prev_was_backslash = false;
+        for (idx, ch) in stripped.char_indices() {
+            if ch == '"' && !prev_was_backslash {
+                return Some(stripped[..idx].to_string());
+            }
+            if ch == '\\' {
+                prev_was_backslash = !prev_was_backslash;
+            } else {
+                prev_was_backslash = false;
+            }
+        }
+        return None;
     }
 
     let end = rest
@@ -55,6 +67,19 @@ fn extract_inline_arg(query: &str, arg_name: &str) -> Option<String> {
         None
     } else {
         Some(token.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_inline_arg;
+
+    #[test]
+    fn extract_inline_arg_handles_escaped_quotes() {
+        let query =
+            r#"mutation { createUser(name: "Alice \"Bob\"", email: "alice@example.com") { id } }"#;
+        let value = extract_inline_arg(query, "name");
+        assert_eq!(value.as_deref(), Some(r#"Alice \"Bob\""#));
     }
 }
 
