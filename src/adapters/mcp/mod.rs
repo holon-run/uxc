@@ -26,6 +26,13 @@ pub struct McpAdapter {
     auth_profile: Option<Profile>,
     discovered_http_endpoints: Arc<RwLock<HashMap<String, String>>>,
     last_probe_diagnostics: Arc<RwLock<Option<String>>>,
+    service_metadata: Arc<RwLock<HashMap<String, McpServiceMetadata>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct McpServiceMetadata {
+    pub name: Option<String>,
+    pub description: Option<String>,
 }
 
 impl McpAdapter {
@@ -35,6 +42,7 @@ impl McpAdapter {
             auth_profile: None,
             discovered_http_endpoints: Arc::new(RwLock::new(HashMap::new())),
             last_probe_diagnostics: Arc::new(RwLock::new(None)),
+            service_metadata: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -161,6 +169,24 @@ impl McpAdapter {
     pub async fn latest_probe_diagnostics(&self) -> Option<String> {
         self.last_probe_diagnostics.read().await.clone()
     }
+
+    async fn cache_service_metadata(
+        &self,
+        url: &str,
+        server_info: Option<&types::ServerInfo>,
+        instructions: Option<&str>,
+    ) {
+        let metadata = McpServiceMetadata {
+            name: server_info.map(|info| info.name.clone()),
+            description: instructions.map(ToString::to_string),
+        };
+        let mut map = self.service_metadata.write().await;
+        map.insert(url.to_string(), metadata);
+    }
+
+    pub async fn service_metadata_for(&self, url: &str) -> Option<McpServiceMetadata> {
+        self.service_metadata.read().await.get(url).cloned()
+    }
 }
 
 impl Default for McpAdapter {
@@ -284,6 +310,8 @@ impl Adapter for McpAdapter {
         if Self::is_stdio_command(url) {
             let (cmd, args) = Self::parse_stdio_command(url)?;
             let mut client = McpStdioClient::connect(&cmd, &args).await?;
+            self.cache_service_metadata(url, client.server_info(), client.instructions())
+                .await;
 
             // List tools as operations
             let tools = client.list_tools().await?;
@@ -317,7 +345,13 @@ impl Adapter for McpAdapter {
                 anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
             })?;
             let transport = McpHttpTransport::with_auth(endpoint, self.auth_profile.clone())?;
-            transport.initialize().await?;
+            let init_result = transport.initialize().await?;
+            self.cache_service_metadata(
+                url,
+                init_result.serverInfo.as_ref(),
+                init_result.instructions.as_deref(),
+            )
+            .await;
             let tools = transport.list_tools().await?;
 
             let operations = tools

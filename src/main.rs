@@ -22,7 +22,9 @@ mod http_client;
 mod output;
 mod schema_mapping;
 
-use adapters::{Adapter, DetectionOptions, Operation, OperationDetail, ProtocolDetector};
+use adapters::{
+    Adapter, AdapterEnum, DetectionOptions, Operation, OperationDetail, ProtocolDetector,
+};
 use auth::{AuthBindingRule, AuthBindings, AuthType, OAuthFlow, Profile, Profiles};
 use cache::CacheConfig;
 use error::UxcError;
@@ -772,7 +774,7 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
             let start = std::time::Instant::now();
             let operations = adapter.list_operations(&url).await?;
             let protocol = adapter.protocol_type().as_str();
-            let service = resolve_host_help_service(protocol, &url, &adapter).await;
+            let service = resolve_host_help_service(&adapter, protocol, &url).await;
             let duration_ms = start.elapsed().as_millis() as u64;
             let summaries = operations
                 .iter()
@@ -1316,10 +1318,17 @@ fn normalize_operation_inputs(
             .into());
         }
 
-        if serde_json::from_str::<Value>(token).is_err() {
-            return Err(UxcError::InvalidArguments(format!(
+        let parsed = serde_json::from_str::<Value>(token).map_err(|_| {
+            UxcError::InvalidArguments(format!(
                 "Unknown argument '{}' for operation '{}'. Use --input-json or --args",
                 token, operation_id
+            ))
+        })?;
+
+        if !parsed.is_object() {
+            return Err(UxcError::InvalidArguments(format!(
+                "Positional JSON payload for operation '{}' must be an object",
+                operation_id
             ))
             .into());
         }
@@ -1392,41 +1401,23 @@ fn host_help_next_commands() -> Vec<String> {
 }
 
 async fn resolve_host_help_service(
+    adapter: &AdapterEnum,
     protocol: &str,
     endpoint: &str,
-    adapter: &dyn Adapter,
 ) -> Option<ServiceSummary> {
-    if protocol != "mcp" {
-        return None;
-    }
-
-    let schema = match adapter.fetch_schema(endpoint).await {
-        Ok(schema) => schema,
-        Err(err) => {
-            tracing::debug!(
-                "Failed to fetch schema for host_help service metadata (endpoint={}): {}",
-                endpoint,
-                err
-            );
-            return None;
+    if protocol == "mcp" {
+        if let AdapterEnum::Mcp(mcp_adapter) = adapter {
+            if let Some(metadata) = mcp_adapter.service_metadata_for(endpoint).await {
+                if metadata.name.is_some() || metadata.description.is_some() {
+                    return Some(ServiceSummary {
+                        name: metadata.name,
+                        description: metadata.description,
+                    });
+                }
+            }
         }
-    };
-
-    let name = schema
-        .get("serverInfo")
-        .and_then(|v| v.get("name"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-    let description = schema
-        .get("instructions")
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-
-    if name.is_none() && description.is_none() {
-        return None;
     }
-
-    Some(ServiceSummary { name, description })
+    None
 }
 
 fn print_host_help_text_from_summaries(
