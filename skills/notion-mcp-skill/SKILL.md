@@ -8,6 +8,7 @@ description: Operate Notion workspace content through Notion MCP using the UXC C
 Use this skill to run Notion MCP operations through `uxc` with OAuth and guarded write behavior.
 
 Always use the `uxc` skill (trigger: `$uxc`) as the execution layer for discovery, schema inspection, and tool calls.
+For OAuth lifecycle and error recovery, follow `$uxc` skill guidance (OAuth and Binding + Error Handling sections).
 
 ## Prerequisites
 
@@ -16,16 +17,15 @@ Always use the `uxc` skill (trigger: `$uxc`) as the execution layer for discover
 - OAuth callback listener is reachable (default examples use `http://127.0.0.1:8788/callback`).
 - `uxc` skill is available for generic discovery/describe/execute patterns.
 
-## Core Workflow
+## Core Workflow (Notion-Specific)
 
-1. Check local auth state first (cache-safe):
+1. Ensure endpoint mapping exists:
    - `uxc auth binding match https://mcp.notion.com/mcp`
-   - If binding match is valid, continue with normal calls.
-2. If local check fails due to auth, run OAuth authorization code flow (dynamic client registration first):
+2. If mapping/auth is not ready, start OAuth login:
    - `uxc auth oauth login notion-mcp --endpoint https://mcp.notion.com/mcp --flow authorization_code --redirect-uri http://127.0.0.1:8788/callback --scope read --scope write`
    - Prompt user to open the printed authorization URL.
    - Ask user to paste the full callback URL after consent.
-3. Bind endpoint to the credential (so runtime can auto-match auth):
+3. Bind endpoint to the credential:
    - `uxc auth binding add --id notion-mcp --host mcp.notion.com --path-prefix /mcp --scheme https --credential notion-mcp --priority 100`
 4. Recommend creating a local shortcut command for repeated calls:
    - `uxc link notion-mcp-cli https://mcp.notion.com/mcp`
@@ -61,13 +61,13 @@ Do not ask user to manually extract or copy bearer tokens. Token exchange is han
 - Call `notion-fetch` before `notion-create-pages` or `notion-update-page` when targeting database-backed content to obtain exact schema/property names.
 - Treat operations as high impact by default:
   - Require explicit user confirmation before create/update/move/delete-style actions.
-- If OAuth fails, follow structured error handling in `references/error-handling.md`.
+- If OAuth/auth fails, use `$uxc` skill OAuth/error playbooks first, then apply Notion-specific checks in this skill's references.
 
 ## References
 
-- OAuth and credential/binding setup:
+- Notion-specific auth notes (thin wrapper over `$uxc` OAuth guidance):
   - `references/oauth-and-binding.md`
 - Invocation patterns by task:
   - `references/usage-patterns.md`
-- Failure handling and retry guidance:
+- Notion-specific failure notes (thin wrapper over `$uxc` error guidance):
   - `references/error-handling.md`

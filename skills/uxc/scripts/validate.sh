@@ -24,6 +24,7 @@ required_files=(
   "${SKILL_DIR}/references/usage-patterns.md"
   "${SKILL_DIR}/references/protocol-cheatsheet.md"
   "${SKILL_DIR}/references/public-endpoints.md"
+  "${SKILL_DIR}/references/oauth-and-binding.md"
   "${SKILL_DIR}/references/error-handling.md"
 )
 
@@ -87,6 +88,7 @@ for rel in \
   "references/usage-patterns.md" \
   "references/protocol-cheatsheet.md" \
   "references/public-endpoints.md" \
+  "references/oauth-and-binding.md" \
   "references/error-handling.md"; do
   if ! rg -q "${rel}" "${SKILL_FILE}"; then
     echo "SKILL.md must reference ${rel}"

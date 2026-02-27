@@ -70,6 +70,18 @@ for rel in \
   fi
 done
 
+if ! rg -q '\$uxc' "${SKILL_FILE}"; then
+  fail "SKILL.md must explicitly reference the $uxc skill for shared OAuth/error guidance"
+fi
+
+if ! rg -q 'canonical OAuth and binding workflow, use `\$uxc` skill' "${SKILL_DIR}/references/oauth-and-binding.md"; then
+  fail "oauth-and-binding.md must be a thin wrapper pointing to $uxc guidance"
+fi
+
+if ! rg -q 'canonical error taxonomy and OAuth recovery playbooks, use `\$uxc` skill' "${SKILL_DIR}/references/error-handling.md"; then
+  fail "error-handling.md must be a thin wrapper pointing to $uxc guidance"
+fi
+
 if ! rg -q '^\s*display_name:\s*"Notion MCP"\s*$' "${OPENAI_FILE}"; then
   fail "agents/openai.yaml must define interface.display_name"
 fi

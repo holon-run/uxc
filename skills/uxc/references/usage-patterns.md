@@ -65,6 +65,30 @@ uxc <host> help
 
 Use this when you need quick discovery context before full `list` + `describe`.
 
+## Auth-Protected Flow
+
+1. Confirm mapping:
+
+```bash
+uxc auth binding match <endpoint_url>
+```
+
+2. Run intended read call directly (use as runtime validation).
+
+3. If auth fails, recover in order:
+
+```bash
+uxc auth oauth info <credential_id>
+uxc auth oauth refresh <credential_id>
+uxc auth oauth login <credential_id> --endpoint <endpoint_url> --flow authorization_code
+```
+
+4. If multiple bindings match, verify explicit credential:
+
+```bash
+uxc --auth <credential_id> <endpoint_url> <operation> --input-json '{...}'
+```
+
 ## Automation Safety Rules
 
 - Keep JSON as default output for machine parsing.

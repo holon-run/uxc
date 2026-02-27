@@ -63,6 +63,8 @@ For more options, see the [Installation](https://github.com/holon-run/uxc#instal
    - Failure: `.ok == false`, inspect `.error.code` and `.error.message`
 5. If operation name conflicts with keywords such as `help`/`list`, use explicit form:
    - `uxc <host> call <operation> --input-json '<payload-json>'`
+6. For auth-protected endpoints, follow the OAuth and binding workflow:
+   - see `references/oauth-and-binding.md`
 
 ## Input Modes
 
@@ -106,5 +108,7 @@ Default output is JSON. Do not use `--text` in agent automation paths.
   - `references/protocol-cheatsheet.md`
 - Public endpoint examples and availability notes:
   - `references/public-endpoints.md`
+- OAuth and credential/binding lifecycle:
+  - `references/oauth-and-binding.md`
 - Failure handling and retry strategy:
   - `references/error-handling.md`
