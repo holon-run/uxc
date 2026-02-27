@@ -928,35 +928,35 @@ fn read_authorization_code_from_stdin() -> Option<String> {
     }
 }
 
+/// Extract code and state parameters from a URL's query string.
+/// Returns Some((code, state)) if code is found, None otherwise.
+fn extract_code_and_state_from_query(url: &Url) -> Option<(String, Option<String>)> {
+    let mut code: Option<String> = None;
+    let mut state: Option<String> = None;
+    for (k, v) in url.query_pairs() {
+        if k == "code" {
+            code = Some(v.to_string());
+        } else if k == "state" {
+            state = Some(v.to_string());
+        }
+    }
+    code.map(|c| (c, state))
+}
+
 fn parse_authorization_code_input(input: &str) -> Option<(String, Option<String>)> {
     if let Some((_, query)) = input.split_once('?') {
+        // Try parsing as a full URL first
         if let Ok(url) = Url::parse(input) {
-            let mut code: Option<String> = None;
-            let mut state: Option<String> = None;
-            for (k, v) in url.query_pairs() {
-                if k == "code" {
-                    code = Some(v.to_string());
-                } else if k == "state" {
-                    state = Some(v.to_string());
-                }
-            }
-            return code.map(|c| (c, state));
+            return extract_code_and_state_from_query(&url);
         }
+        // Fallback: parse as query string only
         let url_like = format!("https://placeholder.local/?{}", query);
         if let Ok(url) = Url::parse(&url_like) {
-            let mut code: Option<String> = None;
-            let mut state: Option<String> = None;
-            for (k, v) in url.query_pairs() {
-                if k == "code" {
-                    code = Some(v.to_string());
-                } else if k == "state" {
-                    state = Some(v.to_string());
-                }
-            }
-            return code.map(|c| (c, state));
+            return extract_code_and_state_from_query(&url);
         }
     }
 
+    // Plain code input (no query string)
     Some((input.trim().to_string(), None))
 }
 
@@ -1111,6 +1111,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_authorization_code_input_supports_query_string_only() {
+        let parsed = parse_authorization_code_input("?code=abc123&state=xyz").unwrap();
+        assert_eq!(parsed.0, "abc123");
+        assert_eq!(parsed.1.as_deref(), Some("xyz"));
+    }
+
+    #[test]
     fn build_authorize_url_includes_pkce_params() {
         let url = build_authorize_url(
             "https://example.com/authorize",
@@ -1131,6 +1138,12 @@ mod tests {
     fn endpoint_origin_extracts_host_and_scheme() {
         let origin = endpoint_origin("https://mcp.notion.com/mcp").unwrap();
         assert_eq!(origin, "https://mcp.notion.com");
+    }
+
+    #[test]
+    fn endpoint_origin_preserves_non_standard_port() {
+        let origin = endpoint_origin("https://mcp.example.com:8443/mcp").unwrap();
+        assert_eq!(origin, "https://mcp.example.com:8443");
     }
 
     #[test]
