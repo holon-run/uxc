@@ -770,11 +770,7 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
             let data = serde_json::to_value(HostHelpData {
                 count: summaries.len(),
                 operations: summaries,
-                next: vec![
-                    "uxc <host> list".to_string(),
-                    "uxc <host> describe <operation_id>".to_string(),
-                    "uxc <host> call <operation_id> --input-json '{...}'".to_string(),
-                ],
+                next: host_help_next_commands(),
             })?;
             OutputEnvelope::success("host_help", protocol, &url, None, data, Some(duration_ms))
         }
@@ -1358,6 +1354,25 @@ fn print_json(envelope: &OutputEnvelope) -> Result<()> {
     Ok(())
 }
 
+fn host_help_next_commands() -> Vec<String> {
+    if let Ok(link_name) = std::env::var("UXC_LINK_NAME") {
+        let link_name = link_name.trim();
+        if !link_name.is_empty() {
+            return vec![
+                format!("{link_name} list"),
+                format!("{link_name} describe <operation_id>"),
+                format!("{link_name} call <operation_id> --input-json '{{...}}'"),
+            ];
+        }
+    }
+
+    vec![
+        "uxc <host> list".to_string(),
+        "uxc <host> describe <operation_id>".to_string(),
+        "uxc <host> call <operation_id> --input-json '{...}'".to_string(),
+    ]
+}
+
 fn print_host_help_text_from_summaries(
     protocol: &str,
     endpoint: &str,
@@ -1501,7 +1516,7 @@ async fn handle_link_command(
     fs::create_dir_all(&target_dir)?;
 
     let target_path = link_target_path(&target_dir, name);
-    let launcher = build_link_launcher(host);
+    let launcher = build_link_launcher(name, host);
     let target_exists_before = target_path.exists();
     write_link_file(&target_path, launcher.as_bytes(), force)?;
     set_executable_if_unix(&target_path)?;
@@ -1540,16 +1555,21 @@ fn link_target_path(dir: &Path, name: &str) -> PathBuf {
     }
 }
 
-fn build_link_launcher(host: &str) -> String {
+fn build_link_launcher(name: &str, host: &str) -> String {
     #[cfg(windows)]
     {
+        let escaped_name = name.replace('"', "\"\"");
         let escaped = host.replace('"', "\"\"");
-        return format!("@echo off\r\nuxc \"{}\" %*\r\n", escaped);
+        return format!(
+            "@echo off\r\nset \"UXC_LINK_NAME={}\"\r\nuxc \"{}\" %*\r\n",
+            escaped_name, escaped
+        );
     }
     #[cfg(not(windows))]
     {
         format!(
-            "#!/usr/bin/env sh\nexec uxc {} \"$@\"\n",
+            "#!/usr/bin/env sh\nUXC_LINK_NAME={} exec uxc {} \"$@\"\n",
+            shell_single_quote(name),
             shell_single_quote(host)
         )
     }

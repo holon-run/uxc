@@ -79,7 +79,7 @@ fn link_create_writes_executable_script() {
     let script = fs::read_to_string(&script_path).expect("script should be readable");
     #[cfg(unix)]
     assert!(
-        script.contains("exec uxc 'petstore3.swagger.io/api/v3' \"$@\""),
+        script.contains("UXC_LINK_NAME='petcli' exec uxc 'petstore3.swagger.io/api/v3' \"$@\""),
         "script should contain bound host invocation"
     );
     #[cfg(windows)]
@@ -159,7 +159,7 @@ fn link_create_overwrites_with_force() {
     let script = fs::read_to_string(&script_path).expect("script should be readable");
     #[cfg(unix)]
     assert!(
-        script.contains("exec uxc 'countries.trevorblades.com' \"$@\""),
+        script.contains("UXC_LINK_NAME='petcli' exec uxc 'countries.trevorblades.com' \"$@\""),
         "script should be overwritten with latest host"
     );
     #[cfg(windows)]

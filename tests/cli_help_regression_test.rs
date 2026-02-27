@@ -159,6 +159,64 @@ fn host_help_supports_url_without_scheme() {
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
     assert_eq!(json["ok"], true);
     assert_eq!(json["kind"], "host_help");
+    assert_eq!(json["data"]["next"][0], "uxc <host> list");
+    assert_eq!(
+        json["data"]["next"][1],
+        "uxc <host> describe <operation_id>"
+    );
+    assert_eq!(
+        json["data"]["next"][2],
+        "uxc <host> call <operation_id> --input-json '{...}'"
+    );
+}
+
+#[test]
+fn host_help_uses_link_name_for_next_commands_when_env_set() {
+    let mut server = mockito::Server::new();
+    let _schema = server
+        .mock("GET", "/openapi.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r##"{
+  "openapi": "3.0.0",
+  "info": { "title": "test", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "list pets",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"##,
+        )
+        .create();
+
+    let output = uxc_command()
+        .env("UXC_LINK_NAME", "petcli")
+        .arg(server.url())
+        .arg("--no-cache")
+        .arg("help")
+        .output()
+        .expect("failed to run uxc");
+
+    assert!(
+        output.status.success(),
+        "command should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "host_help");
+    assert_eq!(json["data"]["next"][0], "petcli list");
+    assert_eq!(json["data"]["next"][1], "petcli describe <operation_id>");
+    assert_eq!(
+        json["data"]["next"][2],
+        "petcli call <operation_id> --input-json '{...}'"
+    );
 }
 
 #[test]
