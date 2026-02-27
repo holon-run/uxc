@@ -29,6 +29,7 @@ serde_json = "1.0"
 
 # Base64 encoding for basic auth
 base64 = "0.21"
+sha2 = "0.10"
 
 # TOML Support
 toml = "0.8"

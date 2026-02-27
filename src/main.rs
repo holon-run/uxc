@@ -321,6 +321,14 @@ enum AuthOauthCommands {
         /// OAuth client secret
         #[arg(long)]
         client_secret: Option<String>,
+
+        /// Redirect URI for authorization_code flow
+        #[arg(long)]
+        redirect_uri: Option<String>,
+
+        /// Authorization code or callback URL for authorization_code flow
+        #[arg(long)]
+        authorization_code: Option<String>,
     },
 
     /// Refresh OAuth token
@@ -2001,6 +2009,8 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
             scope,
             client_id,
             client_secret,
+            redirect_uri,
+            authorization_code,
         } => {
             let flow = parse_oauth_flow(flow)?;
             let scopes = auth::oauth::parse_scopes(scope);
@@ -2018,6 +2028,34 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                     let login =
                         auth::oauth::login_with_device_code(endpoint, &client, &client_id, &scopes)
                             .await?;
+                    (
+                        login.metadata,
+                        login.token,
+                        Some(client_id),
+                        client_secret.clone(),
+                    )
+                }
+                OAuthFlow::AuthorizationCode => {
+                    let client_id = client_id.clone().ok_or_else(|| {
+                        UxcError::InvalidArguments(
+                            "authorization_code flow requires --client-id".to_string(),
+                        )
+                    })?;
+                    let redirect_uri = redirect_uri.clone().ok_or_else(|| {
+                        UxcError::InvalidArguments(
+                            "authorization_code flow requires --redirect-uri".to_string(),
+                        )
+                    })?;
+                    let login = auth::oauth::login_with_authorization_code(
+                        endpoint,
+                        &client,
+                        &client_id,
+                        client_secret.as_deref(),
+                        &scopes,
+                        &redirect_uri,
+                        authorization_code.clone(),
+                    )
+                    .await?;
                     (
                         login.metadata,
                         login.token,
@@ -2151,6 +2189,7 @@ fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
     let oauth = profile.oauth.as_ref().map(|oauth| AuthOAuthView {
         flow: oauth.oauth_flow.as_ref().map(|flow| match flow {
             OAuthFlow::DeviceCode => "device_code".to_string(),
+            OAuthFlow::AuthorizationCode => "authorization_code".to_string(),
             OAuthFlow::ClientCredentials => "client_credentials".to_string(),
         }),
         provider_issuer: oauth.provider_issuer.clone(),
@@ -2172,9 +2211,10 @@ fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
 fn parse_oauth_flow(value: &str) -> Result<OAuthFlow> {
     match value.to_ascii_lowercase().as_str() {
         "device_code" => Ok(OAuthFlow::DeviceCode),
+        "authorization_code" => Ok(OAuthFlow::AuthorizationCode),
         "client_credentials" => Ok(OAuthFlow::ClientCredentials),
         _ => Err(UxcError::InvalidArguments(format!(
-            "Invalid oauth flow '{}'. Valid values: device_code, client_credentials",
+            "Invalid oauth flow '{}'. Valid values: device_code, authorization_code, client_credentials",
             value
         ))
         .into()),

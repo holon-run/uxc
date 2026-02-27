@@ -603,6 +603,14 @@ uxc auth oauth login mcp-ci \
   --client-id your-client-id \
   --client-secret your-client-secret \
   --scope "tools.read"
+
+# Authorization Code + PKCE flow (for providers like Notion MCP)
+uxc auth oauth login notion-mcp \
+  --endpoint https://mcp.notion.com/mcp \
+  --flow authorization_code \
+  --client-id your-client-id \
+  --redirect-uri http://127.0.0.1:8788/callback \
+  --scope "read write"
 ```
 
 Manual management commands:

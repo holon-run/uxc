@@ -9,7 +9,7 @@ OAuth tokens are stored in a credential (`credentials.json`). Runtime selection 
 
 Implemented in MVP:
 
-- OAuth login via `device_code` and `client_credentials`
+- OAuth login via `device_code`, `authorization_code` (PKCE), and `client_credentials`
 - Token persistence in `~/.uxc/credentials.json`
 - Auto refresh before expiry (60s skew)
 - One-time refresh + retry on `401 Unauthorized`
@@ -37,6 +37,20 @@ uxc auth oauth login <credential_id> \
   --client-secret <client_secret> \
   --scope "tools.read"
 ```
+
+Login with Authorization Code + PKCE:
+
+```bash
+uxc auth oauth login <credential_id> \
+  --endpoint <mcp_url> \
+  --flow authorization_code \
+  --client-id <client_id> \
+  --redirect-uri <redirect_uri> \
+  --scope "openid profile"
+```
+
+Use `--authorization-code` to provide the code directly, or run interactively and paste the
+authorization code / callback URL when prompted.
 
 Refresh token manually:
 
