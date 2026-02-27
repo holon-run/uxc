@@ -30,9 +30,11 @@ fn global_help_flag_works() {
     let output = uxc_command().arg("-h").output().expect("failed to run uxc");
 
     assert!(output.status.success(), "command should succeed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Universal X-Protocol Call"));
-    assert!(stdout.contains("describe"));
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "global_help");
+    assert_eq!(json["data"]["path"], "uxc");
 }
 
 #[test]
@@ -159,13 +161,13 @@ fn host_help_supports_url_without_scheme() {
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
     assert_eq!(json["ok"], true);
     assert_eq!(json["kind"], "host_help");
-    assert_eq!(json["data"]["next"][0], "uxc <host> list");
+    assert_eq!(json["data"]["examples"][0], "uxc <host> list");
     assert_eq!(
-        json["data"]["next"][1],
+        json["data"]["examples"][1],
         "uxc <host> describe <operation_id>"
     );
     assert_eq!(
-        json["data"]["next"][2],
+        json["data"]["examples"][2],
         "uxc <host> call <operation_id> --input-json '{...}'"
     );
 }
@@ -211,12 +213,73 @@ fn host_help_uses_link_name_for_next_commands_when_env_set() {
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
     assert_eq!(json["ok"], true);
     assert_eq!(json["kind"], "host_help");
-    assert_eq!(json["data"]["next"][0], "petcli list");
-    assert_eq!(json["data"]["next"][1], "petcli describe <operation_id>");
+    assert_eq!(json["data"]["examples"][0], "petcli list");
     assert_eq!(
-        json["data"]["next"][2],
+        json["data"]["examples"][1],
+        "petcli describe <operation_id>"
+    );
+    assert_eq!(
+        json["data"]["examples"][2],
         "petcli call <operation_id> --input-json '{...}'"
     );
+}
+
+#[test]
+fn cache_without_subcommand_outputs_subcommand_help_json() {
+    let output = uxc_command()
+        .arg("cache")
+        .output()
+        .expect("failed to run uxc");
+
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc cache");
+}
+
+#[test]
+fn auth_credential_without_subcommand_outputs_subcommand_help_json() {
+    let output = uxc_command()
+        .arg("auth")
+        .arg("credential")
+        .output()
+        .expect("failed to run uxc");
+
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc auth credential");
+}
+
+#[test]
+fn call_and_link_help_flags_output_subcommand_help_json() {
+    let call = uxc_command()
+        .arg("call")
+        .arg("-h")
+        .output()
+        .expect("failed to run uxc call -h");
+    assert!(call.status.success(), "command should succeed");
+    let call_json: serde_json::Value =
+        serde_json::from_slice(&call.stdout).expect("stdout should be valid JSON");
+    assert_eq!(call_json["ok"], true);
+    assert_eq!(call_json["kind"], "subcommand_help");
+    assert_eq!(call_json["data"]["path"], "uxc call");
+
+    let link = uxc_command()
+        .arg("link")
+        .arg("--help")
+        .output()
+        .expect("failed to run uxc link --help");
+    assert!(link.status.success(), "command should succeed");
+    let link_json: serde_json::Value =
+        serde_json::from_slice(&link.stdout).expect("stdout should be valid JSON");
+    assert_eq!(link_json["ok"], true);
+    assert_eq!(link_json["kind"], "subcommand_help");
+    assert_eq!(link_json["data"]["path"], "uxc link");
 }
 
 #[test]

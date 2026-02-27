@@ -135,12 +135,17 @@ Global discovery commands are also JSON-first:
 ```bash
 uxc
 uxc help
+uxc -h
+uxc cache
+uxc auth credential
 ```
 
 Use `--text` when you want CLI-style help text:
 
 ```bash
 uxc --text help
+uxc --text -h
+uxc --text cache
 ```
 
 If an operation ID conflicts with a CLI keyword (for example `help`/`list`), use explicit `call`:

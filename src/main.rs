@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{error::ErrorKind, Parser, Subcommand, ValueEnum};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -393,7 +393,7 @@ struct OperationSummary {
 struct HostHelpData {
     operations: Vec<OperationSummary>,
     count: usize,
-    next: Vec<String>,
+    examples: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     service: Option<ServiceSummary>,
 }
@@ -414,16 +414,17 @@ struct OperationListData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct GlobalHelpData {
-    name: String,
+struct HelpData {
+    path: String,
     about: String,
     usage: String,
-    commands: Vec<GlobalHelpCommand>,
+    commands: Vec<HelpCommand>,
     notes: Vec<String>,
+    examples: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct GlobalHelpCommand {
+struct HelpCommand {
     name: String,
     about: String,
 }
@@ -553,7 +554,28 @@ fn render_error(err: &anyhow::Error, output_mode: OutputMode) {
 }
 
 async fn run(args: Vec<String>) -> Result<()> {
-    let cli = Cli::parse_from(args);
+    let parse_result = Cli::try_parse_from(args.clone());
+    let fallback_output_mode = output_mode_from_args(&args);
+    let cli = match parse_result {
+        Ok(cli) => cli,
+        Err(parse_err) => {
+            if matches!(parse_err.kind(), ErrorKind::DisplayVersion) {
+                print_version();
+                return Ok(());
+            }
+            if let Some(help_path) = help_path_from_parse_error(&args, &parse_err) {
+                let envelope = if help_path.is_empty() {
+                    global_help_envelope()?
+                } else {
+                    let help_path_refs = help_path.iter().map(String::as_str).collect::<Vec<_>>();
+                    subcommand_help_envelope(&help_path_refs)?
+                };
+                return render_output(&envelope, fallback_output_mode);
+            }
+            return Err(UxcError::InvalidArguments(parse_err.to_string()).into());
+        }
+    };
+
     let output_mode = resolve_output_mode(&cli);
     let envelope = execute_cli(&cli).await?;
     render_output(&envelope, output_mode)
@@ -561,9 +583,6 @@ async fn run(args: Vec<String>) -> Result<()> {
 
 fn resolve_output_mode(cli: &Cli) -> OutputMode {
     if cli.text || cli.format == Some(OutputFormat::Text) {
-        OutputMode::Text
-    } else if cli.help && cli.url.is_none() && cli.command.is_none() {
-        // Preserve classic `uxc -h/--help` text UX.
         OutputMode::Text
     } else {
         OutputMode::Json
@@ -642,6 +661,210 @@ fn normalize_global_args(raw_args: Vec<String>) -> Vec<String> {
     normalized
 }
 
+fn is_global_bool_arg(arg: &str) -> bool {
+    matches!(arg, "--text" | "--no-cache" | "-h" | "--help")
+}
+
+fn is_global_kv_arg(arg: &str) -> bool {
+    matches!(arg, "--format" | "--auth" | "--cache-ttl" | "--schema-url")
+}
+
+fn is_global_inline_arg(arg: &str) -> bool {
+    arg.starts_with("--format=")
+        || arg.starts_with("--auth=")
+        || arg.starts_with("--cache-ttl=")
+        || arg.starts_with("--schema-url=")
+}
+
+fn non_global_tokens(raw_args: &[String]) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut idx = 1;
+
+    while idx < raw_args.len() {
+        let arg = &raw_args[idx];
+
+        if is_global_bool_arg(arg) || is_global_inline_arg(arg) {
+            idx += 1;
+            continue;
+        }
+
+        if is_global_kv_arg(arg) {
+            idx += 1;
+            if idx < raw_args.len() && !raw_args[idx].starts_with("--") {
+                idx += 1;
+            }
+            continue;
+        }
+
+        tokens.push(arg.clone());
+        idx += 1;
+    }
+
+    tokens
+}
+
+fn is_help_token(arg: &str) -> bool {
+    matches!(arg, "-h" | "--help" | "help")
+}
+
+fn raw_has_help_token(raw_args: &[String]) -> bool {
+    raw_args.iter().skip(1).any(|arg| is_help_token(arg))
+}
+
+fn is_top_level_command_token(token: &str) -> bool {
+    matches!(
+        token,
+        "list" | "describe" | "help" | "inspect" | "cache" | "auth" | "link" | "call"
+    )
+}
+
+fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
+    if tokens.is_empty() {
+        return Some(vec![]);
+    }
+
+    if tokens[0] == "help" {
+        return Some(vec![]);
+    }
+
+    let mut idx = 0usize;
+    if !is_top_level_command_token(&tokens[idx]) {
+        if tokens
+            .get(idx + 1)
+            .is_some_and(|next| is_top_level_command_token(next))
+        {
+            idx += 1;
+        } else {
+            return None;
+        }
+    }
+
+    let mut path = vec![tokens[idx].clone()];
+    idx += 1;
+
+    match path[0].as_str() {
+        "cache" => {
+            if tokens.get(idx).is_some_and(|token| token == "clear") {
+                path.push("clear".to_string());
+            }
+        }
+        "auth" => {
+            if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
+                match level1 {
+                    "credential" => {
+                        path.push("credential".to_string());
+                        if let Some(level2) = tokens.get(idx + 1).map(|s| s.as_str()) {
+                            if matches!(level2, "list" | "info" | "set" | "remove") {
+                                path.push(level2.to_string());
+                            }
+                        }
+                    }
+                    "binding" => {
+                        path.push("binding".to_string());
+                        if let Some(level2) = tokens.get(idx + 1).map(|s| s.as_str()) {
+                            if matches!(level2, "list" | "add" | "remove" | "match") {
+                                path.push(level2.to_string());
+                            }
+                        }
+                    }
+                    "oauth" => {
+                        path.push("oauth".to_string());
+                        if let Some(level2) = tokens.get(idx + 1).map(|s| s.as_str()) {
+                            if matches!(level2, "login" | "refresh" | "info" | "logout") {
+                                path.push(level2.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Some(path)
+}
+
+fn help_path_from_parse_error(raw_args: &[String], parse_err: &clap::Error) -> Option<Vec<String>> {
+    let kind = parse_err.kind();
+    let is_missing_subcommand = matches!(
+        kind,
+        ErrorKind::MissingSubcommand | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+    let is_help_like_error = matches!(
+        kind,
+        ErrorKind::MissingRequiredArgument
+            | ErrorKind::InvalidSubcommand
+            | ErrorKind::UnknownArgument
+            | ErrorKind::DisplayHelp
+    );
+
+    if !is_missing_subcommand && !is_help_like_error {
+        return None;
+    }
+
+    if !is_missing_subcommand && !raw_has_help_token(raw_args) {
+        return None;
+    }
+
+    let tokens = non_global_tokens(raw_args);
+    infer_help_path_from_tokens(&tokens).or(Some(vec![]))
+}
+
+fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
+    if matches!(cli.command, Some(Commands::External(_))) {
+        return None;
+    }
+
+    if matches!(
+        cli.command,
+        None | Some(Commands::Help { operation_id: None })
+    ) {
+        if cli.url.is_none() {
+            return Some(vec![]);
+        }
+        return None;
+    }
+
+    if !cli.help {
+        return None;
+    }
+
+    match &cli.command {
+        Some(Commands::List { .. }) => Some(vec!["list"]),
+        Some(Commands::Describe { .. }) => Some(vec!["describe"]),
+        Some(Commands::Help { .. }) => Some(vec![]),
+        Some(Commands::Inspect { .. }) => Some(vec!["inspect"]),
+        Some(Commands::Cache { cache_command }) => match cache_command {
+            CacheCommands::Clear { .. } => Some(vec!["cache", "clear"]),
+            CacheCommands::Stats => Some(vec!["cache", "stats"]),
+        },
+        Some(Commands::Auth { auth_command }) => match auth_command {
+            AuthCommands::Credential { credential_command } => match credential_command {
+                AuthCredentialCommands::List => Some(vec!["auth", "credential", "list"]),
+                AuthCredentialCommands::Info { .. } => Some(vec!["auth", "credential", "info"]),
+                AuthCredentialCommands::Set { .. } => Some(vec!["auth", "credential", "set"]),
+                AuthCredentialCommands::Remove { .. } => Some(vec!["auth", "credential", "remove"]),
+            },
+            AuthCommands::Binding { binding_command } => match binding_command {
+                AuthBindingCommands::List => Some(vec!["auth", "binding", "list"]),
+                AuthBindingCommands::Add { .. } => Some(vec!["auth", "binding", "add"]),
+                AuthBindingCommands::Remove { .. } => Some(vec!["auth", "binding", "remove"]),
+                AuthBindingCommands::Match { .. } => Some(vec!["auth", "binding", "match"]),
+            },
+            AuthCommands::Oauth { oauth_command } => match oauth_command {
+                AuthOauthCommands::Login { .. } => Some(vec!["auth", "oauth", "login"]),
+                AuthOauthCommands::Refresh { .. } => Some(vec!["auth", "oauth", "refresh"]),
+                AuthOauthCommands::Info { .. } => Some(vec!["auth", "oauth", "info"]),
+                AuthOauthCommands::Logout { .. } => Some(vec!["auth", "oauth", "logout"]),
+            },
+        },
+        Some(Commands::Link { .. }) => Some(vec!["link"]),
+        Some(Commands::Call { .. }) => Some(vec!["call"]),
+        Some(Commands::External(_)) | None => None,
+    }
+}
+
 fn normalize_endpoint_url(input: &str) -> String {
     match infer_scheme_for_endpoint(input) {
         Some(scheme) => format!("{}://{}", scheme, input),
@@ -710,6 +933,13 @@ fn looks_like_operation_id(input: &str) -> bool {
 }
 
 async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
+    if let Some(help_path) = static_help_path_from_cli(cli) {
+        if help_path.is_empty() {
+            return global_help_envelope();
+        }
+        return subcommand_help_envelope(&help_path);
+    }
+
     if should_show_global_help(cli) {
         return global_help_envelope();
     }
@@ -783,7 +1013,7 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
             let data = serde_json::to_value(HostHelpData {
                 count: summaries.len(),
                 operations: summaries,
-                next: host_help_next_commands(),
+                examples: host_help_examples(),
                 service,
             })?;
             OutputEnvelope::success("host_help", protocol, &url, None, data, Some(duration_ms))
@@ -882,57 +1112,8 @@ fn should_show_global_help(cli: &Cli) -> bool {
     )
 }
 
-fn print_global_help() -> Result<()> {
-    let mut cmd = Cli::command();
-    cmd.print_help()?;
-    println!();
-    Ok(())
-}
-
 fn global_help_envelope() -> Result<OutputEnvelope> {
-    let data = serde_json::to_value(GlobalHelpData {
-        name: "uxc".to_string(),
-        about: "Universal X-Protocol Call".to_string(),
-        usage: "uxc [OPTIONS] [URL] [COMMAND]".to_string(),
-        commands: vec![
-            GlobalHelpCommand {
-                name: "list".to_string(),
-                about: "List available operations".to_string(),
-            },
-            GlobalHelpCommand {
-                name: "describe".to_string(),
-                about: "Describe one operation in detail".to_string(),
-            },
-            GlobalHelpCommand {
-                name: "help".to_string(),
-                about: "Show endpoint help, or operation help with OPERATION_ID".to_string(),
-            },
-            GlobalHelpCommand {
-                name: "inspect".to_string(),
-                about: "Inspect endpoint/schema".to_string(),
-            },
-            GlobalHelpCommand {
-                name: "cache".to_string(),
-                about: "Manage schema cache".to_string(),
-            },
-            GlobalHelpCommand {
-                name: "auth".to_string(),
-                about: "Manage credentials, bindings, and OAuth".to_string(),
-            },
-            GlobalHelpCommand {
-                name: "link".to_string(),
-                about: "Create a host-bound shortcut command".to_string(),
-            },
-            GlobalHelpCommand {
-                name: "call".to_string(),
-                about: "Execute an operation explicitly".to_string(),
-            },
-        ],
-        notes: vec![
-            "Default output is JSON. Use --text for human-readable output.".to_string(),
-            "Examples: uxc <host> help; uxc <host> <operation> help".to_string(),
-        ],
-    })?;
+    let data = serde_json::to_value(help_data_for_path(&[]))?;
 
     Ok(OutputEnvelope::success(
         "global_help",
@@ -942,6 +1123,311 @@ fn global_help_envelope() -> Result<OutputEnvelope> {
         data,
         None,
     ))
+}
+
+fn subcommand_help_envelope(path: &[&str]) -> Result<OutputEnvelope> {
+    let data = serde_json::to_value(help_data_for_path(path))?;
+    Ok(OutputEnvelope::success(
+        "subcommand_help",
+        "cli",
+        "uxc",
+        None,
+        data,
+        None,
+    ))
+}
+
+fn commands(entries: &[(&str, &str)]) -> Vec<HelpCommand> {
+    entries
+        .iter()
+        .map(|(name, about)| HelpCommand {
+            name: (*name).to_string(),
+            about: (*about).to_string(),
+        })
+        .collect()
+}
+
+fn help_data_for_path(path: &[&str]) -> HelpData {
+    match path {
+        [] => HelpData {
+            path: "uxc".to_string(),
+            about: "Universal X-Protocol Call".to_string(),
+            usage: "uxc [OPTIONS] [URL] [COMMAND]".to_string(),
+            commands: commands(&[
+                ("list", "List available operations"),
+                ("describe", "Describe one operation in detail"),
+                ("help", "Show endpoint help, or operation help with OPERATION_ID"),
+                ("inspect", "Inspect endpoint/schema"),
+                ("cache", "Manage schema cache"),
+                ("auth", "Manage credentials, bindings, and OAuth"),
+                ("link", "Create a host-bound shortcut command"),
+                ("call", "Execute an operation explicitly"),
+            ]),
+            notes: vec![
+                "Default output is JSON. Use --text for human-readable output.".to_string(),
+            ],
+            examples: vec![
+                "uxc help".to_string(),
+                "uxc <host> help".to_string(),
+                "uxc <host> <operation_id> help".to_string(),
+            ],
+        },
+        ["list"] => HelpData {
+            path: "uxc list".to_string(),
+            about: "List available operations".to_string(),
+            usage: "uxc <host> list [--verbose]".to_string(),
+            commands: vec![],
+            notes: vec!["Requires URL/host as the first argument.".to_string()],
+            examples: vec![
+                "uxc petstore3.swagger.io/api/v3 list".to_string(),
+                "uxc mcp.deepwiki.com/mcp list".to_string(),
+            ],
+        },
+        ["describe"] => HelpData {
+            path: "uxc describe".to_string(),
+            about: "Describe one operation in detail".to_string(),
+            usage: "uxc <host> describe <operation_id>".to_string(),
+            commands: vec![],
+            notes: vec!["Requires URL/host as the first argument.".to_string()],
+            examples: vec![
+                "uxc petstore3.swagger.io/api/v3 describe get:/pet/{petId}".to_string(),
+                "uxc mcp.deepwiki.com/mcp describe ask_question".to_string(),
+            ],
+        },
+        ["inspect"] => HelpData {
+            path: "uxc inspect".to_string(),
+            about: "Inspect endpoint/schema".to_string(),
+            usage: "uxc <host> inspect [--full]".to_string(),
+            commands: vec![],
+            notes: vec!["Requires URL/host as the first argument.".to_string()],
+            examples: vec!["uxc api.github.com inspect --full".to_string()],
+        },
+        ["call"] => HelpData {
+            path: "uxc call".to_string(),
+            about: "Execute an operation explicitly".to_string(),
+            usage: "uxc <host> call <operation_id> [--args k=v] [--input-json '{...}' | '{...}']"
+                .to_string(),
+            commands: vec![],
+            notes: vec![
+                "Use either --input-json or one positional JSON payload object.".to_string(),
+            ],
+            examples: vec![
+                "uxc <host> call <operation_id> --input-json '{...}'".to_string(),
+                "uxc <host> call <operation_id> '{...}'".to_string(),
+            ],
+        },
+        ["link"] => HelpData {
+            path: "uxc link".to_string(),
+            about: "Create a host-bound shortcut command".to_string(),
+            usage: "uxc link <name> <host> [--dir <dir>] [--force]".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec![
+                "uxc link petcli petstore3.swagger.io/api/v3".to_string(),
+                "petcli help".to_string(),
+            ],
+        },
+        ["cache"] => HelpData {
+            path: "uxc cache".to_string(),
+            about: "Manage schema cache".to_string(),
+            usage: "uxc cache <stats|clear>".to_string(),
+            commands: commands(&[
+                ("stats", "Show cache statistics"),
+                ("clear", "Clear cache entries"),
+            ]),
+            notes: vec![],
+            examples: vec![
+                "uxc cache stats".to_string(),
+                "uxc cache clear --all".to_string(),
+            ],
+        },
+        ["cache", "stats"] => HelpData {
+            path: "uxc cache stats".to_string(),
+            about: "Show cache statistics".to_string(),
+            usage: "uxc cache stats".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc cache stats".to_string()],
+        },
+        ["cache", "clear"] => HelpData {
+            path: "uxc cache clear".to_string(),
+            about: "Clear cache entries".to_string(),
+            usage: "uxc cache clear <url> | uxc cache clear --all".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec![
+                "uxc cache clear https://petstore3.swagger.io/api/v3".to_string(),
+                "uxc cache clear --all".to_string(),
+            ],
+        },
+        ["auth"] => HelpData {
+            path: "uxc auth".to_string(),
+            about: "Manage authentication credentials and bindings".to_string(),
+            usage: "uxc auth <credential|binding|oauth> ...".to_string(),
+            commands: commands(&[
+                ("credential", "Manage credentials"),
+                ("binding", "Manage endpoint auth bindings"),
+                ("oauth", "Manage OAuth credentials"),
+            ]),
+            notes: vec![],
+            examples: vec![
+                "uxc auth credential list".to_string(),
+                "uxc auth binding list".to_string(),
+            ],
+        },
+        ["auth", "credential"] => HelpData {
+            path: "uxc auth credential".to_string(),
+            about: "Manage credentials".to_string(),
+            usage: "uxc auth credential <list|info|set|remove> ...".to_string(),
+            commands: commands(&[
+                ("list", "List all credentials"),
+                ("info", "Show information about a specific credential"),
+                ("set", "Set or update a credential"),
+                ("remove", "Remove a credential"),
+            ]),
+            notes: vec![],
+            examples: vec![
+                "uxc auth credential list".to_string(),
+                "uxc auth credential set demo --secret-env DEMO_TOKEN".to_string(),
+            ],
+        },
+        ["auth", "credential", "list"] => HelpData {
+            path: "uxc auth credential list".to_string(),
+            about: "List all credentials".to_string(),
+            usage: "uxc auth credential list".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth credential list".to_string()],
+        },
+        ["auth", "credential", "info"] => HelpData {
+            path: "uxc auth credential info".to_string(),
+            about: "Show information about a specific credential".to_string(),
+            usage: "uxc auth credential info <credential_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth credential info deepwiki".to_string()],
+        },
+        ["auth", "credential", "set"] => HelpData {
+            path: "uxc auth credential set".to_string(),
+            about: "Set or update a credential".to_string(),
+            usage: "uxc auth credential set <credential_id> [--auth-type <type>] [--secret <value>|--secret-env <key>] [--description <text>]".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth credential set deepwiki --secret-env DEEPWIKI_TOKEN".to_string()],
+        },
+        ["auth", "credential", "remove"] => HelpData {
+            path: "uxc auth credential remove".to_string(),
+            about: "Remove a credential".to_string(),
+            usage: "uxc auth credential remove <credential_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth credential remove deepwiki".to_string()],
+        },
+        ["auth", "binding"] => HelpData {
+            path: "uxc auth binding".to_string(),
+            about: "Manage endpoint auth bindings".to_string(),
+            usage: "uxc auth binding <list|add|remove|match> ...".to_string(),
+            commands: commands(&[
+                ("list", "List all endpoint auth bindings"),
+                ("add", "Add a binding rule"),
+                ("remove", "Remove a binding rule"),
+                ("match", "Match endpoint against bindings"),
+            ]),
+            notes: vec![],
+            examples: vec![
+                "uxc auth binding list".to_string(),
+                "uxc auth binding match https://mcp.deepwiki.com/mcp".to_string(),
+            ],
+        },
+        ["auth", "binding", "list"] => HelpData {
+            path: "uxc auth binding list".to_string(),
+            about: "List all endpoint auth bindings".to_string(),
+            usage: "uxc auth binding list".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth binding list".to_string()],
+        },
+        ["auth", "binding", "add"] => HelpData {
+            path: "uxc auth binding add".to_string(),
+            about: "Add a binding rule".to_string(),
+            usage: "uxc auth binding add --id <id> --host <host> --credential <credential> [--path-prefix <path>] [--scheme <scheme>] [--priority <n>] [--disabled]".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mcp --scheme https --credential deepwiki --priority 100".to_string()],
+        },
+        ["auth", "binding", "remove"] => HelpData {
+            path: "uxc auth binding remove".to_string(),
+            about: "Remove a binding rule".to_string(),
+            usage: "uxc auth binding remove <binding_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth binding remove deepwiki-mcp".to_string()],
+        },
+        ["auth", "binding", "match"] => HelpData {
+            path: "uxc auth binding match".to_string(),
+            about: "Match endpoint against bindings".to_string(),
+            usage: "uxc auth binding match <endpoint>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth binding match https://mcp.deepwiki.com/mcp".to_string()],
+        },
+        ["auth", "oauth"] => HelpData {
+            path: "uxc auth oauth".to_string(),
+            about: "Manage OAuth credentials".to_string(),
+            usage: "uxc auth oauth <login|refresh|info|logout> ...".to_string(),
+            commands: commands(&[
+                ("login", "Login with OAuth and save tokens"),
+                ("refresh", "Refresh OAuth token"),
+                ("info", "Show OAuth credential information"),
+                ("logout", "Remove OAuth token data from credential"),
+            ]),
+            notes: vec![],
+            examples: vec![
+                "uxc auth oauth info deepwiki".to_string(),
+                "uxc auth oauth refresh deepwiki".to_string(),
+            ],
+        },
+        ["auth", "oauth", "login"] => HelpData {
+            path: "uxc auth oauth login".to_string(),
+            about: "Login with OAuth and save tokens".to_string(),
+            usage: "uxc auth oauth login <credential_id> --endpoint <url> [--flow <device_code|authorization_code|client_credentials>] [--scope <scope>] [--client-id <id>] [--client-secret <secret>] [--redirect-uri <uri>] [--authorization-code <code>]".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth oauth login deepwiki --endpoint https://mcp.deepwiki.com/mcp --flow device_code --client-id <id>".to_string()],
+        },
+        ["auth", "oauth", "refresh"] => HelpData {
+            path: "uxc auth oauth refresh".to_string(),
+            about: "Refresh OAuth token".to_string(),
+            usage: "uxc auth oauth refresh <credential_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth oauth refresh deepwiki".to_string()],
+        },
+        ["auth", "oauth", "info"] => HelpData {
+            path: "uxc auth oauth info".to_string(),
+            about: "Show OAuth credential information".to_string(),
+            usage: "uxc auth oauth info <credential_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth oauth info deepwiki".to_string()],
+        },
+        ["auth", "oauth", "logout"] => HelpData {
+            path: "uxc auth oauth logout".to_string(),
+            about: "Remove OAuth token data from credential".to_string(),
+            usage: "uxc auth oauth logout <credential_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth oauth logout deepwiki".to_string()],
+        },
+        _ => HelpData {
+            path: "uxc".to_string(),
+            about: "Universal X-Protocol Call".to_string(),
+            usage: "uxc [OPTIONS] [URL] [COMMAND]".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc help".to_string()],
+        },
+    }
 }
 
 fn render_output(envelope: &OutputEnvelope, output_mode: OutputMode) -> Result<()> {
@@ -960,7 +1446,11 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
     }
 
     match envelope.kind.as_deref() {
-        Some("global_help") => print_global_help(),
+        Some("global_help") | Some("subcommand_help") => {
+            let data: HelpData = decode_envelope_data(envelope)?;
+            print_help_text(&data);
+            Ok(())
+        }
         Some("host_help") => {
             let endpoint = envelope.endpoint.as_deref().unwrap_or("unknown");
             let protocol = envelope.protocol.as_deref().unwrap_or("unknown");
@@ -969,7 +1459,7 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
                 protocol,
                 endpoint,
                 &data.operations,
-                &data.next,
+                &data.examples,
                 &data.service,
             );
             Ok(())
@@ -1381,7 +1871,7 @@ fn print_json(envelope: &OutputEnvelope) -> Result<()> {
     Ok(())
 }
 
-fn host_help_next_commands() -> Vec<String> {
+fn host_help_examples() -> Vec<String> {
     if let Ok(link_name) = std::env::var("UXC_LINK_NAME") {
         let link_name = link_name.trim();
         if !link_name.is_empty() {
@@ -1424,7 +1914,7 @@ fn print_host_help_text_from_summaries(
     protocol: &str,
     endpoint: &str,
     operations: &[OperationSummary],
-    next: &[String],
+    examples: &[String],
     service: &Option<ServiceSummary>,
 ) {
     println!("Protocol: {}", protocol);
@@ -1449,11 +1939,42 @@ fn print_host_help_text_from_summaries(
         }
     }
 
-    if !next.is_empty() {
+    if !examples.is_empty() {
         println!();
-        println!("Next steps:");
-        for line in next {
+        println!("Examples:");
+        for line in examples {
             println!("  {}", line);
+        }
+    }
+}
+
+fn print_help_text(data: &HelpData) {
+    println!("{}", data.about);
+    println!();
+    println!("Path: {}", data.path);
+    println!("Usage: {}", data.usage);
+
+    if !data.commands.is_empty() {
+        println!();
+        println!("Commands:");
+        for command in &data.commands {
+            println!("  {:<12} {}", command.name, command.about);
+        }
+    }
+
+    if !data.notes.is_empty() {
+        println!();
+        println!("Notes:");
+        for note in &data.notes {
+            println!("  {}", note);
+        }
+    }
+
+    if !data.examples.is_empty() {
+        println!();
+        println!("Examples:");
+        for example in &data.examples {
+            println!("  {}", example);
         }
     }
 }
