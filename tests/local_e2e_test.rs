@@ -76,6 +76,32 @@ fn test_openapi_call_operation() {
 }
 
 #[test]
+fn test_openapi_call_post_operation() {
+    let _server = start_test_server("openapi", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}/", _server.addr),
+        "post:/users",
+        "--json",
+        r#"{"name":"Charlie","email":"charlie@example.com"}"#,
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call OpenAPI POST operation: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "openapi");
+    assert_eq!(json["data"]["name"], "Charlie");
+    assert_eq!(json["data"]["email"], "charlie@example.com");
+}
+
+#[test]
 fn test_openapi_auth_required() {
     let _server = start_test_server("openapi", "auth_required");
 
@@ -140,7 +166,7 @@ fn test_graphql_call_with_args() {
         &format!("http://{}/", _server.addr),
         "query/user",
         "--json",
-        r#"{"id":"1"}"#,
+        r#"{"id":"2"}"#,
     ]);
 
     assert!(
@@ -154,8 +180,34 @@ fn test_graphql_call_with_args() {
 
     assert_eq!(json["ok"], true);
     assert_eq!(json["protocol"], "graphql");
-    assert_eq!(json["data"]["user"]["id"], "1");
-    assert_eq!(json["data"]["user"]["name"], "Alice");
+    assert_eq!(json["data"]["user"]["id"], "2");
+    assert_eq!(json["data"]["user"]["name"], "Bob");
+}
+
+#[test]
+fn test_graphql_call_mutation() {
+    let _server = start_test_server("graphql", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}/", _server.addr),
+        "mutation/createUser",
+        "--json",
+        r#"{"name":"Dave","email":"dave@example.com"}"#,
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call GraphQL mutation: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "graphql");
+    assert_eq!(json["data"]["createUser"]["name"], "Dave");
+    assert_eq!(json["data"]["createUser"]["email"], "dave@example.com");
 }
 
 #[test]
@@ -252,6 +304,32 @@ fn test_jsonrpc_call_with_args() {
     assert_eq!(json["protocol"], "jsonrpc");
     assert_eq!(json["data"]["id"], 1);
     assert_eq!(json["data"]["name"], "Alice");
+}
+
+#[test]
+fn test_jsonrpc_call_create_user() {
+    let _server = start_test_server("jsonrpc", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}/", _server.addr),
+        "create_user",
+        "--json",
+        r#"{"name":"Erin","email":"erin@example.com"}"#,
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call JSON-RPC create_user: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "jsonrpc");
+    assert_eq!(json["data"]["name"], "Erin");
+    assert_eq!(json["data"]["email"], "erin@example.com");
 }
 
 #[test]
@@ -368,6 +446,28 @@ fn test_grpc_call_method() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["protocol"], "grpc");
     assert!(json["data"]["v"] == 3 || json["data"]["v"] == "3");
+}
+
+#[test]
+fn test_grpc_call_unknown_method_fails() {
+    if !grpcurl_available() {
+        eprintln!("Skipping gRPC unknown method test because grpcurl is not installed");
+        return;
+    }
+
+    let _server = start_test_server("grpc", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}", _server.addr),
+        "addsvc.Add/Unknown",
+        "--json",
+        r#"{"a":1,"b":2}"#,
+    ]);
+
+    assert!(
+        result.is_err(),
+        "Expected unknown gRPC method to fail, got success"
+    );
 }
 
 #[test]
@@ -498,6 +598,113 @@ fn test_mcp_stdio_auth_required() {
     let result = run_uxc(&[&endpoint, "echo", "--json", r#"{"message":"x"}"#]);
 
     assert!(result.is_err(), "Expected MCP stdio auth error");
+}
+
+#[test]
+fn test_openapi_describe_operation() {
+    let _server = start_test_server("openapi", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}/", _server.addr),
+        "describe",
+        "get:/health",
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to describe OpenAPI operation: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "openapi");
+    assert_eq!(json["data"]["operation_id"], "get:/health");
+}
+
+#[test]
+fn test_graphql_describe_operation() {
+    let _server = start_test_server("graphql", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}/", _server.addr),
+        "describe",
+        "query/user",
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to describe GraphQL operation: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "graphql");
+    assert_eq!(json["data"]["operation_id"], "query/user");
+}
+
+#[test]
+fn test_jsonrpc_describe_operation() {
+    let _server = start_test_server("jsonrpc", "ok");
+
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "describe", "get_user"]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to describe JSON-RPC operation: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "jsonrpc");
+    assert_eq!(json["data"]["operation_id"], "get_user");
+}
+
+#[test]
+fn test_grpc_describe_operation() {
+    let _server = start_test_server("grpc", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}", _server.addr),
+        "describe",
+        "addsvc.Add/Sum",
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to describe gRPC operation: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "grpc");
+    assert_eq!(json["data"]["operation_id"], "addsvc.Add/Sum");
+}
+
+#[test]
+fn test_mcp_http_describe_operation() {
+    let _server = start_test_server("mcp-http", "ok");
+
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "describe", "echo"]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to describe MCP HTTP operation: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["operation_id"], "echo");
 }
 
 // Note: Timeout scenario tests are not included here to keep the suite fast.

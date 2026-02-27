@@ -37,26 +37,139 @@ struct GraphQLResponse {
     errors: Option<Vec<serde_json::Value>>,
 }
 
+fn extract_inline_arg(query: &str, arg_name: &str) -> Option<String> {
+    let marker = format!("{arg_name}:");
+    let marker_pos = query.find(&marker)?;
+    let rest = query[marker_pos + marker.len()..].trim_start();
+
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        return Some(stripped[..end].to_string());
+    }
+
+    let end = rest
+        .find(|c: char| c == ',' || c == ')' || c == ' ' || c == '\n' || c == '\t')
+        .unwrap_or(rest.len());
+    let token = rest[..end].trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
 /// Serve GraphQL introspection schema
 fn introspection_schema() -> serde_json::Value {
     json!({
       "data": {
         "__schema": {
-          "queryType": {"name": "Query"},
-          "mutationType": {"name": "Mutation"},
+          "queryType": {
+            "name": "Query",
+            "fields": [
+              {
+                "name": "health",
+                "description": "Health check",
+                "args": [],
+                "type": {"kind": "OBJECT", "name": "HealthResult", "ofType": null}
+              },
+              {
+                "name": "user",
+                "description": "Find a user by id",
+                "args": [
+                  {
+                    "name": "id",
+                    "description": "User ID",
+                    "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "ID", "name": "ID", "ofType": null}},
+                    "defaultValue": null
+                  }
+                ],
+                "type": {"kind": "OBJECT", "name": "User", "ofType": null}
+              },
+              {
+                "name": "users",
+                "description": "List users",
+                "args": [],
+                "type": {"kind": "LIST", "name": null, "ofType": {"kind": "OBJECT", "name": "User", "ofType": null}}
+              }
+            ]
+          },
+          "mutationType": {
+            "name": "Mutation",
+            "fields": [
+              {
+                "name": "createUser",
+                "description": "Create user",
+                "args": [
+                  {
+                    "name": "name",
+                    "description": "User name",
+                    "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "SCALAR", "name": "String", "ofType": null}},
+                    "defaultValue": null
+                  },
+                  {
+                    "name": "email",
+                    "description": "User email",
+                    "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "SCALAR", "name": "String", "ofType": null}},
+                    "defaultValue": null
+                  }
+                ],
+                "type": {"kind": "OBJECT", "name": "User", "ofType": null}
+              }
+            ]
+          },
           "types": [
             {
               "name": "Query",
               "fields": [
-                {"name": "health"},
-                {"name": "user"},
-                {"name": "users"}
+                {
+                  "name": "health",
+                  "description": "Health check",
+                  "args": [],
+                  "type": {"kind": "OBJECT", "name": "HealthResult", "ofType": null}
+                },
+                {
+                  "name": "user",
+                  "description": "Find a user by id",
+                  "args": [
+                    {
+                      "name": "id",
+                      "description": "User ID",
+                      "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "ID", "name": "ID", "ofType": null}},
+                      "defaultValue": null
+                    }
+                  ],
+                  "type": {"kind": "OBJECT", "name": "User", "ofType": null}
+                },
+                {
+                  "name": "users",
+                  "description": "List users",
+                  "args": [],
+                  "type": {"kind": "LIST", "name": null, "ofType": {"kind": "OBJECT", "name": "User", "ofType": null}}
+                }
               ]
             },
             {
               "name": "Mutation",
               "fields": [
-                {"name": "createUser"}
+                {
+                  "name": "createUser",
+                  "description": "Create user",
+                  "args": [
+                    {
+                      "name": "name",
+                      "description": "User name",
+                      "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "SCALAR", "name": "String", "ofType": null}},
+                      "defaultValue": null
+                    },
+                    {
+                      "name": "email",
+                      "description": "User email",
+                      "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "SCALAR", "name": "String", "ofType": null}},
+                      "defaultValue": null
+                    }
+                  ],
+                  "type": {"kind": "OBJECT", "name": "User", "ofType": null}
+                }
               ]
             },
             {
@@ -130,12 +243,16 @@ async fn execute_query(
                     .variables
                     .get("name")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("Charlie");
+                    .map(ToString::to_string)
+                    .or_else(|| extract_inline_arg(query, "name"))
+                    .unwrap_or_else(|| "Charlie".to_string());
                 let email = req
                     .variables
                     .get("email")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("charlie@example.com");
+                    .map(ToString::to_string)
+                    .or_else(|| extract_inline_arg(query, "email"))
+                    .unwrap_or_else(|| "charlie@example.com".to_string());
                 return Ok(GraphQLResponse {
                     data: Some(json!({
                         "createUser": {"id": "3", "name": name, "email": email}
@@ -155,6 +272,7 @@ async fn execute_query(
                             .map(ToString::to_string)
                             .or_else(|| v.as_i64().map(|n| n.to_string()))
                     })
+                    .or_else(|| extract_inline_arg(query, "id"))
                     .unwrap_or_else(|| "1".to_string());
 
                 if id == "1" {
