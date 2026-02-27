@@ -240,6 +240,23 @@ fn cache_without_subcommand_outputs_subcommand_help_json() {
 }
 
 #[test]
+fn cache_stats_help_outputs_specific_subcommand_path() {
+    let output = uxc_command()
+        .arg("cache")
+        .arg("stats")
+        .arg("-h")
+        .output()
+        .expect("failed to run uxc");
+
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc cache stats");
+}
+
+#[test]
 fn auth_credential_without_subcommand_outputs_subcommand_help_json() {
     let output = uxc_command()
         .arg("auth")

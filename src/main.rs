@@ -522,7 +522,7 @@ async fn main() {
     let normalized_args = normalize_global_args(raw_args);
     let fallback_output_mode = output_mode_from_args(&normalized_args);
 
-    if let Err(err) = run(normalized_args).await {
+    if let Err(err) = run(normalized_args, fallback_output_mode).await {
         render_error(&err, fallback_output_mode);
         std::process::exit(1);
     }
@@ -553,9 +553,8 @@ fn render_error(err: &anyhow::Error, output_mode: OutputMode) {
     }
 }
 
-async fn run(args: Vec<String>) -> Result<()> {
+async fn run(args: Vec<String>, fallback_output_mode: OutputMode) -> Result<()> {
     let parse_result = Cli::try_parse_from(args.clone());
-    let fallback_output_mode = output_mode_from_args(&args);
     let cli = match parse_result {
         Ok(cli) => cli,
         Err(parse_err) => {
@@ -744,8 +743,10 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
 
     match path[0].as_str() {
         "cache" => {
-            if tokens.get(idx).is_some_and(|token| token == "clear") {
-                path.push("clear".to_string());
+            if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
+                if matches!(level1, "clear" | "stats") {
+                    path.push(level1.to_string());
+                }
             }
         }
         "auth" => {
@@ -940,10 +941,6 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
         return subcommand_help_envelope(&help_path);
     }
 
-    if should_show_global_help(cli) {
-        return global_help_envelope();
-    }
-
     let cache_config = if cli.no_cache {
         CacheConfig {
             enabled: false,
@@ -1099,17 +1096,6 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
     };
 
     Ok(envelope)
-}
-
-fn should_show_global_help(cli: &Cli) -> bool {
-    if cli.url.is_some() {
-        return false;
-    }
-
-    matches!(
-        cli.command,
-        None | Some(Commands::Help { operation_id: None })
-    )
 }
 
 fn global_help_envelope() -> Result<OutputEnvelope> {
