@@ -36,7 +36,7 @@ toml = "0.8"
 # Async Runtime
 tokio = { version = "1.35", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["net"] }
 async-trait = "0.1"
 futures = "0.3"
 
@@ -113,10 +113,6 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-
-[build-dependencies]
-protoc-bin-vendored = "3"
-tonic-build = "0.10"
 
 [[bin]]
 name = "uxc-test-grpc-server"

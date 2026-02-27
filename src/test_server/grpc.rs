@@ -3,12 +3,13 @@
 use super::common::{write_addr_file, Scenario, ServerHandle};
 use anyhow::Result;
 use tokio::signal::ctrl_c;
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
 pub mod addsvc {
-    tonic::include_proto!("addsvc");
-    pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("addsvc_descriptor");
+    include!("proto/addsvc.rs");
+    pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("proto/addsvc_descriptor.bin");
 }
 
 #[derive(Clone, Copy)]
@@ -38,10 +39,8 @@ impl addsvc::add_server::Add for AddService {
 }
 
 pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
-    // Use a dedicated bound socket first so test harness can discover a concrete port.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    drop(listener);
 
     info!("gRPC test server listening on {}", addr);
     write_addr_file(addr, "grpc")?;
@@ -63,7 +62,7 @@ pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
 
     tokio::spawn(async move {
         if let Err(err) = server
-            .serve_with_shutdown(addr, async {
+            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                 let _ = shutdown_rx.await;
             })
             .await
