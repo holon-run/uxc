@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 const PROBE_TIMEOUT_SECS: u64 = 10;
+const MAX_STREAM_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeInitializeOutcome {
@@ -28,6 +29,8 @@ pub struct McpHttpTransport {
     server_url: String,
     /// Request ID counter
     next_id: Arc<Mutex<i64>>,
+    /// MCP Streamable HTTP session id (if provided by server)
+    session_id: Arc<Mutex<Option<String>>>,
     /// Authentication profile
     auth_profile: Arc<Mutex<Option<Profile>>>,
     /// Lock for OAuth refresh operations
@@ -62,6 +65,7 @@ impl McpHttpTransport {
             client,
             server_url: url,
             next_id: Arc::new(Mutex::new(1i64)),
+            session_id: Arc::new(Mutex::new(None)),
             auth_profile: Arc::new(Mutex::new(auth_profile)),
             oauth_refresh_lock: Arc::new(Mutex::new(())),
         })
@@ -107,6 +111,14 @@ impl McpHttpTransport {
         }
 
         let status = response.status();
+        if let Some(session_id) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+        {
+            *self.session_id.lock().await = Some(session_id);
+        }
         let www_authenticate = response
             .headers()
             .get(reqwest::header::WWW_AUTHENTICATE)
@@ -117,8 +129,7 @@ impl McpHttpTransport {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let body = response
-            .text()
+        let body = Self::read_response_body(&mut response, content_type.as_deref())
             .await
             .unwrap_or_else(|_| "Unable to read response body".to_string());
 
@@ -148,12 +159,16 @@ impl McpHttpTransport {
 
     async fn send_jsonrpc_request(&self, request: &JsonRpcRequest) -> Result<reqwest::Response> {
         let profile = self.auth_profile.lock().await.clone();
+        let session_id = self.session_id.lock().await.clone();
 
         let mut req = self
             .client
             .post(&self.server_url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream");
+        if let Some(session_id) = session_id {
+            req = req.header("mcp-session-id", session_id);
+        }
 
         if let Some(profile) = profile {
             req = Self::apply_profile_auth(req, &profile);
@@ -312,6 +327,37 @@ impl McpHttpTransport {
         bail!("No JSON-RPC payload found in SSE response")
     }
 
+    async fn read_response_body(
+        response: &mut reqwest::Response,
+        content_type: Option<&str>,
+    ) -> Result<String> {
+        let is_sse = content_type
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("text/event-stream");
+
+        let mut body = String::new();
+        loop {
+            let chunk = response
+                .chunk()
+                .await
+                .context("Failed to read SSE response body chunk")?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+
+            body.push_str(&String::from_utf8_lossy(&chunk));
+            if is_sse && Self::parse_sse_response(&body).is_ok() {
+                break;
+            }
+            if body.len() >= MAX_STREAM_BODY_BYTES {
+                break;
+            }
+        }
+
+        Ok(body)
+    }
+
     fn summarize_body(body: &str) -> String {
         const MAX_CHARS: usize = 240;
         let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -356,7 +402,7 @@ impl McpHttpTransport {
             req = Self::apply_profile_auth(req, profile);
         }
 
-        let response = match req.json(&request).send().await {
+        let mut response = match req.json(&request).send().await {
             Ok(response) => response,
             Err(err) => {
                 return Ok(ProbeInitializeOutcome::NotMcp(format!(
@@ -381,7 +427,7 @@ impl McpHttpTransport {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let body = match response.text().await {
+        let body = match Self::read_response_body(&mut response, content_type.as_deref()).await {
             Ok(body) => body,
             Err(err) => {
                 return Ok(ProbeInitializeOutcome::NotMcp(format!(
@@ -449,7 +495,6 @@ impl McpHttpTransport {
         });
 
         let result = self.send_request("initialize", Some(params)).await?;
-
         serde_json::from_value(result).context("Failed to parse initialize result")
     }
 
@@ -469,10 +514,16 @@ impl McpHttpTransport {
         name: &str,
         arguments: Option<JsonValue>,
     ) -> Result<ToolCallResult> {
-        let params = serde_json::json!({
-            "name": name,
-            "arguments": arguments
-        });
+        let params = match arguments {
+            Some(arguments) => serde_json::json!({
+                "name": name,
+                "arguments": arguments
+            }),
+            None => serde_json::json!({
+                "name": name,
+                "arguments": {}
+            }),
+        };
 
         let result = self.send_request("tools/call", Some(params)).await?;
 
