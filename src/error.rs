@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, UxcError>;
 
 #[derive(Error, Debug)]
@@ -9,6 +10,7 @@ pub enum UxcError {
     #[error("Protocol detection failed: {0}")]
     ProtocolDetectionFailed(String),
 
+    #[allow(dead_code)]
     #[error("Unsupported protocol: {0}")]
     UnsupportedProtocol(String),
 

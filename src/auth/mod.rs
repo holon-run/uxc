@@ -529,6 +529,7 @@ impl Profiles {
     }
 
     /// Get credential count.
+    #[allow(dead_code)]
     pub fn count(&self) -> usize {
         self.profiles.len()
     }

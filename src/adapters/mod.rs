@@ -208,6 +208,7 @@ impl ProtocolDetector {
     }
 
     /// Get adapter for a URL (auto-detects protocol)
+    #[allow(dead_code)]
     pub async fn detect_adapter(&self, url: &str) -> Result<AdapterEnum> {
         self.detect_adapter_with_options(url, &DetectionOptions::default())
             .await

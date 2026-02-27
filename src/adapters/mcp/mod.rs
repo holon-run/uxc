@@ -20,7 +20,6 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 #[cfg(test)]
 pub use transport::MockStdioExecutor;
-pub use transport::{DefaultStdioProcessExecutor, SpawnedProcess, StdioProcessExecutor};
 
 pub struct McpAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,

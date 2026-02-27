@@ -232,6 +232,7 @@ impl SchemaCache {
     }
 
     /// Create with default configuration
+    #[allow(dead_code)]
     pub fn with_default_config() -> Result<Self> {
         Self::new(CacheConfig::default())
     }

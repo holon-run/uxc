@@ -183,6 +183,7 @@ struct OutboundMessage {
 
 impl McpStdioTransport {
     /// Spawn a new MCP server process and create a transport
+    #[allow(dead_code)]
     pub async fn connect(command: &str, args: &[String]) -> Result<Self> {
         Self::connect_with_executor(command, args, Arc::new(DefaultStdioProcessExecutor)).await
     }
