@@ -12,8 +12,8 @@ uxc link notion-mcp-cli mcp.notion.com/mcp
 ## Discover And Inspect
 
 ```bash
-notion-mcp-cli list
-notion-mcp-cli describe notion-fetch
+notion-mcp-cli -h
+notion-mcp-cli notion-fetch help
 ```
 
 ## Read-First Flows

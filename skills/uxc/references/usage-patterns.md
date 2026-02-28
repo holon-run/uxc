@@ -34,17 +34,17 @@ For provider-specific wrapper skills, use a fixed local link command as the defa
 command -v <provider>-mcp-cli
 # If missing:
 uxc link <provider>-mcp-cli <host>
-<provider>-mcp-cli list
-<provider>-mcp-cli describe <operation>
+<provider>-mcp-cli -h
+<provider>-mcp-cli <operation> help
 <provider>-mcp-cli <operation> field=value
 ```
 
 Examples:
 
 ```bash
-notion-mcp-cli list
+notion-mcp-cli -h
 # Equivalent:
-uxc mcp.notion.com/mcp list
+uxc mcp.notion.com/mcp help
 ```
 
 ```bash

@@ -69,8 +69,12 @@ if ! rg -q 'uxc link notion-mcp-cli mcp.notion.com/mcp' "${SKILL_FILE}"; then
   fail "SKILL.md must include fixed link creation command"
 fi
 
-if ! rg -q 'notion-mcp-cli list' "${SKILL_FILE}"; then
-  fail "SKILL.md must use notion-mcp-cli as default invocation path"
+if ! rg -q 'notion-mcp-cli -h' "${SKILL_FILE}"; then
+  fail "SKILL.md must use notion-mcp-cli help as default discovery path"
+fi
+
+if ! rg -q 'notion-mcp-cli notion-fetch help' "${SKILL_FILE}"; then
+  fail "SKILL.md must show operation-level help via notion-mcp-cli <method> help"
 fi
 
 for rel in \

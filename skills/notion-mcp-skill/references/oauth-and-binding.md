@@ -73,7 +73,7 @@ If a conflicting command name exists and cannot be safely reused, stop and ask s
 Then run operation discovery/calls:
 
 ```bash
-uxc mcp.notion.com/mcp list
-notion-mcp-cli list
-notion-mcp-cli describe notion-fetch
+uxc mcp.notion.com/mcp help
+notion-mcp-cli -h
+notion-mcp-cli notion-fetch help
 ```

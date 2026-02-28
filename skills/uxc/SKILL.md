@@ -79,7 +79,7 @@ Wrapper skills should default to a fixed local link command instead of calling `
 3. If command is missing, create it:
    - `uxc link <link_name> <host>`
 4. Validate link command:
-   - `<link_name> list`
+   - `<link_name> -h`
 5. Use only the link command for the rest of the skill flow.
 
 ### Naming Governance

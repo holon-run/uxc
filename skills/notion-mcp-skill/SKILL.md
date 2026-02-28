@@ -34,11 +34,11 @@ Endpoint argument style in this skill:
 4. Use fixed link command by default:
    - `command -v notion-mcp-cli`
    - If missing, create it: `uxc link notion-mcp-cli mcp.notion.com/mcp`
-   - `notion-mcp-cli list`
+   - `notion-mcp-cli -h`
    - If command conflict is detected and cannot be safely reused, stop and ask skill maintainers to pick a different fixed command name.
 5. Discover tools and inspect schema before execution:
-   - `notion-mcp-cli list`
-   - `notion-mcp-cli describe notion-fetch`
+   - `notion-mcp-cli -h`
+   - `notion-mcp-cli notion-fetch help`
    - `notion-fetch` requires `id` (URL or UUID). Examples:
      - `notion-mcp-cli notion-fetch id="https://notion.so/your-page-url"`
      - `notion-mcp-cli notion-fetch id="12345678-90ab-cdef-1234-567890abcdef"`
