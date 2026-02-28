@@ -1,23 +1,19 @@
 # Usage Patterns
 
 All commands assume endpoint `mcp.notion.com/mcp`.
-If shortcut exists, prefer:
+This skill defaults to fixed link command `notion-mcp-cli`.
+Create it when missing:
 
 ```bash
-notion-mcp-cli <operation> ...
-```
-
-Create shortcut:
-
-```bash
+command -v notion-mcp-cli
 uxc link notion-mcp-cli mcp.notion.com/mcp
 ```
 
 ## Discover And Inspect
 
 ```bash
-uxc mcp.notion.com/mcp list
-uxc mcp.notion.com/mcp describe notion-fetch
+notion-mcp-cli list
+notion-mcp-cli describe notion-fetch
 ```
 
 ## Read-First Flows
@@ -25,20 +21,20 @@ uxc mcp.notion.com/mcp describe notion-fetch
 Search content:
 
 ```bash
-uxc mcp.notion.com/mcp notion-search query="Q1 plan" query_type=internal
+notion-mcp-cli notion-search query="Q1 plan" query_type=internal
 ```
 
 Fetch entity by URL/ID:
 
 ```bash
-uxc mcp.notion.com/mcp notion-fetch id="https://notion.so/your-page-url"
+notion-mcp-cli notion-fetch id="https://notion.so/your-page-url"
 ```
 
 List users or teams:
 
 ```bash
-uxc mcp.notion.com/mcp notion-get-users '{}'
-uxc mcp.notion.com/mcp notion-get-teams '{}'
+notion-mcp-cli notion-get-users '{}'
+notion-mcp-cli notion-get-teams '{}'
 ```
 
 ## Write Flows (Require Explicit User Confirmation)
@@ -46,7 +42,7 @@ uxc mcp.notion.com/mcp notion-get-teams '{}'
 Create page:
 
 ```bash
-uxc mcp.notion.com/mcp notion-create-pages '{
+notion-mcp-cli notion-create-pages '{
   "pages":[
     {
       "properties":{"title":"Release Notes"},
@@ -59,7 +55,7 @@ uxc mcp.notion.com/mcp notion-create-pages '{
 Update page properties:
 
 ```bash
-uxc mcp.notion.com/mcp notion-update-page '{
+notion-mcp-cli notion-update-page '{
   "page_id":"00000000-0000-0000-0000-000000000000",
   "command":"update_properties",
   "properties":{"title":"Updated Title"}
@@ -69,7 +65,7 @@ uxc mcp.notion.com/mcp notion-update-page '{
 Add comment:
 
 ```bash
-uxc mcp.notion.com/mcp notion-create-comment '{
+notion-mcp-cli notion-create-comment '{
   "page_id":"00000000-0000-0000-0000-000000000000",
   "rich_text":[{"text":{"content":"Looks good"}}]
 }'
@@ -87,3 +83,8 @@ Before writing to database-backed pages:
 Rely on stable envelope fields:
 - Success: `ok == true`, consume `data`
 - Failure: `ok == false`, inspect `error.code` and `error.message`
+
+## Fallback Equivalence
+
+- `notion-mcp-cli <operation> ...` is equivalent to `uxc mcp.notion.com/mcp <operation> ...`.
+- If link setup is temporarily unavailable, use the `uxc mcp.notion.com/mcp ...` form as a fallback.

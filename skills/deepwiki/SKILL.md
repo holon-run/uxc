@@ -40,17 +40,20 @@ cargo install uxc
 
 ## Core Workflow
 
-1. List available tools:
-   - `uxc mcp.deepwiki.com/mcp list`
+1. Use fixed link command by default:
+   - `command -v deepwiki-mcp-cli`
+   - If missing, create it: `uxc link deepwiki-mcp-cli mcp.deepwiki.com/mcp`
+   - `deepwiki-mcp-cli list`
+   - If command conflict is detected and cannot be safely reused, stop and ask skill maintainers to pick a different fixed command name.
 
 2. Ask a question about a repository:
-   - `uxc mcp.deepwiki.com/mcp ask_question repoName=owner/repo question='your question'`
+   - `deepwiki-mcp-cli ask_question repoName=owner/repo question='your question'`
 
 3. Read wiki structure:
-   - `uxc mcp.deepwiki.com/mcp read_wiki_structure repoName=owner/repo`
+   - `deepwiki-mcp-cli read_wiki_structure repoName=owner/repo`
 
 4. Read wiki contents:
-   - `uxc mcp.deepwiki.com/mcp read_wiki_contents repoName=owner/repo`
+   - `deepwiki-mcp-cli read_wiki_contents repoName=owner/repo`
 
 ## Available Tools
 
@@ -63,25 +66,25 @@ cargo install uxc
 ### Ask about a codebase
 
 ```bash
-uxc mcp.deepwiki.com/mcp ask_question repoName=facebook/react question='How does useState work?'
+deepwiki-mcp-cli ask_question repoName=facebook/react question='How does useState work?'
 ```
 
 ### Explore repository structure
 
 ```bash
-uxc mcp.deepwiki.com/mcp read_wiki_structure '{"repoName":"facebook/react"}'
+deepwiki-mcp-cli read_wiki_structure '{"repoName":"facebook/react"}'
 ```
 
 ### Read documentation
 
 ```bash
-uxc mcp.deepwiki.com/mcp read_wiki_contents repoName=facebook/react
+deepwiki-mcp-cli read_wiki_contents repoName=facebook/react
 ```
 
 ### Fallback input mode (only when positional JSON is inconvenient)
 
 ```bash
-uxc mcp.deepwiki.com/mcp ask_question --input-json '{"repoName":"facebook/react","question":"What is reconciliation?"}'
+deepwiki-mcp-cli ask_question --input-json '{"repoName":"facebook/react","question":"What is reconciliation?"}'
 ```
 
 ## Output Parsing
@@ -93,6 +96,8 @@ The response is an MCP JSON envelope. Extract the content from `.data.content[].
 - Maximum 10 repositories per question
 - Some popular repositories may already be indexed
 - Responses are grounded in the actual codebase
+- `deepwiki-mcp-cli <operation> ...` is equivalent to `uxc mcp.deepwiki.com/mcp <operation> ...`.
+- If link setup is temporarily unavailable, use direct `uxc mcp.deepwiki.com/mcp ...` calls as fallback.
 
 ## Reference Files
 

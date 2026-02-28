@@ -1,11 +1,19 @@
 # DeepWiki Usage Patterns
 
+This skill defaults to fixed link command `deepwiki-mcp-cli`.
+Create it when missing:
+
+```bash
+command -v deepwiki-mcp-cli
+uxc link deepwiki-mcp-cli mcp.deepwiki.com/mcp
+```
+
 ## Basic Question Flow
 
 1. Ensure the repository is indexed on DeepWiki (visit https://deepwiki.com)
 2. Ask a question using `ask_question` tool:
    ```bash
-   uxc mcp.deepwiki.com/mcp ask_question repoName=owner/repo question='your question'
+   deepwiki-mcp-cli ask_question repoName=owner/repo question='your question'
    ```
 
 ## Common Use Cases
@@ -13,19 +21,19 @@
 ### Understand a function or API
 
 ```bash
-uxc mcp.deepwiki.com/mcp ask_question repoName=facebook/react question='How does useState work?'
+deepwiki-mcp-cli ask_question repoName=facebook/react question='How does useState work?'
 ```
 
 ### Find relevant code
 
 ```bash
-uxc mcp.deepwiki.com/mcp ask_question '{"repoName":"owner/repo","question":"Where is the authentication logic?"}'
+deepwiki-mcp-cli ask_question '{"repoName":"owner/repo","question":"Where is the authentication logic?"}'
 ```
 
 ### Get code review context
 
 ```bash
-uxc mcp.deepwiki.com/mcp ask_question repoName=owner/repo question='Explain the architecture of this project'
+deepwiki-mcp-cli ask_question repoName=owner/repo question='Explain the architecture of this project'
 ```
 
 ## Output Handling
@@ -34,14 +42,19 @@ Parse the response:
 
 ```bash
 # Extract the answer text
-uxc mcp.deepwiki.com/mcp ask_question repoName=facebook/react question='What is React?' | jq -r '.data.content[].text'
+deepwiki-mcp-cli ask_question repoName=facebook/react question='What is React?' | jq -r '.data.content[].text'
 ```
 
 ## Fallback: Explicit JSON Flag
 
 ```bash
-uxc mcp.deepwiki.com/mcp ask_question --input-json '{"repoName":"facebook/react","question":"How does fiber scheduling work?"}'
+deepwiki-mcp-cli ask_question --input-json '{"repoName":"facebook/react","question":"How does fiber scheduling work?"}'
 ```
+
+## Fallback Equivalence
+
+- `deepwiki-mcp-cli <operation> ...` is equivalent to `uxc mcp.deepwiki.com/mcp <operation> ...`.
+- If link setup is temporarily unavailable, use `uxc mcp.deepwiki.com/mcp ...` as fallback.
 
 ## Limitations
 

@@ -61,6 +61,18 @@ if ! rg -q 'query-docs' "${SKILL_FILE}"; then
   fail "SKILL.md must document query-docs tool"
 fi
 
+if ! rg -q 'command -v context7-mcp-cli' "${SKILL_FILE}"; then
+  fail "SKILL.md must include link command existence check"
+fi
+
+if ! rg -q 'uxc link context7-mcp-cli mcp.context7.com/mcp' "${SKILL_FILE}"; then
+  fail "SKILL.md must include fixed link creation command"
+fi
+
+if ! rg -q 'context7-mcp-cli list' "${SKILL_FILE}"; then
+  fail "SKILL.md must use context7-mcp-cli as default invocation path"
+fi
+
 # Validate preferred input style appears in SKILL text.
 if ! rg -q "resolve-library-id libraryName=" "${SKILL_FILE}"; then
   fail "SKILL.md must prefer key=value examples for resolve-library-id"
@@ -77,6 +89,14 @@ fi
 # Validate references linked from SKILL body.
 if ! rg -q 'references/usage-patterns.md' "${SKILL_FILE}"; then
   fail "SKILL.md must reference usage-patterns.md"
+fi
+
+if ! rg -q 'equivalent to `uxc mcp.context7.com/mcp' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "context7 docs must include single-point fallback equivalence guidance"
+fi
+
+if rg -qi 'retry with .*suffix|append.*suffix|dynamic rename|auto-rename' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "context7 docs must not include dynamic command renaming guidance"
 fi
 
 # Validate openai.yaml minimum fields.

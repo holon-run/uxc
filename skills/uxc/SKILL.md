@@ -67,6 +67,33 @@ For more options, see the [Installation](https://github.com/holon-run/uxc#instal
 6. For auth-protected endpoints, follow the OAuth and binding workflow:
    - see `references/oauth-and-binding.md`
 
+## Link-First Workflow For Wrapper Skills
+
+Wrapper skills should default to a fixed local link command instead of calling `uxc <host> ...` directly on every step.
+
+1. Pick a fixed command name during skill development:
+   - naming convention: `<provider>-mcp-cli`
+   - examples: `notion-mcp-cli`, `context7-mcp-cli`, `deepwiki-mcp-cli`
+2. Check whether the command already exists:
+   - `command -v <link_name>`
+3. If command is missing, create it:
+   - `uxc link <link_name> <host>`
+4. Validate link command:
+   - `<link_name> list`
+5. Use only the link command for the rest of the skill flow.
+
+### Naming Governance
+
+- Link naming is a skill author decision, not a runtime agent decision.
+- Resolve ecosystem conflicts during skill development/review.
+- Do not implement dynamic rename logic inside runtime skill flow.
+- If runtime detects a command conflict that cannot be safely reused, stop and ask for skill maintainer intervention.
+
+### Equivalence Rule
+
+- `<link_name> <operation> ...` is equivalent to `uxc <host> <operation> ...`.
+- Use `uxc <host> ...` only as a temporary fallback when link setup is unavailable.
+
 ## Input Modes
 
 - Preferred (simple payload): key/value
@@ -91,6 +118,7 @@ Default output is JSON. Do not use `--text` in agent automation paths.
 ## Reuse Rule For Other Skills
 
 - If a skill needs remote API/tool execution, reuse this skill instead of embedding protocol-specific calling logic.
+- Wrapper skills should adopt a fixed link command (`<provider>-mcp-cli`) as the default invocation path.
 - Upstream skill inputs should be limited to:
   - target host
   - operation id/name

@@ -60,11 +60,14 @@ uxc auth binding match mcp.notion.com/mcp
 If multiple bindings match Notion endpoint, verify with explicit credential against the same read call before removing stale bindings.
 Do not remove duplicates blindly based on names only.
 
-Recommended shortcut for repeated usage:
+Default fixed link command for this skill:
 
 ```bash
+command -v notion-mcp-cli
 uxc link notion-mcp-cli mcp.notion.com/mcp
 ```
+
+If a conflicting command name exists and cannot be safely reused, stop and ask skill maintainers to update the fixed command name.
 
 Then run operation discovery/calls:
 

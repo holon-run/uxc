@@ -57,6 +57,18 @@ if ! rg -q 'ask_question' "${SKILL_FILE}"; then
   fail "SKILL.md must document ask_question tool"
 fi
 
+if ! rg -q 'command -v deepwiki-mcp-cli' "${SKILL_FILE}"; then
+  fail "SKILL.md must include link command existence check"
+fi
+
+if ! rg -q 'uxc link deepwiki-mcp-cli mcp.deepwiki.com/mcp' "${SKILL_FILE}"; then
+  fail "SKILL.md must include fixed link creation command"
+fi
+
+if ! rg -q 'deepwiki-mcp-cli list' "${SKILL_FILE}"; then
+  fail "SKILL.md must use deepwiki-mcp-cli as default invocation path"
+fi
+
 if ! rg -q 'ask_question repoName=' "${SKILL_FILE}"; then
   fail "SKILL.md must prefer key=value examples for ask_question"
 fi
@@ -72,6 +84,14 @@ fi
 # Validate references linked from SKILL body.
 if ! rg -q 'references/usage-patterns.md' "${SKILL_FILE}"; then
   fail "SKILL.md must reference usage-patterns.md"
+fi
+
+if ! rg -q 'equivalent to `uxc mcp.deepwiki.com/mcp' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "deepwiki docs must include single-point fallback equivalence guidance"
+fi
+
+if rg -qi 'retry with .*suffix|append.*suffix|dynamic rename|auto-rename' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "deepwiki docs must not include dynamic command renaming guidance"
 fi
 
 # Validate openai.yaml minimum fields.

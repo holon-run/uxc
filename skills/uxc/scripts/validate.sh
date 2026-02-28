@@ -69,6 +69,22 @@ if ! rg -q "uxc <host> <operation> '<payload-json>'" "${SKILL_FILE}"; then
   fail "SKILL.md must document bare JSON execute workflow"
 fi
 
+if ! rg -q 'Link-First Workflow For Wrapper Skills' "${SKILL_FILE}"; then
+  fail "SKILL.md must include Link-First workflow guidance for wrapper skills"
+fi
+
+if ! rg -q 'naming convention: `<provider>-mcp-cli`' "${SKILL_FILE}"; then
+  fail "SKILL.md must define fixed wrapper link naming convention"
+fi
+
+if ! rg -q 'command -v <link_name>' "${SKILL_FILE}"; then
+  fail "SKILL.md must include link existence check pattern"
+fi
+
+if ! rg -q '`<link_name> <operation> ...` is equivalent to `uxc <host> <operation> ...`' "${SKILL_FILE}"; then
+  fail "SKILL.md must include link/uxc equivalence rule"
+fi
+
 if rg -q "execute notion" "${SKILL_FILE}"; then
   fail "SKILL.md must not document execute-form invocations"
 fi
@@ -88,6 +104,14 @@ for rel in \
     fail "SKILL.md must reference ${rel}"
   fi
 done
+
+if ! rg -q -F 'Wrapper Pattern (Link-First)' "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "uxc usage-patterns must include wrapper link-first pattern"
+fi
+
+if ! rg -q 'Do not dynamically rename link commands at runtime' "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "uxc usage-patterns must forbid dynamic link renaming at runtime"
+fi
 
 # Validate openai.yaml minimum fields.
 if ! rg -q '^\s*display_name:\s*"UXC"\s*$' "${OPENAI_FILE}"; then

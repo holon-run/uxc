@@ -27,14 +27,17 @@ Do not assume another skill is auto-triggered in every runtime. Keep this skill 
    - Ask user to paste the full callback URL after consent.
 3. Bind endpoint to the credential:
    - `uxc auth binding add --id notion-mcp --host mcp.notion.com --path-prefix /mcp --scheme https --credential notion-mcp --priority 100`
-4. Recommend creating a local shortcut command for repeated calls:
-   - `uxc link notion-mcp-cli mcp.notion.com/mcp`
+4. Use fixed link command by default:
+   - `command -v notion-mcp-cli`
+   - If missing, create it: `uxc link notion-mcp-cli mcp.notion.com/mcp`
+   - `notion-mcp-cli list`
+   - If command conflict is detected and cannot be safely reused, stop and ask skill maintainers to pick a different fixed command name.
 5. Discover tools and inspect schema before execution:
-   - `uxc mcp.notion.com/mcp list`
-   - `uxc mcp.notion.com/mcp describe notion-fetch`
+   - `notion-mcp-cli list`
+   - `notion-mcp-cli describe notion-fetch`
    - `notion-fetch` requires `id` (URL or UUID). Examples:
-     - `uxc mcp.notion.com/mcp notion-fetch id="https://notion.so/your-page-url"`
-     - `uxc mcp.notion.com/mcp notion-fetch id="12345678-90ab-cdef-1234-567890abcdef"`
+     - `notion-mcp-cli notion-fetch id="https://notion.so/your-page-url"`
+     - `notion-mcp-cli notion-fetch id="12345678-90ab-cdef-1234-567890abcdef"`
    - Common operations include `notion-search`, `notion-fetch`, and `notion-update-page`.
 6. Prefer read path first:
    - Search/fetch current state before any write.
@@ -60,7 +63,9 @@ Do not ask user to manually extract or copy bearer tokens. Token exchange is han
 
 - Keep automation on JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
-- If `notion-mcp-cli` exists, prefer it for day-to-day operations; otherwise use full `uxc mcp.notion.com/mcp ...` form.
+- Use `notion-mcp-cli` as the default command path for all Notion MCP calls in this skill.
+- `notion-mcp-cli <operation> ...` is equivalent to `uxc mcp.notion.com/mcp <operation> ...`.
+- Use direct `uxc mcp.notion.com/mcp ...` only as a temporary fallback when link setup is unavailable.
 - Call `notion-fetch` before `notion-create-pages` or `notion-update-page` when targeting database-backed content to obtain exact schema/property names.
 - Treat operations as high impact by default:
   - Require explicit user confirmation before create/update/move/delete-style actions.
