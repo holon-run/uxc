@@ -166,7 +166,7 @@ enum Commands {
         input: Option<String>,
     },
 
-    /// Dynamic operation execution: `uxc <url> <operation_id> [--input-json ...] [--args k=v]`
+    /// Dynamic operation execution: `uxc <url> <operation_id> [key=value ...] ['{...}']`
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -193,6 +193,13 @@ enum AuthCommands {
     Credential {
         #[command(subcommand)]
         credential_command: AuthCredentialCommands,
+    },
+
+    /// Alias for `auth credential info`
+    Info {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
     },
 
     /// Manage endpoint auth bindings
@@ -304,6 +311,9 @@ enum AuthBindingCommands {
 
 #[derive(Subcommand)]
 enum AuthOauthCommands {
+    /// List OAuth credentials
+    List,
+
     /// Login with OAuth and save tokens
     Login {
         /// Credential ID
@@ -752,6 +762,9 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
         "auth" => {
             if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
                 match level1 {
+                    "info" => {
+                        path.push("info".to_string());
+                    }
                     "credential" => {
                         path.push("credential".to_string());
                         if let Some(level2) = tokens.get(idx + 1).map(|s| s.as_str()) {
@@ -771,7 +784,7 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
                     "oauth" => {
                         path.push("oauth".to_string());
                         if let Some(level2) = tokens.get(idx + 1).map(|s| s.as_str()) {
-                            if matches!(level2, "login" | "refresh" | "info" | "logout") {
+                            if matches!(level2, "list" | "login" | "refresh" | "info" | "logout") {
                                 path.push(level2.to_string());
                             }
                         }
@@ -847,6 +860,7 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
                 AuthCredentialCommands::Set { .. } => Some(vec!["auth", "credential", "set"]),
                 AuthCredentialCommands::Remove { .. } => Some(vec!["auth", "credential", "remove"]),
             },
+            AuthCommands::Info { .. } => Some(vec!["auth", "info"]),
             AuthCommands::Binding { binding_command } => match binding_command {
                 AuthBindingCommands::List => Some(vec!["auth", "binding", "list"]),
                 AuthBindingCommands::Add { .. } => Some(vec!["auth", "binding", "add"]),
@@ -854,6 +868,7 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
                 AuthBindingCommands::Match { .. } => Some(vec!["auth", "binding", "match"]),
             },
             AuthCommands::Oauth { oauth_command } => match oauth_command {
+                AuthOauthCommands::List => Some(vec!["auth", "oauth", "list"]),
                 AuthOauthCommands::Login { .. } => Some(vec!["auth", "oauth", "login"]),
                 AuthOauthCommands::Refresh { .. } => Some(vec!["auth", "oauth", "refresh"]),
                 AuthOauthCommands::Info { .. } => Some(vec!["auth", "oauth", "info"]),
@@ -1191,14 +1206,11 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["call"] => HelpData {
             path: "uxc call".to_string(),
             about: "Execute an operation explicitly".to_string(),
-            usage: "uxc <host> call <operation_id> [--args k=v] [--input-json '{...}' | '{...}']"
-                .to_string(),
+            usage: "uxc <host> call <operation_id> [key=value ... | '{...}']".to_string(),
             commands: vec![],
-            notes: vec![
-                "Use either --input-json or one positional JSON payload object.".to_string(),
-            ],
+            notes: vec!["Use exactly one input mode per call.".to_string()],
             examples: vec![
-                "uxc <host> call <operation_id> --input-json '{...}'".to_string(),
+                "uxc <host> call <operation_id> id=42".to_string(),
                 "uxc <host> call <operation_id> '{...}'".to_string(),
             ],
         },
@@ -1249,17 +1261,27 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth"] => HelpData {
             path: "uxc auth".to_string(),
             about: "Manage authentication credentials and bindings".to_string(),
-            usage: "uxc auth <credential|binding|oauth> ...".to_string(),
+            usage: "uxc auth <credential|info|binding|oauth> ...".to_string(),
             commands: commands(&[
                 ("credential", "Manage credentials"),
+                ("info", "Alias for auth credential info"),
                 ("binding", "Manage endpoint auth bindings"),
                 ("oauth", "Manage OAuth credentials"),
             ]),
             notes: vec![],
             examples: vec![
                 "uxc auth credential list".to_string(),
+                "uxc auth info deepwiki".to_string(),
                 "uxc auth binding list".to_string(),
             ],
+        },
+        ["auth", "info"] => HelpData {
+            path: "uxc auth info".to_string(),
+            about: "Alias for auth credential info".to_string(),
+            usage: "uxc auth info <credential_id>".to_string(),
+            commands: vec![],
+            notes: vec!["Equivalent to: uxc auth credential info <credential_id>".to_string()],
+            examples: vec!["uxc auth info deepwiki".to_string()],
         },
         ["auth", "credential"] => HelpData {
             path: "uxc auth credential".to_string(),
@@ -1360,8 +1382,9 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth", "oauth"] => HelpData {
             path: "uxc auth oauth".to_string(),
             about: "Manage OAuth credentials".to_string(),
-            usage: "uxc auth oauth <login|refresh|info|logout> ...".to_string(),
+            usage: "uxc auth oauth <list|login|refresh|info|logout> ...".to_string(),
             commands: commands(&[
+                ("list", "List OAuth credentials"),
                 ("login", "Login with OAuth and save tokens"),
                 ("refresh", "Refresh OAuth token"),
                 ("info", "Show OAuth credential information"),
@@ -1369,9 +1392,18 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             ]),
             notes: vec![],
             examples: vec![
+                "uxc auth oauth list".to_string(),
                 "uxc auth oauth info deepwiki".to_string(),
                 "uxc auth oauth refresh deepwiki".to_string(),
             ],
+        },
+        ["auth", "oauth", "list"] => HelpData {
+            path: "uxc auth oauth list".to_string(),
+            about: "List OAuth credentials".to_string(),
+            usage: "uxc auth oauth list".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth oauth list".to_string()],
         },
         ["auth", "oauth", "login"] => HelpData {
             path: "uxc auth oauth login".to_string(),
@@ -1744,7 +1776,7 @@ fn parse_external_command(tokens: &[String], global_help: bool) -> Result<Endpoi
             }
             unknown => {
                 return Err(UxcError::InvalidArguments(format!(
-                    "Unknown argument '{}' for operation '{}'. Use --input-json or --args",
+                    "Unknown argument '{}' for operation '{}'. Use key=value arguments, a positional JSON object payload, or --input-json",
                     unknown, operation_id
                 ))
                 .into());
@@ -1780,7 +1812,7 @@ fn normalize_operation_inputs(
 
         if token.starts_with('-') {
             return Err(UxcError::InvalidArguments(format!(
-                "Unknown argument '{}' for operation '{}'. Use --input-json or --args",
+                "Unknown argument '{}' for operation '{}'. Use key=value arguments, a positional JSON object payload, or --input-json",
                 token, operation_id
             ))
             .into());
@@ -1796,7 +1828,7 @@ fn normalize_operation_inputs(
 
         let parsed = serde_json::from_str::<Value>(token).map_err(|_| {
             UxcError::InvalidArguments(format!(
-                "Unknown argument '{}' for operation '{}'. Use --input-json or --args",
+                "Unknown argument '{}' for operation '{}'. Use key=value arguments, a positional JSON object payload, or --input-json",
                 token, operation_id
             ))
         })?;
@@ -1816,6 +1848,26 @@ fn normalize_operation_inputs(
         return Err(UxcError::InvalidArguments(
             "Cannot provide both --input-json and positional JSON payload".to_string(),
         )
+        .into());
+    }
+
+    for arg in &args {
+        if arg.contains('=') {
+            continue;
+        }
+
+        if serde_json::from_str::<Value>(arg).is_ok() {
+            return Err(UxcError::InvalidArguments(format!(
+                "Invalid --args value '{}' for operation '{}'. Use key=value for --args, or pass JSON as positional payload / --input-json",
+                arg, operation_id
+            ))
+            .into());
+        }
+
+        return Err(UxcError::InvalidArguments(format!(
+            "Invalid --args value '{}' for operation '{}'. Expected key=value",
+            arg, operation_id
+        ))
         .into());
     }
 
@@ -1864,7 +1916,8 @@ fn host_help_examples() -> Vec<String> {
             return vec![
                 format!("{link_name} list"),
                 format!("{link_name} describe <operation_id>"),
-                format!("{link_name} call <operation_id> --input-json '{{...}}'"),
+                format!("{link_name} call <operation_id> id=42"),
+                format!("{link_name} call <operation_id> '{{...}}'"),
             ];
         }
     }
@@ -1872,7 +1925,8 @@ fn host_help_examples() -> Vec<String> {
     vec![
         "uxc <host> list".to_string(),
         "uxc <host> describe <operation_id>".to_string(),
-        "uxc <host> call <operation_id> --input-json '{...}'".to_string(),
+        "uxc <host> call <operation_id> id=42".to_string(),
+        "uxc <host> call <operation_id> '{...}'".to_string(),
     ]
 }
 
@@ -2418,6 +2472,12 @@ async fn handle_auth_command(command: &AuthCommands) -> Result<OutputEnvelope> {
         AuthCommands::Credential { credential_command } => {
             handle_auth_credential_command(credential_command).await
         }
+        AuthCommands::Info { credential_id } => {
+            handle_auth_credential_command(&AuthCredentialCommands::Info {
+                credential_id: credential_id.clone(),
+            })
+            .await
+        }
         AuthCommands::Binding { binding_command } => handle_auth_binding_command(binding_command),
         AuthCommands::Oauth { oauth_command } => handle_auth_oauth_command(oauth_command).await,
     }
@@ -2661,6 +2721,28 @@ fn handle_auth_binding_command(command: &AuthBindingCommands) -> Result<OutputEn
 
 async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<OutputEnvelope> {
     match command {
+        AuthOauthCommands::List => {
+            let profiles = Profiles::load_profiles()?;
+            let mut rendered = Vec::new();
+            for name in profiles.profile_names() {
+                let profile = profiles.get_profile(&name)?;
+                if profile.auth_type == AuthType::OAuth {
+                    rendered.push(to_auth_profile_view(&name, profile));
+                }
+            }
+            let data = serde_json::to_value(AuthListData {
+                count: rendered.len(),
+                credentials: rendered,
+            })?;
+            Ok(OutputEnvelope::success(
+                "auth_list",
+                "cli",
+                "uxc",
+                None,
+                data,
+                None,
+            ))
+        }
         AuthOauthCommands::Login {
             credential_id,
             endpoint,

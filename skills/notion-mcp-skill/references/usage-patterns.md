@@ -25,20 +25,20 @@ uxc https://mcp.notion.com/mcp describe notion-fetch
 Search content:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-search --input-json '{"query":"Q1 plan","query_type":"internal"}'
+uxc https://mcp.notion.com/mcp notion-search query="Q1 plan" query_type=internal
 ```
 
 Fetch entity by URL/ID:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-fetch --input-json '{"id":"https://notion.so/your-page-url"}'
+uxc https://mcp.notion.com/mcp notion-fetch id="https://notion.so/your-page-url"
 ```
 
 List users or teams:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-get-users --input-json '{}'
-uxc https://mcp.notion.com/mcp notion-get-teams --input-json '{}'
+uxc https://mcp.notion.com/mcp notion-get-users '{}'
+uxc https://mcp.notion.com/mcp notion-get-teams '{}'
 ```
 
 ## Write Flows (Require Explicit User Confirmation)
@@ -46,7 +46,7 @@ uxc https://mcp.notion.com/mcp notion-get-teams --input-json '{}'
 Create page:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-create-pages --input-json '{
+uxc https://mcp.notion.com/mcp notion-create-pages '{
   "pages":[
     {
       "properties":{"title":"Release Notes"},
@@ -59,7 +59,7 @@ uxc https://mcp.notion.com/mcp notion-create-pages --input-json '{
 Update page properties:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-update-page --input-json '{
+uxc https://mcp.notion.com/mcp notion-update-page '{
   "page_id":"00000000-0000-0000-0000-000000000000",
   "command":"update_properties",
   "properties":{"title":"Updated Title"}
@@ -69,7 +69,7 @@ uxc https://mcp.notion.com/mcp notion-update-page --input-json '{
 Add comment:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-create-comment --input-json '{
+uxc https://mcp.notion.com/mcp notion-create-comment '{
   "page_id":"00000000-0000-0000-0000-000000000000",
   "rich_text":[{"text":{"content":"Looks good"}}]
 }'

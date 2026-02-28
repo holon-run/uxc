@@ -55,28 +55,29 @@ For more options, see the [Installation](https://github.com/holon-run/uxc#instal
    - `uxc <host> describe <operation>`
    - or `uxc <host> <operation> help`
 3. Execute with structured input:
-   - `uxc <host> <operation> --input-json '<payload-json>'`
+   - `uxc <host> <operation> key=value`
    - `uxc <host> <operation> '<payload-json>'`
-   - `uxc <host> <operation> --args key=value`
+   - `uxc <host> <operation> --input-json '<payload-json>'` (fallback only)
 4. Parse result as JSON envelope:
    - Success: `.ok == true`, consume `.data`
    - Failure: `.ok == false`, inspect `.error.code` and `.error.message`
 5. If operation name conflicts with keywords such as `help`/`list`, use explicit form:
-   - `uxc <host> call <operation> --input-json '<payload-json>'`
+   - `uxc <host> call <operation> key=value`
+   - `uxc <host> call <operation> '<payload-json>'`
 6. For auth-protected endpoints, follow the OAuth and binding workflow:
    - see `references/oauth-and-binding.md`
 
 ## Input Modes
 
+- Preferred (simple payload): key/value
+  - `uxc <host> <operation> field=value`
 - Bare JSON positional:
   - `uxc <host> <operation> '{"field":"value"}'`
-- Explicit JSON flag:
+- Explicit JSON flag (fallback when positional JSON is inconvenient):
   - `uxc <host> <operation> --input-json '{"field":"value"}'`
-- Key/value arguments:
-  - `uxc <host> <operation> field=value`
-  - `uxc <host> <operation> --args field=value`
 
 Do not pass both positional JSON and `--input-json` in one call.
+Do not pass raw JSON through `--args`; use positional JSON or `--input-json`.
 
 ## Migration Note
 

@@ -17,13 +17,13 @@ uxc <host> describe <operation>
 3. Execute with minimal valid payload:
 
 ```bash
-uxc <host> <operation> --input-json '{"field":"value"}'
+uxc <host> <operation> field=value
 ```
 
 4. Parse success/failure envelope:
 
 ```bash
-uxc <host> <operation> --input-json '{"field":"value"}' | jq '.ok, .kind, .data'
+uxc <host> <operation> field=value | jq '.ok, .kind, .data'
 ```
 
 ## Conflict-Safe Flow
@@ -31,7 +31,8 @@ uxc <host> <operation> --input-json '{"field":"value"}' | jq '.ok, .kind, .data'
 If operation name collides with CLI keywords (`help`, `list`, `describe`), use explicit `call`:
 
 ```bash
-uxc <host> call <operation> --input-json '{"field":"value"}'
+uxc <host> call <operation> field=value
+uxc <host> call <operation> '{"field":"value"}'
 ```
 
 ## Input Modes
@@ -47,7 +48,12 @@ uxc <host> call <operation> '{"field":"value"}'
 
 ```bash
 uxc <host> <operation> field=value
-uxc <host> <operation> --args field=value
+```
+
+### Explicit JSON flag (fallback)
+
+```bash
+uxc <host> <operation> --input-json '{"field":"value"}'
 ```
 
 ### Precedence and conflict
@@ -56,6 +62,7 @@ uxc <host> <operation> --args field=value
   - bare positional JSON, or
   - `--input-json`
 - Supplying both should fail with `INVALID_ARGUMENT`.
+- Do not pass raw JSON via `--args`; use bare JSON positional payload instead.
 
 ## Host-Level Help
 
@@ -86,7 +93,7 @@ uxc auth oauth login <credential_id> --endpoint <endpoint_url> --flow authorizat
 4. If multiple bindings match, verify explicit credential:
 
 ```bash
-uxc --auth <credential_id> <endpoint_url> <operation> --input-json '{...}'
+uxc --auth <credential_id> <endpoint_url> <operation> '{...}'
 ```
 
 ## Automation Safety Rules

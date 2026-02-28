@@ -70,8 +70,8 @@ for rel in \
   fi
 done
 
-if ! rg -q '\$uxc' "${SKILL_FILE}"; then
-  fail "SKILL.md must explicitly reference the $uxc skill for shared OAuth/error guidance"
+if ! rg -q '(\\$uxc|`uxc` skill)' "${SKILL_FILE}"; then
+  fail "SKILL.md must reference uxc skill guidance for shared OAuth/error handling"
 fi
 
 if ! rg -q 'canonical OAuth and binding workflow, use `\$uxc` skill' "${SKILL_DIR}/references/oauth-and-binding.md"; then
@@ -80,6 +80,18 @@ fi
 
 if ! rg -q 'canonical error taxonomy and OAuth recovery playbooks, use `\$uxc` skill' "${SKILL_DIR}/references/error-handling.md"; then
   fail "error-handling.md must be a thin wrapper pointing to $uxc guidance"
+fi
+
+if rg -q ' execute ' "${SKILL_FILE}"; then
+  fail "SKILL.md must not include execute-form command examples"
+fi
+
+if rg -q ' --json ' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "Notion skill docs must not include removed --json flag examples"
+fi
+
+if rg -q -- "--args '\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "Notion skill docs must not pass raw JSON via --args"
 fi
 
 if ! rg -q '^\s*display_name:\s*"Notion MCP"\s*$' "${OPENAI_FILE}"; then

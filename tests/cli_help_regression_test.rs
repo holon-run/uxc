@@ -168,7 +168,11 @@ fn host_help_supports_url_without_scheme() {
     );
     assert_eq!(
         json["data"]["examples"][2],
-        "uxc <host> call <operation_id> --input-json '{...}'"
+        "uxc <host> call <operation_id> id=42"
+    );
+    assert_eq!(
+        json["data"]["examples"][3],
+        "uxc <host> call <operation_id> '{...}'"
     );
 }
 
@@ -220,8 +224,62 @@ fn host_help_uses_link_name_for_next_commands_when_env_set() {
     );
     assert_eq!(
         json["data"]["examples"][2],
-        "petcli call <operation_id> --input-json '{...}'"
+        "petcli call <operation_id> id=42"
     );
+    assert_eq!(
+        json["data"]["examples"][3],
+        "petcli call <operation_id> '{...}'"
+    );
+}
+
+#[test]
+fn auth_info_alias_outputs_auth_info_json() {
+    let _ = uxc_command()
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("alias-test")
+        .arg("--secret")
+        .arg("dummy")
+        .output()
+        .expect("failed to set auth credential");
+
+    let output = uxc_command()
+        .arg("auth")
+        .arg("info")
+        .arg("alias-test")
+        .output()
+        .expect("failed to run uxc auth info");
+
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "auth_info");
+    assert_eq!(json["operation"], "alias-test");
+
+    let _ = uxc_command()
+        .arg("auth")
+        .arg("credential")
+        .arg("remove")
+        .arg("alias-test")
+        .output();
+}
+
+#[test]
+fn auth_oauth_list_outputs_auth_list_json() {
+    let output = uxc_command()
+        .arg("auth")
+        .arg("oauth")
+        .arg("list")
+        .output()
+        .expect("failed to run uxc auth oauth list");
+
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "auth_list");
 }
 
 #[test]
@@ -694,6 +752,31 @@ fn dynamic_operation_rejects_non_object_positional_json_payload() {
     assert!(json["error"]["message"]
         .as_str()
         .is_some_and(|m| m.contains("must be an object")));
+}
+
+#[test]
+fn dynamic_operation_rejects_json_passed_to_args_flag() {
+    let output = uxc_command()
+        .arg("https://example.com")
+        .arg("op")
+        .arg("--args")
+        .arg(r#"{"query":"ai"}"#)
+        .output()
+        .expect("failed to run uxc");
+
+    assert!(
+        !output.status.success(),
+        "command should fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+    assert!(json["error"]["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("Use key=value for --args")));
 }
 
 #[test]

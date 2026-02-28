@@ -193,7 +193,7 @@ jobs:
           # Call operation with retry
           for attempt in {1..3}; do
             echo "Attempt $attempt/3: Calling query/country..."
-            if OUTPUT=$($UXC https://countries.trevorblades.com/ query/country --json '{"code":"US"}' 2>&1); then
+            if OUTPUT=$($UXC https://countries.trevorblades.com/ query/country '{"code":"US"}' 2>&1); then
               if echo "$OUTPUT" | jq -e '.ok == true and .protocol == "graphql" and .kind == "call_result"' >/dev/null; then
                 echo "✓ Call operation succeeded"
                 echo "Country data:"
@@ -257,7 +257,7 @@ jobs:
           # Call operation with retry
           for attempt in {1..3}; do
             echo "Attempt $attempt/3: Calling addsvc.Add/Sum..."
-            if OUTPUT=$($UXC grpcb.in:9000 addsvc.Add/Sum --json '{"a":1,"b":2}' 2>&1); then
+            if OUTPUT=$($UXC grpcb.in:9000 addsvc.Add/Sum '{"a":1,"b":2}' 2>&1); then
               if echo "$OUTPUT" | jq -e '.ok == true and .protocol == "grpc" and .data.v == "3"' >/dev/null; then
                 echo "✓ Call operation succeeded"
                 echo "Result: 1 + 2 = $(echo \"$OUTPUT\" | jq -r '.data.v')"
@@ -320,7 +320,7 @@ jobs:
           # Call operation with retry
           for attempt in {1..3}; do
             echo "Attempt $attempt/3: Calling read_wiki_structure..."
-            if OUTPUT=$($UXC https://mcp.deepwiki.com/mcp read_wiki_structure --json '{"repoName":"holon-run/uxc"}' 2>&1); then
+            if OUTPUT=$($UXC https://mcp.deepwiki.com/mcp read_wiki_structure '{"repoName":"holon-run/uxc"}' 2>&1); then
               if echo "$OUTPUT" | jq -e '.ok == true and .protocol == "mcp"' >/dev/null; then
                 echo "✓ Call operation succeeded"
                 break
@@ -384,7 +384,7 @@ jobs:
           # Call operation with retry
           for attempt in {1..3}; do
             echo "Attempt $attempt/3: Calling list_directory..."
-            if OUTPUT=$("$UXC" "$MCP_STDIO" list_directory --json '{"path":"/tmp"}'); then
+            if OUTPUT=$("$UXC" "$MCP_STDIO" list_directory '{"path":"/tmp"}'); then
               if echo "$OUTPUT" | jq -e '.ok == true and .protocol == "mcp"' >/dev/null; then
                 echo "✓ Call operation succeeded"
                 echo "Found $(echo "$OUTPUT" | jq '.data.data | length') entries in /tmp"

@@ -68,7 +68,7 @@ if ! rg -q 'uxc <host> describe <operation>' "${SKILL_FILE}"; then
   exit 1
 fi
 
-if ! rg -q "uxc <host> <operation> --input-json '<payload-json>'" "${SKILL_FILE}"; then
+if ! rg -q "uxc <host> <operation> key=value" "${SKILL_FILE}"; then
   echo "SKILL.md must document execute workflow"
   exit 1
 fi
@@ -80,6 +80,11 @@ fi
 
 if ! rg -q -- '--json`?\s+has been removed' "${SKILL_FILE}"; then
   echo "SKILL.md must include migration note for removed --json"
+  exit 1
+fi
+
+if rg -q "execute notion" "${SKILL_FILE}"; then
+  echo "SKILL.md must not document execute-form invocations"
   exit 1
 fi
 

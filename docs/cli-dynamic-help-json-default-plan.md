@@ -8,7 +8,7 @@ Status: Draft
 当前 CLI 形态主要是：
 
 - `uxc <host> list`
-- `uxc <host> call <operation> --json ...`
+- `uxc <host> call <operation> --input-json ...`
 - `uxc <host> call <operation> --op-help`
 
 已知问题：
@@ -40,7 +40,7 @@ Status: Draft
 - `uxc <host> help` 或 `uxc <host> -h`：host 级动态帮助。
 - `uxc <host> list`：返回操作列表（JSON 默认）。
 - `uxc <host> describe <operation>`：返回操作详情（JSON 默认）。
-- `uxc <host> <operation> --json '{...}'`：直接执行（动态快捷语法）。
+- `uxc <host> <operation> --input-json '{...}'`：直接执行（动态快捷语法）。
 
 ## 旧命令处理
 
@@ -122,7 +122,7 @@ Status: Draft
   "output_schema": null,
   "examples": [
     {
-      "cli": "uxc https://mcp.deepwiki.com/mcp ask_question --json '{...}'",
+      "cli": "uxc https://mcp.deepwiki.com/mcp ask_question --input-json '{...}'",
       "payload": {}
     }
   ],
@@ -205,7 +205,7 @@ Status: Draft
    - 范围：operation 路由与 describe 集成。
    - 验收：可在不写 `call --op-help` 的情况下查看详情。
 
-5. [Feature] Dynamic execution syntax (`uxc <host> <op> --json ...`)
+5. [Feature] Dynamic execution syntax (`uxc <host> <op> --input-json ...`)
    - 范围：动态语法映射到 execute。
    - 验收：可直接执行且不再支持 `call <op>` 旧语法。
 
@@ -234,7 +234,7 @@ Status: Draft
 
 ## 完成定义（Definition of Done）
 
-1. 新语法可用：`uxc <host> help`、`uxc <host> <op> help`、`uxc <host> <op> --json`。
+1. 新语法可用：`uxc <host> help`、`uxc <host> <op> help`、`uxc <host> <op> --input-json`。
 2. 默认输出 JSON，`--text` 可切换可读格式。
 3. 四协议 list/describe/execute 均返回统一 envelope。
 4. 旧命令入口已删除（`call`、`--op-help`）。
