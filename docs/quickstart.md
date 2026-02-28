@@ -130,7 +130,7 @@ uxc <host> <operation_id> '{...}'
 Switch to CLI-readable text output when needed:
 
 ```bash
-uxc --text help
+uxc --text -h
 uxc --text <host> -h
 ```
 
