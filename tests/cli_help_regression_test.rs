@@ -348,7 +348,7 @@ fn auth_credential_without_subcommand_outputs_subcommand_help_json() {
 #[test]
 fn host_help_keyword_is_treated_as_operation_literal() {
     let output = uxc_command()
-        .arg("https://example.com")
+        .arg("https://127.0.0.1:1")
         .arg("help")
         .output()
         .expect("failed to run uxc");
