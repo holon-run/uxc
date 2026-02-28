@@ -10,6 +10,7 @@ For canonical OAuth and binding workflow, use `uxc` skill:
 ## Notion Endpoint Defaults
 
 - endpoint: `mcp.notion.com/mcp`
+- endpoint input accepts both `mcp.notion.com/mcp` and `https://mcp.notion.com/mcp`
 - suggested scopes: `read`, `write`
 - callback example: `http://127.0.0.1:8788/callback`
 

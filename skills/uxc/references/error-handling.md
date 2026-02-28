@@ -40,7 +40,7 @@ Always parse `ok` first.
 5. OAuth authentication failure
 - Symptoms: `OAUTH_REQUIRED`, `OAUTH_REFRESH_FAILED`, `401 invalid_token`
 - Actions:
-  - verify binding with `uxc auth binding match <endpoint_url>`
+  - verify binding with `uxc auth binding match <endpoint>`
   - inspect credential with `uxc auth oauth info <credential_id>`
   - run `uxc auth oauth refresh <credential_id>`
   - if refresh fails, run login again

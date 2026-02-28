@@ -19,6 +19,10 @@ Do not assume another skill is auto-triggered in every runtime. Keep this skill 
 
 ## Core Workflow (Notion-Specific)
 
+Endpoint argument style in this skill:
+- Prefer shorthand `mcp.notion.com/mcp` (scheme omitted).
+- Full URL `https://mcp.notion.com/mcp` is also valid.
+
 1. Ensure endpoint mapping exists:
    - `uxc auth binding match mcp.notion.com/mcp`
 2. If mapping/auth is not ready, start OAuth login:

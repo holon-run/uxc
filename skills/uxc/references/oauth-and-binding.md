@@ -16,7 +16,7 @@ Use this guide for OAuth-backed endpoints across protocols and providers.
 
 ```bash
 uxc auth oauth login <credential_id> \
-  --endpoint <endpoint_url> \
+  --endpoint <endpoint> \
   --flow authorization_code
 ```
 
@@ -35,8 +35,12 @@ uxc auth binding add \
 3. Verify binding:
 
 ```bash
-uxc auth binding match <endpoint_url>
+uxc auth binding match <endpoint>
 ```
+
+`<endpoint>` accepts either:
+- shorthand host/path like `mcp.notion.com/mcp`
+- full URL like `https://mcp.notion.com/mcp`
 
 ## Validation Strategy
 
@@ -71,9 +75,9 @@ If auth failures persist:
 1. list bindings:
    - `uxc auth binding list`
 2. confirm current default match:
-   - `uxc auth binding match <endpoint_url>`
+   - `uxc auth binding match <endpoint>`
 3. verify candidate credentials explicitly:
-   - `uxc --auth <credential_id> <endpoint_url> <same_read_operation> ...`
+   - `uxc --auth <credential_id> <endpoint> <same_read_operation> ...`
 4. remove only bindings confirmed stale/invalid.
 
 ## Common Error Codes

@@ -110,7 +110,7 @@ Use this when you need quick discovery context before full `list` + `describe`.
 1. Confirm mapping:
 
 ```bash
-uxc auth binding match <endpoint_url>
+uxc auth binding match <endpoint>
 ```
 
 2. Run intended read call directly (use as runtime validation).
@@ -120,13 +120,13 @@ uxc auth binding match <endpoint_url>
 ```bash
 uxc auth oauth info <credential_id>
 uxc auth oauth refresh <credential_id>
-uxc auth oauth login <credential_id> --endpoint <endpoint_url> --flow authorization_code
+uxc auth oauth login <credential_id> --endpoint <endpoint> --flow authorization_code
 ```
 
 4. If multiple bindings match, verify explicit credential:
 
 ```bash
-uxc --auth <credential_id> <endpoint_url> <operation> '{...}'
+uxc --auth <credential_id> <endpoint> <operation> '{...}'
 ```
 
 ## Automation Safety Rules
