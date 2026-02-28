@@ -52,7 +52,7 @@ UXC is a practical fit for skill-based agents:
 - URL-first usage: call endpoints directly, no server alias required
 - Multi-protocol detection and adapter routing
 - Schema-driven operation discovery (`list`, `describe`, `help`)
-- Structured invocation (`--input-json`, positional JSON, key-value args)
+- Structured invocation (positional JSON, key-value args)
 - Deterministic JSON envelopes for automation and agents
 - Auth model with reusable credentials and endpoint bindings
 - Host shortcut commands via `uxc link`
@@ -166,14 +166,15 @@ uxc petstore3.swagger.io/api/v3 get:/pet/{petId} help
 3. Execute with structured input:
 
 ```bash
-uxc petstore3.swagger.io/api/v3 get:/pet/{petId} --input-json '{"petId":1}'
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
 ```
 
 If an operation name conflicts with a CLI keyword (for example `help` or `list`),
 use the explicit `call` form:
 
 ```bash
-uxc <host> call <operation_id> --input-json '{...}'
+uxc <host> call <operation_id> field=value
+uxc <host> call <operation_id> '{"field":"value"}'
 ```
 
 ## Protocol Examples (One Each)
@@ -190,7 +191,7 @@ Operation ID conventions:
 
 ```bash
 uxc petstore3.swagger.io/api/v3 list
-uxc petstore3.swagger.io/api/v3 get:/pet/{petId} --input-json '{"petId":1}'
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
 ```
 
 For schema-separated services, you can override schema source:
@@ -204,7 +205,7 @@ uxc api.github.com list \
 
 ```bash
 uxc grpcb.in:9000 list
-uxc grpcb.in:9000 addsvc.Add/Sum --input-json '{"a":1,"b":2}'
+uxc grpcb.in:9000 addsvc.Add/Sum a=1 b=2
 ```
 
 Note: gRPC unary runtime invocation requires `grpcurl` on `PATH`.
@@ -213,14 +214,14 @@ Note: gRPC unary runtime invocation requires `grpcurl` on `PATH`.
 
 ```bash
 uxc countries.trevorblades.com list
-uxc countries.trevorblades.com query/country --input-json '{"code":"US"}'
+uxc countries.trevorblades.com query/country code=US
 ```
 
 ### MCP
 
 ```bash
 uxc mcp.deepwiki.com/mcp list
-uxc mcp.deepwiki.com/mcp ask_question --input-json '{"repoName":"holon-run/uxc","question":"What does this project do?"}'
+uxc mcp.deepwiki.com/mcp ask_question repoName=holon-run/uxc question='What does this project do?'
 ```
 
 ### JSON-RPC
