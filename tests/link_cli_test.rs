@@ -174,6 +174,39 @@ fn link_create_overwrites_with_force() {
 }
 
 #[test]
+fn link_create_force_refuses_overwrite_for_non_uxc_file() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&link_dir).expect("bin dir should be created");
+    let script_path = link_script_path(&link_dir, "petcli");
+    fs::write(&script_path, "#!/usr/bin/env sh\necho custom-tool\n")
+        .expect("custom script should be written");
+
+    let output = uxc_command()
+        .arg("link")
+        .arg("petcli")
+        .arg("countries.trevorblades.com")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--force")
+        .output()
+        .expect("overwrite create should run");
+
+    assert!(!output.status.success(), "overwrite should be rejected");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not a uxc-managed shortcut"),
+        "error should explain protected overwrite behavior"
+    );
+}
+
+#[test]
 fn link_create_rejects_invalid_name() {
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
     let link_dir = temp_dir.path().join("bin");

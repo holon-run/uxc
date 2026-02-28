@@ -2219,6 +2219,14 @@ fn write_link_file(target_path: &Path, content: &[u8], force: bool) -> Result<()
         return Ok(());
     }
 
+    if target_path.exists() && !is_uxc_managed_link_file(target_path)? {
+        return Err(UxcError::InvalidArguments(format!(
+            "Refusing to overwrite '{}': existing file is not a uxc-managed shortcut.",
+            target_path.display()
+        ))
+        .into());
+    }
+
     let temp_path = temporary_link_path(target_path);
     {
         let mut file = OpenOptions::new()
@@ -2239,6 +2247,31 @@ fn write_link_file(target_path: &Path, content: &[u8], force: bool) -> Result<()
         UxcError::IoError(err)
     })?;
     Ok(())
+}
+
+fn is_uxc_managed_link_file(target_path: &Path) -> Result<bool> {
+    let metadata = fs::metadata(target_path)?;
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+
+    let bytes = fs::read(target_path)?;
+    Ok(looks_like_uxc_link_launcher(&bytes))
+}
+
+fn looks_like_uxc_link_launcher(content: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(content);
+
+    // Unix launcher shape:
+    //   UXC_LINK_NAME='name' exec uxc 'host' "$@"
+    let unix_like = text.contains("UXC_LINK_NAME=") && text.contains(" exec uxc ");
+
+    // Windows launcher shape:
+    //   set "UXC_LINK_NAME=name"
+    //   uxc "host" %*
+    let windows_like = text.contains("set \"UXC_LINK_NAME=") && text.contains("uxc \"");
+
+    unix_like || windows_like
 }
 
 fn temporary_link_path(target_path: &Path) -> PathBuf {
