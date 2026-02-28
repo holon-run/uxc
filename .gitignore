@@ -16,3 +16,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local agent settings
+.claude/settings.local.json
