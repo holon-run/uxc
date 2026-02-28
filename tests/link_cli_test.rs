@@ -282,8 +282,8 @@ fn link_shortcut_is_runnable_and_forwards_args() {
 
     let output = Command::new(&script_path)
         .env("PATH", prepend_path(&link_dir))
-        .arg("describe")
         .arg("get:/pet/{petId}")
+        .arg("-h")
         .output()
         .expect("shortcut should run");
 
@@ -300,7 +300,7 @@ fn link_shortcut_is_runnable_and_forwards_args() {
         "bound host should be passed as first argument"
     );
     assert!(
-        stdout.contains("describe") && stdout.contains("get:/pet/{petId}"),
+        stdout.contains("get:/pet/{petId}") && stdout.contains("-h"),
         "user arguments should be forwarded"
     );
 }

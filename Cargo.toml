@@ -79,6 +79,7 @@ tempfile = ">=3.8, <3.10"
 # CLI testing
 assert_cmd = "2.0"
 predicates = "3.0"
+serial_test = "3.2"
 
 [[bin]]
 name = "uxc"

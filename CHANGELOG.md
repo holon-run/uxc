@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Endpoint CLI interaction is now single-path and help-first:
+  - `uxc <host> -h`
+  - `uxc <host> <operation_id> -h`
+  - `uxc <host> <operation_id> key=value | '{...}'`
+
+### Removed
+- Legacy endpoint command forms have been removed:
+  - `uxc <host> list`
+  - `uxc <host> describe <operation_id>`
+  - `uxc <host> call <operation_id> ...`
+  - `uxc <host> inspect`
+- Endpoint `help` word alias is removed; `help` is treated as a literal operation name in endpoint routing.
+
 ## [0.3.0] - 2026-02-27
 
 ### Added

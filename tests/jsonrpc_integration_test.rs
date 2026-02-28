@@ -45,7 +45,7 @@ fn openrpc_document() -> &'static str {
 }
 
 #[test]
-fn list_operations_from_rpc_discover() {
+fn host_help_lists_operations_from_rpc_discover() {
     let mut server = mockito::Server::new();
     let _discover = server
         .mock("POST", "/")
@@ -60,7 +60,7 @@ fn list_operations_from_rpc_discover() {
 
     let output = uxc_command()
         .arg(server.url())
-        .arg("list")
+        .arg("-h")
         .output()
         .expect("failed to run uxc");
 
@@ -69,7 +69,7 @@ fn list_operations_from_rpc_discover() {
     let json = parse_stdout_json(&output);
     assert_eq!(json["ok"], true);
     assert_eq!(json["protocol"], "jsonrpc");
-    assert_eq!(json["kind"], "operation_list");
+    assert_eq!(json["kind"], "host_help");
     assert!(json["data"]["operations"].as_array().is_some_and(|ops| {
         ops.iter()
             .any(|op| op["operation_id"] == "subtract" && op["protocol_kind"] == "rpc_method")
@@ -77,7 +77,7 @@ fn list_operations_from_rpc_discover() {
 }
 
 #[test]
-fn describe_operation_from_openrpc() {
+fn operation_help_from_openrpc() {
     let mut server = mockito::Server::new();
     let _discover = server
         .mock("POST", "/")
@@ -92,8 +92,8 @@ fn describe_operation_from_openrpc() {
 
     let output = uxc_command()
         .arg(server.url())
-        .arg("describe")
         .arg("subtract")
+        .arg("-h")
         .output()
         .expect("failed to run uxc");
 

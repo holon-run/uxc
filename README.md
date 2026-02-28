@@ -51,7 +51,7 @@ UXC is a practical fit for skill-based agents:
 
 - URL-first usage: call endpoints directly, no server alias required
 - Multi-protocol detection and adapter routing
-- Schema-driven operation discovery (`list`, `describe`, `help`)
+- Schema-driven operation discovery (`<host> -h`, `<host> <operation_id> -h`)
 - Structured invocation (positional JSON, key-value args)
 - Deterministic JSON envelopes for automation and agents
 - Auth model with reusable credentials and endpoint bindings
@@ -152,15 +152,13 @@ For public hosts, UXC infers `https://` when omitted.
 1. Discover operations:
 
 ```bash
-uxc petstore3.swagger.io/api/v3 list
+uxc petstore3.swagger.io/api/v3 -h
 ```
 
 2. Inspect operation schema:
 
 ```bash
-uxc petstore3.swagger.io/api/v3 describe get:/pet/{petId}
-# equivalent help path:
-uxc petstore3.swagger.io/api/v3 get:/pet/{petId} help
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} -h
 ```
 
 3. Execute with structured input:
@@ -169,13 +167,10 @@ uxc petstore3.swagger.io/api/v3 get:/pet/{petId} help
 uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
 ```
 
-If an operation name conflicts with a CLI keyword (for example `help` or `list`),
-use the explicit `call` form:
-
-```bash
-uxc <host> call <operation_id> field=value
-uxc <host> call <operation_id> '{"field":"value"}'
-```
+Use only these endpoint forms:
+- `uxc <host> -h`
+- `uxc <host> <operation_id> -h`
+- `uxc <host> <operation_id> key=value` or `uxc <host> <operation_id> '{...}'`
 
 ## Protocol Examples (One Each)
 
@@ -190,21 +185,21 @@ Operation ID conventions:
 ### OpenAPI
 
 ```bash
-uxc petstore3.swagger.io/api/v3 list
+uxc petstore3.swagger.io/api/v3 -h
 uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
 ```
 
 For schema-separated services, you can override schema source:
 
 ```bash
-uxc api.github.com list \
+uxc api.github.com -h \
   --schema-url https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json
 ```
 
 ### gRPC
 
 ```bash
-uxc grpcb.in:9000 list
+uxc grpcb.in:9000 -h
 uxc grpcb.in:9000 addsvc.Add/Sum a=1 b=2
 ```
 
@@ -213,21 +208,21 @@ Note: gRPC unary runtime invocation requires `grpcurl` on `PATH`.
 ### GraphQL
 
 ```bash
-uxc countries.trevorblades.com list
+uxc countries.trevorblades.com -h
 uxc countries.trevorblades.com query/country code=US
 ```
 
 ### MCP
 
 ```bash
-uxc mcp.deepwiki.com/mcp list
+uxc mcp.deepwiki.com/mcp -h
 uxc mcp.deepwiki.com/mcp ask_question repoName=holon-run/uxc question='What does this project do?'
 ```
 
 ### JSON-RPC
 
 ```bash
-uxc fullnode.mainnet.sui.io list
+uxc fullnode.mainnet.sui.io -h
 uxc fullnode.mainnet.sui.io sui_getLatestCheckpointSequenceNumber
 ```
 
@@ -255,10 +250,12 @@ Examples:
 ```bash
 uxc
 uxc help
-uxc <host> help
-uxc <host> <operation_id> help
+uxc <host> -h
+uxc <host> <operation_id> -h
 uxc --text help
 ```
+
+Note: In endpoint routing, `help` is treated as a literal operation name, not a help alias.
 
 Success envelope shape:
 

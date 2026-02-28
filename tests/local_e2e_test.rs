@@ -17,14 +17,15 @@ fn grpcurl_available() -> bool {
 }
 
 #[test]
-fn test_openapi_list_operations() {
+#[serial_test::serial]
+fn test_openapi_host_help_lists_operations() {
     let _server = start_test_server("openapi", "ok");
 
-    let result = run_uxc(&[&format!("http://{}/", _server.addr), "list"]);
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "-h"]);
 
     assert!(
         result.is_ok(),
-        "Failed to list OpenAPI operations: {:?}",
+        "Failed to run OpenAPI host help: {:?}",
         result
     );
 
@@ -55,6 +56,7 @@ fn test_openapi_list_operations() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_openapi_call_operation() {
     let _server = start_test_server("openapi", "ok");
 
@@ -76,6 +78,7 @@ fn test_openapi_call_operation() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_openapi_call_post_operation() {
     let _server = start_test_server("openapi", "ok");
 
@@ -102,6 +105,7 @@ fn test_openapi_call_post_operation() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_openapi_auth_required() {
     let _server = start_test_server("openapi", "auth_required");
 
@@ -118,14 +122,15 @@ fn test_openapi_auth_required() {
 }
 
 #[test]
-fn test_graphql_list_operations() {
+#[serial_test::serial]
+fn test_graphql_host_help_lists_operations() {
     let _server = start_test_server("graphql", "ok");
 
-    let result = run_uxc(&[&format!("http://{}/", _server.addr), "list"]);
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "-h"]);
 
     assert!(
         result.is_ok(),
-        "Failed to list GraphQL operations: {:?}",
+        "Failed to run GraphQL host help: {:?}",
         result
     );
 
@@ -136,11 +141,12 @@ fn test_graphql_list_operations() {
     assert_eq!(json["protocol"], "graphql");
     assert!(
         json["data"]["operations"].is_array(),
-        "Expected operations array in GraphQL list output"
+        "Expected operations array in GraphQL host_help output"
     );
 }
 
 #[test]
+#[serial_test::serial]
 fn test_graphql_call_query() {
     let _server = start_test_server("graphql", "ok");
 
@@ -158,6 +164,7 @@ fn test_graphql_call_query() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_graphql_call_with_args() {
     let _server = start_test_server("graphql", "ok");
 
@@ -185,6 +192,7 @@ fn test_graphql_call_with_args() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_graphql_call_mutation() {
     let _server = start_test_server("graphql", "ok");
 
@@ -211,6 +219,7 @@ fn test_graphql_call_mutation() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_graphql_auth_required() {
     let _server = start_test_server("graphql", "auth_required");
 
@@ -227,14 +236,15 @@ fn test_graphql_auth_required() {
 }
 
 #[test]
-fn test_jsonrpc_list_operations() {
+#[serial_test::serial]
+fn test_jsonrpc_host_help_lists_operations() {
     let _server = start_test_server("jsonrpc", "ok");
 
-    let result = run_uxc(&[&format!("http://{}/", _server.addr), "list"]);
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "-h"]);
 
     assert!(
         result.is_ok(),
-        "Failed to list JSON-RPC operations: {:?}",
+        "Failed to run JSON-RPC host help: {:?}",
         result
     );
 
@@ -259,6 +269,7 @@ fn test_jsonrpc_list_operations() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_jsonrpc_call_method() {
     let _server = start_test_server("jsonrpc", "ok");
 
@@ -280,6 +291,7 @@ fn test_jsonrpc_call_method() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_jsonrpc_call_with_args() {
     let _server = start_test_server("jsonrpc", "ok");
 
@@ -307,6 +319,7 @@ fn test_jsonrpc_call_with_args() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_jsonrpc_call_create_user() {
     let _server = start_test_server("jsonrpc", "ok");
 
@@ -333,6 +346,7 @@ fn test_jsonrpc_call_create_user() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_jsonrpc_auth_required() {
     let _server = start_test_server("jsonrpc", "auth_required");
 
@@ -349,6 +363,7 @@ fn test_jsonrpc_auth_required() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_openapi_malformed_response() {
     let _server = start_test_server("openapi", "malformed");
 
@@ -360,6 +375,7 @@ fn test_openapi_malformed_response() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_graphql_malformed_response() {
     let _server = start_test_server("graphql", "malformed");
 
@@ -376,6 +392,7 @@ fn test_graphql_malformed_response() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_jsonrpc_malformed_response() {
     let _server = start_test_server("jsonrpc", "malformed");
 
@@ -392,16 +409,13 @@ fn test_jsonrpc_malformed_response() {
 }
 
 #[test]
-fn test_grpc_list_operations() {
+#[serial_test::serial]
+fn test_grpc_host_help_lists_operations() {
     let _server = start_test_server("grpc", "ok");
 
-    let result = run_uxc(&[&format!("http://{}", _server.addr), "list"]);
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "-h"]);
 
-    assert!(
-        result.is_ok(),
-        "Failed to list gRPC operations: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "Failed to run gRPC host help: {:?}", result);
 
     let output = result.unwrap();
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -423,6 +437,7 @@ fn test_grpc_list_operations() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_grpc_call_method() {
     if !grpcurl_available() {
         eprintln!("Skipping gRPC call test because grpcurl is not installed");
@@ -449,6 +464,7 @@ fn test_grpc_call_method() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_grpc_call_unknown_method_fails() {
     if !grpcurl_available() {
         eprintln!("Skipping gRPC unknown method test because grpcurl is not installed");
@@ -471,10 +487,11 @@ fn test_grpc_call_unknown_method_fails() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_grpc_auth_required() {
     let _server = start_test_server("grpc", "auth_required");
 
-    let result = run_uxc(&[&format!("http://{}", _server.addr), "list"]);
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "-h"]);
 
     assert!(
         result.is_err(),
@@ -483,14 +500,15 @@ fn test_grpc_auth_required() {
 }
 
 #[test]
-fn test_mcp_http_list_operations() {
+#[serial_test::serial]
+fn test_mcp_http_host_help_lists_operations() {
     let _server = start_test_server("mcp-http", "ok");
 
-    let result = run_uxc(&[&format!("http://{}", _server.addr), "list"]);
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "-h"]);
 
     assert!(
         result.is_ok(),
-        "Failed to list MCP HTTP tools: {:?}",
+        "Failed to run MCP HTTP host help: {:?}",
         result
     );
 
@@ -511,6 +529,7 @@ fn test_mcp_http_list_operations() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_mcp_http_call_tool() {
     let _server = start_test_server("mcp-http", "ok");
 
@@ -532,19 +551,21 @@ fn test_mcp_http_call_tool() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_mcp_http_auth_required() {
     let _server = start_test_server("mcp-http", "auth_required");
 
-    let result = run_uxc(&[&format!("http://{}", _server.addr), "list"]);
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "-h"]);
 
     assert!(result.is_err(), "Expected MCP HTTP auth error, got success");
 }
 
 #[test]
+#[serial_test::serial]
 fn test_mcp_http_host_help_includes_service_metadata() {
     let _server = start_test_server("mcp-http", "ok");
 
-    let result = run_uxc(&[&format!("http://{}", _server.addr), "help"]);
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "-h"]);
     assert!(result.is_ok(), "Failed to run MCP HTTP help: {:?}", result);
 
     let output = result.unwrap();
@@ -560,10 +581,11 @@ fn test_mcp_http_host_help_includes_service_metadata() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_mcp_http_text_help_prints_service_summary() {
     let _server = start_test_server("mcp-http", "ok");
 
-    let result = run_uxc(&["--text", &format!("http://{}", _server.addr), "help"]);
+    let result = run_uxc(&["--text", &format!("http://{}", _server.addr), "-h"]);
     assert!(result.is_ok(), "Failed to run MCP HTTP help: {:?}", result);
 
     let output = result.unwrap();
@@ -573,15 +595,16 @@ fn test_mcp_http_text_help_prints_service_summary() {
 }
 
 #[test]
-fn test_mcp_stdio_list_operations() {
+#[serial_test::serial]
+fn test_mcp_stdio_host_help_lists_operations() {
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} ok", bin.display());
 
-    let result = run_uxc(&[&endpoint, "list"]);
+    let result = run_uxc(&[&endpoint, "-h"]);
 
     assert!(
         result.is_ok(),
-        "Failed to list MCP stdio tools: {:?}",
+        "Failed to run MCP stdio host help: {:?}",
         result
     );
 
@@ -602,6 +625,7 @@ fn test_mcp_stdio_list_operations() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_mcp_stdio_call_tool() {
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} ok", bin.display());
@@ -628,6 +652,7 @@ fn test_mcp_stdio_call_tool() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_mcp_stdio_auth_required() {
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} auth_required", bin.display());
@@ -638,14 +663,11 @@ fn test_mcp_stdio_auth_required() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_openapi_describe_operation() {
     let _server = start_test_server("openapi", "ok");
 
-    let result = run_uxc(&[
-        &format!("http://{}/", _server.addr),
-        "describe",
-        "get:/health",
-    ]);
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "get:/health", "-h"]);
 
     assert!(
         result.is_ok(),
@@ -661,14 +683,11 @@ fn test_openapi_describe_operation() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_graphql_describe_operation() {
     let _server = start_test_server("graphql", "ok");
 
-    let result = run_uxc(&[
-        &format!("http://{}/", _server.addr),
-        "describe",
-        "query/user",
-    ]);
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "query/user", "-h"]);
 
     assert!(
         result.is_ok(),
@@ -684,10 +703,11 @@ fn test_graphql_describe_operation() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_jsonrpc_describe_operation() {
     let _server = start_test_server("jsonrpc", "ok");
 
-    let result = run_uxc(&[&format!("http://{}/", _server.addr), "describe", "get_user"]);
+    let result = run_uxc(&[&format!("http://{}/", _server.addr), "get_user", "-h"]);
 
     assert!(
         result.is_ok(),
@@ -703,14 +723,11 @@ fn test_jsonrpc_describe_operation() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_grpc_describe_operation() {
     let _server = start_test_server("grpc", "ok");
 
-    let result = run_uxc(&[
-        &format!("http://{}", _server.addr),
-        "describe",
-        "addsvc.Add/Sum",
-    ]);
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "addsvc.Add/Sum", "-h"]);
 
     assert!(
         result.is_ok(),
@@ -726,10 +743,11 @@ fn test_grpc_describe_operation() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_mcp_http_describe_operation() {
     let _server = start_test_server("mcp-http", "ok");
 
-    let result = run_uxc(&[&format!("http://{}", _server.addr), "describe", "echo"]);
+    let result = run_uxc(&[&format!("http://{}", _server.addr), "echo", "-h"]);
 
     assert!(
         result.is_ok(),

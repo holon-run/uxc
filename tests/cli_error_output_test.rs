@@ -4,7 +4,6 @@
 
 use assert_cmd::Command;
 use mockito::Server;
-use predicates::prelude::*;
 
 fn uxc() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("uxc"))
@@ -14,7 +13,7 @@ fn uxc() -> Command {
 fn protocol_detection_failure_uses_error_envelope() {
     let output = uxc()
         .arg("http://127.0.0.1:9")
-        .arg("list")
+        .arg("-h")
         .assert()
         .failure()
         .stdout(predicates::str::contains("PROTOCOL_DETECTION_FAILED"))
@@ -56,8 +55,8 @@ fn operation_execution_failure_uses_error_envelope() {
         )
         .create();
 
-    // Call without operation should succeed
-    uxc().arg(server.url()).arg("list").assert().success();
+    // Host help should succeed
+    uxc().arg(server.url()).arg("-h").assert().success();
 
     // Call with non-existent operation should fail with error envelope
     let output = uxc()

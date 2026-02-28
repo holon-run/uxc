@@ -88,34 +88,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List available operations
-    List {
-        /// Show detailed information (text mode only)
-        #[arg(short, long)]
-        verbose: bool,
-    },
-
-    /// Describe one operation in detail
-    Describe {
-        /// Operation ID (e.g., "get:/users/{id}", "query/user", "ask_question")
-        #[arg(value_name = "OPERATION_ID")]
-        operation_id: String,
-    },
-
-    /// Show endpoint help, or operation help when OPERATION_ID is provided
-    Help {
-        /// Optional operation ID
-        #[arg(value_name = "OPERATION_ID")]
-        operation_id: Option<String>,
-    },
-
-    /// Inspect endpoint/schema
-    Inspect {
-        /// Show full schema
-        #[arg(short, long)]
-        full: bool,
-    },
-
     /// Manage schema cache
     Cache {
         #[command(subcommand)]
@@ -145,25 +117,6 @@ enum Commands {
         /// Overwrite existing shortcut file
         #[arg(long)]
         force: bool,
-    },
-
-    /// Execute an operation explicitly
-    Call {
-        /// Operation ID
-        #[arg(value_name = "OPERATION_ID")]
-        operation_id: String,
-
-        /// Key-value arguments (e.g., "id=42")
-        #[arg(short, long)]
-        args: Vec<String>,
-
-        /// JSON input payload
-        #[arg(long = "input-json")]
-        input_json: Option<String>,
-
-        /// Positional input (`key=value` or a single JSON object payload)
-        #[arg(value_name = "INPUT")]
-        input: Option<String>,
     },
 
     /// Dynamic operation execution: `uxc <url> <operation_id> [key=value ...] ['{...}']`
@@ -373,14 +326,8 @@ enum AuthOauthCommands {
 
 enum EndpointCommand {
     HostHelp,
-    List {
-        verbose: bool,
-    },
     Describe {
         operation_id: String,
-    },
-    Inspect {
-        full: bool,
     },
     Execute {
         operation_id: String,
@@ -414,13 +361,6 @@ struct ServiceSummary {
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct OperationListData {
-    operations: Vec<OperationSummary>,
-    count: usize,
-    verbose: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -721,10 +661,7 @@ fn raw_has_help_token(raw_args: &[String]) -> bool {
 }
 
 fn is_top_level_command_token(token: &str) -> bool {
-    matches!(
-        token,
-        "list" | "describe" | "help" | "inspect" | "cache" | "auth" | "link" | "call"
-    )
+    matches!(token, "help" | "cache" | "auth" | "link")
 }
 
 fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
@@ -830,11 +767,8 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
         return None;
     }
 
-    if matches!(
-        cli.command,
-        None | Some(Commands::Help { operation_id: None })
-    ) {
-        if cli.url.is_none() {
+    if cli.command.is_none() {
+        if cli.url.is_none() || cli.url.as_deref() == Some("help") {
             return Some(vec![]);
         }
         return None;
@@ -845,10 +779,6 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
     }
 
     match &cli.command {
-        Some(Commands::List { .. }) => Some(vec!["list"]),
-        Some(Commands::Describe { .. }) => Some(vec!["describe"]),
-        Some(Commands::Help { .. }) => Some(vec![]),
-        Some(Commands::Inspect { .. }) => Some(vec!["inspect"]),
         Some(Commands::Cache { cache_command }) => match cache_command {
             CacheCommands::Clear { .. } => Some(vec!["cache", "clear"]),
             CacheCommands::Stats => Some(vec!["cache", "stats"]),
@@ -876,7 +806,6 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             },
         },
         Some(Commands::Link { .. }) => Some(vec!["link"]),
-        Some(Commands::Call { .. }) => Some(vec!["call"]),
         Some(Commands::External(_)) | None => None,
     }
 }
@@ -1030,29 +959,6 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
             })?;
             OutputEnvelope::success("host_help", protocol, &url, None, data, Some(duration_ms))
         }
-        EndpointCommand::List { verbose } => {
-            let start = std::time::Instant::now();
-            let operations = adapter.list_operations(&url).await?;
-            let protocol = adapter.protocol_type().as_str();
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let summaries = operations
-                .iter()
-                .map(|op| to_operation_summary(protocol, op))
-                .collect::<Vec<_>>();
-            let data = serde_json::to_value(OperationListData {
-                count: summaries.len(),
-                operations: summaries,
-                verbose,
-            })?;
-            OutputEnvelope::success(
-                "operation_list",
-                protocol,
-                &url,
-                None,
-                data,
-                Some(duration_ms),
-            )
-        }
         EndpointCommand::Describe { operation_id } => {
             let start = std::time::Instant::now();
             let detail = adapter.describe_operation(&url, &operation_id).await?;
@@ -1064,29 +970,6 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
                 protocol,
                 &url,
                 Some(&detail.operation_id),
-                data,
-                Some(duration_ms),
-            )
-        }
-        EndpointCommand::Inspect { full } => {
-            let start = std::time::Instant::now();
-            let protocol = adapter.protocol_type().as_str();
-            let schema = if full {
-                Some(adapter.fetch_schema(&url).await?)
-            } else {
-                None
-            };
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let data = json!({
-                "protocol": protocol,
-                "endpoint": url,
-                "schema": schema,
-            });
-            OutputEnvelope::success(
-                "inspect_result",
-                protocol,
-                &url,
-                None,
                 data,
                 Some(duration_ms),
             )
@@ -1155,63 +1038,20 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             about: "Universal X-Protocol Call".to_string(),
             usage: "uxc [OPTIONS] [URL] [COMMAND]".to_string(),
             commands: commands(&[
-                ("list", "List available operations"),
-                ("describe", "Describe one operation in detail"),
-                ("help", "Show endpoint help, or operation help with OPERATION_ID"),
-                ("inspect", "Inspect endpoint/schema"),
+                ("help", "Show global help"),
                 ("cache", "Manage schema cache"),
                 ("auth", "Manage credentials, bindings, and OAuth"),
                 ("link", "Create a host-bound shortcut command"),
-                ("call", "Execute an operation explicitly"),
             ]),
             notes: vec![
                 "Default output is JSON. Use --text for human-readable output.".to_string(),
+                "For endpoints, use: uxc <host> -h, uxc <host> <operation_id> -h, and uxc <host> <operation_id> ...".to_string(),
             ],
             examples: vec![
                 "uxc -h".to_string(),
                 "uxc <host> -h".to_string(),
                 "uxc <host> <operation_id> -h".to_string(),
-            ],
-        },
-        ["list"] => HelpData {
-            path: "uxc list".to_string(),
-            about: "List available operations".to_string(),
-            usage: "uxc <host> list [--verbose]".to_string(),
-            commands: vec![],
-            notes: vec!["Requires URL/host as the first argument.".to_string()],
-            examples: vec![
-                "uxc petstore3.swagger.io/api/v3 list".to_string(),
-                "uxc mcp.deepwiki.com/mcp list".to_string(),
-            ],
-        },
-        ["describe"] => HelpData {
-            path: "uxc describe".to_string(),
-            about: "Describe one operation in detail".to_string(),
-            usage: "uxc <host> describe <operation_id>".to_string(),
-            commands: vec![],
-            notes: vec!["Requires URL/host as the first argument.".to_string()],
-            examples: vec![
-                "uxc petstore3.swagger.io/api/v3 describe get:/pet/{petId}".to_string(),
-                "uxc mcp.deepwiki.com/mcp describe ask_question".to_string(),
-            ],
-        },
-        ["inspect"] => HelpData {
-            path: "uxc inspect".to_string(),
-            about: "Inspect endpoint/schema".to_string(),
-            usage: "uxc <host> inspect [--full]".to_string(),
-            commands: vec![],
-            notes: vec!["Requires URL/host as the first argument.".to_string()],
-            examples: vec!["uxc api.github.com inspect --full".to_string()],
-        },
-        ["call"] => HelpData {
-            path: "uxc call".to_string(),
-            about: "Execute an operation explicitly".to_string(),
-            usage: "uxc <host> call <operation_id> [key=value ... | '{...}']".to_string(),
-            commands: vec![],
-            notes: vec!["Use exactly one input mode per call.".to_string()],
-            examples: vec![
-                "uxc <host> call <operation_id> id=42".to_string(),
-                "uxc <host> call <operation_id> '{...}'".to_string(),
+                "uxc <host> <operation_id> key=value".to_string(),
             ],
         },
         ["link"] => HelpData {
@@ -1482,12 +1322,6 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             );
             Ok(())
         }
-        Some("operation_list") => {
-            let protocol = envelope.protocol.as_deref().unwrap_or("unknown");
-            let data: OperationListData = decode_envelope_data(envelope)?;
-            print_list_text_from_summaries(protocol, &data.operations, data.verbose);
-            Ok(())
-        }
         Some("operation_detail") => {
             let endpoint = envelope.endpoint.as_deref().unwrap_or("unknown");
             let protocol = envelope.protocol.as_deref().unwrap_or("unknown");
@@ -1683,36 +1517,6 @@ fn decode_envelope_data<T: DeserializeOwned>(envelope: &OutputEnvelope) -> Resul
 fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
     match &cli.command {
         None => Ok(EndpointCommand::HostHelp),
-        Some(Commands::List { verbose }) => Ok(EndpointCommand::List { verbose: *verbose }),
-        Some(Commands::Describe { operation_id }) => Ok(EndpointCommand::Describe {
-            operation_id: operation_id.clone(),
-        }),
-        Some(Commands::Help {
-            operation_id: Some(operation_id),
-        }) => Ok(EndpointCommand::Describe {
-            operation_id: operation_id.clone(),
-        }),
-        Some(Commands::Help { operation_id: None }) => Ok(EndpointCommand::HostHelp),
-        Some(Commands::Inspect { full }) => Ok(EndpointCommand::Inspect { full: *full }),
-        Some(Commands::Call {
-            operation_id,
-            args,
-            input_json,
-            input,
-        }) => {
-            let positional = input.clone().into_iter().collect::<Vec<_>>();
-            let (resolved_args, resolved_input_json) = normalize_operation_inputs(
-                operation_id,
-                args.clone(),
-                input_json.clone(),
-                &positional,
-            )?;
-            Ok(EndpointCommand::Execute {
-                operation_id: operation_id.clone(),
-                args: resolved_args,
-                input_json: resolved_input_json,
-            })
-        }
         Some(Commands::External(tokens)) => parse_external_command(tokens, cli.help),
         Some(Commands::Cache { .. })
         | Some(Commands::Auth { .. })
@@ -1731,16 +1535,6 @@ fn parse_external_command(tokens: &[String], global_help: bool) -> Result<Endpoi
     let operation_id = tokens[0].clone();
 
     if global_help {
-        return Ok(EndpointCommand::Describe { operation_id });
-    }
-
-    if tokens.len() >= 2 && tokens[1] == "help" {
-        if tokens.len() > 2 {
-            return Err(UxcError::InvalidArguments(
-                "Unexpected arguments after '<operation_id> help'".to_string(),
-            )
-            .into());
-        }
         return Ok(EndpointCommand::Describe { operation_id });
     }
 
@@ -2015,24 +1809,6 @@ fn print_help_text(data: &HelpData) {
         println!("Examples:");
         for example in &data.examples {
             println!("  {}", example);
-        }
-    }
-}
-
-fn print_list_text_from_summaries(protocol: &str, operations: &[OperationSummary], verbose: bool) {
-    if verbose {
-        println!("Detected protocol: {}", protocol);
-        println!();
-    }
-    for op in operations {
-        println!("{} ({})", op.display_name, op.operation_id);
-        if verbose {
-            if let Some(desc) = &op.summary {
-                println!("  {}", desc);
-            }
-            if !op.required.is_empty() {
-                println!("  Required: {}", op.required.join(", "));
-            }
         }
     }
 }
