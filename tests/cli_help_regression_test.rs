@@ -384,7 +384,8 @@ fn host_help_keyword_is_treated_as_operation_literal() {
         .as_str()
         .expect("error.message should be a string");
     assert!(
-        message.contains("Invalid operation ID format") || message.contains("Unknown argument 'help'"),
+        message.contains("Invalid operation ID format")
+            || message.contains("Unknown argument 'help'"),
         "unexpected message: {}",
         message
     );
