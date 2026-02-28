@@ -70,7 +70,7 @@ for rel in \
   fi
 done
 
-if ! rg -q '(\\$uxc|`uxc` skill)' "${SKILL_FILE}"; then
+if ! rg -q '(\$uxc|`uxc` skill)' "${SKILL_FILE}"; then
   fail "SKILL.md must reference uxc skill guidance for shared OAuth/error handling"
 fi
 

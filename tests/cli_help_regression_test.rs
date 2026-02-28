@@ -1,7 +1,32 @@
 use std::process::Command;
+use tempfile::TempDir;
 
 fn uxc_command() -> Command {
     Command::new(env!("CARGO_BIN_EXE_uxc"))
+}
+
+struct TestAuthFiles {
+    _temp_dir: TempDir,
+    credentials_file: std::path::PathBuf,
+    bindings_file: std::path::PathBuf,
+}
+
+impl TestAuthFiles {
+    fn new() -> Self {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        Self {
+            credentials_file: temp_dir.path().join("credentials.json"),
+            bindings_file: temp_dir.path().join("auth_bindings.json"),
+            _temp_dir: temp_dir,
+        }
+    }
+}
+
+fn uxc_command_with_auth_files(files: &TestAuthFiles) -> Command {
+    let mut cmd = uxc_command();
+    cmd.env("UXC_CREDENTIALS_FILE", &files.credentials_file);
+    cmd.env("UXC_AUTH_BINDINGS_FILE", &files.bindings_file);
+    cmd
 }
 
 fn without_http_scheme(url: &str) -> String {
@@ -234,7 +259,9 @@ fn host_help_uses_link_name_for_next_commands_when_env_set() {
 
 #[test]
 fn auth_info_alias_outputs_auth_info_json() {
-    let _ = uxc_command()
+    let files = TestAuthFiles::new();
+
+    let _ = uxc_command_with_auth_files(&files)
         .arg("auth")
         .arg("credential")
         .arg("set")
@@ -244,7 +271,7 @@ fn auth_info_alias_outputs_auth_info_json() {
         .output()
         .expect("failed to set auth credential");
 
-    let output = uxc_command()
+    let output = uxc_command_with_auth_files(&files)
         .arg("auth")
         .arg("info")
         .arg("alias-test")
@@ -258,7 +285,7 @@ fn auth_info_alias_outputs_auth_info_json() {
     assert_eq!(json["kind"], "auth_info");
     assert_eq!(json["operation"], "alias-test");
 
-    let _ = uxc_command()
+    let _ = uxc_command_with_auth_files(&files)
         .arg("auth")
         .arg("credential")
         .arg("remove")

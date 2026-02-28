@@ -105,28 +105,28 @@ See [`docs/schema-mapping.md`](schema-mapping.md) for mapping-based defaults.
 
 ```bash
 uxc grpcb.in:9000 list
-uxc grpcb.in:9000 addsvc.Add/Sum --input-json '{"a":1,"b":2}'
+uxc grpcb.in:9000 addsvc.Add/Sum a=1 b=2
 ```
 
 ## GraphQL
 
 ```bash
 uxc countries.trevorblades.com list
-uxc countries.trevorblades.com query/country --input-json '{"code":"US"}'
+uxc countries.trevorblades.com query/country code=US
 ```
 
 ## MCP HTTP
 
 ```bash
 uxc mcp.deepwiki.com/mcp list
-uxc mcp.deepwiki.com/mcp ask_question --input-json '{"repoName":"holon-run/uxc","question":"What does this project do?"}'
+uxc mcp.deepwiki.com/mcp ask_question '{"repoName":"holon-run/uxc","question":"What does this project do?"}'
 ```
 
 ## MCP stdio
 
 ```bash
 uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list
-uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list_directory --input-json '{"path":"/tmp"}'
+uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list_directory path=/tmp
 ```
 
 ## JSON-RPC
@@ -146,7 +146,8 @@ By default, UXC prints machine-friendly JSON envelopes.
 ```bash
 uxc <host> list
 uxc <host> describe <operation_id>
-uxc <host> <operation_id> --input-json '{...}'
+uxc <host> <operation_id> key=value
+uxc <host> <operation_id> '{...}'
 ```
 
 Switch to CLI-readable text output when needed:
