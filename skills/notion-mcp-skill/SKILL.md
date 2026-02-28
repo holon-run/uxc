@@ -38,17 +38,6 @@ Do not assume `$uxc` will be auto-triggered in every runtime. Keep this skill ex
 7. Execute writes only after explicit user confirmation:
    - For `notion-update-page` operations that may delete content, always confirm intent first.
 
-## Input Rules (Hard Constraints)
-
-- Prefer no-flag inputs:
-  - simple payload: `key=value`
-  - structured payload: bare JSON positional string
-- Use `--input-json` only as fallback when positional JSON is inconvenient.
-- Do not use `execute` form.
-- Do not use removed `--json` flag.
-- Do not pass raw JSON via `--args`.
-- For `notion-fetch`, required field is `id` (not `uri`).
-
 ## OAuth Interaction Template
 
 Use this exact operator-facing flow:
