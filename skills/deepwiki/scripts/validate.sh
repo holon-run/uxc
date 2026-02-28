@@ -65,10 +65,6 @@ if ! rg -q "read_wiki_structure .*'\\{.*\\}'" "${SKILL_FILE}"; then
   fail "SKILL.md must include a bare JSON positional example"
 fi
 
-if rg -q -- ' --json ' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
-  fail "deepwiki docs must not include removed --json flag examples"
-fi
-
 if rg -q -- "--args '\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail "deepwiki docs must not pass raw JSON via --args"
 fi

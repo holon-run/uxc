@@ -79,10 +79,6 @@ For more options, see the [Installation](https://github.com/holon-run/uxc#instal
 Do not pass both positional JSON and `--input-json` in one call.
 Do not pass raw JSON through `--args`; use positional JSON or `--input-json`.
 
-## Migration Note
-
-- `--json` has been removed. Use `--input-json` or a bare JSON positional payload.
-
 ## Output Contract For Reuse
 
 Other skills should treat this skill as the interface execution layer and consume only the stable envelope:

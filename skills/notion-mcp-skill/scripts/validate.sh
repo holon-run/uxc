@@ -86,10 +86,6 @@ if rg -q ' execute ' "${SKILL_FILE}"; then
   fail "SKILL.md must not include execute-form command examples"
 fi
 
-if rg -q ' --json ' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
-  fail "Notion skill docs must not include removed --json flag examples"
-fi
-
 if rg -q -- "--args '\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail "Notion skill docs must not pass raw JSON via --args"
 fi

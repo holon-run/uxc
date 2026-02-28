@@ -69,16 +69,8 @@ if ! rg -q "uxc <host> <operation> '<payload-json>'" "${SKILL_FILE}"; then
   fail "SKILL.md must document bare JSON execute workflow"
 fi
 
-if ! rg -q -- '--json`?\s+has been removed' "${SKILL_FILE}"; then
-  fail "SKILL.md must include migration note for removed --json"
-fi
-
 if rg -q "execute notion" "${SKILL_FILE}"; then
   fail "SKILL.md must not document execute-form invocations"
-fi
-
-if rg -q -- ' --json ' "${SKILL_FILE}" "${SKILL_DIR}/references/"*.md; then
-  fail "uxc docs must not include removed --json flag examples"
 fi
 
 if rg -q -- "--args '\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/"*.md; then

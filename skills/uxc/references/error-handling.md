@@ -29,7 +29,6 @@ Always parse `ok` first.
   - start from minimal required payload
   - prefer `key=value` or bare positional JSON for primary calls
   - use `--input-json` only when positional JSON is inconvenient
-  - never use removed `--json`
   - do not combine positional JSON and `--input-json` in one command
 
 4. Runtime transport failure

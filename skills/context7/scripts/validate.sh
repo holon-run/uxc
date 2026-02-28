@@ -70,10 +70,6 @@ if ! rg -q "query-docs .*'\\{.*\\}'" "${SKILL_FILE}"; then
   fail "SKILL.md must include a bare JSON positional example"
 fi
 
-if rg -q -- ' --json ' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
-  fail "context7 docs must not include removed --json flag examples"
-fi
-
 if rg -q -- "--args '\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail "context7 docs must not pass raw JSON via --args"
 fi
