@@ -10,7 +10,7 @@ Last verified in project docs on **2026-02-28**.
 - Quick checks:
 
 ```bash
-uxc petstore3.swagger.io/api/v3 list
+uxc petstore3.swagger.io/api/v3 -h
 curl -sS https://petstore3.swagger.io/api/v3/openapi.json | jq -r '.openapi, .info.title'
 ```
 
@@ -20,7 +20,7 @@ curl -sS https://petstore3.swagger.io/api/v3/openapi.json | jq -r '.openapi, .in
 - Quick checks:
 
 ```bash
-uxc countries.trevorblades.com list
+uxc countries.trevorblades.com -h
 curl -sS https://countries.trevorblades.com/ \
   -H 'content-type: application/json' \
   --data '{"query":"{ __schema { queryType { name } } }"}' \
@@ -34,7 +34,7 @@ curl -sS https://countries.trevorblades.com/ \
 - Quick checks:
 
 ```bash
-uxc grpcb.in:9000 list
+uxc grpcb.in:9000 -h
 grpcurl -plaintext grpcb.in:9000 list
 grpcurl grpcb.in:9001 list
 ```
@@ -45,7 +45,7 @@ grpcurl grpcb.in:9001 list
 - Quick checks:
 
 ```bash
-uxc mcp.deepwiki.com/mcp list
+uxc mcp.deepwiki.com/mcp -h
 curl -sS https://mcp.deepwiki.com/mcp \
   -H 'content-type: application/json' \
   -H 'accept: application/json, text/event-stream' \
@@ -60,8 +60,8 @@ Note: DeepWiki MCP can return streamable HTTP/SSE payloads.
 - Quick checks:
 
 ```bash
-uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list
-uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list_directory --input-json '{"path":"/tmp"}'
+uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" -h
+uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list_directory path=/tmp
 ```
 
 ## JSON-RPC
@@ -70,7 +70,7 @@ uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list_directory --input
 - Quick checks:
 
 ```bash
-uxc fullnode.mainnet.sui.io list
+uxc fullnode.mainnet.sui.io -h
 uxc fullnode.mainnet.sui.io sui_getLatestCheckpointSequenceNumber
 ```
 

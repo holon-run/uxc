@@ -45,12 +45,6 @@ Parse the response:
 deepwiki-mcp-cli ask_question repoName=facebook/react question='What is React?' | jq -r '.data.content[].text'
 ```
 
-## Fallback: Explicit JSON Flag
-
-```bash
-deepwiki-mcp-cli ask_question --input-json '{"repoName":"facebook/react","question":"How does fiber scheduling work?"}'
-```
-
 ## Fallback Equivalence
 
 - `deepwiki-mcp-cli <operation> ...` is equivalent to `uxc mcp.deepwiki.com/mcp <operation> ...`.

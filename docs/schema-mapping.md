@@ -15,7 +15,7 @@ UXC supports this with a layered strategy:
 ## CLI Override
 
 ```bash
-uxc https://api.github.com list \
+uxc https://api.github.com -h \
   --schema-url https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json
 ```
 
@@ -63,5 +63,5 @@ Field notes:
 For CI or testing:
 
 ```bash
-UXC_SCHEMA_MAPPINGS_FILE=/tmp/schema_mappings.json uxc https://service.example.com list
+UXC_SCHEMA_MAPPINGS_FILE=/tmp/schema_mappings.json uxc https://service.example.com -h
 ```

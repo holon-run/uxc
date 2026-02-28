@@ -186,18 +186,15 @@ fn host_help_supports_url_without_scheme() {
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
     assert_eq!(json["ok"], true);
     assert_eq!(json["kind"], "host_help");
-    assert_eq!(json["data"]["examples"][0], "uxc <host> list");
-    assert_eq!(
-        json["data"]["examples"][1],
-        "uxc <host> describe <operation_id>"
-    );
+    assert_eq!(json["data"]["examples"][0], "uxc <host> -h");
+    assert_eq!(json["data"]["examples"][1], "uxc <host> <operation_id> -h");
     assert_eq!(
         json["data"]["examples"][2],
-        "uxc <host> call <operation_id> id=42"
+        "uxc <host> <operation_id> id=42"
     );
     assert_eq!(
         json["data"]["examples"][3],
-        "uxc <host> call <operation_id> '{...}'"
+        "uxc <host> <operation_id> '{...}'"
     );
 }
 
@@ -242,19 +239,10 @@ fn host_help_uses_link_name_for_next_commands_when_env_set() {
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
     assert_eq!(json["ok"], true);
     assert_eq!(json["kind"], "host_help");
-    assert_eq!(json["data"]["examples"][0], "petcli list");
-    assert_eq!(
-        json["data"]["examples"][1],
-        "petcli describe <operation_id>"
-    );
-    assert_eq!(
-        json["data"]["examples"][2],
-        "petcli call <operation_id> id=42"
-    );
-    assert_eq!(
-        json["data"]["examples"][3],
-        "petcli call <operation_id> '{...}'"
-    );
+    assert_eq!(json["data"]["examples"][0], "petcli -h");
+    assert_eq!(json["data"]["examples"][1], "petcli <operation_id> -h");
+    assert_eq!(json["data"]["examples"][2], "petcli <operation_id> id=42");
+    assert_eq!(json["data"]["examples"][3], "petcli <operation_id> '{...}'");
 }
 
 #[test]

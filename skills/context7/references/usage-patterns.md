@@ -49,12 +49,6 @@ Parse the response:
 context7-mcp-cli query-docs libraryId=/reactjs/react.dev query=useState | jq -r '.data.content[].text'
 ```
 
-## Fallback: Explicit JSON Flag
-
-```bash
-context7-mcp-cli query-docs --input-json '{"libraryId":"/reactjs/react.dev","query":"useMemo"}'
-```
-
 ## Fallback Equivalence
 
 - `context7-mcp-cli <operation> ...` is equivalent to `uxc mcp.context7.com/mcp <operation> ...`.

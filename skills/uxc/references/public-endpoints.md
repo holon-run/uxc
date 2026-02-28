@@ -8,7 +8,7 @@ The following endpoints are practical no-key baselines for smoke checks. Availab
 - Check:
 
 ```bash
-uxc petstore3.swagger.io/api/v3 list
+uxc petstore3.swagger.io/api/v3 -h
 uxc petstore3.swagger.io/api/v3 get:/store/inventory
 ```
 
@@ -18,7 +18,7 @@ uxc petstore3.swagger.io/api/v3 get:/store/inventory
 - Check:
 
 ```bash
-uxc countries.trevorblades.com list
+uxc countries.trevorblades.com -h
 uxc countries.trevorblades.com query/country code=US
 ```
 
@@ -29,7 +29,7 @@ uxc countries.trevorblades.com query/country code=US
 - Check:
 
 ```bash
-uxc grpcb.in:9000 list
+uxc grpcb.in:9000 -h
 uxc grpcb.in:9000 addsvc.Add/Sum a=1 b=2
 ```
 
@@ -39,8 +39,8 @@ uxc grpcb.in:9000 addsvc.Add/Sum a=1 b=2
 - Check:
 
 ```bash
-uxc mcp.deepwiki.com/mcp list
-uxc mcp.deepwiki.com/mcp describe ask_question
+uxc mcp.deepwiki.com/mcp -h
+uxc mcp.deepwiki.com/mcp ask_question -h
 ```
 
 ## JSON-RPC

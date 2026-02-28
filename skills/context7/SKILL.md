@@ -19,7 +19,7 @@ Use this skill to query library documentation and code examples.
 1. Use fixed link command by default:
    - `command -v context7-mcp-cli`
    - If missing, create it: `uxc link context7-mcp-cli mcp.context7.com/mcp`
-   - `context7-mcp-cli list`
+   - `context7-mcp-cli -h`
    - If command conflict is detected and cannot be safely reused, stop and ask skill maintainers to pick a different fixed command name.
 
 2. Resolve a library name to get library ID:
@@ -52,12 +52,6 @@ context7-mcp-cli query-docs '{"libraryId":"/reactjs/react.dev","query":"how to u
 
 ```bash
 context7-mcp-cli resolve-library-id libraryName=node query='file system'
-```
-
-### Fallback input mode (only when positional JSON is inconvenient)
-
-```bash
-context7-mcp-cli query-docs --input-json '{"libraryId":"/reactjs/react.dev","query":"useRef"}'
 ```
 
 ## Notes

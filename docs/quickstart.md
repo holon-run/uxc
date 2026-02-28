@@ -13,18 +13,18 @@ Install options are listed in the top-level README:
 
 ## 1. Discover Operations
 
-Start from a host and list discoverable operations:
+Start from a host with help-first discovery:
 
 ```bash
-uxc <host> list
+uxc <host> -h
 ```
 
 Examples:
 
 ```bash
-uxc petstore3.swagger.io/api/v3 list
-uxc countries.trevorblades.com list
-uxc mcp.deepwiki.com/mcp list
+uxc petstore3.swagger.io/api/v3 -h
+uxc countries.trevorblades.com -h
+uxc mcp.deepwiki.com/mcp -h
 ```
 
 ## 2. Inspect Operation Schemas
@@ -32,21 +32,15 @@ uxc mcp.deepwiki.com/mcp list
 Inspect a specific operation before calling it:
 
 ```bash
-uxc <host> describe <operation_id>
-```
-
-Equivalent dynamic help path:
-
-```bash
-uxc <host> <operation_id> help
+uxc <host> <operation_id> -h
 ```
 
 Examples:
 
 ```bash
-uxc petstore3.swagger.io/api/v3 describe get:/pet/{petId}
-uxc countries.trevorblades.com query/country help
-uxc mcp.deepwiki.com/mcp describe ask_question
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} -h
+uxc countries.trevorblades.com query/country -h
+uxc mcp.deepwiki.com/mcp ask_question -h
 ```
 
 ## 3. Execute Operations
@@ -63,39 +57,22 @@ uxc <host> <operation_id> key=value
 uxc <host> <operation_id> '{"key":"value"}'
 ```
 
-### Fallback: explicit JSON flag
-
-```bash
-uxc <host> <operation_id> --input-json '{"key":"value"}'
-```
-
-Do not pass positional JSON and `--input-json` together.
 Do not pass raw JSON through `--args`.
 
-## 4. Handle Keyword Conflicts
-
-If an operation ID conflicts with a CLI keyword (for example `help` or `list`),
-use explicit `call` form:
-
-```bash
-uxc <host> call <operation_id> key=value
-uxc <host> call <operation_id> '{...}'
-```
-
-## 5. Protocol Recipes
+## 4. Protocol Recipes
 
 ## OpenAPI
 
 ```bash
-uxc petstore3.swagger.io/api/v3 list
-uxc petstore3.swagger.io/api/v3 describe get:/pet/{petId}
+uxc petstore3.swagger.io/api/v3 -h
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} -h
 uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
 ```
 
 Schema-separated service (runtime endpoint differs from schema URL):
 
 ```bash
-uxc api.github.com list \
+uxc api.github.com -h \
   --schema-url https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json
 ```
 
@@ -104,48 +81,48 @@ See [`docs/schema-mapping.md`](schema-mapping.md) for mapping-based defaults.
 ## gRPC
 
 ```bash
-uxc grpcb.in:9000 list
+uxc grpcb.in:9000 -h
 uxc grpcb.in:9000 addsvc.Add/Sum a=1 b=2
 ```
 
 ## GraphQL
 
 ```bash
-uxc countries.trevorblades.com list
+uxc countries.trevorblades.com -h
 uxc countries.trevorblades.com query/country code=US
 ```
 
 ## MCP HTTP
 
 ```bash
-uxc mcp.deepwiki.com/mcp list
+uxc mcp.deepwiki.com/mcp -h
 uxc mcp.deepwiki.com/mcp ask_question '{"repoName":"holon-run/uxc","question":"What does this project do?"}'
 ```
 
 ## MCP stdio
 
 ```bash
-uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list
+uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" -h
 uxc "npx -y @modelcontextprotocol/server-filesystem /tmp" list_directory path=/tmp
 ```
 
 ## JSON-RPC
 
 ```bash
-uxc fullnode.mainnet.sui.io list
-uxc fullnode.mainnet.sui.io describe sui_getLatestCheckpointSequenceNumber
+uxc fullnode.mainnet.sui.io -h
+uxc fullnode.mainnet.sui.io sui_getLatestCheckpointSequenceNumber -h
 uxc fullnode.mainnet.sui.io sui_getLatestCheckpointSequenceNumber
 ```
 
 JSON-RPC discovery is OpenRPC-driven (`rpc.discover` or `openrpc.json` style sources).
 
-## 6. Work with JSON-First Output
+## 5. Work with JSON-First Output
 
 By default, UXC prints machine-friendly JSON envelopes.
 
 ```bash
-uxc <host> list
-uxc <host> describe <operation_id>
+uxc <host> -h
+uxc <host> <operation_id> -h
 uxc <host> <operation_id> key=value
 uxc <host> <operation_id> '{...}'
 ```
@@ -154,10 +131,10 @@ Switch to CLI-readable text output when needed:
 
 ```bash
 uxc --text help
-uxc --text <host> help
+uxc --text <host> -h
 ```
 
-## 7. Configure Auth
+## 6. Configure Auth
 
 Auth model uses:
 
@@ -173,17 +150,17 @@ uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mc
 
 For OAuth (MCP HTTP), see [`docs/oauth-mcp-http.md`](oauth-mcp-http.md).
 
-## 8. Optional: Create Host Shortcut
+## 7. Optional: Create Host Shortcut
 
 Create a local shortcut command for a frequently used host:
 
 ```bash
 uxc link petcli petstore3.swagger.io/api/v3
-petcli list
-petcli describe get:/pet/{petId}
+petcli -h
+petcli get:/pet/{petId} -h
 ```
 
-## 9. Next Docs
+## 8. Next Docs
 
 - Public endpoints without API keys: [`public-endpoints.md`](public-endpoints.md)
 - Logging and troubleshooting: [`logging.md`](logging.md)

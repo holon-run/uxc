@@ -1168,9 +1168,9 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "Default output is JSON. Use --text for human-readable output.".to_string(),
             ],
             examples: vec![
-                "uxc help".to_string(),
-                "uxc <host> help".to_string(),
-                "uxc <host> <operation_id> help".to_string(),
+                "uxc -h".to_string(),
+                "uxc <host> -h".to_string(),
+                "uxc <host> <operation_id> -h".to_string(),
             ],
         },
         ["list"] => HelpData {
@@ -1222,7 +1222,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             notes: vec![],
             examples: vec![
                 "uxc link petcli petstore3.swagger.io/api/v3".to_string(),
-                "petcli help".to_string(),
+                "petcli -h".to_string(),
             ],
         },
         ["cache"] => HelpData {
@@ -1914,19 +1914,19 @@ fn host_help_examples() -> Vec<String> {
         let link_name = link_name.trim();
         if !link_name.is_empty() {
             return vec![
-                format!("{link_name} list"),
-                format!("{link_name} describe <operation_id>"),
-                format!("{link_name} call <operation_id> id=42"),
-                format!("{link_name} call <operation_id> '{{...}}'"),
+                format!("{link_name} -h"),
+                format!("{link_name} <operation_id> -h"),
+                format!("{link_name} <operation_id> id=42"),
+                format!("{link_name} <operation_id> '{{...}}'"),
             ];
         }
     }
 
     vec![
-        "uxc <host> list".to_string(),
-        "uxc <host> describe <operation_id>".to_string(),
-        "uxc <host> call <operation_id> id=42".to_string(),
-        "uxc <host> call <operation_id> '{...}'".to_string(),
+        "uxc <host> -h".to_string(),
+        "uxc <host> <operation_id> -h".to_string(),
+        "uxc <host> <operation_id> id=42".to_string(),
+        "uxc <host> <operation_id> '{...}'".to_string(),
     ]
 }
 

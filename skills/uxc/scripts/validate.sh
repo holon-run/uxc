@@ -53,12 +53,12 @@ if ! rg -q '^description:\s*.+' "${SKILL_FILE}"; then
 fi
 
 # Validate required invocation contract appears in SKILL text.
-if ! rg -q 'uxc <host> list' "${SKILL_FILE}"; then
-  fail "SKILL.md must document list workflow"
+if ! rg -q 'uxc <host> -h' "${SKILL_FILE}"; then
+  fail "SKILL.md must document help-first discovery workflow"
 fi
 
-if ! rg -q 'uxc <host> describe <operation>' "${SKILL_FILE}"; then
-  fail "SKILL.md must document describe workflow"
+if ! rg -q 'uxc <host> <operation> -h' "${SKILL_FILE}"; then
+  fail "SKILL.md must document operation-level help workflow"
 fi
 
 if ! rg -q "uxc <host> <operation> key=value" "${SKILL_FILE}"; then
@@ -67,6 +67,10 @@ fi
 
 if ! rg -q "uxc <host> <operation> '<payload-json>'" "${SKILL_FILE}"; then
   fail "SKILL.md must document bare JSON execute workflow"
+fi
+
+if rg -q -- 'uxc <host> describe <operation>|uxc <host> call <operation>|--input-json' "${SKILL_FILE}" "${SKILL_DIR}/references/"*.md; then
+  fail "uxc skill docs must not use describe/call/--input-json in default examples"
 fi
 
 if ! rg -q 'Link-First Workflow For Wrapper Skills' "${SKILL_FILE}"; then

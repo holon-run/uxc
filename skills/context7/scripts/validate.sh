@@ -69,8 +69,8 @@ if ! rg -q 'uxc link context7-mcp-cli mcp.context7.com/mcp' "${SKILL_FILE}"; the
   fail "SKILL.md must include fixed link creation command"
 fi
 
-if ! rg -q 'context7-mcp-cli list' "${SKILL_FILE}"; then
-  fail "SKILL.md must use context7-mcp-cli as default invocation path"
+if ! rg -q 'context7-mcp-cli -h' "${SKILL_FILE}"; then
+  fail "SKILL.md must use context7-mcp-cli help-first discovery"
 fi
 
 # Validate preferred input style appears in SKILL text.
@@ -80,6 +80,10 @@ fi
 
 if ! rg -q "query-docs .*'\\{.*\\}'" "${SKILL_FILE}"; then
   fail "SKILL.md must include a bare JSON positional example"
+fi
+
+if rg -q -- '--input-json|context7-mcp-cli list|context7-mcp-cli describe|context7-mcp-cli call' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "context7 docs must not use list/describe/call/--input-json in default examples"
 fi
 
 if rg -q -- "--args '\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then

@@ -17,19 +17,17 @@ Always parse `ok` first.
   - for OpenAPI schema separation, provide `--schema-url` or mapping if needed
 
 2. Operation not found
-- Symptoms: `describe` or call reports unknown operation
+- Symptoms: operation help or runtime call reports unknown operation
 - Actions:
-  - refresh with `list`
+  - refresh with `-h` on endpoint
   - check exact operation naming convention per protocol
 
 3. Input validation failure
 - Symptoms: invalid argument / missing field
 - Actions:
-  - inspect `describe` schema
+  - inspect operation schema via `<operation> -h`
   - start from minimal required payload
   - prefer `key=value` or bare positional JSON for primary calls
-  - use `--input-json` only when positional JSON is inconvenient
-  - do not combine positional JSON and `--input-json` in one command
 
 4. Runtime transport failure
 - Symptoms: timeout, connection reset, TLS error

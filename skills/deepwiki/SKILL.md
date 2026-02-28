@@ -43,7 +43,7 @@ cargo install uxc
 1. Use fixed link command by default:
    - `command -v deepwiki-mcp-cli`
    - If missing, create it: `uxc link deepwiki-mcp-cli mcp.deepwiki.com/mcp`
-   - `deepwiki-mcp-cli list`
+   - `deepwiki-mcp-cli -h`
    - If command conflict is detected and cannot be safely reused, stop and ask skill maintainers to pick a different fixed command name.
 
 2. Ask a question about a repository:
@@ -79,12 +79,6 @@ deepwiki-mcp-cli read_wiki_structure '{"repoName":"facebook/react"}'
 
 ```bash
 deepwiki-mcp-cli read_wiki_contents repoName=facebook/react
-```
-
-### Fallback input mode (only when positional JSON is inconvenient)
-
-```bash
-deepwiki-mcp-cli ask_question --input-json '{"repoName":"facebook/react","question":"What is reconciliation?"}'
 ```
 
 ## Output Parsing

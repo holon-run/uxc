@@ -8,7 +8,7 @@ Logs are written to `stderr` so JSON output on `stdout` remains machine-parseabl
 Default level is effectively warning and above.
 
 ```bash
-uxc petstore3.swagger.io/api/v3 list
+uxc petstore3.swagger.io/api/v3 -h
 ```
 
 ## Set Log Level
@@ -16,19 +16,19 @@ uxc petstore3.swagger.io/api/v3 list
 ## info
 
 ```bash
-RUST_LOG=info uxc petstore3.swagger.io/api/v3 list
+RUST_LOG=info uxc petstore3.swagger.io/api/v3 -h
 ```
 
 ## debug
 
 ```bash
-RUST_LOG=debug uxc petstore3.swagger.io/api/v3 list
+RUST_LOG=debug uxc petstore3.swagger.io/api/v3 -h
 ```
 
 ## trace
 
 ```bash
-RUST_LOG=trace uxc petstore3.swagger.io/api/v3 list
+RUST_LOG=trace uxc petstore3.swagger.io/api/v3 -h
 ```
 
 ## Module-Scoped Logging
@@ -36,8 +36,8 @@ RUST_LOG=trace uxc petstore3.swagger.io/api/v3 list
 Limit verbosity to selected modules:
 
 ```bash
-RUST_LOG=uxc::adapters::openapi=debug uxc petstore3.swagger.io/api/v3 list
-RUST_LOG=uxc::adapters::mcp=trace uxc mcp.deepwiki.com/mcp list
+RUST_LOG=uxc::adapters::openapi=debug uxc petstore3.swagger.io/api/v3 -h
+RUST_LOG=uxc::adapters::mcp=trace uxc mcp.deepwiki.com/mcp -h
 ```
 
 ## Suggested Debug Flow
@@ -54,7 +54,7 @@ RUST_LOG=uxc::adapters::mcp=trace uxc mcp.deepwiki.com/mcp list
 ## Endpoint detection looks wrong
 
 ```bash
-RUST_LOG=debug uxc <host> list
+RUST_LOG=debug uxc <host> -h
 ```
 
 Inspect adapter selection and probing sequence in logs.
@@ -63,7 +63,7 @@ Inspect adapter selection and probing sequence in logs.
 
 ```bash
 RUST_LOG=debug uxc auth binding match https://example.com/path
-RUST_LOG=debug uxc https://example.com/path list
+RUST_LOG=debug uxc https://example.com/path -h
 ```
 
 Check binding match details and header application logs.

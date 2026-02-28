@@ -65,8 +65,8 @@ if ! rg -q 'uxc link deepwiki-mcp-cli mcp.deepwiki.com/mcp' "${SKILL_FILE}"; the
   fail "SKILL.md must include fixed link creation command"
 fi
 
-if ! rg -q 'deepwiki-mcp-cli list' "${SKILL_FILE}"; then
-  fail "SKILL.md must use deepwiki-mcp-cli as default invocation path"
+if ! rg -q 'deepwiki-mcp-cli -h' "${SKILL_FILE}"; then
+  fail "SKILL.md must use deepwiki-mcp-cli help-first discovery"
 fi
 
 if ! rg -q 'ask_question repoName=' "${SKILL_FILE}"; then
@@ -75,6 +75,10 @@ fi
 
 if ! rg -q "read_wiki_structure .*'\\{.*\\}'" "${SKILL_FILE}"; then
   fail "SKILL.md must include a bare JSON positional example"
+fi
+
+if rg -q -- '--input-json|deepwiki-mcp-cli list|deepwiki-mcp-cli describe|deepwiki-mcp-cli call' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "deepwiki docs must not use list/describe/call/--input-json in default examples"
 fi
 
 if rg -q -- "--args '\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then

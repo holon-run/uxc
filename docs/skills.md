@@ -6,7 +6,7 @@ This repository ships one canonical skill and several official scenario wrappers
 
 - `skills/uxc`
   - Canonical reusable execution layer for remote schema-exposed interfaces.
-  - Other skills should call this skill for discovery/describe/call patterns.
+  - Other skills should call this skill for help-first discovery and operation execution patterns.
 - `skills/deepwiki`
   - Wrapper for DeepWiki MCP workflows.
 - `skills/context7`
