@@ -75,5 +75,5 @@ Then run operation discovery/calls:
 ```bash
 uxc mcp.notion.com/mcp help
 notion-mcp-cli -h
-notion-mcp-cli notion-fetch help
+notion-mcp-cli notion-fetch -h
 ```

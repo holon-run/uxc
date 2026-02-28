@@ -35,7 +35,7 @@ command -v <provider>-mcp-cli
 # If missing:
 uxc link <provider>-mcp-cli <host>
 <provider>-mcp-cli -h
-<provider>-mcp-cli <operation> help
+<provider>-mcp-cli <operation> -h
 <provider>-mcp-cli <operation> field=value
 ```
 

@@ -13,7 +13,7 @@ uxc link notion-mcp-cli mcp.notion.com/mcp
 
 ```bash
 notion-mcp-cli -h
-notion-mcp-cli notion-fetch help
+notion-mcp-cli notion-fetch -h
 ```
 
 ## Read-First Flows

@@ -73,8 +73,8 @@ if ! rg -q 'notion-mcp-cli -h' "${SKILL_FILE}"; then
   fail "SKILL.md must use notion-mcp-cli help as default discovery path"
 fi
 
-if ! rg -q 'notion-mcp-cli notion-fetch help' "${SKILL_FILE}"; then
-  fail "SKILL.md must show operation-level help via notion-mcp-cli <method> help"
+if ! rg -q 'notion-mcp-cli notion-fetch -h' "${SKILL_FILE}"; then
+  fail "SKILL.md must show operation-level help via notion-mcp-cli <method> -h"
 fi
 
 for rel in \
