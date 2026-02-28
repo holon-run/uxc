@@ -19,7 +19,7 @@ uxc petstore3.swagger.io/api/v3 get:/store/inventory
 
 ```bash
 uxc countries.trevorblades.com list
-uxc countries.trevorblades.com query/country --input-json '{"code":"US"}'
+uxc countries.trevorblades.com query/country code=US
 ```
 
 ## gRPC
@@ -30,7 +30,7 @@ uxc countries.trevorblades.com query/country --input-json '{"code":"US"}'
 
 ```bash
 uxc grpcb.in:9000 list
-uxc grpcb.in:9000 addsvc.Add/Sum --input-json '{"a":1,"b":2}'
+uxc grpcb.in:9000 addsvc.Add/Sum a=1 b=2
 ```
 
 ## MCP (HTTP)

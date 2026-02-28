@@ -44,13 +44,13 @@ cargo install uxc
    - `uxc mcp.deepwiki.com/mcp list`
 
 2. Ask a question about a repository:
-   - `uxc mcp.deepwiki.com/mcp ask_question --input-json '{"repoName":"owner/repo","question":"your question"}'`
+   - `uxc mcp.deepwiki.com/mcp ask_question repoName=owner/repo question='your question'`
 
 3. Read wiki structure:
-   - `uxc mcp.deepwiki.com/mcp read_wiki_structure --input-json '{"repoName":"owner/repo"}'`
+   - `uxc mcp.deepwiki.com/mcp read_wiki_structure repoName=owner/repo`
 
 4. Read wiki contents:
-   - `uxc mcp.deepwiki.com/mcp read_wiki_contents --input-json '{"repoName":"owner/repo"}'`
+   - `uxc mcp.deepwiki.com/mcp read_wiki_contents repoName=owner/repo`
 
 ## Available Tools
 
@@ -63,19 +63,25 @@ cargo install uxc
 ### Ask about a codebase
 
 ```bash
-uxc mcp.deepwiki.com/mcp ask_question --input-json '{"repoName":"facebook/react","question":"How does useState work?"}'
+uxc mcp.deepwiki.com/mcp ask_question repoName=facebook/react question='How does useState work?'
 ```
 
 ### Explore repository structure
 
 ```bash
-uxc mcp.deepwiki.com/mcp read_wiki_structure --input-json '{"repoName":"facebook/react"}'
+uxc mcp.deepwiki.com/mcp read_wiki_structure '{"repoName":"facebook/react"}'
 ```
 
 ### Read documentation
 
 ```bash
-uxc mcp.deepwiki.com/mcp read_wiki_contents --input-json '{"repoName":"facebook/react"}'
+uxc mcp.deepwiki.com/mcp read_wiki_contents repoName=facebook/react
+```
+
+### Fallback input mode (only when positional JSON is inconvenient)
+
+```bash
+uxc mcp.deepwiki.com/mcp ask_question --input-json '{"repoName":"facebook/react","question":"What is reconciliation?"}'
 ```
 
 ## Output Parsing

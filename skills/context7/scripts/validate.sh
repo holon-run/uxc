@@ -61,6 +61,23 @@ if ! rg -q 'query-docs' "${SKILL_FILE}"; then
   fail "SKILL.md must document query-docs tool"
 fi
 
+# Validate preferred input style appears in SKILL text.
+if ! rg -q "resolve-library-id libraryName=" "${SKILL_FILE}"; then
+  fail "SKILL.md must prefer key=value examples for resolve-library-id"
+fi
+
+if ! rg -q "query-docs .*'\\{.*\\}'" "${SKILL_FILE}"; then
+  fail "SKILL.md must include a bare JSON positional example"
+fi
+
+if rg -q -- ' --json ' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "context7 docs must not include removed --json flag examples"
+fi
+
+if rg -q -- "--args '\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "context7 docs must not pass raw JSON via --args"
+fi
+
 # Validate references linked from SKILL body.
 if ! rg -q 'references/usage-patterns.md' "${SKILL_FILE}"; then
   fail "SKILL.md must reference usage-patterns.md"

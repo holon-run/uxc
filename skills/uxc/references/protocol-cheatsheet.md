@@ -42,5 +42,8 @@ UXC operation names follow protocol-native conventions.
 ```bash
 uxc <host> list
 uxc <host> describe <operation>
-uxc <host> <operation> --input-json '<payload-json>'
+uxc <host> <operation> field=value
+uxc <host> <operation> '{"field":"value"}'
+# fallback only:
+uxc <host> <operation> --input-json '{"field":"value"}'
 ```

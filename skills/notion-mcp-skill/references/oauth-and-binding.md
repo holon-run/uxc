@@ -3,7 +3,7 @@
 ## Scope
 
 This file keeps Notion-specific OAuth notes only.
-For canonical OAuth and binding workflow, use `$uxc` skill:
+For canonical OAuth and binding workflow, use `uxc` skill:
 - section: `OAuth and credential/binding lifecycle`
 - file name in `$uxc`: `references/oauth-and-binding.md`
 
@@ -58,6 +58,7 @@ uxc auth binding match https://mcp.notion.com/mcp
 ## Notion Duplicate-Binding Tip
 
 If multiple bindings match Notion endpoint, verify with explicit credential against the same read call before removing stale bindings.
+Do not remove duplicates blindly based on names only.
 
 Recommended shortcut for repeated usage:
 

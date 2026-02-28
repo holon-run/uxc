@@ -7,8 +7,8 @@ description: Operate Notion workspace content through Notion MCP using the UXC C
 
 Use this skill to run Notion MCP operations through `uxc` with OAuth and guarded write behavior.
 
-Use the `uxc` skill guidance for discovery, schema inspection, OAuth lifecycle, and error recovery.
-Do not assume `$uxc` will be auto-triggered in every runtime. Keep this skill executable on its own.
+Reuse the `uxc` skill guidance for discovery, schema inspection, OAuth lifecycle, and error recovery.
+Do not assume another skill is auto-triggered in every runtime. Keep this skill executable on its own.
 
 ## Prerequisites
 
@@ -64,13 +64,13 @@ Do not ask user to manually extract or copy bearer tokens. Token exchange is han
 - Call `notion-fetch` before `notion-create-pages` or `notion-update-page` when targeting database-backed content to obtain exact schema/property names.
 - Treat operations as high impact by default:
   - Require explicit user confirmation before create/update/move/delete-style actions.
-- If OAuth/auth fails, use `$uxc` skill OAuth/error playbooks first, then apply Notion-specific checks in this skill's references.
+- If OAuth/auth fails, use `uxc` skill OAuth/error playbooks first, then apply Notion-specific checks in this skill's references.
 
 ## References
 
-- Notion-specific auth notes (thin wrapper over `$uxc` OAuth guidance):
+- Notion-specific auth notes (thin wrapper over `uxc` skill OAuth guidance):
   - `references/oauth-and-binding.md`
 - Invocation patterns by task:
   - `references/usage-patterns.md`
-- Notion-specific failure notes (thin wrapper over `$uxc` error guidance):
+- Notion-specific failure notes (thin wrapper over `uxc` skill error guidance):
   - `references/error-handling.md`

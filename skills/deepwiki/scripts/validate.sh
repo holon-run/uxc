@@ -26,64 +26,69 @@ required_files=(
 
 for file in "${required_files[@]}"; do
   if [[ ! -f "${file}" ]]; then
-    echo "missing required file: ${file}"
-    exit 1
+    fail "missing required file: ${file}"
   fi
 done
 
 # Validate SKILL frontmatter minimum fields.
 # Require the first line to be '---' and a subsequent closing '---'.
 if ! head -n 1 "${SKILL_FILE}" | rg -q '^---$'; then
-  echo "SKILL.md must include YAML frontmatter"
-  exit 1
+  fail "SKILL.md must include YAML frontmatter"
 fi
 
 if ! tail -n +2 "${SKILL_FILE}" | rg -q '^---$'; then
-  echo "SKILL.md must include YAML frontmatter"
-  exit 1
+  fail "SKILL.md must include YAML frontmatter"
 fi
 
 if ! rg -q '^name:\s*deepwiki\s*$' "${SKILL_FILE}"; then
-  echo "SKILL.md frontmatter must define: name: deepwiki"
-  exit 1
+  fail "SKILL.md frontmatter must define: name: deepwiki"
 fi
 
 if ! rg -q '^description:\s*.+' "${SKILL_FILE}"; then
-  echo "SKILL.md frontmatter must define a description"
-  exit 1
+  fail "SKILL.md frontmatter must define a description"
 fi
 
 # Validate required invocation contract appears in SKILL text.
 if ! rg -q 'mcp.deepwiki.com/mcp' "${SKILL_FILE}"; then
-  echo "SKILL.md must document MCP endpoint"
-  exit 1
+  fail "SKILL.md must document MCP endpoint"
 fi
 
 if ! rg -q 'ask_question' "${SKILL_FILE}"; then
-  echo "SKILL.md must document ask_question tool"
-  exit 1
+  fail "SKILL.md must document ask_question tool"
+fi
+
+if ! rg -q 'ask_question repoName=' "${SKILL_FILE}"; then
+  fail "SKILL.md must prefer key=value examples for ask_question"
+fi
+
+if ! rg -q "read_wiki_structure .*'\\{.*\\}'" "${SKILL_FILE}"; then
+  fail "SKILL.md must include a bare JSON positional example"
+fi
+
+if rg -q -- ' --json ' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "deepwiki docs must not include removed --json flag examples"
+fi
+
+if rg -q -- "--args '\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "deepwiki docs must not pass raw JSON via --args"
 fi
 
 # Validate references linked from SKILL body.
 if ! rg -q 'references/usage-patterns.md' "${SKILL_FILE}"; then
-  echo "SKILL.md must reference usage-patterns.md"
-  exit 1
+  fail "SKILL.md must reference usage-patterns.md"
 fi
 
 # Validate openai.yaml minimum fields.
 if ! rg -q '^\s*display_name:\s*"DeepWiki"\s*$' "${OPENAI_FILE}"; then
-  echo "agents/openai.yaml must define interface.display_name"
-  exit 1
+  fail "agents/openai.yaml must define interface.display_name"
 fi
 
 if ! rg -q '^\s*short_description:\s*".+"\s*$' "${OPENAI_FILE}"; then
-  echo "agents/openai.yaml must define interface.short_description"
-  exit 1
+  fail "agents/openai.yaml must define interface.short_description"
 fi
 
 if ! rg -q '^\s*default_prompt:\s*".*\$deepwiki.*"\s*$' "${OPENAI_FILE}"; then
-  echo 'agents/openai.yaml default_prompt must mention $deepwiki'
-  exit 1
+  fail 'agents/openai.yaml default_prompt must mention $deepwiki'
 fi
 
 echo "skills/deepwiki validation passed"

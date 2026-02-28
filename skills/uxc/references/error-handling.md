@@ -27,7 +27,9 @@ Always parse `ok` first.
 - Actions:
   - inspect `describe` schema
   - start from minimal required payload
-  - ensure you are using `--input-json` (not removed `--json`)
+  - prefer `key=value` or bare positional JSON for primary calls
+  - use `--input-json` only when positional JSON is inconvenient
+  - never use removed `--json`
   - do not combine positional JSON and `--input-json` in one command
 
 4. Runtime transport failure

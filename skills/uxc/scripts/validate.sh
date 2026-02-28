@@ -30,62 +30,59 @@ required_files=(
 
 for file in "${required_files[@]}"; do
   if [[ ! -f "${file}" ]]; then
-    echo "missing required file: ${file}"
-    exit 1
+    fail "missing required file: ${file}"
   fi
 done
 
 # Validate SKILL frontmatter minimum fields.
 # Require the first line to be '---' and a subsequent closing '---'.
 if ! head -n 1 "${SKILL_FILE}" | rg -q '^---$'; then
-  echo "SKILL.md must include YAML frontmatter"
-  exit 1
+  fail "SKILL.md must include YAML frontmatter"
 fi
 
 if ! tail -n +2 "${SKILL_FILE}" | rg -q '^---$'; then
-  echo "SKILL.md must include YAML frontmatter"
-  exit 1
+  fail "SKILL.md must include YAML frontmatter"
 fi
 
 if ! rg -q '^name:\s*uxc\s*$' "${SKILL_FILE}"; then
-  echo "SKILL.md frontmatter must define: name: uxc"
-  exit 1
+  fail "SKILL.md frontmatter must define: name: uxc"
 fi
 
 if ! rg -q '^description:\s*.+' "${SKILL_FILE}"; then
-  echo "SKILL.md frontmatter must define a description"
-  exit 1
+  fail "SKILL.md frontmatter must define a description"
 fi
 
 # Validate required invocation contract appears in SKILL text.
 if ! rg -q 'uxc <host> list' "${SKILL_FILE}"; then
-  echo "SKILL.md must document list workflow"
-  exit 1
+  fail "SKILL.md must document list workflow"
 fi
 
 if ! rg -q 'uxc <host> describe <operation>' "${SKILL_FILE}"; then
-  echo "SKILL.md must document describe workflow"
-  exit 1
+  fail "SKILL.md must document describe workflow"
 fi
 
 if ! rg -q "uxc <host> <operation> key=value" "${SKILL_FILE}"; then
-  echo "SKILL.md must document execute workflow"
-  exit 1
+  fail "SKILL.md must document execute workflow"
 fi
 
 if ! rg -q "uxc <host> <operation> '<payload-json>'" "${SKILL_FILE}"; then
-  echo "SKILL.md must document bare JSON execute workflow"
-  exit 1
+  fail "SKILL.md must document bare JSON execute workflow"
 fi
 
 if ! rg -q -- '--json`?\s+has been removed' "${SKILL_FILE}"; then
-  echo "SKILL.md must include migration note for removed --json"
-  exit 1
+  fail "SKILL.md must include migration note for removed --json"
 fi
 
 if rg -q "execute notion" "${SKILL_FILE}"; then
-  echo "SKILL.md must not document execute-form invocations"
-  exit 1
+  fail "SKILL.md must not document execute-form invocations"
+fi
+
+if rg -q -- ' --json ' "${SKILL_FILE}" "${SKILL_DIR}/references/"*.md; then
+  fail "uxc docs must not include removed --json flag examples"
+fi
+
+if rg -q -- "--args '\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/"*.md; then
+  fail "uxc docs must not pass raw JSON via --args"
 fi
 
 # Validate references linked from SKILL body.
@@ -96,25 +93,21 @@ for rel in \
   "references/oauth-and-binding.md" \
   "references/error-handling.md"; do
   if ! rg -q "${rel}" "${SKILL_FILE}"; then
-    echo "SKILL.md must reference ${rel}"
-    exit 1
+    fail "SKILL.md must reference ${rel}"
   fi
 done
 
 # Validate openai.yaml minimum fields.
 if ! rg -q '^\s*display_name:\s*"UXC"\s*$' "${OPENAI_FILE}"; then
-  echo "agents/openai.yaml must define interface.display_name"
-  exit 1
+  fail "agents/openai.yaml must define interface.display_name"
 fi
 
 if ! rg -q '^\s*short_description:\s*".+"\s*$' "${OPENAI_FILE}"; then
-  echo "agents/openai.yaml must define interface.short_description"
-  exit 1
+  fail "agents/openai.yaml must define interface.short_description"
 fi
 
 if ! rg -q '^\s*default_prompt:\s*".*\$uxc.*"\s*$' "${OPENAI_FILE}"; then
-  echo 'agents/openai.yaml default_prompt must mention $uxc'
-  exit 1
+  fail 'agents/openai.yaml default_prompt must mention $uxc'
 fi
 
 echo "skills/uxc validation passed"

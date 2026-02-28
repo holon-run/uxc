@@ -3,7 +3,7 @@
 ## Scope
 
 This file keeps Notion-specific failure notes only.
-For canonical error taxonomy and OAuth recovery playbooks, use `$uxc` skill:
+For canonical error taxonomy and OAuth recovery playbooks, use `uxc` skill:
 - section: `Failure handling and retry strategy`
 - file name in `$uxc`: `references/error-handling.md`
 
