@@ -32,6 +32,9 @@ Do not assume `$uxc` will be auto-triggered in every runtime. Keep this skill ex
 5. Discover tools and inspect schema before execution:
    - `uxc https://mcp.notion.com/mcp list`
    - `uxc https://mcp.notion.com/mcp describe notion-fetch`
+   - `notion-fetch` requires `id` (URL or UUID). Examples:
+     - `uxc https://mcp.notion.com/mcp notion-fetch id="https://notion.so/your-page-url"`
+     - `uxc https://mcp.notion.com/mcp notion-fetch id="12345678-90ab-cdef-1234-567890abcdef"`
    - Common operations include `notion-search`, `notion-fetch`, and `notion-update-page`.
 6. Prefer read path first:
    - Search/fetch current state before any write.
