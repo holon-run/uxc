@@ -19,6 +19,9 @@
 5. Execution input style is explicit:
    - at least one `key=value` example
    - at least one bare JSON positional example
+6. Link naming convention is explicit:
+   - use `<provider>-<protocol>-cli`
+   - keep the name fixed for the skill
 
 ## Banned defaults
 

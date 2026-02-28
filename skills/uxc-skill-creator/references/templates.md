@@ -40,6 +40,12 @@ Use this skill to run <provider> operations through `uxc`.
 - `references/usage-patterns.md`
 ```
 
+Link naming convention to apply in templates:
+
+- `<provider>-<protocol>-cli`
+- keep the name fixed at skill-authoring time
+- do not auto-rename at runtime
+
 ## Minimal usage-patterns.md Template
 
 ```markdown

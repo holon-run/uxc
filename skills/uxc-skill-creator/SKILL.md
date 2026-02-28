@@ -1,6 +1,6 @@
 ---
 name: uxc-skill-creator
-description: Create or update wrapper skills that call remote tools through UXC, with strict link-first and help-first conventions. Use when defining a new provider MCP skill (or refactoring an existing one) and you need reusable templates, validation rules, and anti-pattern guidance based on proven UXC skill practices.
+description: Create wrapper skills that call remote tools through UXC. Use when defining a new provider skill and you need reusable templates, validation rules, and anti-pattern guidance based on proven UXC skill practices.
 ---
 
 # UXC Skill Creator
@@ -27,7 +27,7 @@ Optional files are allowed only when they add real reusable value.
 
 1. Fix the wrapper interface first:
    - provider endpoint (`<host>`)
-   - fixed link command name (`<provider>-mcp-cli`)
+   - fixed link command name (`<provider>-<protocol>-cli`)
    - auth mode (none, api key, oauth)
 2. Write `SKILL.md` as a thin execution policy:
    - link-first command flow
@@ -48,6 +48,9 @@ Optional files are allowed only when they add real reusable value.
 
 - Default to link-first (`command -v <link_name>` then `uxc link <link_name> <host>`).
 - Default to help-first (`<link_name> -h`, `<link_name> <operation> -h`).
+- Use protocol-aware link naming:
+  - format: `<provider>-<protocol>-cli`
+  - examples: `notion-mcp-cli`, `github-openapi-cli`
 - Prefer `key=value`; allow bare JSON positional payload.
 - Keep JSON output as automation path; do not rely on `--text`.
 - Do not use legacy default examples (`list`/`describe`/`call`/removed flags).

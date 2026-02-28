@@ -54,6 +54,10 @@ if ! rg -q 'help-first' "${SKILL_FILE}"; then
   fail "SKILL.md must document help-first convention"
 fi
 
+if ! rg -q '<provider>-<protocol>-cli' "${SKILL_FILE}"; then
+  fail "SKILL.md must document protocol-aware link naming convention"
+fi
+
 if ! rg -q 'references/workflow.md' "${SKILL_FILE}"; then
   fail "SKILL.md must reference workflow.md"
 fi

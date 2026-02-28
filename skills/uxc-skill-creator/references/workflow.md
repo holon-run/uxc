@@ -6,9 +6,15 @@ Lock these values before writing examples:
 
 - Skill name (folder-safe, stable)
 - Provider endpoint host/path
-- Fixed link command name (`<provider>-mcp-cli`)
+- Fixed link command name (`<provider>-<protocol>-cli`)
 - Auth model and required scopes
 - High-risk operations that require explicit user confirmation
+
+Use protocol-aware names for cross-protocol consistency:
+
+- MCP wrapper: `notion-mcp-cli`
+- OpenAPI wrapper: `github-openapi-cli`
+- GraphQL wrapper: `shopify-graphql-cli`
 
 ## 2. Draft wrapper `SKILL.md`
 
