@@ -22,6 +22,12 @@
 6. Link naming convention is explicit:
    - use `<provider>-<protocol>-cli`
    - keep the name fixed for the skill
+7. Discovery workflow is explicit:
+   - start from user-provided host
+   - include search + `uxc <endpoint> -h` probe before finalizing protocol/path
+8. Auth detection workflow is explicit:
+   - include how auth requirement is determined from probe/first call errors
+   - include binding verification when OAuth/binding is used
 
 ## Banned defaults
 
@@ -31,6 +37,7 @@ Reject these in default examples and workflow text:
 - removed input flags or deprecated invocation forms
 - raw JSON passed through `--args`
 - dynamic runtime command renaming for link conflicts
+- protocol/path/auth assumptions made without verification
 
 ## OAuth and error handling boundary
 

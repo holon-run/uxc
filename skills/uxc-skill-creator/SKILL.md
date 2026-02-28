@@ -25,24 +25,35 @@ Optional files are allowed only when they add real reusable value.
 
 ## Core Workflow
 
-1. Fix the wrapper interface first:
+1. Start from user-provided host input:
+   - record the raw host the user gives
+   - normalize endpoint candidates (scheme/no-scheme, path variants)
+2. Discover protocol and valid path before drafting skill text:
+   - search official docs/repo to confirm endpoint shape and auth model
+   - probe candidates with `uxc <endpoint> -h`
+   - confirm one working endpoint + protocol as the wrapper target
+3. Detect authentication requirement explicitly:
+   - run host help or a minimal read call and inspect envelope/error code
+   - if auth-protected, record required model (api key or oauth) and scopes
+   - verify local mapping path with `uxc auth binding match <endpoint>` when OAuth/binding is used
+4. Fix the wrapper interface:
    - provider endpoint (`<host>`)
    - fixed link command name (`<provider>-<protocol>-cli`)
    - auth mode (none, api key, oauth)
-2. Write `SKILL.md` as a thin execution policy:
+5. Write `SKILL.md` as a thin execution policy:
    - link-first command flow
    - help-first discovery flow
    - JSON envelope parsing and safe-write guardrails
-3. Add provider-specific `references/usage-patterns.md`:
+6. Add provider-specific `references/usage-patterns.md`:
    - minimal read and write examples
    - key=value and bare JSON positional input examples
-4. Add `scripts/validate.sh` with strict checks:
+7. Add `scripts/validate.sh` with strict checks:
    - required files
    - frontmatter fields
    - command style constraints
    - banned legacy patterns
-5. Add `agents/openai.yaml` for skill UI metadata.
-6. Run validation and iterate until clean.
+8. Add `agents/openai.yaml` for skill UI metadata.
+9. Run validation and iterate until clean.
 
 ## Hard Rules
 
@@ -55,6 +66,7 @@ Optional files are allowed only when they add real reusable value.
 - Keep JSON output as automation path; do not rely on `--text`.
 - Do not use legacy default examples (`list`/`describe`/`call`/removed flags).
 - Do not use dynamic link renaming at runtime.
+- Do not assume protocol/path/auth from host string alone; verify by search + probe.
 
 ## References
 

@@ -58,6 +58,22 @@ if ! rg -q '<provider>-<protocol>-cli' "${SKILL_FILE}"; then
   fail "SKILL.md must document protocol-aware link naming convention"
 fi
 
+if ! rg -q 'Start from user-provided host input' "${SKILL_FILE}"; then
+  fail "SKILL.md must document host-driven workflow intake"
+fi
+
+if ! rg -q 'search official docs/repo' "${SKILL_FILE}"; then
+  fail "SKILL.md must document external search for protocol/path/auth discovery"
+fi
+
+if ! rg -q 'probe candidates with `uxc <endpoint> -h`' "${SKILL_FILE}"; then
+  fail "SKILL.md must document uxc probe-based endpoint validation"
+fi
+
+if ! rg -q 'uxc auth binding match <endpoint>' "${SKILL_FILE}"; then
+  fail "SKILL.md must document local binding verification for oauth/binding flows"
+fi
+
 if ! rg -q 'references/workflow.md' "${SKILL_FILE}"; then
   fail "SKILL.md must reference workflow.md"
 fi

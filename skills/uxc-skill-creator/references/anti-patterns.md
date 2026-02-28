@@ -24,3 +24,8 @@ Prefer `key=value`, and include bare JSON positional only where it adds clarity.
 
 Do not default to write operations.
 Read current state first, then require explicit user confirmation before destructive or high-impact writes.
+
+## 6. Host-only assumptions
+
+Do not infer protocol/path/auth only from host shape.
+Always verify with official docs search and `uxc` probing before publishing wrapper commands.

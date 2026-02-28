@@ -19,13 +19,16 @@ Use this skill to run <provider> operations through `uxc`.
 
 ## Core Workflow
 
-1. Use fixed link command by default:
+1. Confirm endpoint/protocol/auth from user host:
+   - search official docs for canonical endpoint and auth requirements
+   - probe with `uxc <host> -h` (and endpoint variants if needed)
+2. Use fixed link command by default:
    - `command -v <link_name>`
    - If missing, create it: `uxc link <link_name> <host>`
    - `<link_name> -h`
-2. Inspect operation schema:
+3. Inspect operation schema:
    - `<link_name> <operation> -h`
-3. Execute operation:
+4. Execute operation:
    - `<link_name> <operation> field=value`
    - `<link_name> <operation> '{"field":"value"}'`
 
@@ -34,6 +37,8 @@ Use this skill to run <provider> operations through `uxc`.
 - Parse JSON envelope fields (`ok`, `data`, `error`).
 - Require explicit user confirmation for destructive writes.
 - `<link_name> <operation> ...` is equivalent to `uxc <host> <operation> ...`.
+- When OAuth/binding is used, include local mapping check:
+  - `uxc auth binding match <endpoint>`
 
 ## References
 
