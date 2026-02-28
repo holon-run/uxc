@@ -9,7 +9,7 @@ For canonical OAuth and binding workflow, use `uxc` skill:
 
 ## Notion Endpoint Defaults
 
-- endpoint: `https://mcp.notion.com/mcp`
+- endpoint: `mcp.notion.com/mcp`
 - suggested scopes: `read`, `write`
 - callback example: `http://127.0.0.1:8788/callback`
 
@@ -17,7 +17,7 @@ For canonical OAuth and binding workflow, use `uxc` skill:
 
 ```bash
 uxc auth oauth login notion-mcp \
-  --endpoint https://mcp.notion.com/mcp \
+  --endpoint mcp.notion.com/mcp \
   --flow authorization_code \
   --redirect-uri http://127.0.0.1:8788/callback \
   --scope read \
@@ -52,7 +52,7 @@ uxc auth binding add \
 Validate match:
 
 ```bash
-uxc auth binding match https://mcp.notion.com/mcp
+uxc auth binding match mcp.notion.com/mcp
 ```
 
 ## Notion Duplicate-Binding Tip
@@ -63,13 +63,13 @@ Do not remove duplicates blindly based on names only.
 Recommended shortcut for repeated usage:
 
 ```bash
-uxc link notion-mcp-cli https://mcp.notion.com/mcp
+uxc link notion-mcp-cli mcp.notion.com/mcp
 ```
 
 Then run operation discovery/calls:
 
 ```bash
-uxc https://mcp.notion.com/mcp list
+uxc mcp.notion.com/mcp list
 notion-mcp-cli list
 notion-mcp-cli describe notion-fetch
 ```

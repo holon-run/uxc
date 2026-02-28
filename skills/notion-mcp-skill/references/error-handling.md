@@ -12,9 +12,9 @@ For canonical error taxonomy and OAuth recovery playbooks, use `uxc` skill:
 1. If first real call returns `invalid_token`:
 1. Check for duplicate endpoint bindings (`uxc auth binding list`).
 2. Confirm the binding that currently matches:
-   - `uxc auth binding match https://mcp.notion.com/mcp`
+   - `uxc auth binding match mcp.notion.com/mcp`
 3. If multiple candidates exist, verify each candidate with explicit credential:
-   - `uxc --auth <credential_id> https://mcp.notion.com/mcp <same_read_operation> ...`
+   - `uxc --auth <credential_id> mcp.notion.com/mcp <same_read_operation> ...`
 4. Remove only the binding(s) confirmed stale/invalid.
 5. Retry the original read call that failed.
 

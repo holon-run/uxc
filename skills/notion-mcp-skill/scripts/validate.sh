@@ -45,7 +45,7 @@ if ! rg -q '^description:\s*.+' "${SKILL_FILE}"; then
   fail "SKILL.md frontmatter must define a description"
 fi
 
-if ! rg -q 'https://mcp.notion.com/mcp' "${SKILL_FILE}"; then
+if ! rg -q 'mcp.notion.com/mcp' "${SKILL_FILE}"; then
   fail "SKILL.md must document Notion MCP endpoint"
 fi
 

@@ -1,6 +1,6 @@
 # Usage Patterns
 
-All commands assume endpoint `https://mcp.notion.com/mcp`.
+All commands assume endpoint `mcp.notion.com/mcp`.
 If shortcut exists, prefer:
 
 ```bash
@@ -10,14 +10,14 @@ notion-mcp-cli <operation> ...
 Create shortcut:
 
 ```bash
-uxc link notion-mcp-cli https://mcp.notion.com/mcp
+uxc link notion-mcp-cli mcp.notion.com/mcp
 ```
 
 ## Discover And Inspect
 
 ```bash
-uxc https://mcp.notion.com/mcp list
-uxc https://mcp.notion.com/mcp describe notion-fetch
+uxc mcp.notion.com/mcp list
+uxc mcp.notion.com/mcp describe notion-fetch
 ```
 
 ## Read-First Flows
@@ -25,20 +25,20 @@ uxc https://mcp.notion.com/mcp describe notion-fetch
 Search content:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-search query="Q1 plan" query_type=internal
+uxc mcp.notion.com/mcp notion-search query="Q1 plan" query_type=internal
 ```
 
 Fetch entity by URL/ID:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-fetch id="https://notion.so/your-page-url"
+uxc mcp.notion.com/mcp notion-fetch id="https://notion.so/your-page-url"
 ```
 
 List users or teams:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-get-users '{}'
-uxc https://mcp.notion.com/mcp notion-get-teams '{}'
+uxc mcp.notion.com/mcp notion-get-users '{}'
+uxc mcp.notion.com/mcp notion-get-teams '{}'
 ```
 
 ## Write Flows (Require Explicit User Confirmation)
@@ -46,7 +46,7 @@ uxc https://mcp.notion.com/mcp notion-get-teams '{}'
 Create page:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-create-pages '{
+uxc mcp.notion.com/mcp notion-create-pages '{
   "pages":[
     {
       "properties":{"title":"Release Notes"},
@@ -59,7 +59,7 @@ uxc https://mcp.notion.com/mcp notion-create-pages '{
 Update page properties:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-update-page '{
+uxc mcp.notion.com/mcp notion-update-page '{
   "page_id":"00000000-0000-0000-0000-000000000000",
   "command":"update_properties",
   "properties":{"title":"Updated Title"}
@@ -69,7 +69,7 @@ uxc https://mcp.notion.com/mcp notion-update-page '{
 Add comment:
 
 ```bash
-uxc https://mcp.notion.com/mcp notion-create-comment '{
+uxc mcp.notion.com/mcp notion-create-comment '{
   "page_id":"00000000-0000-0000-0000-000000000000",
   "rich_text":[{"text":{"content":"Looks good"}}]
 }'
