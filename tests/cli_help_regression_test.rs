@@ -347,8 +347,30 @@ fn auth_credential_without_subcommand_outputs_subcommand_help_json() {
 
 #[test]
 fn host_help_keyword_is_treated_as_operation_literal() {
+    let mut server = mockito::Server::new();
+    let _schema = server
+        .mock("GET", "/openapi.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r##"{
+  "openapi": "3.0.0",
+  "info": { "title": "test", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "list pets",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"##,
+        )
+        .create();
+
     let output = uxc_command()
-        .arg("https://127.0.0.1:1")
+        .arg(server.url())
+        .arg("--no-cache")
         .arg("help")
         .output()
         .expect("failed to run uxc");
@@ -356,15 +378,13 @@ fn host_help_keyword_is_treated_as_operation_literal() {
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
     assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
 
     let message = json["error"]["message"]
         .as_str()
         .expect("error.message should be a string");
     assert!(
-        message.contains("Protocol detection failed")
-            || message.contains("PROTOCOL_DETECTION_FAILED")
-            || message.contains("Connection")
-            || message.contains("connect"),
+        message.contains("Invalid operation ID format") || message.contains("Unknown argument 'help'"),
         "unexpected message: {}",
         message
     );
@@ -644,72 +664,6 @@ fn dynamic_operation_executes_operation() {
 
 #[test]
 fn dynamic_operation_accepts_bare_json_payload() {
-    let mut server = mockito::Server::new();
-    let _schema = server
-        .mock("GET", "/openapi.json")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            r#"{
-  "openapi": "3.0.0",
-  "info": { "title": "test", "version": "1.0.0" },
-  "paths": {
-    "/echo": {
-      "post": {
-        "summary": "echo payload",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["message"],
-                "properties": {
-                  "message": { "type": "string" }
-                }
-              }
-            }
-          }
-        },
-        "responses": { "200": { "description": "ok" } }
-      }
-    }
-  }
-}"#,
-        )
-        .create();
-    let _call = server
-        .mock("POST", "/echo")
-        .match_body(r#"{"message":"hello"}"#)
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(r#"{"message":"hello"}"#)
-        .create();
-
-    let output = uxc_command()
-        .arg(server.url())
-        .arg("--no-cache")
-        .arg("post:/echo")
-        .arg(r#"{"message":"hello"}"#)
-        .output()
-        .expect("failed to run uxc");
-
-    assert!(
-        output.status.success(),
-        "command should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
-    assert_eq!(json["ok"], true);
-    assert_eq!(json["kind"], "call_result");
-    assert_eq!(json["operation"], "post:/echo");
-    assert_eq!(json["data"]["message"], "hello");
-}
-
-#[test]
-fn dynamic_operation_accepts_bare_json_payload_duplicate_case() {
     let mut server = mockito::Server::new();
     let _schema = server
         .mock("GET", "/openapi.json")
