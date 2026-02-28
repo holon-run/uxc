@@ -13,12 +13,15 @@ This repository ships one canonical skill and several official scenario wrappers
   - Wrapper for Context7 MCP library documentation workflows.
 - `skills/notion-mcp-skill`
   - Wrapper for Notion MCP workflows with OAuth and guarded-write guidance.
+- `skills/uxc-skill-creator`
+  - Creator skill for authoring new UXC-based wrapper skills with strict conventions.
 
 ## Recommended Usage Model
 
 1. Install and rely on `skills/uxc` as the base capability.
 2. Add wrapper skills only for repeated service-specific workflows.
 3. Keep wrapper logic thin and delegate generic protocol execution to `skills/uxc`.
+4. Use `skills/uxc-skill-creator` when creating or refactoring wrapper skills.
 
 ## Install For Codex
 
@@ -53,6 +56,12 @@ After installation, restart Codex to load new skills.
 
 ```bash
 bash skills/uxc/scripts/validate.sh
+```
+
+- Validate skill creator docs:
+
+```bash
+bash skills/uxc-skill-creator/scripts/validate.sh
 ```
 
 - Validate Notion wrapper docs when touched:

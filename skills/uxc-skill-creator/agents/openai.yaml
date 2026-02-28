@@ -1,0 +1,4 @@
+interface:
+  display_name: "UXC Skill Creator"
+  short_description: "Create consistent UXC-based wrapper skills"
+  default_prompt: "Use $uxc-skill-creator to create or refine UXC-based wrapper skills with link-first, help-first, and strict validation conventions."
