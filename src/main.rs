@@ -2520,10 +2520,11 @@ async fn handle_cache_command(
                     None,
                 ))
             } else if let Some(url) = url {
-                cache.invalidate(url)?;
+                let normalized_url = normalize_endpoint_url(url);
+                cache.invalidate(&normalized_url)?;
                 let data = serde_json::to_value(CacheClearData {
                     scope: "url".to_string(),
-                    url: Some(url.clone()),
+                    url: Some(normalized_url),
                 })?;
                 Ok(OutputEnvelope::success(
                     "cache_clear_result",
@@ -2769,17 +2770,18 @@ fn handle_auth_binding_command(command: &AuthBindingCommands) -> Result<OutputEn
             ))
         }
         AuthBindingCommands::Match { endpoint } => {
-            if url::Url::parse(endpoint).is_err() {
+            let endpoint = normalize_endpoint_url(endpoint);
+            if url::Url::parse(&endpoint).is_err() {
                 return Err(UxcError::InvalidArguments(format!(
-                    "Invalid endpoint URL '{}'. Use a full URL such as https://api.example.com/path",
+                    "Invalid endpoint URL '{}'. Use a URL/host like api.example.com/path or https://api.example.com/path",
                     endpoint
                 ))
                 .into());
             }
             let bindings = AuthBindings::load_bindings()?;
-            let matched = bindings.matching_rule(endpoint).cloned();
+            let matched = bindings.matching_rule(&endpoint).cloned();
             let data = serde_json::to_value(AuthBindingMatchData {
-                endpoint: endpoint.clone(),
+                endpoint,
                 matched: matched.is_some(),
                 binding: matched,
             })?;
@@ -2831,6 +2833,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
         } => {
             let flow = parse_oauth_flow(flow)?;
             let scopes = auth::oauth::parse_scopes(scope);
+            let endpoint = normalize_endpoint_url(endpoint);
             let client = build_resilient_http_client(
                 std::time::Duration::from_secs(30),
                 "OAuth login command",
@@ -2843,9 +2846,10 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                             "device_code flow requires --client-id".to_string(),
                         )
                     })?;
-                    let login =
-                        auth::oauth::login_with_device_code(endpoint, &client, &client_id, &scopes)
-                            .await?;
+                    let login = auth::oauth::login_with_device_code(
+                        &endpoint, &client, &client_id, &scopes,
+                    )
+                    .await?;
                     (
                         login.metadata,
                         login.token,
@@ -2860,7 +2864,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                         )
                     })?;
                     let login = auth::oauth::login_with_authorization_code(
-                        endpoint,
+                        &endpoint,
                         &client,
                         client_id.as_deref(),
                         client_secret.as_deref(),
@@ -2888,7 +2892,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                         )
                     })?;
                     let login = auth::oauth::login_with_client_credentials(
-                        endpoint,
+                        &endpoint,
                         &client,
                         &client_id,
                         &client_secret,

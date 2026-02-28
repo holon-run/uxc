@@ -99,7 +99,7 @@ fn auth_binding_lifecycle_outputs_json_envelopes() {
         .arg("auth")
         .arg("binding")
         .arg("match")
-        .arg("https://mcp.deepwiki.com/mcp")
+        .arg("mcp.deepwiki.com/mcp")
         .output()
         .expect("binding match should run");
     assert!(
@@ -110,6 +110,10 @@ fn auth_binding_lifecycle_outputs_json_envelopes() {
     let match_json = parse_stdout_json(&match_output);
     assert_eq!(match_json["ok"], true);
     assert_eq!(match_json["kind"], "auth_binding_match");
+    assert_eq!(
+        match_json["data"]["endpoint"],
+        "https://mcp.deepwiki.com/mcp"
+    );
     assert_eq!(match_json["data"]["matched"], true);
     assert_eq!(match_json["data"]["binding"]["id"], "deepwiki-mcp");
 
