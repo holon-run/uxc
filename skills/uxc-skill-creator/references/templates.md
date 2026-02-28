@@ -2,7 +2,7 @@
 
 ## Minimal Wrapper SKILL.md Template
 
-```markdown
+````markdown
 ---
 name: <skill-name>
 description: <what it does + when to use>
@@ -43,7 +43,7 @@ Use this skill to run <provider> operations through `uxc`.
 ## References
 
 - `references/usage-patterns.md`
-```
+````
 
 Link naming convention to apply in templates:
 
@@ -53,7 +53,7 @@ Link naming convention to apply in templates:
 
 ## Minimal usage-patterns.md Template
 
-```markdown
+````markdown
 # Usage Patterns
 
 ```bash
@@ -77,7 +77,14 @@ uxc link <link_name> <host>
 ## Fallback equivalence
 
 - `<link_name> <operation> ...` is equivalent to `uxc <host> <operation> ...`.
-```
+````
+
+Replace placeholders before use:
+
+- `<skill-name>` -> actual folder name
+- `<link_name>` -> fixed command name
+- `<host>` -> verified endpoint
+- `<operation>` / `<read_operation>` -> real operation IDs
 
 ## Minimal validate.sh Template
 
@@ -104,7 +111,7 @@ rg -q '^description:\s*.+' "${SKILL_FILE}" || fail 'missing description'
 rg -q 'command -v <link_name>' "${SKILL_FILE}" || fail 'missing link-first check'
 rg -q '<link_name> -h' "${SKILL_FILE}" || fail 'missing help-first usage'
 
-if rg -q -- 'list|describe|call|--input-json|--args .*\{' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+if rg -q -- '(^|[[:space:]])uxc <host> (list|describe|call)([[:space:]]|$)|(^|[[:space:]])<link_name> (list|describe|call)([[:space:]]|$)|--input-json|--args .*\{' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail 'found banned legacy patterns'
 fi
 

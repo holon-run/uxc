@@ -90,8 +90,8 @@ if ! rg -q 'references/anti-patterns.md' "${SKILL_FILE}"; then
   fail "SKILL.md must reference anti-patterns.md"
 fi
 
-if rg -q -- 'uxc <host> describe <operation>|uxc <host> call <operation>' "${SKILL_FILE}" "${SKILL_DIR}/references/"*.md; then
-  fail "uxc-skill-creator docs must not use deprecated default invocation forms"
+if rg -q -- '(^|[[:space:]])uxc <host> (list|describe|call)([[:space:]]|$)|(^|[[:space:]])<link_name> (list|describe|call)([[:space:]]|$)' "${SKILL_FILE}" "${SKILL_DIR}/references/"*.md; then
+  fail "uxc-skill-creator docs must not use deprecated list/describe/call invocation forms"
 fi
 
 if ! rg -q '^\s*display_name:\s*"UXC Skill Creator"\s*$' "${OPENAI_FILE}"; then

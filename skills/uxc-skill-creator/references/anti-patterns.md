@@ -5,7 +5,7 @@
 Avoid adding extra remote probe calls just to test auth readiness.
 Use local binding checks first, then validate through the first real operation call.
 
-## 2. Dynamic link renaming in runtime
+## 2. Dynamic link renaming at runtime
 
 Do not teach runtime logic to append suffixes or auto-rename command names.
 Link naming is a skill author decision at design time.

@@ -78,3 +78,8 @@ Optional files are allowed only when they add real reusable value.
   - `references/validation-rules.md`
 - Observed pitfalls and better defaults:
   - `references/anti-patterns.md`
+
+## See Also
+
+- Base execution and protocol/auth guidance:
+  - `skills/uxc/SKILL.md`
