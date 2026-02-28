@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::process::Command;
+use tempfile::TempDir;
 
 fn parse_stdout_json(output: &std::process::Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON")
@@ -7,7 +8,10 @@ fn parse_stdout_json(output: &std::process::Output) -> Value {
 
 #[test]
 fn cache_clear_normalizes_shorthand_url() {
+    let temp_home = TempDir::new().expect("temp home should be created");
     let output = Command::new(env!("CARGO_BIN_EXE_uxc"))
+        .env("HOME", temp_home.path())
+        .env("USERPROFILE", temp_home.path())
         .arg("cache")
         .arg("clear")
         .arg("mcp.notion.com/mcp")
