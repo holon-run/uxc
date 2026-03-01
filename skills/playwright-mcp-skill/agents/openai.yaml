@@ -1,0 +1,4 @@
+interface:
+  display_name: "Playwright MCP"
+  short_description: "Automate browser tasks via @playwright/mcp over UXC stdio"
+  default_prompt: "Use $playwright-mcp-skill to navigate pages, inspect snapshots, and run browser actions through @playwright/mcp with UXC."
