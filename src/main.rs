@@ -1509,6 +1509,13 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             println!("Running: {}", running);
+            if !running {
+                if let Some(err) = data.get("error") {
+                    if let Some(message) = err.get("message").and_then(Value::as_str) {
+                        println!("Error: {}", message);
+                    }
+                }
+            }
             if let Some(pid) = data.get("pid").and_then(Value::as_u64) {
                 println!("PID: {}", pid);
             }
@@ -2402,10 +2409,12 @@ async fn handle_cache_command(
 async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelope> {
     match command {
         DaemonCommands::Start => {
-            let started = daemon::daemon_start_local().await?;
+            let started_now = daemon::daemon_start_local().await?;
             let data = json!({
                 "started": true,
-                "autostarted": started,
+                "autostarted": started_now,
+                "started_now": started_now,
+                "already_running": !started_now,
                 "socket": daemon::socket_path().display().to_string()
             });
             Ok(OutputEnvelope::success(
@@ -2435,9 +2444,13 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
         DaemonCommands::Status => {
             let status = match daemon::daemon_status_local().await {
                 Ok(status) => serde_json::to_value(status)?,
-                Err(_) => json!({
+                Err(err) => json!({
                     "running": false,
-                    "socket": daemon::socket_path().display().to_string()
+                    "socket": daemon::socket_path().display().to_string(),
+                    "error": {
+                        "code": "DAEMON_UNREACHABLE",
+                        "message": err.to_string()
+                    }
                 }),
             };
             Ok(OutputEnvelope::success(

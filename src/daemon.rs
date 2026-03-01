@@ -26,6 +26,8 @@ use tokio::sync::{Mutex, RwLock};
 const JSONRPC_VERSION: &str = "2.0";
 const START_POLL_TRIES: usize = 30;
 const START_POLL_INTERVAL_MS: u64 = 100;
+const STOP_POLL_TRIES: usize = 30;
+const STOP_POLL_INTERVAL_MS: u64 = 100;
 const START_LOCK_STALE_SECS: u64 = 30;
 const MCP_IDLE_TTL_SECS: u64 = 600;
 const CONNECT_TIMEOUT_SECS: u64 = 2;
@@ -147,6 +149,7 @@ struct ServerState {
 #[derive(Clone)]
 struct McpSessionManager {
     stdio: Arc<Mutex<HashMap<String, Arc<Mutex<McpStdioSession>>>>>,
+    stdio_init_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     http: Arc<Mutex<HashMap<String, Arc<McpHttpSession>>>>,
     reuse_hits: Arc<Mutex<u64>>,
 }
@@ -166,6 +169,7 @@ impl McpSessionManager {
     fn new() -> Self {
         Self {
             stdio: Arc::new(Mutex::new(HashMap::new())),
+            stdio_init_locks: Arc::new(Mutex::new(HashMap::new())),
             http: Arc::new(Mutex::new(HashMap::new())),
             reuse_hits: Arc::new(Mutex::new(0)),
         }
@@ -188,6 +192,15 @@ impl McpSessionManager {
             }
         }
 
+        let session_keys = {
+            let map = self.stdio.lock().await;
+            map.keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let mut lock_map = self.stdio_init_locks.lock().await;
+        lock_map.retain(|k, _| session_keys.contains(k));
+
         {
             let mut map = self.http.lock().await;
             let mut remove = Vec::new();
@@ -209,6 +222,25 @@ impl McpSessionManager {
         command: &str,
         args: &[String],
     ) -> Result<(Arc<Mutex<McpStdioSession>>, bool)> {
+        {
+            let map = self.stdio.lock().await;
+            if let Some(s) = map.get(key) {
+                *self.reuse_hits.lock().await += 1;
+                return Ok((s.clone(), true));
+            }
+        }
+
+        // Singleflight for stdio process initialization by endpoint key.
+        // This avoids duplicate process spawns under concurrent cold requests.
+        let key_lock = {
+            let mut lock_map = self.stdio_init_locks.lock().await;
+            lock_map
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _guard = key_lock.lock().await;
+
         {
             let map = self.stdio.lock().await;
             if let Some(s) = map.get(key) {
@@ -953,7 +985,13 @@ pub async fn daemon_stop_local() -> Result<bool> {
         return Ok(false);
     }
     daemon_stop_client().await?;
-    Ok(true)
+    for _ in 0..STOP_POLL_TRIES {
+        tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
+        if daemon_status_client().await.is_err() {
+            return Ok(true);
+        }
+    }
+    bail!("Daemon did not stop in time. Run `uxc daemon status` for diagnostics.")
 }
 
 async fn client_call(method: &str, params: Option<Value>) -> Result<Value> {
