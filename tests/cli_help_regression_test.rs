@@ -1,8 +1,13 @@
+use serial_test::serial;
 use std::process::Command;
 use tempfile::TempDir;
 
 fn uxc_command() -> Command {
     Command::new(env!("CARGO_BIN_EXE_uxc"))
+}
+
+fn daemon_stop_best_effort() {
+    let _ = uxc_command().arg("daemon").arg("stop").output();
 }
 
 fn uxc_command_with_home(home: &std::path::Path) -> Command {
@@ -43,6 +48,7 @@ fn without_http_scheme(url: &str) -> String {
 }
 
 #[test]
+#[serial]
 fn bare_invocation_outputs_json_global_help() {
     let output = uxc_command()
         .arg("help")
@@ -58,6 +64,7 @@ fn bare_invocation_outputs_json_global_help() {
 }
 
 #[test]
+#[serial]
 fn global_help_flag_works() {
     let output = uxc_command().arg("-h").output().expect("failed to run uxc");
 
@@ -70,6 +77,7 @@ fn global_help_flag_works() {
 }
 
 #[test]
+#[serial]
 fn help_subcommand_defaults_to_json() {
     let output = uxc_command()
         .arg("help")
@@ -84,6 +92,7 @@ fn help_subcommand_defaults_to_json() {
 }
 
 #[test]
+#[serial]
 fn cache_and_auth_commands_default_to_json() {
     let cache_output = uxc_command()
         .arg("cache")
@@ -113,6 +122,7 @@ fn cache_and_auth_commands_default_to_json() {
 }
 
 #[test]
+#[serial]
 fn operation_help_works_with_dynamic_syntax() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -154,6 +164,7 @@ fn operation_help_works_with_dynamic_syntax() {
 }
 
 #[test]
+#[serial]
 fn host_help_supports_url_without_scheme() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -206,6 +217,7 @@ fn host_help_supports_url_without_scheme() {
 }
 
 #[test]
+#[serial]
 fn host_help_uses_link_name_for_next_commands_when_env_set() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -253,7 +265,9 @@ fn host_help_uses_link_name_for_next_commands_when_env_set() {
 }
 
 #[test]
+#[serial]
 fn host_help_uses_stale_cache_fallback_with_meta() {
+    daemon_stop_best_effort();
     let temp_home = tempfile::tempdir().expect("temp home should be created");
     let endpoint = {
         let mut server = mockito::Server::new();
@@ -316,9 +330,12 @@ fn host_help_uses_stale_cache_fallback_with_meta() {
         json["meta"]["cache_age_ms"].as_u64().is_some(),
         "cache_age_ms should be present"
     );
+
+    daemon_stop_best_effort();
 }
 
 #[test]
+#[serial]
 fn refresh_schema_forces_online_fetch_in_help_flow() {
     let temp_home = tempfile::tempdir().expect("temp home should be created");
     let mut server = mockito::Server::new();
@@ -401,6 +418,7 @@ fn refresh_schema_forces_online_fetch_in_help_flow() {
 }
 
 #[test]
+#[serial]
 fn auth_info_alias_outputs_auth_info_json() {
     let files = TestAuthFiles::new();
 
@@ -437,6 +455,7 @@ fn auth_info_alias_outputs_auth_info_json() {
 }
 
 #[test]
+#[serial]
 fn auth_oauth_list_outputs_auth_list_json() {
     let output = uxc_command()
         .arg("auth")
@@ -453,6 +472,7 @@ fn auth_oauth_list_outputs_auth_list_json() {
 }
 
 #[test]
+#[serial]
 fn cache_without_subcommand_outputs_subcommand_help_json() {
     let output = uxc_command()
         .arg("cache")
@@ -468,6 +488,7 @@ fn cache_without_subcommand_outputs_subcommand_help_json() {
 }
 
 #[test]
+#[serial]
 fn cache_stats_help_outputs_specific_subcommand_path() {
     let output = uxc_command()
         .arg("cache")
@@ -485,6 +506,7 @@ fn cache_stats_help_outputs_specific_subcommand_path() {
 }
 
 #[test]
+#[serial]
 fn auth_credential_without_subcommand_outputs_subcommand_help_json() {
     let output = uxc_command()
         .arg("auth")
@@ -501,6 +523,7 @@ fn auth_credential_without_subcommand_outputs_subcommand_help_json() {
 }
 
 #[test]
+#[serial]
 fn host_help_keyword_is_treated_as_operation_literal() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -547,6 +570,7 @@ fn host_help_keyword_is_treated_as_operation_literal() {
 }
 
 #[test]
+#[serial]
 fn operation_help_keyword_is_not_a_help_alias() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -592,6 +616,7 @@ fn operation_help_keyword_is_not_a_help_alias() {
 }
 
 #[test]
+#[serial]
 fn link_help_flag_outputs_subcommand_help_json() {
     let link = uxc_command()
         .arg("link")
@@ -607,6 +632,7 @@ fn link_help_flag_outputs_subcommand_help_json() {
 }
 
 #[test]
+#[serial]
 fn operation_help_supports_url_without_scheme() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -651,6 +677,7 @@ fn operation_help_supports_url_without_scheme() {
 }
 
 #[test]
+#[serial]
 fn dynamic_operation_help_supports_text_output() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -694,6 +721,7 @@ fn dynamic_operation_help_supports_text_output() {
 }
 
 #[test]
+#[serial]
 fn operation_help_includes_openapi_request_body_schema() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -761,6 +789,7 @@ fn operation_help_includes_openapi_request_body_schema() {
 }
 
 #[test]
+#[serial]
 fn text_and_format_flags_are_mutually_exclusive() {
     let output = uxc_command()
         .arg("--format")
@@ -775,6 +804,7 @@ fn text_and_format_flags_are_mutually_exclusive() {
 }
 
 #[test]
+#[serial]
 fn dynamic_operation_executes_operation() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -819,6 +849,7 @@ fn dynamic_operation_executes_operation() {
 }
 
 #[test]
+#[serial]
 fn dynamic_operation_accepts_bare_json_payload() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -885,6 +916,7 @@ fn dynamic_operation_accepts_bare_json_payload() {
 }
 
 #[test]
+#[serial]
 fn dynamic_operation_rejects_conflicting_json_inputs() {
     let output = uxc_command()
         .arg("https://example.com")
@@ -911,6 +943,7 @@ fn dynamic_operation_rejects_conflicting_json_inputs() {
 }
 
 #[test]
+#[serial]
 fn dynamic_operation_rejects_non_object_positional_json_payload() {
     let output = uxc_command()
         .arg("https://example.com")
@@ -935,6 +968,7 @@ fn dynamic_operation_rejects_non_object_positional_json_payload() {
 }
 
 #[test]
+#[serial]
 fn dynamic_operation_rejects_json_passed_to_args_flag() {
     let output = uxc_command()
         .arg("https://example.com")
@@ -960,6 +994,7 @@ fn dynamic_operation_rejects_json_passed_to_args_flag() {
 }
 
 #[test]
+#[serial]
 fn host_help_outputs_operation_id_and_display_name() {
     let mut server = mockito::Server::new();
     let _schema = server
@@ -998,6 +1033,7 @@ fn host_help_outputs_operation_id_and_display_name() {
 }
 
 #[test]
+#[serial]
 fn schema_url_override_supports_schema_separated_openapi_service() {
     let mut target_server = mockito::Server::new();
     let _call = target_server
@@ -1071,6 +1107,7 @@ fn schema_url_override_supports_schema_separated_openapi_service() {
 }
 
 #[test]
+#[serial]
 fn user_schema_mapping_file_supports_schema_separated_openapi_service() {
     let mut target_server = mockito::Server::new();
     let _call = target_server
