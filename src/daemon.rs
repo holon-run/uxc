@@ -1,0 +1,1330 @@
+use crate::adapters::{self, Adapter, AdapterEnum, DetectionOptions, Operation, OperationDetail, ProtocolDetector, ProtocolType};
+use crate::auth::{self, Profile};
+use crate::cache::{self, Cache, CacheConfig};
+use crate::error::UxcError;
+use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::fs;
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{Mutex, RwLock};
+
+const JSONRPC_VERSION: &str = "2.0";
+const START_POLL_TRIES: usize = 30;
+const START_POLL_INTERVAL_MS: u64 = 100;
+const MCP_IDLE_TTL_SECS: u64 = 600;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAction {
+    HostHelp,
+    OperationHelp,
+    Execute,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInvokeRequest {
+    pub request_id: String,
+    pub endpoint: String,
+    pub action: RuntimeAction,
+    pub operation_id: Option<String>,
+    pub args: Option<HashMap<String, Value>>,
+    pub options: RuntimeInvokeOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInvokeOptions {
+    pub auth: Option<String>,
+    pub no_cache: bool,
+    pub cache_ttl: Option<u64>,
+    pub refresh_schema: bool,
+    pub schema_url: Option<String>,
+    pub link_name: Option<String>,
+    pub schema_mapping_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInvokeResponse {
+    pub protocol: String,
+    pub endpoint: String,
+    pub kind: String,
+    pub operation: Option<String>,
+    pub data: Value,
+    pub duration_ms: Option<u64>,
+    pub meta: RuntimeMeta,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeMeta {
+    pub schema_involved: Option<bool>,
+    pub cache_source: Option<String>,
+    pub cache_age_ms: Option<u64>,
+    pub cache_stale: Option<bool>,
+    pub cache_fallback: Option<bool>,
+    pub daemon_session_reused: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub socket: String,
+    pub started_at_unix: Option<u64>,
+    pub request_count: u64,
+    pub mcp_stdio_sessions: usize,
+    pub mcp_http_sessions: usize,
+    pub mcp_reuse_hits: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    id: Value,
+    method: String,
+    params: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonRpcResponse {
+    jsonrpc: String,
+    id: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonRpcError {
+    code: i32,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+struct SchemaCacheMeta {
+    age_ms: u64,
+    stale: bool,
+    fallback: bool,
+}
+
+struct ResolveAdapterResult {
+    adapter: AdapterEnum,
+    cache_meta: Option<SchemaCacheMeta>,
+}
+
+#[derive(Default)]
+struct ServerState {
+    started_at_unix: u64,
+    request_count: u64,
+}
+
+#[derive(Clone)]
+struct McpSessionManager {
+    stdio: Arc<Mutex<HashMap<String, Arc<Mutex<McpStdioSession>>>>>,
+    http: Arc<Mutex<HashMap<String, Arc<McpHttpSession>>>>,
+    reuse_hits: Arc<Mutex<u64>>,
+}
+
+struct McpStdioSession {
+    client: adapters::mcp::McpStdioClient,
+    last_used: Instant,
+}
+
+struct McpHttpSession {
+    transport: adapters::mcp::McpHttpTransport,
+    last_used: Arc<Mutex<Instant>>,
+}
+
+impl McpSessionManager {
+    fn new() -> Self {
+        Self {
+            stdio: Arc::new(Mutex::new(HashMap::new())),
+            http: Arc::new(Mutex::new(HashMap::new())),
+            reuse_hits: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    async fn cleanup_idle(&self) {
+        let cutoff = Instant::now() - Duration::from_secs(MCP_IDLE_TTL_SECS);
+
+        {
+            let mut map = self.stdio.lock().await;
+            let mut remove = Vec::new();
+            for (k, s) in map.iter() {
+                let guard = s.lock().await;
+                if guard.last_used < cutoff {
+                    remove.push(k.clone());
+                }
+            }
+            for key in remove {
+                map.remove(&key);
+            }
+        }
+
+        {
+            let mut map = self.http.lock().await;
+            let mut remove = Vec::new();
+            for (k, s) in map.iter() {
+                let last = *s.last_used.lock().await;
+                if last < cutoff {
+                    remove.push(k.clone());
+                }
+            }
+            for key in remove {
+                map.remove(&key);
+            }
+        }
+    }
+
+    async fn get_or_create_stdio(
+        &self,
+        key: &str,
+        command: &str,
+        args: &[String],
+    ) -> Result<(Arc<Mutex<McpStdioSession>>, bool)> {
+        {
+            let map = self.stdio.lock().await;
+            if let Some(s) = map.get(key) {
+                *self.reuse_hits.lock().await += 1;
+                return Ok((s.clone(), true));
+            }
+        }
+
+        let client = adapters::mcp::McpStdioClient::connect(command, args).await?;
+        let session = Arc::new(Mutex::new(McpStdioSession {
+            client,
+            last_used: Instant::now(),
+        }));
+
+        let mut map = self.stdio.lock().await;
+        map.insert(key.to_string(), session.clone());
+        Ok((session, false))
+    }
+
+    async fn get_or_create_http(
+        &self,
+        key: &str,
+        endpoint: &str,
+        auth_profile: Option<Profile>,
+    ) -> Result<(Arc<McpHttpSession>, bool)> {
+        {
+            let map = self.http.lock().await;
+            if let Some(s) = map.get(key) {
+                *self.reuse_hits.lock().await += 1;
+                *s.last_used.lock().await = Instant::now();
+                return Ok((s.clone(), true));
+            }
+        }
+
+        let transport = adapters::mcp::McpHttpTransport::with_auth(endpoint.to_string(), auth_profile)?;
+        let _ = transport.initialize().await?;
+        let session = Arc::new(McpHttpSession {
+            transport,
+            last_used: Arc::new(Mutex::new(Instant::now())),
+        });
+
+        let mut map = self.http.lock().await;
+        map.insert(key.to_string(), session.clone());
+        Ok((session, false))
+    }
+
+    async fn status_counts(&self) -> (usize, usize, u64) {
+        let stdio_count = self.stdio.lock().await.len();
+        let http_count = self.http.lock().await.len();
+        let reuse_hits = *self.reuse_hits.lock().await;
+        (stdio_count, http_count, reuse_hits)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OperationSummary {
+    operation_id: String,
+    display_name: String,
+    summary: Option<String>,
+    required: Vec<String>,
+    input_shape_hint: String,
+    protocol_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ServiceSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct DaemonRuntime {
+    state: Arc<Mutex<ServerState>>,
+    mcp: McpSessionManager,
+    should_stop: Arc<RwLock<bool>>,
+    invoke_lock: Arc<Mutex<()>>,
+}
+
+impl DaemonRuntime {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ServerState {
+                started_at_unix: now_unix_secs(),
+                request_count: 0,
+            })),
+            mcp: McpSessionManager::new(),
+            should_stop: Arc::new(RwLock::new(false)),
+            invoke_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub async fn invoke(&self, request: RuntimeInvokeRequest) -> Result<RuntimeInvokeResponse> {
+        let _invoke_guard = self.invoke_lock.lock().await;
+        let _schema_mapping_guard =
+            SchemaMappingEnvGuard::new(request.options.schema_mapping_file.clone());
+        self.mcp.cleanup_idle().await;
+        {
+            let mut st = self.state.lock().await;
+            st.request_count = st.request_count.saturating_add(1);
+        }
+
+        let start = Instant::now();
+        let cache = self.build_cache(&request.options)?;
+        let auth_profile = auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+
+        let detection_options = DetectionOptions {
+            schema_url: request.options.schema_url.clone(),
+            auth_profile: auth_profile.clone(),
+        };
+
+        let resolved = resolve_adapter_with_schema_cache(
+            &request.endpoint,
+            &detection_options,
+            cache,
+            auth_profile.clone(),
+            request.options.no_cache,
+            request.options.refresh_schema,
+        )
+        .await?;
+
+        let protocol = resolved.adapter.protocol_type().as_str().to_string();
+        let mut meta = RuntimeMeta::default();
+        if let Some(cache_meta) = resolved.cache_meta {
+            meta.schema_involved = Some(true);
+            meta.cache_source = Some("schema_cache".to_string());
+            meta.cache_age_ms = Some(cache_meta.age_ms);
+            meta.cache_stale = Some(cache_meta.stale);
+            meta.cache_fallback = Some(cache_meta.fallback);
+        } else if matches!(protocol.as_str(), "jsonrpc" | "grpc" | "mcp") {
+            meta.schema_involved = Some(true);
+        }
+
+        if protocol == "mcp" {
+            let (kind, operation, data, reused) = self.invoke_mcp(&request, auth_profile).await?;
+            meta.daemon_session_reused = Some(reused);
+            return Ok(RuntimeInvokeResponse {
+                protocol,
+                endpoint: request.endpoint,
+                kind,
+                operation,
+                data,
+                duration_ms: Some(start.elapsed().as_millis() as u64),
+                meta,
+            });
+        }
+
+        let (kind, operation, data) = invoke_with_adapter(&resolved.adapter, &request).await?;
+        Ok(RuntimeInvokeResponse {
+            protocol,
+            endpoint: request.endpoint,
+            kind,
+            operation,
+            data,
+            duration_ms: Some(start.elapsed().as_millis() as u64),
+            meta,
+        })
+    }
+
+    pub async fn status(&self) -> DaemonStatus {
+        let state = self.state.lock().await;
+        let (stdio_sessions, http_sessions, reuse_hits) = self.mcp.status_counts().await;
+        DaemonStatus {
+            running: true,
+            pid: Some(std::process::id()),
+            socket: socket_path().display().to_string(),
+            started_at_unix: Some(state.started_at_unix),
+            request_count: state.request_count,
+            mcp_stdio_sessions: stdio_sessions,
+            mcp_http_sessions: http_sessions,
+            mcp_reuse_hits: reuse_hits,
+        }
+    }
+
+    pub async fn request_stop(&self) {
+        let mut stop = self.should_stop.write().await;
+        *stop = true;
+        let _ = UnixStream::connect(socket_path()).await;
+    }
+
+    pub async fn should_stop(&self) -> bool {
+        *self.should_stop.read().await
+    }
+
+    fn build_cache(&self, options: &RuntimeInvokeOptions) -> Result<Arc<dyn Cache>> {
+        let cfg = if options.no_cache {
+            CacheConfig {
+                enabled: false,
+                ..Default::default()
+            }
+        } else if let Some(ttl) = options.cache_ttl {
+            CacheConfig {
+                ttl,
+                ..Default::default()
+            }
+        } else {
+            CacheConfig::load_from_file().unwrap_or_default()
+        };
+        cache::create_cache(cfg)
+    }
+
+    async fn invoke_mcp(
+        &self,
+        request: &RuntimeInvokeRequest,
+        auth_profile: Option<Profile>,
+    ) -> Result<(String, Option<String>, Value, bool)> {
+        let endpoint = &request.endpoint;
+        if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
+            let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;
+            let key = format!("stdio:{}:{}", endpoint, auth_fingerprint(auth_profile.as_ref()));
+            let (session, reused) = self.mcp.get_or_create_stdio(&key, &cmd, &cmd_args).await?;
+            let mut guard = session.lock().await;
+            guard.last_used = Instant::now();
+            match request.action {
+                RuntimeAction::HostHelp => {
+                    let operations = guard
+                        .client
+                        .list_tools()
+                        .await?
+                        .into_iter()
+                        .map(tool_to_operation)
+                        .collect::<Vec<_>>();
+                    let protocol = "mcp";
+                    let summaries = operations
+                        .iter()
+                        .map(|op| to_operation_summary(protocol, op))
+                        .collect::<Vec<_>>();
+                    let service = Some(ServiceSummary {
+                        name: guard.client.server_info().map(|i| i.name.clone()),
+                        description: guard.client.instructions().map(ToString::to_string),
+                    });
+                    Ok((
+                        "host_help".to_string(),
+                        None,
+                        serde_json::to_value(json!({
+                            "operations": summaries,
+                            "count": summaries.len(),
+                            "examples": host_help_examples(request.options.link_name.as_deref()),
+                            "service": service
+                        }))?,
+                        reused,
+                    ))
+                }
+                RuntimeAction::OperationHelp => {
+                    let op = request
+                        .operation_id
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("operation_id is required"))?;
+                    let tools = guard.client.list_tools().await?;
+                    let tool = tools
+                        .into_iter()
+                        .find(|t| t.name == *op)
+                        .ok_or_else(|| UxcError::OperationNotFound(op.clone()))?;
+                    let detail = tool_to_operation_detail(tool);
+                    Ok((
+                        "operation_detail".to_string(),
+                        Some(op.clone()),
+                        serde_json::to_value(detail)?,
+                        reused,
+                    ))
+                }
+                RuntimeAction::Execute => {
+                    let op = request
+                        .operation_id
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("operation_id is required"))?;
+                    let args = request.args.clone().unwrap_or_default();
+                    let arguments = if args.is_empty() {
+                        None
+                    } else {
+                        Some(Value::Object(args.into_iter().collect()))
+                    };
+                    let result = guard.client.call_tool(op, arguments).await?;
+                    Ok((
+                        "call_result".to_string(),
+                        Some(op.clone()),
+                        convert_tool_content_to_value(&result.content),
+                        reused,
+                    ))
+                }
+            }
+        } else {
+            let resolved_endpoint = resolve_mcp_http_endpoint(endpoint, auth_profile.clone()).await?;
+            let key = format!(
+                "http:{}:{}",
+                resolved_endpoint,
+                auth_fingerprint(auth_profile.as_ref())
+            );
+            let (session, reused) = self
+                .mcp
+                .get_or_create_http(&key, &resolved_endpoint, auth_profile)
+                .await?;
+            *session.last_used.lock().await = Instant::now();
+
+            match request.action {
+                RuntimeAction::HostHelp => {
+                    let init_result = session.transport.initialize().await?;
+                    let operations = session
+                        .transport
+                        .list_tools()
+                        .await?
+                        .into_iter()
+                        .map(tool_to_operation)
+                        .collect::<Vec<_>>();
+                    let protocol = "mcp";
+                    let summaries = operations
+                        .iter()
+                        .map(|op| to_operation_summary(protocol, op))
+                        .collect::<Vec<_>>();
+                    let service = Some(ServiceSummary {
+                        name: init_result.serverInfo.map(|i| i.name),
+                        description: init_result.instructions,
+                    });
+                    Ok((
+                        "host_help".to_string(),
+                        None,
+                        serde_json::to_value(json!({
+                            "operations": summaries,
+                            "count": summaries.len(),
+                            "examples": host_help_examples(request.options.link_name.as_deref()),
+                            "service": service
+                        }))?,
+                        reused,
+                    ))
+                }
+                RuntimeAction::OperationHelp => {
+                    let op = request
+                        .operation_id
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("operation_id is required"))?;
+                    let tools = session.transport.list_tools().await?;
+                    let tool = tools
+                        .into_iter()
+                        .find(|t| t.name == *op)
+                        .ok_or_else(|| UxcError::OperationNotFound(op.clone()))?;
+                    let detail = tool_to_operation_detail(tool);
+                    Ok((
+                        "operation_detail".to_string(),
+                        Some(op.clone()),
+                        serde_json::to_value(detail)?,
+                        reused,
+                    ))
+                }
+                RuntimeAction::Execute => {
+                    let op = request
+                        .operation_id
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("operation_id is required"))?;
+                    let args = request.args.clone().unwrap_or_default();
+                    let arguments = if args.is_empty() {
+                        None
+                    } else {
+                        Some(Value::Object(args.into_iter().collect()))
+                    };
+                    let result = session.transport.call_tool(op, arguments).await?;
+                    Ok((
+                        "call_result".to_string(),
+                        Some(op.clone()),
+                        convert_tool_content_to_value(&result.content),
+                        reused,
+                    ))
+                }
+            }
+        }
+    }
+}
+
+pub async fn daemon_status_client() -> Result<DaemonStatus> {
+    let value = client_call("daemon.status", None).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn daemon_stop_client() -> Result<()> {
+    let _ = client_call("daemon.shutdown", None).await?;
+    Ok(())
+}
+
+pub async fn runtime_invoke_client(request: &RuntimeInvokeRequest) -> Result<RuntimeInvokeResponse> {
+    let params = serde_json::to_value(request)?;
+    let value = client_call("runtime.invoke", Some(params)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+pub async fn ensure_daemon_running() -> Result<bool> {
+    if daemon_status_client().await.is_ok() {
+        return Ok(false);
+    }
+
+    let dir = daemon_dir()?;
+    fs::create_dir_all(&dir)?;
+
+    let lock_path = dir.join("start.lock");
+    let got_lock = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&lock_path)
+        .is_ok();
+
+    if got_lock {
+        let current_exe = std::env::current_exe().context("Cannot resolve current executable")?;
+        let _child = std::process::Command::new(current_exe)
+            .arg("daemon")
+            .arg("_serve")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to spawn daemon process")?;
+    }
+
+    for _ in 0..START_POLL_TRIES {
+        tokio::time::sleep(Duration::from_millis(START_POLL_INTERVAL_MS)).await;
+        if daemon_status_client().await.is_ok() {
+            if got_lock {
+                let _ = fs::remove_file(&lock_path);
+            }
+            return Ok(true);
+        }
+    }
+
+    if got_lock {
+        let _ = fs::remove_file(&lock_path);
+    }
+    bail!("Daemon failed to start. Run `uxc daemon status` for diagnostics.")
+}
+
+pub async fn run_daemon_server() -> Result<()> {
+    let dir = daemon_dir()?;
+    fs::create_dir_all(&dir)?;
+    let socket = socket_path();
+    if socket.exists() {
+        let _ = fs::remove_file(&socket);
+    }
+
+    let listener = UnixListener::bind(&socket)
+        .with_context(|| format!("Failed to bind daemon socket at {}", socket.display()))?;
+
+    let runtime = Arc::new(DaemonRuntime::new());
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let runtime_for_conn = runtime.clone();
+        tokio::spawn(async move {
+            if let Err(err) = handle_connection(stream, runtime_for_conn).await {
+                tracing::debug!("daemon connection failed: {}", err);
+            }
+        });
+
+        if runtime.should_stop().await {
+            break;
+        }
+    }
+
+    let _ = fs::remove_file(&socket);
+    Ok(())
+}
+
+async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) -> Result<()> {
+    let req_val = read_frame(&mut stream).await?;
+    let req: JsonRpcRequest = serde_json::from_value(req_val).context("Invalid JSON-RPC request")?;
+
+    if req.jsonrpc != JSONRPC_VERSION {
+        let resp = JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: req.id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32600,
+                message: "Invalid jsonrpc version".to_string(),
+            }),
+        };
+        write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+        return Ok(());
+    }
+
+    let response = match req.method.as_str() {
+        "daemon.ping" => JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: req.id,
+            result: Some(json!({"ok": true})),
+            error: None,
+        },
+        "daemon.status" => {
+            let status = runtime.status().await;
+            JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: req.id,
+                result: Some(serde_json::to_value(status)?),
+                error: None,
+            }
+        }
+        "daemon.shutdown" => {
+            runtime.request_stop().await;
+            JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: req.id,
+                result: Some(json!({"ok": true})),
+                error: None,
+            }
+        }
+        "runtime.invoke" => {
+            let params = req.params.ok_or_else(|| anyhow!("Missing params"))?;
+            let invoke: RuntimeInvokeRequest = serde_json::from_value(params)?;
+            match runtime.invoke(invoke).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: map_runtime_error_code(&err),
+                        message: err.to_string(),
+                    }),
+                },
+            }
+        }
+        _ => JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: req.id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32601,
+                message: format!("Method not found: {}", req.method),
+            }),
+        },
+    };
+
+    write_frame(&mut stream, &serde_json::to_value(response)?).await?;
+    Ok(())
+}
+
+pub async fn daemon_status_local() -> Result<DaemonStatus> {
+    daemon_status_client().await
+}
+
+pub async fn daemon_start_local() -> Result<bool> {
+    ensure_daemon_running().await
+}
+
+pub async fn daemon_stop_local() -> Result<bool> {
+    if daemon_status_client().await.is_err() {
+        return Ok(false);
+    }
+    daemon_stop_client().await?;
+    Ok(true)
+}
+
+async fn client_call(method: &str, params: Option<Value>) -> Result<Value> {
+    let mut stream = UnixStream::connect(socket_path())
+        .await
+        .with_context(|| format!("Failed to connect daemon socket {}", socket_path().display()))?;
+
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    write_frame(&mut stream, &request).await?;
+
+    let resp_val = read_frame(&mut stream).await?;
+    let resp: JsonRpcResponse = serde_json::from_value(resp_val)?;
+    if let Some(err) = resp.error {
+        if err.code == -32602 {
+            return Err(UxcError::InvalidArguments(err.message).into());
+        }
+        if err.code == -32010 {
+            return Err(UxcError::ProtocolDetectionFailed(err.message).into());
+        }
+        bail!("{}", err.message);
+    }
+    resp.result.ok_or_else(|| anyhow!("Missing JSON-RPC result"))
+}
+
+async fn write_frame(stream: &mut UnixStream, value: &Value) -> Result<()> {
+    let body = serde_json::to_vec(value)?;
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(&body).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+async fn read_frame(stream: &mut UnixStream) -> Result<Value> {
+    let mut header = Vec::new();
+    let mut byte = [0_u8; 1];
+
+    loop {
+        let n = stream.read(&mut byte).await?;
+        if n == 0 {
+            bail!("EOF while reading frame header");
+        }
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if header.len() > 8192 {
+            bail!("Frame header too large");
+        }
+    }
+
+    let header_str = String::from_utf8(header)?;
+    let mut content_len = None;
+    for line in header_str.split("\r\n") {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Content-Length:") {
+            content_len = Some(rest.trim().parse::<usize>()?);
+        }
+    }
+
+    let len = content_len.ok_or_else(|| anyhow!("Missing Content-Length header"))?;
+    let mut body = vec![0_u8; len];
+    stream.read_exact(&mut body).await?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
+fn daemon_dir() -> Result<PathBuf> {
+    let home = home_dir()?;
+    Ok(home.join(".uxc").join("daemon"))
+}
+
+pub fn socket_path() -> PathBuf {
+    match daemon_dir() {
+        Ok(dir) => dir.join("uxc.sock"),
+        Err(_) => PathBuf::from("/tmp/uxc.sock"),
+    }
+}
+
+fn home_dir() -> Result<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home));
+    }
+    Err(anyhow!("Cannot resolve HOME directory"))
+}
+
+fn auth_fingerprint(profile: Option<&Profile>) -> String {
+    let mut hasher = Sha256::new();
+    if let Some(p) = profile {
+        hasher.update(p.auth_type.to_string().as_bytes());
+        hasher.update(p.api_key.as_bytes());
+        if let Some(name) = &p.name {
+            hasher.update(name.as_bytes());
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn cache_age_ms(fetched_at: u64) -> u64 {
+    now_unix_secs().saturating_sub(fetched_at).saturating_mul(1000)
+}
+
+fn protocol_from_cached_schema(schema: &Value) -> Option<ProtocolType> {
+    if schema
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .is_some_and(|p| p.eq_ignore_ascii_case("MCP"))
+    {
+        return Some(ProtocolType::Mcp);
+    }
+
+    if schema.get("openapi").is_some() || schema.get("swagger").is_some() {
+        return Some(ProtocolType::OpenAPI);
+    }
+
+    if schema.get("openrpc").is_some() {
+        return Some(ProtocolType::JsonRpc);
+    }
+
+    if schema.get("data").and_then(|v| v.get("__schema")).is_some()
+        || schema.get("__schema").is_some()
+    {
+        return Some(ProtocolType::GraphQL);
+    }
+
+    if schema
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .is_some_and(|p| p.eq_ignore_ascii_case("gRPC"))
+        || schema.get("services").is_some()
+    {
+        return Some(ProtocolType::GRpc);
+    }
+
+    None
+}
+
+fn adapter_from_protocol(protocol: ProtocolType, options: &DetectionOptions) -> AdapterEnum {
+    match protocol {
+        ProtocolType::OpenAPI => AdapterEnum::OpenAPI(
+            adapters::openapi::OpenAPIAdapter::new().with_schema_url_override(options.schema_url.clone()),
+        ),
+        ProtocolType::GRpc => AdapterEnum::GRpc(adapters::grpc::GrpcAdapter::new()),
+        ProtocolType::JsonRpc => AdapterEnum::JsonRpc(adapters::jsonrpc::JsonRpcAdapter::new()),
+        ProtocolType::Mcp => AdapterEnum::Mcp(adapters::mcp::McpAdapter::new()),
+        ProtocolType::GraphQL => AdapterEnum::GraphQL(adapters::graphql::GraphQLAdapter::new()),
+    }
+}
+
+fn inject_cache_if_supported(adapter: adapters::AdapterEnum, cache: Arc<dyn cache::Cache>) -> adapters::AdapterEnum {
+    match adapter {
+        adapters::AdapterEnum::OpenAPI(a) => adapters::AdapterEnum::OpenAPI(a.with_cache(cache)),
+        adapters::AdapterEnum::GraphQL(a) => adapters::AdapterEnum::GraphQL(a.with_cache(cache)),
+        adapters::AdapterEnum::GRpc(a) => adapters::AdapterEnum::GRpc(a.with_cache(cache)),
+        adapters::AdapterEnum::JsonRpc(a) => adapters::AdapterEnum::JsonRpc(a.with_cache(cache)),
+        adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_cache(cache)),
+    }
+}
+
+fn inject_auth_if_supported(adapter: adapters::AdapterEnum, profile: Option<Profile>) -> adapters::AdapterEnum {
+    match profile {
+        Some(profile) => match adapter {
+            adapters::AdapterEnum::OpenAPI(a) => adapters::AdapterEnum::OpenAPI(a.with_auth(profile)),
+            adapters::AdapterEnum::GraphQL(a) => adapters::AdapterEnum::GraphQL(a.with_auth(profile)),
+            adapters::AdapterEnum::GRpc(a) => adapters::AdapterEnum::GRpc(a.with_auth(profile)),
+            adapters::AdapterEnum::JsonRpc(a) => adapters::AdapterEnum::JsonRpc(a.with_auth(profile)),
+            adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_auth(profile)),
+        },
+        None => adapter,
+    }
+}
+
+fn inject_refresh_if_supported(adapter: adapters::AdapterEnum, refresh_schema: bool) -> adapters::AdapterEnum {
+    match adapter {
+        adapters::AdapterEnum::OpenAPI(a) => {
+            adapters::AdapterEnum::OpenAPI(a.with_refresh_schema(refresh_schema))
+        }
+        adapters::AdapterEnum::GraphQL(a) => {
+            adapters::AdapterEnum::GraphQL(a.with_refresh_schema(refresh_schema))
+        }
+        adapters::AdapterEnum::GRpc(a) => adapters::AdapterEnum::GRpc(a.with_refresh_schema(refresh_schema)),
+        adapters::AdapterEnum::JsonRpc(a) => {
+            adapters::AdapterEnum::JsonRpc(a.with_refresh_schema(refresh_schema))
+        }
+        adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_refresh_schema(refresh_schema)),
+    }
+}
+
+async fn resolve_adapter_with_schema_cache(
+    url: &str,
+    detection_options: &DetectionOptions,
+    cache: Arc<dyn cache::Cache>,
+    auth_profile: Option<Profile>,
+    no_cache: bool,
+    refresh_schema: bool,
+) -> Result<ResolveAdapterResult> {
+    if !no_cache && !refresh_schema {
+        match cache.get_with_policy(url, cache::CacheReadPolicy::NormalTtl)? {
+            cache::CacheLookup::Hit(hit) => {
+                if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
+                    let mut adapter = adapter_from_protocol(protocol, detection_options);
+                    adapter = inject_cache_if_supported(adapter, cache.clone());
+                    adapter = inject_auth_if_supported(adapter, auth_profile.clone());
+                    adapter = inject_refresh_if_supported(adapter, refresh_schema);
+                    return Ok(ResolveAdapterResult {
+                        adapter,
+                        cache_meta: Some(SchemaCacheMeta {
+                            age_ms: cache_age_ms(hit.fetched_at),
+                            stale: hit.stale,
+                            fallback: false,
+                        }),
+                    });
+                }
+            }
+            cache::CacheLookup::Miss | cache::CacheLookup::Bypassed => {}
+        }
+    }
+
+    let detector = ProtocolDetector::new();
+    match detector.detect_adapter_with_options(url, detection_options).await {
+        Ok(mut adapter) => {
+            adapter = inject_cache_if_supported(adapter, cache);
+            adapter = inject_auth_if_supported(adapter, auth_profile);
+            adapter = inject_refresh_if_supported(adapter, refresh_schema);
+            Ok(ResolveAdapterResult {
+                adapter,
+                cache_meta: None,
+            })
+        }
+        Err(err) => {
+            if !no_cache && !refresh_schema {
+                if let cache::CacheLookup::Hit(hit) =
+                    cache.get_with_policy(url, cache::CacheReadPolicy::AllowStale)?
+                {
+                    if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
+                        let _ = cache.put(url, &hit.schema);
+                        let mut adapter = adapter_from_protocol(protocol, detection_options);
+                        adapter = inject_cache_if_supported(adapter, cache.clone());
+                        adapter = inject_auth_if_supported(adapter, auth_profile.clone());
+                        adapter = inject_refresh_if_supported(adapter, refresh_schema);
+                        return Ok(ResolveAdapterResult {
+                            adapter,
+                            cache_meta: Some(SchemaCacheMeta {
+                                age_ms: cache_age_ms(hit.fetched_at),
+                                stale: hit.stale,
+                                fallback: true,
+                            }),
+                        });
+                    }
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
+async fn invoke_with_adapter(
+    adapter: &AdapterEnum,
+    request: &RuntimeInvokeRequest,
+) -> Result<(String, Option<String>, Value)> {
+    match request.action {
+        RuntimeAction::HostHelp => {
+            let operations = adapter.list_operations(&request.endpoint).await?;
+            let protocol = adapter.protocol_type().as_str();
+            let summaries = operations
+                .iter()
+                .map(|op| to_operation_summary(protocol, op))
+                .collect::<Vec<_>>();
+            Ok((
+                "host_help".to_string(),
+                None,
+                json!({
+                    "operations": summaries,
+                    "count": summaries.len(),
+                    "examples": host_help_examples(request.options.link_name.as_deref()),
+                }),
+            ))
+        }
+        RuntimeAction::OperationHelp => {
+            let op = request
+                .operation_id
+                .as_ref()
+                .ok_or_else(|| anyhow!("operation_id is required"))?;
+            let detail = adapter.describe_operation(&request.endpoint, op).await?;
+            Ok((
+                "operation_detail".to_string(),
+                Some(op.clone()),
+                serde_json::to_value(detail)?,
+            ))
+        }
+        RuntimeAction::Execute => {
+            let op = request
+                .operation_id
+                .as_ref()
+                .ok_or_else(|| anyhow!("operation_id is required"))?;
+            let args = request.args.clone().unwrap_or_default();
+            let result = adapter.execute(&request.endpoint, op, args).await?;
+            Ok(("call_result".to_string(), Some(op.clone()), result.data))
+        }
+    }
+}
+
+fn to_operation_summary(protocol: &str, op: &Operation) -> OperationSummary {
+    let required = op
+        .parameters
+        .iter()
+        .filter(|p| p.required)
+        .map(|p| p.name.clone())
+        .collect::<Vec<_>>();
+
+    let input_shape_hint = if op.parameters.is_empty() {
+        "none".to_string()
+    } else if required.is_empty() {
+        "optional".to_string()
+    } else {
+        "required".to_string()
+    };
+
+    let protocol_kind = match protocol {
+        "openapi" => {
+            if op.operation_id.contains(':') {
+                "http_operation"
+            } else {
+                "api_operation"
+            }
+        }
+        "graphql" => {
+            if op.operation_id.starts_with("query/") {
+                "query"
+            } else if op.operation_id.starts_with("mutation/") {
+                "mutation"
+            } else if op.operation_id.starts_with("subscription/") {
+                "subscription"
+            } else {
+                "graphql_operation"
+            }
+        }
+        "jsonrpc" => "rpc_method",
+        "grpc" => "rpc_method",
+        "mcp" => "tool",
+        _ => "operation",
+    }
+    .to_string();
+
+    OperationSummary {
+        operation_id: op.operation_id.clone(),
+        display_name: op.display_name.clone(),
+        summary: op.description.clone(),
+        required,
+        input_shape_hint,
+        protocol_kind,
+    }
+}
+
+fn host_help_examples(link_name: Option<&str>) -> Vec<String> {
+    if let Some(link_name) = link_name.map(str::trim).filter(|v| !v.is_empty()) {
+        return vec![
+            format!("{link_name} -h"),
+            format!("{link_name} <operation_id> -h"),
+            format!("{link_name} <operation_id> id=42"),
+            format!("{link_name} <operation_id> '{{...}}'"),
+        ];
+    }
+
+    vec![
+        "uxc <host> -h".to_string(),
+        "uxc <host> <operation_id> -h".to_string(),
+        "uxc <host> <operation_id> id=42".to_string(),
+        "uxc <host> <operation_id> '{...}'".to_string(),
+    ]
+}
+
+struct SchemaMappingEnvGuard {
+    prev: Option<OsString>,
+}
+
+impl SchemaMappingEnvGuard {
+    fn new(schema_mapping_file: Option<String>) -> Self {
+        let prev = std::env::var_os("UXC_SCHEMA_MAPPINGS_FILE");
+        match schema_mapping_file {
+            Some(path) if !path.is_empty() => std::env::set_var("UXC_SCHEMA_MAPPINGS_FILE", path),
+            _ => std::env::remove_var("UXC_SCHEMA_MAPPINGS_FILE"),
+        }
+        Self { prev }
+    }
+}
+
+impl Drop for SchemaMappingEnvGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(value) => std::env::set_var("UXC_SCHEMA_MAPPINGS_FILE", value),
+            None => std::env::remove_var("UXC_SCHEMA_MAPPINGS_FILE"),
+        }
+    }
+}
+
+fn tool_to_operation(tool: adapters::mcp::types::Tool) -> Operation {
+    let parameters = if let Some(schema) = tool.inputSchema {
+        parse_schema_to_parameters(&schema)
+    } else {
+        Vec::new()
+    };
+
+    Operation {
+        operation_id: tool.name.clone(),
+        display_name: tool.name.clone(),
+        description: Some(tool.description),
+        parameters,
+        return_type: Some("ToolContent".to_string()),
+    }
+}
+
+fn tool_to_operation_detail(tool: adapters::mcp::types::Tool) -> OperationDetail {
+    OperationDetail {
+        operation_id: tool.name.clone(),
+        display_name: tool.name,
+        description: Some(tool.description),
+        parameters: tool
+            .inputSchema
+            .as_ref()
+            .map(parse_schema_to_parameters)
+            .unwrap_or_default(),
+        return_type: Some("ToolContent".to_string()),
+        input_schema: tool.inputSchema,
+    }
+}
+
+fn parse_schema_to_parameters(schema: &Value) -> Vec<adapters::Parameter> {
+    let mut parameters = Vec::new();
+
+    if let Some(obj) = schema.as_object() {
+        if let Some(props) = obj.get("properties").and_then(|v| v.as_object()) {
+            let required = obj
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<std::collections::HashSet<_>>()
+                })
+                .unwrap_or_default();
+
+            for (name, prop_schema) in props {
+                let param_type = prop_schema
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let description = prop_schema
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                parameters.push(adapters::Parameter {
+                    name: name.clone(),
+                    param_type,
+                    required: required.contains(name.as_str()),
+                    description,
+                });
+            }
+        }
+    }
+
+    parameters
+}
+
+fn convert_tool_content_to_value(content: &[adapters::mcp::types::ToolContent]) -> Value {
+    let mut results = Vec::new();
+
+    for item in content {
+        let value = match item {
+            adapters::mcp::types::ToolContent::Text { text } => serde_json::json!({
+                "type": "text",
+                "text": text
+            }),
+            adapters::mcp::types::ToolContent::Image { data, mimeType } => serde_json::json!({
+                "type": "image",
+                "data": data,
+                "mimeType": mimeType
+            }),
+            adapters::mcp::types::ToolContent::Resource {
+                uri,
+                mimeType,
+                text,
+                blob,
+            } => {
+                let mut obj = serde_json::json!({
+                    "type": "resource",
+                    "uri": uri
+                });
+                if let Some(mt) = mimeType {
+                    obj["mimeType"] = serde_json::json!(mt);
+                }
+                if let Some(t) = text {
+                    obj["text"] = serde_json::json!(t);
+                }
+                if let Some(b) = blob {
+                    obj["blob"] = serde_json::json!(b);
+                }
+                obj
+            }
+        };
+        results.push(value);
+    }
+
+    serde_json::json!({ "content": results })
+}
+
+fn normalize_http_url(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
+}
+
+fn http_endpoint_candidates(url: &str) -> Vec<String> {
+    let normalized = normalize_http_url(url);
+    let mut candidates = vec![normalized.clone()];
+
+    if let Ok(parsed) = url::Url::parse(&normalized) {
+        let path = parsed.path();
+        if path.is_empty() || path == "/" {
+            candidates.push(format!("{}/mcp", normalized));
+            candidates.push(format!("{}/.well-known/mcp", normalized));
+        }
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+async fn resolve_mcp_http_endpoint(url: &str, auth_profile: Option<Profile>) -> Result<String> {
+    for candidate in http_endpoint_candidates(url) {
+        match adapters::mcp::http_transport::McpHttpTransport::probe_initialize_with_reason(
+            &candidate,
+            auth_profile.clone(),
+        )
+        .await
+        {
+            Ok(adapters::mcp::http_transport::ProbeInitializeOutcome::Success) => {
+                return Ok(candidate);
+            }
+            Ok(adapters::mcp::http_transport::ProbeInitializeOutcome::AuthFailed(failure)) => {
+                let detail = format!(
+                    "MCP authentication probe failed for {}: {}",
+                    candidate, failure.message
+                );
+                return match failure.code {
+                    adapters::mcp::http_transport::ProbeAuthFailureCode::OAuthRequired => {
+                        Err(UxcError::OAuthRequired(detail).into())
+                    }
+                    adapters::mcp::http_transport::ProbeAuthFailureCode::OAuthRefreshFailed => {
+                        Err(UxcError::OAuthRefreshFailed(detail).into())
+                    }
+                };
+            }
+            Ok(adapters::mcp::http_transport::ProbeInitializeOutcome::NotMcp(_)) => {}
+            Err(_) => {}
+        }
+    }
+
+    bail!("Unable to discover MCP HTTP endpoint for {}", url)
+}
+
+fn map_runtime_error_code(err: &anyhow::Error) -> i32 {
+    if let Some(uxc_err) = err.downcast_ref::<UxcError>() {
+        return match uxc_err {
+            UxcError::ProtocolDetectionFailed(_) | UxcError::UnsupportedProtocol(_) => -32010,
+            UxcError::InvalidArguments(_) | UxcError::OperationNotFound(_) => -32602,
+            _ => -32030,
+        };
+    }
+    -32030
+}

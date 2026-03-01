@@ -74,6 +74,18 @@ pub struct Metadata {
     /// Whether stale cache fallback was used after online failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_fallback: Option<bool>,
+
+    /// Whether the daemon handled this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_used: Option<bool>,
+
+    /// Whether daemon was auto-started for this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_autostarted: Option<bool>,
+
+    /// Whether daemon session was reused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_session_reused: Option<bool>,
 }
 
 impl OutputEnvelope {
@@ -102,6 +114,9 @@ impl OutputEnvelope {
                 cache_age_ms: None,
                 cache_stale: None,
                 cache_fallback: None,
+                daemon_used: None,
+                daemon_autostarted: None,
+                daemon_session_reused: None,
             },
         }
     }
@@ -127,6 +142,9 @@ impl OutputEnvelope {
                 cache_age_ms: None,
                 cache_stale: None,
                 cache_fallback: None,
+                daemon_used: None,
+                daemon_autostarted: None,
+                daemon_session_reused: None,
             },
         }
     }
@@ -145,6 +163,18 @@ impl OutputEnvelope {
         self.meta.cache_age_ms = cache_age_ms;
         self.meta.cache_stale = cache_stale;
         self.meta.cache_fallback = cache_fallback;
+        self
+    }
+
+    pub fn with_daemon_meta(
+        mut self,
+        daemon_used: bool,
+        daemon_autostarted: Option<bool>,
+        daemon_session_reused: Option<bool>,
+    ) -> Self {
+        self.meta.daemon_used = Some(daemon_used);
+        self.meta.daemon_autostarted = daemon_autostarted;
+        self.meta.daemon_session_reused = daemon_session_reused;
         self
     }
 

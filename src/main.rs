@@ -17,15 +17,13 @@ mod adapters;
 mod auth;
 mod cache;
 pub mod cli;
+mod daemon;
 mod error;
 mod http_client;
 mod output;
 mod schema_mapping;
 
-use adapters::{
-    Adapter, AdapterEnum, DetectionOptions, Operation, OperationDetail, ProtocolDetector,
-    ProtocolType,
-};
+use adapters::OperationDetail;
 use auth::{AuthBindingRule, AuthBindings, AuthType, OAuthFlow, Profile, Profiles};
 use cache::CacheConfig;
 use error::UxcError;
@@ -124,9 +122,28 @@ enum Commands {
         force: bool,
     },
 
+    /// Manage local runtime daemon
+    Daemon {
+        #[command(subcommand)]
+        daemon_command: DaemonCommands,
+    },
+
     /// Dynamic operation execution: `uxc <url> <operation_id> [key=value ...] ['{...}']`
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum DaemonCommands {
+    /// Start daemon process
+    Start,
+    /// Stop daemon process
+    Stop,
+    /// Show daemon status
+    Status,
+    /// Internal daemon server entrypoint
+    #[command(name = "_serve", hide = true)]
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -738,6 +755,13 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
                 }
             }
         }
+        "daemon" => {
+            if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
+                if matches!(level1, "start" | "stop" | "status" | "_serve") {
+                    path.push(level1.to_string());
+                }
+            }
+        }
         _ => {}
     }
 
@@ -814,6 +838,12 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             },
         },
         Some(Commands::Link { .. }) => Some(vec!["link"]),
+        Some(Commands::Daemon { daemon_command }) => match daemon_command {
+            DaemonCommands::Start => Some(vec!["daemon", "start"]),
+            DaemonCommands::Stop => Some(vec!["daemon", "stop"]),
+            DaemonCommands::Status => Some(vec!["daemon", "status"]),
+            DaemonCommands::Serve => Some(vec!["daemon", "_serve"]),
+        },
         Some(Commands::External(_)) | None => None,
     }
 }
@@ -885,154 +915,6 @@ fn looks_like_operation_id(input: &str) -> bool {
         || lower.starts_with("subscription/")
 }
 
-struct ResolvedAdapter {
-    adapter: AdapterEnum,
-    cache_meta: Option<SchemaCacheMeta>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SchemaCacheMeta {
-    age_ms: u64,
-    stale: bool,
-    fallback: bool,
-}
-
-fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn cache_age_ms(fetched_at: u64) -> u64 {
-    now_unix_secs()
-        .saturating_sub(fetched_at)
-        .saturating_mul(1000)
-}
-
-fn protocol_from_cached_schema(schema: &Value) -> Option<ProtocolType> {
-    if schema
-        .get("protocol")
-        .and_then(|v| v.as_str())
-        .is_some_and(|p| p.eq_ignore_ascii_case("MCP"))
-    {
-        return Some(ProtocolType::Mcp);
-    }
-
-    if schema.get("openapi").is_some() || schema.get("swagger").is_some() {
-        return Some(ProtocolType::OpenAPI);
-    }
-
-    if schema.get("openrpc").is_some() {
-        return Some(ProtocolType::JsonRpc);
-    }
-
-    if schema.get("data").and_then(|v| v.get("__schema")).is_some()
-        || schema.get("__schema").is_some()
-    {
-        return Some(ProtocolType::GraphQL);
-    }
-
-    if schema
-        .get("protocol")
-        .and_then(|v| v.as_str())
-        .is_some_and(|p| p.eq_ignore_ascii_case("gRPC"))
-        || schema.get("services").is_some()
-    {
-        return Some(ProtocolType::GRpc);
-    }
-
-    None
-}
-
-fn adapter_from_protocol(protocol: ProtocolType, options: &DetectionOptions) -> AdapterEnum {
-    match protocol {
-        ProtocolType::OpenAPI => AdapterEnum::OpenAPI(
-            adapters::openapi::OpenAPIAdapter::new()
-                .with_schema_url_override(options.schema_url.clone()),
-        ),
-        ProtocolType::GRpc => AdapterEnum::GRpc(adapters::grpc::GrpcAdapter::new()),
-        ProtocolType::JsonRpc => AdapterEnum::JsonRpc(adapters::jsonrpc::JsonRpcAdapter::new()),
-        ProtocolType::Mcp => AdapterEnum::Mcp(adapters::mcp::McpAdapter::new()),
-        ProtocolType::GraphQL => AdapterEnum::GraphQL(adapters::graphql::GraphQLAdapter::new()),
-    }
-}
-
-async fn resolve_adapter_with_schema_cache(
-    url: &str,
-    detection_options: &DetectionOptions,
-    cache: std::sync::Arc<dyn cache::Cache>,
-    auth_profile: Option<Profile>,
-    no_cache: bool,
-    refresh_schema: bool,
-) -> Result<ResolvedAdapter> {
-    if !no_cache && !refresh_schema {
-        match cache.get_with_policy(url, cache::CacheReadPolicy::NormalTtl)? {
-            cache::CacheLookup::Hit(hit) => {
-                if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
-                    let mut adapter = adapter_from_protocol(protocol, detection_options);
-                    adapter = inject_cache_if_supported(adapter, cache.clone());
-                    adapter = inject_auth_if_supported(adapter, auth_profile.clone());
-                    adapter = inject_refresh_if_supported(adapter, refresh_schema);
-                    return Ok(ResolvedAdapter {
-                        adapter,
-                        cache_meta: Some(SchemaCacheMeta {
-                            age_ms: cache_age_ms(hit.fetched_at),
-                            stale: hit.stale,
-                            fallback: false,
-                        }),
-                    });
-                }
-            }
-            cache::CacheLookup::Miss | cache::CacheLookup::Bypassed => {}
-        }
-    }
-
-    let detector = ProtocolDetector::new();
-    match detector
-        .detect_adapter_with_options(url, detection_options)
-        .await
-    {
-        Ok(mut adapter) => {
-            adapter = inject_cache_if_supported(adapter, cache);
-            adapter = inject_auth_if_supported(adapter, auth_profile);
-            adapter = inject_refresh_if_supported(adapter, refresh_schema);
-            Ok(ResolvedAdapter {
-                adapter,
-                cache_meta: None,
-            })
-        }
-        Err(err) => {
-            if !no_cache && !refresh_schema {
-                if let cache::CacheLookup::Hit(hit) =
-                    cache.get_with_policy(url, cache::CacheReadPolicy::AllowStale)?
-                {
-                    if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
-                        let _ = cache.put(url, &hit.schema);
-                        let mut adapter = adapter_from_protocol(protocol, detection_options);
-                        adapter = inject_cache_if_supported(adapter, cache.clone());
-                        adapter = inject_auth_if_supported(adapter, auth_profile.clone());
-                        adapter = inject_refresh_if_supported(adapter, refresh_schema);
-                        return Ok(ResolvedAdapter {
-                            adapter,
-                            cache_meta: Some(SchemaCacheMeta {
-                                age_ms: cache_age_ms(hit.fetched_at),
-                                stale: hit.stale,
-                                fallback: true,
-                            }),
-                        });
-                    }
-                }
-            }
-            Err(err)
-        }
-    }
-}
-
-fn execute_schema_involved(protocol: &str) -> bool {
-    matches!(protocol, "jsonrpc" | "grpc" | "mcp")
-}
-
 async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
     if let Some(help_path) = static_help_path_from_cli(cli) {
         if help_path.is_empty() {
@@ -1073,128 +955,94 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
         return handle_link_command(name, host, dir.as_deref(), *force).await;
     }
 
+    if let Some(Commands::Daemon { daemon_command }) = &cli.command {
+        return handle_daemon_command(daemon_command).await;
+    }
+
     let url = cli
         .url
         .clone()
         .ok_or_else(|| UxcError::InvalidArguments("URL is required".to_string()))
         .map(|raw| normalize_endpoint_url(&raw))?;
 
+    let endpoint_command = resolve_endpoint_command(cli)?;
+    execute_endpoint_via_daemon(&url, &endpoint_command, cli).await
+}
+
+async fn execute_endpoint_via_daemon(
+    url: &str,
+    endpoint_command: &EndpointCommand,
+    cli: &Cli,
+) -> Result<OutputEnvelope> {
     info!("UXC v{} - connecting to {}", env!("CARGO_PKG_VERSION"), url);
 
-    let endpoint_command = resolve_endpoint_command(cli)?;
-    let auth_profile = auth::resolve_auth_for_endpoint(&url, cli.auth.clone())?;
-    let cache = cache::create_cache(cache_config)?;
-
-    let detection_options = DetectionOptions {
-        schema_url: cli.schema_url.as_deref().map(normalize_endpoint_url),
-        auth_profile: auth_profile.clone(),
-    };
-    let resolved = resolve_adapter_with_schema_cache(
-        &url,
-        &detection_options,
-        cache,
-        auth_profile,
-        cli.no_cache,
-        cli.refresh_schema,
-    )
-    .await?;
-    let ResolvedAdapter {
-        adapter,
-        cache_meta,
-    } = resolved;
-
-    let envelope = match endpoint_command {
-        EndpointCommand::HostHelp => {
-            let start = std::time::Instant::now();
-            let operations = adapter.list_operations(&url).await?;
-            let protocol = adapter.protocol_type().as_str();
-            let service = resolve_host_help_service(&adapter, protocol, &url).await;
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let summaries = operations
-                .iter()
-                .map(|op| to_operation_summary(protocol, op))
-                .collect::<Vec<_>>();
-            let data = serde_json::to_value(HostHelpData {
-                count: summaries.len(),
-                operations: summaries,
-                examples: host_help_examples(),
-                service,
-            })?;
-            let mut envelope =
-                OutputEnvelope::success("host_help", protocol, &url, None, data, Some(duration_ms));
-            if let Some(meta) = cache_meta {
-                envelope = envelope.with_schema_meta(
-                    true,
-                    Some("schema_cache"),
-                    Some(meta.age_ms),
-                    Some(meta.stale),
-                    Some(meta.fallback),
-                );
-            } else {
-                envelope = envelope.with_schema_meta(true, None, None, None, None);
-            }
-            envelope
-        }
-        EndpointCommand::Describe { operation_id } => {
-            let start = std::time::Instant::now();
-            let detail = adapter.describe_operation(&url, &operation_id).await?;
-            let protocol = adapter.protocol_type().as_str();
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let data = serde_json::to_value(&detail)?;
-            let mut envelope = OutputEnvelope::success(
-                "operation_detail",
-                protocol,
-                &url,
-                Some(&detail.operation_id),
-                data,
-                Some(duration_ms),
-            );
-            if let Some(meta) = cache_meta {
-                envelope = envelope.with_schema_meta(
-                    true,
-                    Some("schema_cache"),
-                    Some(meta.age_ms),
-                    Some(meta.stale),
-                    Some(meta.fallback),
-                );
-            } else {
-                envelope = envelope.with_schema_meta(true, None, None, None, None);
-            }
-            envelope
-        }
+    let daemon_autostarted = daemon::ensure_daemon_running().await?;
+    let (action, operation_id, args_map) = match endpoint_command {
+        EndpointCommand::HostHelp => (daemon::RuntimeAction::HostHelp, None, None),
+        EndpointCommand::Describe { operation_id } => (
+            daemon::RuntimeAction::OperationHelp,
+            Some(operation_id.clone()),
+            None,
+        ),
         EndpointCommand::Execute {
             operation_id,
             args,
             input_json,
-        } => {
-            let args_map = parse_arguments(args, input_json)?;
-            let result = adapter.execute(&url, &operation_id, args_map).await?;
-            let protocol = adapter.protocol_type().as_str();
-            let mut envelope = OutputEnvelope::success(
-                "call_result",
-                protocol,
-                &url,
-                Some(&operation_id),
-                result.data,
-                Some(result.metadata.duration_ms),
-            );
-            if execute_schema_involved(protocol) {
-                if let Some(meta) = cache_meta {
-                    envelope = envelope.with_schema_meta(
-                        true,
-                        Some("schema_cache"),
-                        Some(meta.age_ms),
-                        Some(meta.stale),
-                        Some(meta.fallback),
-                    );
-                } else {
-                    envelope = envelope.with_schema_meta(true, None, None, None, None);
-                }
-            }
-            envelope
-        }
+        } => (
+            daemon::RuntimeAction::Execute,
+            Some(operation_id.clone()),
+            Some(parse_arguments(args.clone(), input_json.clone())?),
+        ),
     };
 
+    let request = daemon::RuntimeInvokeRequest {
+        request_id: format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ),
+        endpoint: url.to_string(),
+        action,
+        operation_id,
+        args: args_map,
+        options: daemon::RuntimeInvokeOptions {
+            auth: cli.auth.clone(),
+            no_cache: cli.no_cache,
+            cache_ttl: cli.cache_ttl,
+            refresh_schema: cli.refresh_schema,
+            schema_url: cli.schema_url.as_deref().map(normalize_endpoint_url),
+            link_name: std::env::var("UXC_LINK_NAME").ok(),
+            schema_mapping_file: std::env::var("UXC_SCHEMA_MAPPINGS_FILE").ok(),
+        },
+    };
+
+    let response = daemon::runtime_invoke_client(&request).await?;
+    let mut envelope = OutputEnvelope::success(
+        &response.kind,
+        &response.protocol,
+        &response.endpoint,
+        response.operation.as_deref(),
+        response.data,
+        response.duration_ms,
+    )
+    .with_daemon_meta(
+        true,
+        Some(daemon_autostarted),
+        response.meta.daemon_session_reused,
+    );
+
+    if let Some(schema_involved) = response.meta.schema_involved {
+        envelope = envelope.with_schema_meta(
+            schema_involved,
+            response.meta.cache_source.as_deref(),
+            response.meta.cache_age_ms,
+            response.meta.cache_stale,
+            response.meta.cache_fallback,
+        );
+    }
     Ok(envelope)
 }
 
@@ -1244,6 +1092,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 ("cache", "Manage schema cache"),
                 ("auth", "Manage credentials, bindings, and OAuth"),
                 ("link", "Create a host-bound shortcut command"),
+                ("daemon", "Manage local runtime daemon"),
             ]),
             notes: vec![
                 "Default output is JSON. Use --text for human-readable output.".to_string(),
@@ -1266,6 +1115,49 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc link petcli petstore3.swagger.io/api/v3".to_string(),
                 "petcli -h".to_string(),
             ],
+        },
+        ["daemon"] => HelpData {
+            path: "uxc daemon".to_string(),
+            about: "Manage local runtime daemon".to_string(),
+            usage: "uxc daemon <start|stop|status>".to_string(),
+            commands: commands(&[
+                ("start", "Start daemon process"),
+                ("stop", "Stop daemon process"),
+                ("status", "Show daemon status"),
+            ]),
+            notes: vec![
+                "Endpoint invocations auto-start daemon when needed.".to_string(),
+                "Daemon serves endpoint requests over local Unix socket JSON-RPC.".to_string(),
+            ],
+            examples: vec![
+                "uxc daemon status".to_string(),
+                "uxc daemon start".to_string(),
+                "uxc daemon stop".to_string(),
+            ],
+        },
+        ["daemon", "start"] => HelpData {
+            path: "uxc daemon start".to_string(),
+            about: "Start daemon process".to_string(),
+            usage: "uxc daemon start".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc daemon start".to_string()],
+        },
+        ["daemon", "stop"] => HelpData {
+            path: "uxc daemon stop".to_string(),
+            about: "Stop daemon process".to_string(),
+            usage: "uxc daemon stop".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc daemon stop".to_string()],
+        },
+        ["daemon", "status"] => HelpData {
+            path: "uxc daemon status".to_string(),
+            about: "Show daemon status".to_string(),
+            usage: "uxc daemon status".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc daemon status".to_string()],
         },
         ["cache"] => HelpData {
             path: "uxc cache".to_string(),
@@ -1565,6 +1457,42 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             }
             Ok(())
         }
+        Some("daemon_start_result") => {
+            let data = envelope.data.clone().unwrap_or(Value::Null);
+            if data.get("autostarted").and_then(Value::as_bool).unwrap_or(false) {
+                println!("Daemon started.");
+            } else {
+                println!("Daemon already running.");
+            }
+            if let Some(socket) = data.get("socket").and_then(Value::as_str) {
+                println!("Socket: {}", socket);
+            }
+            Ok(())
+        }
+        Some("daemon_stop_result") => {
+            let data = envelope.data.clone().unwrap_or(Value::Null);
+            if data.get("stopped").and_then(Value::as_bool).unwrap_or(false) {
+                println!("Daemon stopped.");
+            } else {
+                println!("Daemon is not running.");
+            }
+            Ok(())
+        }
+        Some("daemon_status") => {
+            let data = envelope.data.clone().unwrap_or(Value::Null);
+            let running = data.get("running").and_then(Value::as_bool).unwrap_or(false);
+            println!("Running: {}", running);
+            if let Some(pid) = data.get("pid").and_then(Value::as_u64) {
+                println!("PID: {}", pid);
+            }
+            if let Some(socket) = data.get("socket").and_then(Value::as_str) {
+                println!("Socket: {}", socket);
+            }
+            if let Some(requests) = data.get("request_count").and_then(Value::as_u64) {
+                println!("Requests: {}", requests);
+            }
+            Ok(())
+        }
         Some("auth_list") => {
             let data: AuthListData = decode_envelope_data(envelope)?;
             if data.credentials.is_empty() {
@@ -1722,7 +1650,8 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
         Some(Commands::External(tokens)) => parse_external_command(tokens, cli.help),
         Some(Commands::Cache { .. })
         | Some(Commands::Auth { .. })
-        | Some(Commands::Link { .. }) => Err(UxcError::InvalidArguments(
+        | Some(Commands::Link { .. })
+        | Some(Commands::Daemon { .. }) => Err(UxcError::InvalidArguments(
             "Internal routing error for cache/auth/link command".to_string(),
         )
         .into()),
@@ -1905,47 +1834,6 @@ fn print_json(envelope: &OutputEnvelope) -> Result<()> {
     Ok(())
 }
 
-fn host_help_examples() -> Vec<String> {
-    if let Ok(link_name) = std::env::var("UXC_LINK_NAME") {
-        let link_name = link_name.trim();
-        if !link_name.is_empty() {
-            return vec![
-                format!("{link_name} -h"),
-                format!("{link_name} <operation_id> -h"),
-                format!("{link_name} <operation_id> id=42"),
-                format!("{link_name} <operation_id> '{{...}}'"),
-            ];
-        }
-    }
-
-    vec![
-        "uxc <host> -h".to_string(),
-        "uxc <host> <operation_id> -h".to_string(),
-        "uxc <host> <operation_id> id=42".to_string(),
-        "uxc <host> <operation_id> '{...}'".to_string(),
-    ]
-}
-
-async fn resolve_host_help_service(
-    adapter: &AdapterEnum,
-    protocol: &str,
-    endpoint: &str,
-) -> Option<ServiceSummary> {
-    if protocol == "mcp" {
-        if let AdapterEnum::Mcp(mcp_adapter) = adapter {
-            if let Some(metadata) = mcp_adapter.service_metadata_for(endpoint).await {
-                if metadata.name.is_some() || metadata.description.is_some() {
-                    return Some(ServiceSummary {
-                        name: metadata.name,
-                        description: metadata.description,
-                    });
-                }
-            }
-        }
-    }
-    None
-}
-
 fn print_host_help_text_from_summaries(
     protocol: &str,
     endpoint: &str,
@@ -2049,50 +1937,6 @@ fn print_detail_text(protocol: &str, endpoint: &str, detail: &OperationDetail) {
             "\nInput Schema:\n{}",
             serde_json::to_string_pretty(input_schema).unwrap_or_else(|_| "{}".to_string())
         );
-    }
-}
-
-fn to_operation_summary(protocol: &str, op: &Operation) -> OperationSummary {
-    let required = op
-        .parameters
-        .iter()
-        .filter(|p| p.required)
-        .map(|p| p.name.clone())
-        .collect::<Vec<_>>();
-
-    let protocol_kind = match protocol {
-        "mcp" => "tool",
-        "graphql" => {
-            if op.operation_id.starts_with("query/") {
-                "query"
-            } else if op.operation_id.starts_with("mutation/") {
-                "mutation"
-            } else if op.operation_id.starts_with("subscription/") {
-                "subscription"
-            } else {
-                "field"
-            }
-        }
-        "grpc" => "rpc",
-        "openapi" => "http_operation",
-        "jsonrpc" => "rpc_method",
-        _ => "operation",
-    }
-    .to_string();
-
-    let input_shape_hint = if op.parameters.is_empty() {
-        "none".to_string()
-    } else {
-        "object".to_string()
-    };
-
-    OperationSummary {
-        operation_id: op.operation_id.clone(),
-        display_name: op.display_name.clone(),
-        summary: op.description.clone(),
-        required,
-        input_shape_hint,
-        protocol_kind,
     }
 }
 
@@ -2518,6 +2362,70 @@ async fn handle_cache_command(
                 )
                 .into())
             }
+        }
+    }
+}
+
+async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelope> {
+    match command {
+        DaemonCommands::Start => {
+            let started = daemon::daemon_start_local().await?;
+            let data = json!({
+                "started": true,
+                "autostarted": started,
+                "socket": daemon::socket_path().display().to_string()
+            });
+            Ok(OutputEnvelope::success(
+                "daemon_start_result",
+                "cli",
+                "uxc",
+                None,
+                data,
+                None,
+            ))
+        }
+        DaemonCommands::Stop => {
+            let stopped = daemon::daemon_stop_local().await?;
+            let data = json!({
+                "stopped": stopped,
+                "socket": daemon::socket_path().display().to_string()
+            });
+            Ok(OutputEnvelope::success(
+                "daemon_stop_result",
+                "cli",
+                "uxc",
+                None,
+                data,
+                None,
+            ))
+        }
+        DaemonCommands::Status => {
+            let status = match daemon::daemon_status_local().await {
+                Ok(status) => serde_json::to_value(status)?,
+                Err(_) => json!({
+                    "running": false,
+                    "socket": daemon::socket_path().display().to_string()
+                }),
+            };
+            Ok(OutputEnvelope::success(
+                "daemon_status",
+                "cli",
+                "uxc",
+                None,
+                status,
+                None,
+            ))
+        }
+        DaemonCommands::Serve => {
+            daemon::run_daemon_server().await?;
+            Ok(OutputEnvelope::success(
+                "daemon_serve_result",
+                "cli",
+                "uxc",
+                None,
+                json!({"stopped": true}),
+                None,
+            ))
         }
     }
 }
@@ -3014,64 +2922,6 @@ fn parse_oauth_flow(value: &str) -> Result<OAuthFlow> {
             value
         ))
         .into()),
-    }
-}
-
-fn inject_cache_if_supported(
-    adapter: adapters::AdapterEnum,
-    cache: std::sync::Arc<dyn cache::Cache>,
-) -> adapters::AdapterEnum {
-    match adapter {
-        adapters::AdapterEnum::OpenAPI(a) => adapters::AdapterEnum::OpenAPI(a.with_cache(cache)),
-        adapters::AdapterEnum::GraphQL(a) => adapters::AdapterEnum::GraphQL(a.with_cache(cache)),
-        adapters::AdapterEnum::GRpc(a) => adapters::AdapterEnum::GRpc(a.with_cache(cache)),
-        adapters::AdapterEnum::JsonRpc(a) => adapters::AdapterEnum::JsonRpc(a.with_cache(cache)),
-        adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_cache(cache)),
-    }
-}
-
-fn inject_auth_if_supported(
-    adapter: adapters::AdapterEnum,
-    profile: Option<Profile>,
-) -> adapters::AdapterEnum {
-    match profile {
-        Some(profile) => match adapter {
-            adapters::AdapterEnum::OpenAPI(a) => {
-                adapters::AdapterEnum::OpenAPI(a.with_auth(profile))
-            }
-            adapters::AdapterEnum::GraphQL(a) => {
-                adapters::AdapterEnum::GraphQL(a.with_auth(profile))
-            }
-            adapters::AdapterEnum::GRpc(a) => adapters::AdapterEnum::GRpc(a.with_auth(profile)),
-            adapters::AdapterEnum::JsonRpc(a) => {
-                adapters::AdapterEnum::JsonRpc(a.with_auth(profile))
-            }
-            adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_auth(profile)),
-        },
-        None => adapter,
-    }
-}
-
-fn inject_refresh_if_supported(
-    adapter: adapters::AdapterEnum,
-    refresh_schema: bool,
-) -> adapters::AdapterEnum {
-    match adapter {
-        adapters::AdapterEnum::OpenAPI(a) => {
-            adapters::AdapterEnum::OpenAPI(a.with_refresh_schema(refresh_schema))
-        }
-        adapters::AdapterEnum::GraphQL(a) => {
-            adapters::AdapterEnum::GraphQL(a.with_refresh_schema(refresh_schema))
-        }
-        adapters::AdapterEnum::GRpc(a) => {
-            adapters::AdapterEnum::GRpc(a.with_refresh_schema(refresh_schema))
-        }
-        adapters::AdapterEnum::JsonRpc(a) => {
-            adapters::AdapterEnum::JsonRpc(a.with_refresh_schema(refresh_schema))
-        }
-        adapters::AdapterEnum::Mcp(a) => {
-            adapters::AdapterEnum::Mcp(a.with_refresh_schema(refresh_schema))
-        }
     }
 }
 
