@@ -8,10 +8,7 @@ use serial_test::serial;
 #[serial]
 fn daemon_status_includes_log_file_path() {
     // Stop any running daemon first
-    let _ = uxc_command()
-        .arg("daemon")
-        .arg("stop")
-        .output();
+    let _ = uxc_command().arg("daemon").arg("stop").output();
 
     // Start daemon
     let start = uxc_command()
@@ -29,8 +26,7 @@ fn daemon_status_includes_log_file_path() {
         .expect("daemon status should run");
     assert!(status.status.success());
 
-    let json: serde_json::Value = serde_json::from_slice(&status.stdout)
-        .expect("valid json");
+    let json: serde_json::Value = serde_json::from_slice(&status.stdout).expect("valid json");
     assert_eq!(json["ok"], true);
     assert_eq!(json["kind"], "daemon_status");
 
@@ -43,10 +39,7 @@ fn daemon_status_includes_log_file_path() {
     );
 
     // Cleanup
-    let _ = uxc_command()
-        .arg("daemon")
-        .arg("stop")
-        .output();
+    let _ = uxc_command().arg("daemon").arg("stop").output();
 }
 
 #[test]
@@ -56,10 +49,7 @@ fn daemon_creates_log_file() {
     use std::path::PathBuf;
 
     // Stop any running daemon first
-    let _ = uxc_command()
-        .arg("daemon")
-        .arg("stop")
-        .output();
+    let _ = uxc_command().arg("daemon").arg("stop").output();
 
     // Determine log file location
     let log_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -94,22 +84,18 @@ fn daemon_creates_log_file() {
     );
 
     // Verify log file contains JSON Lines format
-    let content = fs::read_to_string(&log_file)
-        .expect("should be able to read log file");
+    let content = fs::read_to_string(&log_file).expect("should be able to read log file");
 
     // Each line should be valid JSON
     for line in content.lines() {
         if !line.is_empty() {
-            let _: serde_json::Value = serde_json::from_str(line)
-                .expect("each log line should be valid JSON");
+            let _: serde_json::Value =
+                serde_json::from_str(line).expect("each log line should be valid JSON");
         }
     }
 
     // Cleanup
-    let _ = uxc_command()
-        .arg("daemon")
-        .arg("stop")
-        .output();
+    let _ = uxc_command().arg("daemon").arg("stop").output();
     let _ = fs::remove_file(&log_file);
 }
 
@@ -120,10 +106,7 @@ fn daemon_log_contains_start_event() {
     use std::path::PathBuf;
 
     // Stop any running daemon first
-    let _ = uxc_command()
-        .arg("daemon")
-        .arg("stop")
-        .output();
+    let _ = uxc_command().arg("daemon").arg("stop").output();
 
     // Determine log file location
     let log_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -151,8 +134,7 @@ fn daemon_log_contains_start_event() {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Read and check log file
-    let content = fs::read_to_string(&log_file)
-        .expect("should be able to read log file");
+    let content = fs::read_to_string(&log_file).expect("should be able to read log file");
 
     // Look for daemon_start event
     assert!(
@@ -167,10 +149,7 @@ fn daemon_log_contains_start_event() {
     );
 
     // Cleanup
-    let _ = uxc_command()
-        .arg("daemon")
-        .arg("stop")
-        .output();
+    let _ = uxc_command().arg("daemon").arg("stop").output();
     let _ = fs::remove_file(&log_file);
 }
 

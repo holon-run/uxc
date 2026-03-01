@@ -309,7 +309,13 @@ impl DaemonRuntime {
 
     fn initialize_logger() -> Option<DaemonLogger> {
         let dir = daemon_dir();
-        DaemonLogger::new(&dir).ok()
+        match DaemonLogger::new(&dir) {
+            Ok(logger) => Some(logger),
+            Err(e) => {
+                tracing::warn!("Failed to initialize daemon logger: {}", e);
+                None
+            }
+        }
     }
 
     async fn log(&self, entry: DaemonLogEntry) {
