@@ -973,6 +973,7 @@ async fn resolve_adapter_with_schema_cache(
                     let mut adapter = adapter_from_protocol(protocol, detection_options);
                     adapter = inject_cache_if_supported(adapter, cache.clone());
                     adapter = inject_auth_if_supported(adapter, auth_profile.clone());
+                    adapter = inject_refresh_if_supported(adapter, refresh_schema);
                     return Ok(ResolvedAdapter {
                         adapter,
                         cache_meta: Some(SchemaCacheMeta {
@@ -995,6 +996,7 @@ async fn resolve_adapter_with_schema_cache(
         Ok(mut adapter) => {
             adapter = inject_cache_if_supported(adapter, cache);
             adapter = inject_auth_if_supported(adapter, auth_profile);
+            adapter = inject_refresh_if_supported(adapter, refresh_schema);
             Ok(ResolvedAdapter {
                 adapter,
                 cache_meta: None,
@@ -1006,9 +1008,11 @@ async fn resolve_adapter_with_schema_cache(
                     cache.get_with_policy(url, cache::CacheReadPolicy::AllowStale)?
                 {
                     if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
+                        let _ = cache.put(url, &hit.schema);
                         let mut adapter = adapter_from_protocol(protocol, detection_options);
                         adapter = inject_cache_if_supported(adapter, cache.clone());
                         adapter = inject_auth_if_supported(adapter, auth_profile.clone());
+                        adapter = inject_refresh_if_supported(adapter, refresh_schema);
                         return Ok(ResolvedAdapter {
                             adapter,
                             cache_meta: Some(SchemaCacheMeta {
@@ -3045,6 +3049,29 @@ fn inject_auth_if_supported(
             adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_auth(profile)),
         },
         None => adapter,
+    }
+}
+
+fn inject_refresh_if_supported(
+    adapter: adapters::AdapterEnum,
+    refresh_schema: bool,
+) -> adapters::AdapterEnum {
+    match adapter {
+        adapters::AdapterEnum::OpenAPI(a) => {
+            adapters::AdapterEnum::OpenAPI(a.with_refresh_schema(refresh_schema))
+        }
+        adapters::AdapterEnum::GraphQL(a) => {
+            adapters::AdapterEnum::GraphQL(a.with_refresh_schema(refresh_schema))
+        }
+        adapters::AdapterEnum::GRpc(a) => {
+            adapters::AdapterEnum::GRpc(a.with_refresh_schema(refresh_schema))
+        }
+        adapters::AdapterEnum::JsonRpc(a) => {
+            adapters::AdapterEnum::JsonRpc(a.with_refresh_schema(refresh_schema))
+        }
+        adapters::AdapterEnum::Mcp(a) => {
+            adapters::AdapterEnum::Mcp(a.with_refresh_schema(refresh_schema))
+        }
     }
 }
 

@@ -5,6 +5,13 @@ fn uxc_command() -> Command {
     Command::new(env!("CARGO_BIN_EXE_uxc"))
 }
 
+fn uxc_command_with_home(home: &std::path::Path) -> Command {
+    let mut cmd = uxc_command();
+    cmd.env("HOME", home);
+    cmd.env("USERPROFILE", home);
+    cmd
+}
+
 struct TestAuthFiles {
     _temp_dir: TempDir,
     credentials_file: std::path::PathBuf,
@@ -243,6 +250,154 @@ fn host_help_uses_link_name_for_next_commands_when_env_set() {
     assert_eq!(json["data"]["examples"][1], "petcli <operation_id> -h");
     assert_eq!(json["data"]["examples"][2], "petcli <operation_id> id=42");
     assert_eq!(json["data"]["examples"][3], "petcli <operation_id> '{...}'");
+}
+
+#[test]
+fn host_help_uses_stale_cache_fallback_with_meta() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    let endpoint = {
+        let mut server = mockito::Server::new();
+        let _schema = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r##"{
+  "openapi": "3.0.0",
+  "info": { "title": "test", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "list pets",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"##,
+            )
+            .create();
+
+        let prime = uxc_command_with_home(temp_home.path())
+            .arg(server.url())
+            .arg("--cache-ttl")
+            .arg("1")
+            .arg("-h")
+            .output()
+            .expect("prime cache should succeed");
+        assert!(prime.status.success(), "prime run should succeed");
+
+        server.url()
+    };
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let output = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("--cache-ttl")
+        .arg("1")
+        .arg("-h")
+        .output()
+        .expect("offline fallback should run");
+
+    assert!(
+        output.status.success(),
+        "offline fallback should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "host_help");
+    assert_eq!(json["meta"]["cache_fallback"], true);
+    assert_eq!(json["meta"]["cache_stale"], true);
+    assert_eq!(json["meta"]["cache_source"], "schema_cache");
+    assert!(
+        json["meta"]["cache_age_ms"].as_u64().is_some(),
+        "cache_age_ms should be present"
+    );
+}
+
+#[test]
+fn refresh_schema_forces_online_fetch_in_help_flow() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    let mut server = mockito::Server::new();
+    let endpoint = server.url();
+
+    {
+        let _schema_v1 = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r##"{
+  "openapi": "3.0.0",
+  "info": { "title": "v1", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "list pets",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"##,
+            )
+            .create();
+
+        let output = uxc_command_with_home(temp_home.path())
+            .arg(&endpoint)
+            .arg("-h")
+            .output()
+            .expect("initial host help should run");
+        assert!(output.status.success());
+    }
+
+    {
+        let _schema_v2 = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r##"{
+  "openapi": "3.0.0",
+  "info": { "title": "v2", "version": "1.0.0" },
+  "paths": {
+    "/users": {
+      "get": {
+        "summary": "list users",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"##,
+            )
+            .create();
+
+        let output = uxc_command_with_home(temp_home.path())
+            .arg(&endpoint)
+            .arg("--refresh-schema")
+            .arg("-h")
+            .output()
+            .expect("refresh host help should run");
+        assert!(
+            output.status.success(),
+            "refresh run should succeed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+        let operations = json["data"]["operations"]
+            .as_array()
+            .expect("operations should be an array");
+        assert!(
+            operations
+                .iter()
+                .any(|op| op["operation_id"] == "get:/users"),
+            "expected refreshed operations to include get:/users"
+        );
+    }
 }
 
 #[test]

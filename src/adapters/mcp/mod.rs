@@ -25,6 +25,7 @@ pub use transport::MockStdioExecutor;
 pub struct McpAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,
     auth_profile: Option<Profile>,
+    force_refresh_schema: bool,
     discovered_http_endpoints: Arc<RwLock<HashMap<String, String>>>,
     last_probe_diagnostics: Arc<RwLock<Option<String>>>,
     service_metadata: Arc<RwLock<HashMap<String, McpServiceMetadata>>>,
@@ -41,6 +42,7 @@ impl McpAdapter {
         Self {
             cache: None,
             auth_profile: None,
+            force_refresh_schema: false,
             discovered_http_endpoints: Arc::new(RwLock::new(HashMap::new())),
             last_probe_diagnostics: Arc::new(RwLock::new(None)),
             service_metadata: Arc::new(RwLock::new(HashMap::new())),
@@ -54,6 +56,11 @@ impl McpAdapter {
 
     pub fn with_auth(mut self, profile: Profile) -> Self {
         self.auth_profile = Some(profile);
+        self
+    }
+
+    pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
+        self.force_refresh_schema = refresh;
         self
     }
 
@@ -203,17 +210,14 @@ impl McpAdapter {
         self.service_metadata.read().await.get(url).cloned()
     }
 
-    fn tools_from_schema(schema: &Value) -> Vec<types::Tool> {
-        schema
-            .get("tools")
-            .and_then(|v| v.as_array())
-            .map(|tools| {
-                tools
-                    .iter()
-                    .filter_map(|tool| serde_json::from_value::<types::Tool>(tool.clone()).ok())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+    fn tools_from_schema(schema: &Value) -> Option<Vec<types::Tool>> {
+        let tools = schema.get("tools")?.as_array()?;
+        Some(
+            tools
+                .iter()
+                .filter_map(|tool| serde_json::from_value::<types::Tool>(tool.clone()).ok())
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn validate_required_args(
@@ -256,7 +260,10 @@ impl McpAdapter {
         args: &HashMap<String, Value>,
     ) -> Result<()> {
         let schema = self.fetch_schema(url).await?;
-        let tools = Self::tools_from_schema(&schema);
+        let Some(tools) = Self::tools_from_schema(&schema) else {
+            // Skip local validation when tool catalog is unavailable.
+            return Ok(());
+        };
         let tool = tools
             .iter()
             .find(|tool| tool.name == operation)
@@ -293,17 +300,19 @@ impl Adapter for McpAdapter {
 
     async fn fetch_schema(&self, url: &str) -> Result<Value> {
         // Try cache first if available
-        if let Some(cache) = &self.cache {
-            match cache.get(url)? {
-                crate::cache::CacheResult::Hit(schema) => {
-                    debug!("MCP cache hit for: {}", url);
-                    return Ok(schema);
-                }
-                crate::cache::CacheResult::Bypassed => {
-                    debug!("MCP cache bypassed for: {}", url);
-                }
-                crate::cache::CacheResult::Miss => {
-                    debug!("MCP cache miss for: {}", url);
+        if !self.force_refresh_schema {
+            if let Some(cache) = &self.cache {
+                match cache.get(url)? {
+                    crate::cache::CacheResult::Hit(schema) => {
+                        debug!("MCP cache hit for: {}", url);
+                        return Ok(schema);
+                    }
+                    crate::cache::CacheResult::Bypassed => {
+                        debug!("MCP cache bypassed for: {}", url);
+                    }
+                    crate::cache::CacheResult::Miss => {
+                        debug!("MCP cache miss for: {}", url);
+                    }
                 }
             }
         }
@@ -315,15 +324,15 @@ impl Adapter for McpAdapter {
             let server_info = client.server_info().cloned();
             let instructions = client.instructions().map(ToString::to_string);
             let tools = match client.list_tools().await {
-                Ok(tools) => tools,
+                Ok(tools) => Some(tools),
                 Err(err) => {
                     debug!("MCP stdio list_tools failed while building schema: {}", err);
-                    Vec::new()
+                    None
                 }
             };
 
             // Build schema from server capabilities
-            let schema = serde_json::json!({
+            let mut schema = serde_json::json!({
                 "protocol": "MCP",
                 "protocolVersion": "2024-11-05",
                 "transport": "stdio",
@@ -334,9 +343,11 @@ impl Adapter for McpAdapter {
                     "tools": client.supports_tools(),
                     "resources": client.supports_resources(),
                     "prompts": client.supports_prompts(),
-                },
-                "tools": tools,
+                }
             });
+            if let Some(tools) = tools {
+                schema["tools"] = serde_json::json!(tools);
+            }
 
             // Store in cache if available
             if let Some(cache) = &self.cache {
@@ -358,23 +369,25 @@ impl Adapter for McpAdapter {
             let transport = McpHttpTransport::with_auth(endpoint, self.auth_profile.clone())?;
             let init_result = transport.initialize().await?;
             let tools = match transport.list_tools().await {
-                Ok(tools) => tools,
+                Ok(tools) => Some(tools),
                 Err(err) => {
                     debug!("MCP HTTP list_tools failed while building schema: {}", err);
-                    Vec::new()
+                    None
                 }
             };
 
-            let schema = serde_json::json!({
+            let mut schema = serde_json::json!({
                 "protocol": "MCP",
                 "protocolVersion": "2024-11-05",
                 "transport": "http",
                 "url": url,
                 "serverInfo": init_result.serverInfo,
                 "instructions": init_result.instructions,
-                "capabilities": init_result.capabilities,
-                "tools": tools,
+                "capabilities": init_result.capabilities
             });
+            if let Some(tools) = tools {
+                schema["tools"] = serde_json::json!(tools);
+            }
 
             // Store in cache if available
             if let Some(cache) = &self.cache {
@@ -768,7 +781,7 @@ mod tests {
         });
 
         let tools = McpAdapter::tools_from_schema(&schema);
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "search");
+        assert_eq!(tools.as_ref().map(Vec::len), Some(1));
+        assert_eq!(tools.unwrap()[0].name, "search");
     }
 }

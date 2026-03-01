@@ -22,6 +22,7 @@ pub struct GraphQLAdapter {
     client: reqwest::Client,
     cache: Option<Arc<dyn crate::cache::Cache>>,
     auth_profile: Option<Profile>,
+    force_refresh_schema: bool,
 }
 
 impl GraphQLAdapter {
@@ -32,6 +33,7 @@ impl GraphQLAdapter {
             client: reqwest::Client::new(),
             cache: None,
             auth_profile: None,
+            force_refresh_schema: false,
         }
     }
 
@@ -42,6 +44,11 @@ impl GraphQLAdapter {
 
     pub fn with_auth(mut self, profile: Profile) -> Self {
         self.auth_profile = Some(profile);
+        self
+    }
+
+    pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
+        self.force_refresh_schema = refresh;
         self
     }
 
@@ -753,17 +760,19 @@ impl Adapter for GraphQLAdapter {
 
     async fn fetch_schema(&self, url: &str) -> Result<Value> {
         // Try cache first if available
-        if let Some(cache) = &self.cache {
-            match cache.get(url)? {
-                crate::cache::CacheResult::Hit(schema) => {
-                    debug!("GraphQL cache hit for: {}", url);
-                    return Ok(schema);
-                }
-                crate::cache::CacheResult::Bypassed => {
-                    debug!("GraphQL cache bypassed for: {}", url);
-                }
-                crate::cache::CacheResult::Miss => {
-                    debug!("GraphQL cache miss for: {}", url);
+        if !self.force_refresh_schema {
+            if let Some(cache) = &self.cache {
+                match cache.get(url)? {
+                    crate::cache::CacheResult::Hit(schema) => {
+                        debug!("GraphQL cache hit for: {}", url);
+                        return Ok(schema);
+                    }
+                    crate::cache::CacheResult::Bypassed => {
+                        debug!("GraphQL cache bypassed for: {}", url);
+                    }
+                    crate::cache::CacheResult::Miss => {
+                        debug!("GraphQL cache miss for: {}", url);
+                    }
                 }
             }
         }

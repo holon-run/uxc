@@ -276,7 +276,6 @@ impl Cache for SchemaCache {
                 let stale = entry.is_expired();
                 if stale && matches!(policy, CacheReadPolicy::NormalTtl) {
                     debug!("Cache entry expired: {}", key);
-                    self.storage.delete_entry(&key)?;
                     self.storage.record_miss();
                     Ok(CacheLookup::Miss)
                 } else {

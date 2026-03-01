@@ -28,6 +28,7 @@ pub struct JsonRpcAdapter {
     client: reqwest::Client,
     cache: Option<Arc<dyn crate::cache::Cache>>,
     auth_profile: Option<Profile>,
+    force_refresh_schema: bool,
     discovered: Arc<RwLock<HashMap<String, ResolvedOpenRpc>>>,
     next_id: Arc<Mutex<i64>>,
 }
@@ -41,6 +42,7 @@ impl JsonRpcAdapter {
             client: reqwest::Client::new(),
             cache: None,
             auth_profile: None,
+            force_refresh_schema: false,
             discovered: Arc::new(RwLock::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
         }
@@ -53,6 +55,11 @@ impl JsonRpcAdapter {
 
     pub fn with_auth(mut self, profile: Profile) -> Self {
         self.auth_profile = Some(profile);
+        self
+    }
+
+    pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
+        self.force_refresh_schema = refresh;
         self
     }
 
@@ -649,17 +656,19 @@ impl Adapter for JsonRpcAdapter {
             }
         }
 
-        if let Some(cache) = &self.cache {
-            match cache.get(url)? {
-                crate::cache::CacheResult::Hit(schema) => {
-                    debug!("JSON-RPC cache hit for: {}", url);
-                    return Ok(schema);
-                }
-                crate::cache::CacheResult::Bypassed => {
-                    debug!("JSON-RPC cache bypassed for: {}", url);
-                }
-                crate::cache::CacheResult::Miss => {
-                    debug!("JSON-RPC cache miss for: {}", url);
+        if !self.force_refresh_schema {
+            if let Some(cache) = &self.cache {
+                match cache.get(url)? {
+                    crate::cache::CacheResult::Hit(schema) => {
+                        debug!("JSON-RPC cache hit for: {}", url);
+                        return Ok(schema);
+                    }
+                    crate::cache::CacheResult::Bypassed => {
+                        debug!("JSON-RPC cache bypassed for: {}", url);
+                    }
+                    crate::cache::CacheResult::Miss => {
+                        debug!("JSON-RPC cache miss for: {}", url);
+                    }
                 }
             }
         }

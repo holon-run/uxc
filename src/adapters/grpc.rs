@@ -103,6 +103,8 @@ pub struct GrpcAdapter {
     schema_cache: Option<Arc<dyn crate::cache::Cache>>,
     /// Authentication profile
     auth_profile: Option<Profile>,
+    /// Force online schema refresh by bypassing schema cache reads.
+    force_refresh_schema: bool,
     /// grpcurl executor (abstracted for testing)
     grpcurl_executor: Arc<dyn GrpcurlExecutor>,
 }
@@ -139,6 +141,7 @@ impl GrpcAdapter {
             in_memory_cache: Arc::new(RwLock::new(HashMap::new())),
             schema_cache: None,
             auth_profile: None,
+            force_refresh_schema: false,
             grpcurl_executor: Arc::new(DefaultGrpcurlExecutor),
         }
     }
@@ -157,6 +160,11 @@ impl GrpcAdapter {
 
     pub fn with_auth(mut self, profile: Profile) -> Self {
         self.auth_profile = Some(profile);
+        self
+    }
+
+    pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
+        self.force_refresh_schema = refresh;
         self
     }
 
@@ -910,17 +918,19 @@ impl Adapter for GrpcAdapter {
 
     async fn fetch_schema(&self, url: &str) -> Result<Value> {
         // Try persistent cache first if available
-        if let Some(cache) = &self.schema_cache {
-            match cache.get(url)? {
-                crate::cache::CacheResult::Hit(schema) => {
-                    debug!("gRPC cache hit for: {}", url);
-                    return Ok(schema);
-                }
-                crate::cache::CacheResult::Bypassed => {
-                    debug!("gRPC cache bypassed for: {}", url);
-                }
-                crate::cache::CacheResult::Miss => {
-                    debug!("gRPC cache miss for: {}", url);
+        if !self.force_refresh_schema {
+            if let Some(cache) = &self.schema_cache {
+                match cache.get(url)? {
+                    crate::cache::CacheResult::Hit(schema) => {
+                        debug!("gRPC cache hit for: {}", url);
+                        return Ok(schema);
+                    }
+                    crate::cache::CacheResult::Bypassed => {
+                        debug!("gRPC cache bypassed for: {}", url);
+                    }
+                    crate::cache::CacheResult::Miss => {
+                        debug!("gRPC cache miss for: {}", url);
+                    }
                 }
             }
         }
