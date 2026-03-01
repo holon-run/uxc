@@ -2,7 +2,7 @@
 
 use super::config::CacheConfig;
 use super::stats::{CacheStats, ProtocolStats};
-use super::{Cache, CacheResult};
+use super::{Cache, CacheHit, CacheLookup, CacheReadPolicy, CacheResult};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -256,35 +256,49 @@ impl SchemaCache {
 
 impl Cache for SchemaCache {
     fn get(&self, url: &str) -> Result<CacheResult> {
+        match self.get_with_policy(url, CacheReadPolicy::NormalTtl)? {
+            CacheLookup::Hit(hit) => Ok(CacheResult::Hit(hit.schema)),
+            CacheLookup::Miss => Ok(CacheResult::Miss),
+            CacheLookup::Bypassed => Ok(CacheResult::Bypassed),
+        }
+    }
+
+    fn get_with_policy(&self, url: &str, policy: CacheReadPolicy) -> Result<CacheLookup> {
         if !self.storage.config.enabled {
             debug!("Cache is disabled, bypassing");
-            return Ok(CacheResult::Bypassed);
+            return Ok(CacheLookup::Bypassed);
         }
 
         let key = self.storage.generate_cache_key(url);
 
         match self.storage.load_entry(&key) {
             Ok(Some(entry)) => {
-                if entry.is_expired() {
+                let stale = entry.is_expired();
+                if stale && matches!(policy, CacheReadPolicy::NormalTtl) {
                     debug!("Cache entry expired: {}", key);
                     self.storage.delete_entry(&key)?;
                     self.storage.record_miss();
-                    Ok(CacheResult::Miss)
+                    Ok(CacheLookup::Miss)
                 } else {
-                    debug!("Cache hit: {}", key);
+                    debug!("Cache hit: {} (stale={})", key, stale);
                     self.storage.record_hit(&entry.protocol);
-                    Ok(CacheResult::Hit(entry.schema))
+                    Ok(CacheLookup::Hit(CacheHit {
+                        schema: entry.schema,
+                        fetched_at: entry.fetched_at,
+                        expires_at: entry.expires_at,
+                        stale,
+                    }))
                 }
             }
             Ok(None) => {
                 debug!("Cache miss: entry not found");
                 self.storage.record_miss();
-                Ok(CacheResult::Miss)
+                Ok(CacheLookup::Miss)
             }
             Err(e) => {
                 warn!("Failed to load cache entry: {}", e);
                 self.storage.record_miss();
-                Ok(CacheResult::Miss)
+                Ok(CacheLookup::Miss)
             }
         }
     }

@@ -24,6 +24,7 @@ mod schema_mapping;
 
 use adapters::{
     Adapter, AdapterEnum, DetectionOptions, Operation, OperationDetail, ProtocolDetector,
+    ProtocolType,
 };
 use auth::{AuthBindingRule, AuthBindings, AuthType, OAuthFlow, Profile, Profiles};
 use cache::CacheConfig;
@@ -65,6 +66,10 @@ struct Cli {
     /// Cache TTL in seconds
     #[arg(long, global = true)]
     cache_ttl: Option<u64>,
+
+    /// Force online schema discovery and refresh cache.
+    #[arg(long, global = true, conflicts_with = "no_cache")]
+    refresh_schema: bool,
 
     /// Explicit OpenAPI schema URL (for schema-discovery separated services)
     #[arg(long, global = true)]
@@ -570,7 +575,7 @@ fn normalize_global_args(raw_args: Vec<String>) -> Vec<String> {
 
     while idx < raw_args.len() {
         let arg = &raw_args[idx];
-        let is_global_bool = matches!(arg.as_str(), "--text" | "--no-cache");
+        let is_global_bool = matches!(arg.as_str(), "--text" | "--no-cache" | "--refresh-schema");
         let is_global_kv = matches!(
             arg.as_str(),
             "--format" | "--auth" | "--cache-ttl" | "--schema-url"
@@ -611,7 +616,10 @@ fn normalize_global_args(raw_args: Vec<String>) -> Vec<String> {
 }
 
 fn is_global_bool_arg(arg: &str) -> bool {
-    matches!(arg, "--text" | "--no-cache" | "-h" | "--help")
+    matches!(
+        arg,
+        "--text" | "--no-cache" | "--refresh-schema" | "-h" | "--help"
+    )
 }
 
 fn is_global_kv_arg(arg: &str) -> bool {
@@ -877,6 +885,150 @@ fn looks_like_operation_id(input: &str) -> bool {
         || lower.starts_with("subscription/")
 }
 
+struct ResolvedAdapter {
+    adapter: AdapterEnum,
+    cache_meta: Option<SchemaCacheMeta>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SchemaCacheMeta {
+    age_ms: u64,
+    stale: bool,
+    fallback: bool,
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn cache_age_ms(fetched_at: u64) -> u64 {
+    now_unix_secs()
+        .saturating_sub(fetched_at)
+        .saturating_mul(1000)
+}
+
+fn protocol_from_cached_schema(schema: &Value) -> Option<ProtocolType> {
+    if schema
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .is_some_and(|p| p.eq_ignore_ascii_case("MCP"))
+    {
+        return Some(ProtocolType::Mcp);
+    }
+
+    if schema.get("openapi").is_some() || schema.get("swagger").is_some() {
+        return Some(ProtocolType::OpenAPI);
+    }
+
+    if schema.get("openrpc").is_some() {
+        return Some(ProtocolType::JsonRpc);
+    }
+
+    if schema.get("data").and_then(|v| v.get("__schema")).is_some()
+        || schema.get("__schema").is_some()
+    {
+        return Some(ProtocolType::GraphQL);
+    }
+
+    if schema
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .is_some_and(|p| p.eq_ignore_ascii_case("gRPC"))
+        || schema.get("services").is_some()
+    {
+        return Some(ProtocolType::GRpc);
+    }
+
+    None
+}
+
+fn adapter_from_protocol(protocol: ProtocolType, options: &DetectionOptions) -> AdapterEnum {
+    match protocol {
+        ProtocolType::OpenAPI => AdapterEnum::OpenAPI(
+            adapters::openapi::OpenAPIAdapter::new()
+                .with_schema_url_override(options.schema_url.clone()),
+        ),
+        ProtocolType::GRpc => AdapterEnum::GRpc(adapters::grpc::GrpcAdapter::new()),
+        ProtocolType::JsonRpc => AdapterEnum::JsonRpc(adapters::jsonrpc::JsonRpcAdapter::new()),
+        ProtocolType::Mcp => AdapterEnum::Mcp(adapters::mcp::McpAdapter::new()),
+        ProtocolType::GraphQL => AdapterEnum::GraphQL(adapters::graphql::GraphQLAdapter::new()),
+    }
+}
+
+async fn resolve_adapter_with_schema_cache(
+    url: &str,
+    detection_options: &DetectionOptions,
+    cache: std::sync::Arc<dyn cache::Cache>,
+    auth_profile: Option<Profile>,
+    no_cache: bool,
+    refresh_schema: bool,
+) -> Result<ResolvedAdapter> {
+    if !no_cache && !refresh_schema {
+        match cache.get_with_policy(url, cache::CacheReadPolicy::NormalTtl)? {
+            cache::CacheLookup::Hit(hit) => {
+                if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
+                    let mut adapter = adapter_from_protocol(protocol, detection_options);
+                    adapter = inject_cache_if_supported(adapter, cache.clone());
+                    adapter = inject_auth_if_supported(adapter, auth_profile.clone());
+                    return Ok(ResolvedAdapter {
+                        adapter,
+                        cache_meta: Some(SchemaCacheMeta {
+                            age_ms: cache_age_ms(hit.fetched_at),
+                            stale: hit.stale,
+                            fallback: false,
+                        }),
+                    });
+                }
+            }
+            cache::CacheLookup::Miss | cache::CacheLookup::Bypassed => {}
+        }
+    }
+
+    let detector = ProtocolDetector::new();
+    match detector
+        .detect_adapter_with_options(url, detection_options)
+        .await
+    {
+        Ok(mut adapter) => {
+            adapter = inject_cache_if_supported(adapter, cache);
+            adapter = inject_auth_if_supported(adapter, auth_profile);
+            Ok(ResolvedAdapter {
+                adapter,
+                cache_meta: None,
+            })
+        }
+        Err(err) => {
+            if !no_cache && !refresh_schema {
+                if let cache::CacheLookup::Hit(hit) =
+                    cache.get_with_policy(url, cache::CacheReadPolicy::AllowStale)?
+                {
+                    if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
+                        let mut adapter = adapter_from_protocol(protocol, detection_options);
+                        adapter = inject_cache_if_supported(adapter, cache.clone());
+                        adapter = inject_auth_if_supported(adapter, auth_profile.clone());
+                        return Ok(ResolvedAdapter {
+                            adapter,
+                            cache_meta: Some(SchemaCacheMeta {
+                                age_ms: cache_age_ms(hit.fetched_at),
+                                stale: hit.stale,
+                                fallback: true,
+                            }),
+                        });
+                    }
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
+fn execute_schema_involved(protocol: &str) -> bool {
+    matches!(protocol, "jsonrpc" | "grpc" | "mcp")
+}
+
 async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
     if let Some(help_path) = static_help_path_from_cli(cli) {
         if help_path.is_empty() {
@@ -929,16 +1081,23 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
     let auth_profile = auth::resolve_auth_for_endpoint(&url, cli.auth.clone())?;
     let cache = cache::create_cache(cache_config)?;
 
-    let detector = ProtocolDetector::new();
     let detection_options = DetectionOptions {
         schema_url: cli.schema_url.as_deref().map(normalize_endpoint_url),
         auth_profile: auth_profile.clone(),
     };
-    let mut adapter = detector
-        .detect_adapter_with_options(&url, &detection_options)
-        .await?;
-    adapter = inject_cache_if_supported(adapter, cache);
-    adapter = inject_auth_if_supported(adapter, auth_profile);
+    let resolved = resolve_adapter_with_schema_cache(
+        &url,
+        &detection_options,
+        cache,
+        auth_profile,
+        cli.no_cache,
+        cli.refresh_schema,
+    )
+    .await?;
+    let ResolvedAdapter {
+        adapter,
+        cache_meta,
+    } = resolved;
 
     let envelope = match endpoint_command {
         EndpointCommand::HostHelp => {
@@ -957,7 +1116,20 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
                 examples: host_help_examples(),
                 service,
             })?;
-            OutputEnvelope::success("host_help", protocol, &url, None, data, Some(duration_ms))
+            let mut envelope =
+                OutputEnvelope::success("host_help", protocol, &url, None, data, Some(duration_ms));
+            if let Some(meta) = cache_meta {
+                envelope = envelope.with_schema_meta(
+                    true,
+                    Some("schema_cache"),
+                    Some(meta.age_ms),
+                    Some(meta.stale),
+                    Some(meta.fallback),
+                );
+            } else {
+                envelope = envelope.with_schema_meta(true, None, None, None, None);
+            }
+            envelope
         }
         EndpointCommand::Describe { operation_id } => {
             let start = std::time::Instant::now();
@@ -965,14 +1137,26 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
             let protocol = adapter.protocol_type().as_str();
             let duration_ms = start.elapsed().as_millis() as u64;
             let data = serde_json::to_value(&detail)?;
-            OutputEnvelope::success(
+            let mut envelope = OutputEnvelope::success(
                 "operation_detail",
                 protocol,
                 &url,
                 Some(&detail.operation_id),
                 data,
                 Some(duration_ms),
-            )
+            );
+            if let Some(meta) = cache_meta {
+                envelope = envelope.with_schema_meta(
+                    true,
+                    Some("schema_cache"),
+                    Some(meta.age_ms),
+                    Some(meta.stale),
+                    Some(meta.fallback),
+                );
+            } else {
+                envelope = envelope.with_schema_meta(true, None, None, None, None);
+            }
+            envelope
         }
         EndpointCommand::Execute {
             operation_id,
@@ -982,14 +1166,28 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
             let args_map = parse_arguments(args, input_json)?;
             let result = adapter.execute(&url, &operation_id, args_map).await?;
             let protocol = adapter.protocol_type().as_str();
-            OutputEnvelope::success(
+            let mut envelope = OutputEnvelope::success(
                 "call_result",
                 protocol,
                 &url,
                 Some(&operation_id),
                 result.data,
                 Some(result.metadata.duration_ms),
-            )
+            );
+            if execute_schema_involved(protocol) {
+                if let Some(meta) = cache_meta {
+                    envelope = envelope.with_schema_meta(
+                        true,
+                        Some("schema_cache"),
+                        Some(meta.age_ms),
+                        Some(meta.stale),
+                        Some(meta.fallback),
+                    );
+                } else {
+                    envelope = envelope.with_schema_meta(true, None, None, None, None);
+                }
+            }
+            envelope
         }
     };
 

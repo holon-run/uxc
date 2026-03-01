@@ -81,3 +81,24 @@ fn operation_execution_failure_uses_error_envelope() {
         "error.message should be a string"
     );
 }
+
+#[test]
+fn no_cache_and_refresh_schema_conflict_returns_invalid_argument() {
+    let output = uxc()
+        .arg("--no-cache")
+        .arg("--refresh-schema")
+        .arg("http://127.0.0.1:9")
+        .arg("-h")
+        .assert()
+        .failure();
+
+    let stdout = output.get_output().stdout.clone();
+    let json: serde_json::Value =
+        serde_json::from_slice(&stdout).expect("stdout should be valid JSON");
+
+    assert_eq!(json["ok"], false, "ok should be false");
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+    let message = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("--no-cache"));
+    assert!(message.contains("--refresh-schema"));
+}

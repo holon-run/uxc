@@ -36,6 +36,35 @@ pub enum CacheResult {
     Bypassed,
 }
 
+/// Cache read policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheReadPolicy {
+    /// Enforce TTL. Expired entries are treated as miss.
+    NormalTtl,
+    /// Allow returning stale entries.
+    AllowStale,
+}
+
+/// Cache lookup result with metadata.
+#[derive(Debug, Clone)]
+pub enum CacheLookup {
+    /// Value was retrieved from cache.
+    Hit(CacheHit),
+    /// Value was not in cache.
+    Miss,
+    /// Cache read was bypassed.
+    Bypassed,
+}
+
+/// Cached value with timing metadata.
+#[derive(Debug, Clone)]
+pub struct CacheHit {
+    pub schema: Value,
+    pub fetched_at: u64,
+    pub expires_at: u64,
+    pub stale: bool,
+}
+
 impl CacheResult {
     #[allow(dead_code)]
     pub fn is_hit(&self) -> bool {
@@ -64,6 +93,9 @@ pub trait Cache: Send + Sync {
     /// `CacheResult::Miss` if not found or expired, or `CacheResult::Bypassed`
     /// if caching is disabled.
     fn get(&self, url: &str) -> Result<CacheResult>;
+
+    /// Get a schema from cache with explicit read policy and metadata.
+    fn get_with_policy(&self, url: &str, policy: CacheReadPolicy) -> Result<CacheLookup>;
 
     /// Put a schema into cache
     ///

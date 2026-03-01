@@ -54,6 +54,26 @@ pub struct Metadata {
     /// Execution duration in milliseconds when applicable
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+
+    /// Whether schema participated in this request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_involved: Option<bool>,
+
+    /// Cache source for schema data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_source: Option<String>,
+
+    /// Age of cached schema in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_age_ms: Option<u64>,
+
+    /// Whether cached schema is stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_stale: Option<bool>,
+
+    /// Whether stale cache fallback was used after online failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_fallback: Option<bool>,
 }
 
 impl OutputEnvelope {
@@ -77,6 +97,11 @@ impl OutputEnvelope {
             meta: Metadata {
                 version: "v1".to_string(),
                 duration_ms,
+                schema_involved: None,
+                cache_source: None,
+                cache_age_ms: None,
+                cache_stale: None,
+                cache_fallback: None,
             },
         }
     }
@@ -97,8 +122,30 @@ impl OutputEnvelope {
             meta: Metadata {
                 version: "v1".to_string(),
                 duration_ms: None,
+                schema_involved: None,
+                cache_source: None,
+                cache_age_ms: None,
+                cache_stale: None,
+                cache_fallback: None,
             },
         }
+    }
+
+    /// Attach schema/cache metadata.
+    pub fn with_schema_meta(
+        mut self,
+        schema_involved: bool,
+        cache_source: Option<&str>,
+        cache_age_ms: Option<u64>,
+        cache_stale: Option<bool>,
+        cache_fallback: Option<bool>,
+    ) -> Self {
+        self.meta.schema_involved = Some(schema_involved);
+        self.meta.cache_source = cache_source.map(ToString::to_string);
+        self.meta.cache_age_ms = cache_age_ms;
+        self.meta.cache_stale = cache_stale;
+        self.meta.cache_fallback = cache_fallback;
+        self
     }
 
     /// Convert to JSON string

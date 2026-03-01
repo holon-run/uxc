@@ -485,6 +485,24 @@ impl Adapter for OpenAPIAdapter {
     }
 
     async fn fetch_schema(&self, url: &str) -> Result<Value> {
+        let normalized_url = Self::normalized_url(url);
+
+        // Try endpoint-level cache first so protocol resolution can be cache-first.
+        if let Some(cache) = &self.cache {
+            match cache.get(&normalized_url)? {
+                crate::cache::CacheResult::Hit(schema) => {
+                    if Self::is_openapi_document(&schema) {
+                        debug!("OpenAPI endpoint cache hit for: {}", normalized_url);
+                        return Ok(schema);
+                    }
+                }
+                crate::cache::CacheResult::Bypassed => {
+                    debug!("OpenAPI endpoint cache bypassed for: {}", normalized_url);
+                }
+                crate::cache::CacheResult::Miss => {}
+            }
+        }
+
         let schema_url = self
             .discover_schema_url(url)
             .await?
@@ -518,6 +536,9 @@ impl Adapter for OpenAPIAdapter {
                 debug!("Failed to cache OpenAPI schema: {}", e);
             } else {
                 info!("Cached OpenAPI schema for: {}", cache_key);
+            }
+            if let Err(e) = cache.put(&normalized_url, &schema) {
+                debug!("Failed to cache OpenAPI endpoint schema: {}", e);
             }
         }
 
