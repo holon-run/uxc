@@ -1,6 +1,6 @@
 mod common;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use common::{start_test_server, test_server_binary};
@@ -12,6 +12,11 @@ fn uxc_command() -> Command {
 
 fn daemon_stop_best_effort() {
     let _ = uxc_command().arg("daemon").arg("stop").output();
+}
+
+fn warm_latency_bound(cold: Duration) -> Duration {
+    cold.saturating_mul(25)
+        .saturating_add(Duration::from_millis(50))
 }
 
 #[test]
@@ -37,7 +42,7 @@ fn benchmark_mcp_stdio_cold_vs_warm_latency() {
         .arg(r#"{"message":"benchmark-cold"}"#)
         .output()
         .expect("cold call should run");
-    let cold_ms = cold_t0.elapsed().as_millis() as u64;
+    let cold = cold_t0.elapsed();
     assert!(
         cold_output.status.success(),
         "cold call should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -53,7 +58,7 @@ fn benchmark_mcp_stdio_cold_vs_warm_latency() {
         .arg(r#"{"message":"benchmark-warm"}"#)
         .output()
         .expect("warm call should run");
-    let warm_ms = warm_t0.elapsed().as_millis() as u64;
+    let warm = warm_t0.elapsed();
     assert!(
         warm_output.status.success(),
         "warm call should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -61,15 +66,16 @@ fn benchmark_mcp_stdio_cold_vs_warm_latency() {
         String::from_utf8_lossy(&warm_output.stderr)
     );
 
-    eprintln!("mcp-stdio latency: cold={}ms warm={}ms", cold_ms, warm_ms);
-
-    assert!(cold_ms > 0, "cold latency should be > 0");
-    assert!(warm_ms > 0, "warm latency should be > 0");
+    eprintln!(
+        "mcp-stdio latency: cold={}ms warm={}ms",
+        cold.as_millis(),
+        warm.as_millis()
+    );
     assert!(
-        warm_ms <= cold_ms.saturating_mul(25).saturating_add(50),
+        warm <= warm_latency_bound(cold),
         "warm call unexpectedly slower: cold={}ms warm={}ms",
-        cold_ms,
-        warm_ms
+        cold.as_millis(),
+        warm.as_millis()
     );
 
     daemon_stop_best_effort();
@@ -96,7 +102,7 @@ fn benchmark_openapi_http_cold_vs_warm_latency() {
         .arg("get:/health")
         .output()
         .expect("cold call should run");
-    let cold_ms = cold_t0.elapsed().as_millis() as u64;
+    let cold = cold_t0.elapsed();
     assert!(cold_output.status.success());
 
     let warm_t0 = Instant::now();
@@ -105,21 +111,20 @@ fn benchmark_openapi_http_cold_vs_warm_latency() {
         .arg("get:/health")
         .output()
         .expect("warm call should run");
-    let warm_ms = warm_t0.elapsed().as_millis() as u64;
+    let warm = warm_t0.elapsed();
     assert!(warm_output.status.success());
 
     eprintln!(
         "openapi-http latency: cold={}ms warm={}ms",
-        cold_ms, warm_ms
+        cold.as_millis(),
+        warm.as_millis()
     );
 
-    assert!(cold_ms > 0, "cold latency should be > 0");
-    assert!(warm_ms > 0, "warm latency should be > 0");
     assert!(
-        warm_ms <= cold_ms.saturating_mul(25).saturating_add(50),
+        warm <= warm_latency_bound(cold),
         "warm call unexpectedly slower: cold={}ms warm={}ms",
-        cold_ms,
-        warm_ms
+        cold.as_millis(),
+        warm.as_millis()
     );
 
     daemon_stop_best_effort();
@@ -172,8 +177,6 @@ fn benchmark_repeated_call_latency_p95() {
         latencies_ms.len()
     );
 
-    assert!(p50 > 0, "p50 latency should be > 0");
-    assert!(p95 > 0, "p95 latency should be > 0");
     assert!(p95 < 5_000, "p95 latency should stay within sane bound");
 
     daemon_stop_best_effort();

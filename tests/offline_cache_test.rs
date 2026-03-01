@@ -8,6 +8,10 @@ fn uxc_command() -> Command {
     Command::new(env!("CARGO_BIN_EXE_uxc"))
 }
 
+fn daemon_stop_best_effort() {
+    let _ = uxc_command().arg("daemon").arg("stop").output();
+}
+
 fn uxc_command_with_home(home: &Path) -> Command {
     let mut cmd = uxc_command();
     cmd.env("HOME", home);
@@ -18,6 +22,7 @@ fn uxc_command_with_home(home: &Path) -> Command {
 #[test]
 #[serial]
 fn operation_help_uses_stale_cache_fallback_with_meta() {
+    daemon_stop_best_effort();
     let temp_home = tempfile::tempdir().expect("temp home should be created");
 
     let endpoint = {
@@ -84,11 +89,13 @@ fn operation_help_uses_stale_cache_fallback_with_meta() {
         json["meta"]["cache_age_ms"].as_u64().is_some(),
         "cache_age_ms should be present"
     );
+    daemon_stop_best_effort();
 }
 
 #[test]
 #[serial]
 fn host_help_offline_cache_miss_returns_actionable_error() {
+    daemon_stop_best_effort();
     let temp_home = tempfile::tempdir().expect("temp home should be created");
 
     let output = uxc_command_with_home(temp_home.path())
@@ -111,11 +118,13 @@ fn host_help_offline_cache_miss_returns_actionable_error() {
         message.contains("No adapter found for URL"),
         "error message should be actionable, got: {message}"
     );
+    daemon_stop_best_effort();
 }
 
 #[test]
 #[serial]
 fn operation_help_offline_cache_miss_returns_actionable_error() {
+    daemon_stop_best_effort();
     let temp_home = tempfile::tempdir().expect("temp home should be created");
 
     let output = uxc_command_with_home(temp_home.path())
@@ -139,4 +148,5 @@ fn operation_help_offline_cache_miss_returns_actionable_error() {
         message.contains("No adapter found for URL"),
         "error message should be actionable, got: {message}"
     );
+    daemon_stop_best_effort();
 }
