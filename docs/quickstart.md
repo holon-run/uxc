@@ -145,6 +145,7 @@ Example bearer setup:
 
 ```bash
 uxc auth credential set deepwiki --auth-type bearer --secret-env DEEPWIKI_TOKEN
+uxc auth credential set deepwiki --secret-op op://Engineering/deepwiki/token
 uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mcp --scheme https --credential deepwiki --priority 100
 ```
 

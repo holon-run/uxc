@@ -93,5 +93,5 @@ When calling MCP HTTP with an OAuth credential:
 
 ## Notes
 
-- OAuth credential data is currently stored in plaintext (same as existing credential storage).
-- Local encrypted storage is tracked separately (Issue #29).
+- UXC supports mixed credential sources in the same store: `literal`, `env`, and `op`.
+- For external sources (`env`, `op`), resolved secret values are used at runtime and are not written back as plaintext credential values.

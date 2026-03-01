@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod oauth;
 
@@ -150,13 +152,29 @@ pub struct OAuthProfile {
 pub enum SecretSource {
     Literal { value: String },
     Env { key: String },
+    Op { reference: String },
 }
 
 impl SecretSource {
-    fn resolve(&self) -> Option<String> {
+    pub fn kind(&self) -> &'static str {
         match self {
-            SecretSource::Literal { value } => Some(value.clone()),
-            SecretSource::Env { key } => std::env::var(key).ok(),
+            SecretSource::Literal { .. } => "literal",
+            SecretSource::Env { .. } => "env",
+            SecretSource::Op { .. } => "op",
+        }
+    }
+
+    fn resolve(&self, credential_name: Option<&str>) -> Result<String> {
+        match self {
+            SecretSource::Literal { value } => Ok(value.clone()),
+            SecretSource::Env { key } => std::env::var(key).map_err(|_| {
+                anyhow::anyhow!(
+                    "Credential '{}' expects env var '{}' but it is not set",
+                    credential_name.unwrap_or("unknown"),
+                    key
+                )
+            }),
+            SecretSource::Op { reference } => resolve_op_secret(reference, credential_name),
         }
     }
 }
@@ -226,29 +244,38 @@ impl Profile {
         self
     }
 
+    pub fn with_secret_op(mut self, reference: String) -> Self {
+        self.secret_source = Some(SecretSource::Op { reference });
+        self.api_key.clear();
+        self
+    }
+
     /// Resolve runtime secret from secret_source.
-    pub fn resolve_secret(&self) -> Option<String> {
+    pub fn resolve_secret(&self) -> Result<Option<String>> {
         if self.auth_type == AuthType::OAuth {
-            return self.oauth.as_ref()?.access_token.clone();
+            return Ok(self
+                .oauth
+                .as_ref()
+                .and_then(|oauth| oauth.access_token.clone()));
         }
 
         if let Some(source) = &self.secret_source {
-            return source.resolve();
+            return Ok(Some(source.resolve(self.name.as_deref())?));
         }
 
         if !self.api_key.is_empty() {
-            return Some(self.api_key.clone());
+            return Ok(Some(self.api_key.clone()));
         }
 
-        None
+        Ok(None)
     }
 
-    /// Materialize secret into `api_key`.
-    pub fn materialize(mut self) -> Self {
-        if let Some(secret) = self.resolve_secret() {
+    /// Materialize secret into `api_key` for runtime execution.
+    pub fn materialize_runtime(mut self) -> Result<Self> {
+        if let Some(secret) = self.resolve_secret()? {
             self.api_key = secret;
         }
-        self
+        Ok(self)
     }
 
     /// Mask the API key for display (show only first 8 and last 4 characters)
@@ -283,8 +310,11 @@ impl Profile {
             return self.api_key.clone();
         }
 
-        if let Some(secret) = self.resolve_secret() {
-            return secret;
+        if let Some(source) = &self.secret_source {
+            return match source {
+                SecretSource::Literal { value } => value.clone(),
+                SecretSource::Env { .. } | SecretSource::Op { .. } => "********".to_string(),
+            };
         }
 
         String::new()
@@ -348,13 +378,23 @@ impl StoredCredential {
     }
 
     fn to_runtime(&self, name: &str) -> Profile {
+        let secret_source = if self.auth_type == AuthType::OAuth {
+            None
+        } else {
+            self.secret_source.clone().or_else(|| {
+                self.api_key.as_ref().map(|value| SecretSource::Literal {
+                    value: value.clone(),
+                })
+            })
+        };
+
         let mut profile = Profile {
             api_key: String::new(),
             auth_type: self.auth_type.clone(),
             description: self.description.clone(),
             oauth: self.oauth.clone(),
             name: Some(name.to_string()),
-            secret_source: self.secret_source.clone(),
+            secret_source,
         };
 
         if profile.auth_type == AuthType::OAuth {
@@ -364,8 +404,8 @@ impl StoredCredential {
                 .and_then(|oauth| oauth.access_token.clone())
                 .or_else(|| self.api_key.clone())
                 .unwrap_or_default();
-        } else if let Some(secret) = profile.resolve_secret() {
-            profile.api_key = secret;
+        } else if let Some(SecretSource::Literal { value }) = &profile.secret_source {
+            profile.api_key = value.clone();
         }
 
         profile
@@ -450,8 +490,7 @@ impl Profiles {
         let json = serde_json::to_string_pretty(&document)
             .context("Failed to serialize credentials to JSON")?;
 
-        fs::write(&path, json)
-            .with_context(|| format!("Failed to write credentials file: {:?}", path))?;
+        write_secure_auth_file(&path, &json, "credentials")?;
 
         Ok(())
     }
@@ -497,7 +536,7 @@ impl Profiles {
     pub fn set_profile(&mut self, name: String, mut profile: Profile) -> Result<()> {
         Self::validate_profile_name(&name)?;
         profile.name = Some(name.clone());
-        self.profiles.insert(name, profile.materialize());
+        self.profiles.insert(name, profile);
         Ok(())
     }
 
@@ -619,8 +658,7 @@ impl AuthBindings {
         let json = serde_json::to_string_pretty(&document)
             .context("Failed to serialize auth bindings to JSON")?;
 
-        fs::write(&path, json)
-            .with_context(|| format!("Failed to write auth bindings file: {:?}", path))?;
+        write_secure_auth_file(&path, &json, "auth bindings")?;
 
         Ok(())
     }
@@ -730,7 +768,7 @@ pub fn resolve_auth_for_endpoint(
     let profiles = Profiles::load_profiles()?;
 
     if let Some(id) = explicit_credential {
-        let profile = profiles.get_profile(&id)?.clone().materialize();
+        let profile = profiles.get_profile(&id)?.clone().materialize_runtime()?;
         validate_ready(&profile)?;
         return Ok(Some(profile));
     }
@@ -749,7 +787,7 @@ pub fn resolve_auth_for_endpoint(
             )
         })?
         .clone()
-        .materialize();
+        .materialize_runtime()?;
 
     validate_ready(&profile)?;
     Ok(Some(profile))
@@ -769,22 +807,145 @@ fn validate_ready(profile: &Profile) -> Result<()> {
         }
         _ => {
             if profile.api_key.is_empty() {
-                if let Some(SecretSource::Env { key }) = &profile.secret_source {
-                    anyhow::bail!(
-                        "Credential '{}' expects env var '{}' but it is not set",
-                        profile.name.as_deref().unwrap_or("unknown"),
-                        key
-                    );
-                }
                 anyhow::bail!(
-                    "Credential '{}' does not have a usable secret",
-                    profile.name.as_deref().unwrap_or("unknown")
+                    "Credential '{}' does not have a usable secret. Set it with --secret, --secret-env, or --secret-op.",
+                    profile.name.as_deref().unwrap_or("unknown"),
                 );
             }
         }
     }
 
     Ok(())
+}
+
+fn resolve_op_secret(reference: &str, credential_name: Option<&str>) -> Result<String> {
+    let output = match std::process::Command::new("op")
+        .arg("read")
+        .arg(reference)
+        .arg("--no-newline")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!(
+                "Credential '{}' uses 1Password secret source, but 'op' CLI was not found in PATH. Install it from https://developer.1password.com/docs/cli/",
+                credential_name.unwrap_or("unknown")
+            );
+        }
+        Err(err) => {
+            anyhow::bail!(
+                "Failed to execute 'op read' for credential '{}': {}",
+                credential_name.unwrap_or("unknown"),
+                err
+            );
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = sanitize_command_error(&stderr);
+        anyhow::bail!(
+            "Failed to resolve 1Password secret for credential '{}': {}",
+            credential_name.unwrap_or("unknown"),
+            message
+        );
+    }
+
+    let value = String::from_utf8(output.stdout)
+        .context("Failed to decode 1Password CLI output as UTF-8")?
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+    if value.is_empty() {
+        anyhow::bail!(
+            "1Password secret reference returned empty value for credential '{}'",
+            credential_name.unwrap_or("unknown")
+        );
+    }
+    Ok(value)
+}
+
+fn sanitize_command_error(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        return "unknown error".to_string();
+    }
+
+    let single_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+    let mut truncated = single_line.to_string();
+    if truncated.len() > 240 {
+        truncated.truncate(240);
+        truncated.push_str("...");
+    }
+    truncated
+}
+
+fn write_secure_auth_file(path: &std::path::Path, contents: &str, label: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create auth directory: {:?}", parent))?;
+        }
+    }
+
+    let temp_path = temporary_auth_file_path(path);
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options
+        .open(&temp_path)
+        .with_context(|| format!("Failed to create temporary {} file: {:?}", label, temp_path))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("Failed to write temporary {} file: {:?}", label, temp_path))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to sync temporary {} file: {:?}", label, temp_path))?;
+    drop(file);
+
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "Failed to atomically replace {} file: temp={:?}, target={:?}",
+            label, temp_path, path
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "Failed to set secure permissions on {} file: {:?}",
+                label, path
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn temporary_auth_file_path(path: &std::path::Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("auth-file");
+    let pid = std::process::id();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    for nonce in 0..64u32 {
+        let candidate = parent.join(format!(".{}.{}.{}.{}.tmp", filename, pid, now, nonce));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    parent.join(format!(".{}.{}.{}.tmp", filename, pid, now))
 }
 
 /// Apply authentication to a reqwest request builder.

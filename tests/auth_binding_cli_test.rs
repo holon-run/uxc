@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -250,4 +251,98 @@ fn auth_binding_set_and_remove_have_text_output() {
     );
     let remove_stdout = String::from_utf8_lossy(&remove_output.stdout);
     assert!(remove_stdout.contains("Removed binding 'txt-binding'."));
+}
+
+#[cfg(unix)]
+#[test]
+fn auth_bindings_file_permissions_are_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let files = AuthFiles::new();
+    create_test_credential(&files, "perm");
+
+    let add_output = uxc_command(&files)
+        .arg("auth")
+        .arg("binding")
+        .arg("add")
+        .arg("--id")
+        .arg("perm-binding")
+        .arg("--host")
+        .arg("api.example.com")
+        .arg("--credential")
+        .arg("perm")
+        .output()
+        .expect("binding add should run");
+    assert!(add_output.status.success(), "binding add should succeed");
+
+    let mode = fs::metadata(&files.bindings_file)
+        .expect("bindings file metadata should exist")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "bindings file should be mode 0600");
+}
+
+#[test]
+fn auth_credential_set_preserves_existing_type_and_description() {
+    let files = AuthFiles::new();
+
+    let first = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("preserve")
+        .arg("--auth-type")
+        .arg("api_key")
+        .arg("--secret")
+        .arg("first-secret")
+        .arg("--description")
+        .arg("keep-me")
+        .output()
+        .expect("first credential set should run");
+    assert!(first.status.success(), "first set should succeed");
+
+    let second = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("preserve")
+        .arg("--secret-env")
+        .arg("PRESERVE_TOKEN")
+        .output()
+        .expect("second credential set should run");
+    assert!(second.status.success(), "second set should succeed");
+
+    let info = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("info")
+        .arg("preserve")
+        .output()
+        .expect("credential info should run");
+    assert!(info.status.success(), "info should succeed");
+    let json = parse_stdout_json(&info);
+    assert_eq!(json["data"]["auth_type"], "api_key");
+    assert_eq!(json["data"]["description"], "keep-me");
+    assert_eq!(json["data"]["secret_source"]["kind"], "env");
+}
+
+#[test]
+fn auth_credential_set_supports_secret_op_source() {
+    let files = AuthFiles::new();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("op-source")
+        .arg("--secret-op")
+        .arg("op://Engineering/demo/token")
+        .output()
+        .expect("credential set should run");
+    assert!(output.status.success(), "credential set should succeed");
+
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["secret_source"]["kind"], "op");
 }

@@ -300,6 +300,7 @@ Example:
 
 ```bash
 uxc auth credential set deepwiki --auth-type bearer --secret-env DEEPWIKI_TOKEN
+uxc auth credential set deepwiki --secret-op op://Engineering/deepwiki/token
 uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mcp --scheme https --credential deepwiki --priority 100
 ```
 
@@ -311,6 +312,7 @@ See [`docs/oauth-mcp-http.md`](docs/oauth-mcp-http.md) for full workflows.
 - Extended quickstart and protocol walkthroughs: [`docs/quickstart.md`](docs/quickstart.md)
 - Public no-key endpoints for protocol checks: [`docs/public-endpoints.md`](docs/public-endpoints.md)
 - Logging and troubleshooting with `RUST_LOG`: [`docs/logging.md`](docs/logging.md)
+- Auth credential secret sources (`literal/env/op`): [`docs/auth-secret-sources.md`](docs/auth-secret-sources.md)
 - OpenAPI schema mapping and `--schema-url`: [`docs/schema-mapping.md`](docs/schema-mapping.md)
 - Skills overview and install/maintenance guidance: [`docs/skills.md`](docs/skills.md)
 - Release process: [`docs/release.md`](docs/release.md)

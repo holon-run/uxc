@@ -208,7 +208,13 @@ pub struct AuthProfileView {
     pub name: String,
     pub auth_type: String,
     pub api_key_masked: String,
+    pub secret_source: Option<AuthSecretSourceView>,
     pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthSecretSourceView {
+    pub kind: String,
 }
 
 /// Convert Profile to AuthProfileView
@@ -217,6 +223,12 @@ pub fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
         name: name.to_string(),
         auth_type: profile.auth_type.to_string(),
         api_key_masked: profile.mask_api_key(),
+        secret_source: profile
+            .secret_source
+            .as_ref()
+            .map(|source| AuthSecretSourceView {
+                kind: source.kind().to_string(),
+            }),
         description: profile.description.clone(),
     }
 }

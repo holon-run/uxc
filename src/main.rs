@@ -209,16 +209,20 @@ enum AuthCredentialCommands {
         credential_id: String,
 
         /// Authentication type (bearer, api_key, basic, oauth)
-        #[arg(short = 't', long, default_value = "bearer")]
-        auth_type: String,
+        #[arg(short = 't', long)]
+        auth_type: Option<String>,
 
         /// Literal secret value
-        #[arg(long, conflicts_with = "secret_env")]
+        #[arg(long, conflicts_with_all = ["secret_env", "secret_op"])]
         secret: Option<String>,
 
         /// Environment variable key containing secret
-        #[arg(long, conflicts_with = "secret")]
+        #[arg(long, conflicts_with_all = ["secret", "secret_op"])]
         secret_env: Option<String>,
+
+        /// 1Password secret reference (op://...)
+        #[arg(long, conflicts_with_all = ["secret", "secret_env"])]
+        secret_op: Option<String>,
 
         /// Credential description
         #[arg(long)]
@@ -412,8 +416,14 @@ struct AuthProfileView {
     name: String,
     auth_type: String,
     api_key_masked: String,
+    secret_source: Option<AuthSecretSourceView>,
     description: Option<String>,
     oauth: Option<AuthOAuthView>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthSecretSourceView {
+    kind: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1231,6 +1241,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             examples: vec![
                 "uxc auth credential list".to_string(),
                 "uxc auth credential set demo --secret-env DEMO_TOKEN".to_string(),
+                "uxc auth credential set demo --secret-op op://Vault/Item/token".to_string(),
             ],
         },
         ["auth", "credential", "list"] => HelpData {
@@ -1252,10 +1263,14 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth", "credential", "set"] => HelpData {
             path: "uxc auth credential set".to_string(),
             about: "Set or update a credential".to_string(),
-            usage: "uxc auth credential set <credential_id> [--auth-type <type>] [--secret <value>|--secret-env <key>] [--description <text>]".to_string(),
+            usage: "uxc auth credential set <credential_id> [--auth-type <type>] [--secret <value>|--secret-env <key>|--secret-op <op://...>] [--description <text>]".to_string(),
             commands: vec![],
             notes: vec![],
-            examples: vec!["uxc auth credential set deepwiki --secret-env DEEPWIKI_TOKEN".to_string()],
+            examples: vec![
+                "uxc auth credential set deepwiki --secret-env DEEPWIKI_TOKEN".to_string(),
+                "uxc auth credential set deepwiki --secret-op op://Engineering/deepwiki/token"
+                    .to_string(),
+            ],
         },
         ["auth", "credential", "remove"] => HelpData {
             path: "uxc auth credential remove".to_string(),
@@ -1517,6 +1532,9 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
                 println!("  {}", credential.name);
                 println!("    Type: {}", credential.auth_type);
                 println!("    Secret: {}", credential.api_key_masked);
+                if let Some(source) = credential.secret_source {
+                    println!("    Source: {}", source.kind);
+                }
                 if let Some(oauth) = credential.oauth {
                     println!(
                         "    OAuth Flow: {}",
@@ -1538,6 +1556,9 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             println!("Credential: {}", credential.name);
             println!("  Type: {}", credential.auth_type);
             println!("  Secret: {}", credential.api_key_masked);
+            if let Some(source) = credential.secret_source {
+                println!("  Source: {}", source.kind);
+            }
             if let Some(oauth) = credential.oauth {
                 println!(
                     "  OAuth Flow: {}",
@@ -2499,46 +2520,123 @@ async fn handle_auth_credential_command(
             auth_type,
             secret,
             secret_env,
+            secret_op,
             description,
         } => {
-            let auth_type = auth_type
-                .parse::<AuthType>()
-                .map_err(|e| anyhow::anyhow!("Invalid auth type: {}", e))?;
+            let mut profiles = Profiles::load_profiles()?;
+            let existing = profiles.profiles.get(credential_id).cloned();
 
-            if auth_type != AuthType::OAuth && secret.is_none() && secret_env.is_none() {
+            let resolved_auth_type = match auth_type {
+                Some(value) => value
+                    .parse::<AuthType>()
+                    .map_err(|e| anyhow::anyhow!("Invalid auth type: {}", e))?,
+                None => existing
+                    .as_ref()
+                    .map(|p| p.auth_type.clone())
+                    .unwrap_or(AuthType::Bearer),
+            };
+
+            let provided_secret_flags =
+                [secret.is_some(), secret_env.is_some(), secret_op.is_some()]
+                    .iter()
+                    .filter(|present| **present)
+                    .count();
+            if provided_secret_flags > 1 {
                 return Err(UxcError::InvalidArguments(
-                    "Credential set requires either --secret or --secret-env".to_string(),
+                    "Use only one of --secret, --secret-env, or --secret-op".to_string(),
                 )
                 .into());
             }
 
-            let mut profile_obj = match (&secret, &secret_env) {
-                (Some(value), None) => Profile::new(value.clone(), auth_type.clone()),
-                (None, Some(env_key)) => {
-                    Profile::new(String::new(), auth_type.clone()).with_secret_env(env_key.clone())
-                }
-                (None, None) => Profile::new(String::new(), auth_type.clone()),
-                _ => {
+            if resolved_auth_type == AuthType::OAuth && provided_secret_flags > 0 {
+                return Err(UxcError::InvalidArguments(
+                    "OAuth credential set does not accept --secret/--secret-env/--secret-op. Use `uxc auth oauth login <credential_id> ...`.".to_string(),
+                )
+                .into());
+            }
+
+            let mut profile_obj =
+                existing.unwrap_or_else(|| Profile::new(String::new(), resolved_auth_type.clone()));
+            profile_obj.auth_type = resolved_auth_type.clone();
+            profile_obj.name = Some(credential_id.clone());
+
+            if resolved_auth_type != AuthType::OAuth {
+                let has_existing_secret = matches!(
+                    profile_obj.secret_source,
+                    Some(crate::auth::SecretSource::Literal { .. })
+                        | Some(crate::auth::SecretSource::Env { .. })
+                        | Some(crate::auth::SecretSource::Op { .. })
+                ) || !profile_obj.api_key.is_empty();
+
+                if provided_secret_flags == 0 && !has_existing_secret {
                     return Err(UxcError::InvalidArguments(
-                        "Use only one of --secret or --secret-env".to_string(),
+                        "Credential set requires one of --secret, --secret-env, or --secret-op"
+                            .to_string(),
                     )
                     .into());
                 }
-            };
-            if let Some(desc) = description {
-                profile_obj = profile_obj.with_description(desc.clone());
             }
 
-            let mut profiles = Profiles::load_profiles()?;
+            match (secret, secret_env, secret_op) {
+                (Some(value), None, None) => {
+                    profile_obj.secret_source = Some(crate::auth::SecretSource::Literal {
+                        value: value.clone(),
+                    });
+                    profile_obj.api_key = value.clone();
+                }
+                (None, Some(env_key), None) => {
+                    profile_obj.secret_source = Some(crate::auth::SecretSource::Env {
+                        key: env_key.clone(),
+                    });
+                    profile_obj.api_key.clear();
+                }
+                (None, None, Some(reference)) => {
+                    profile_obj.secret_source = Some(crate::auth::SecretSource::Op {
+                        reference: reference.clone(),
+                    });
+                    profile_obj.api_key.clear();
+                }
+                (None, None, None) => {}
+                _ => unreachable!("secret argument exclusivity is validated above"),
+            }
+
+            if resolved_auth_type == AuthType::OAuth {
+                profile_obj.secret_source = None;
+            } else {
+                profile_obj.oauth = None;
+            }
+
+            if let Some(desc) = description {
+                profile_obj.description = Some(desc.clone());
+            } else if profile_obj.description.is_none() {
+                profile_obj.description = None;
+            }
+
             profiles.set_profile(credential_id.clone(), profile_obj)?;
             profiles.save_profiles()?;
             let profile_data = profiles.get_profile(credential_id)?;
             let view = AuthProfileView {
                 name: credential_id.clone(),
-                auth_type: auth_type.to_string(),
+                auth_type: resolved_auth_type.to_string(),
                 api_key_masked: profile_data.mask_api_key(),
-                description: description.clone(),
-                oauth: None,
+                secret_source: profile_data.secret_source.as_ref().map(|source| {
+                    AuthSecretSourceView {
+                        kind: source.kind().to_string(),
+                    }
+                }),
+                description: profile_data.description.clone(),
+                oauth: profile_data.oauth.as_ref().map(|oauth| AuthOAuthView {
+                    flow: oauth.oauth_flow.as_ref().map(|flow| match flow {
+                        OAuthFlow::DeviceCode => "device_code".to_string(),
+                        OAuthFlow::AuthorizationCode => "authorization_code".to_string(),
+                        OAuthFlow::ClientCredentials => "client_credentials".to_string(),
+                    }),
+                    provider_issuer: oauth.provider_issuer.clone(),
+                    resource_metadata_url: oauth.resource_metadata_url.clone(),
+                    scopes: oauth.scopes.clone(),
+                    expires_at: oauth.expires_at,
+                    has_refresh_token: oauth.refresh_token.is_some(),
+                }),
             };
             let data = serde_json::to_value(view)?;
             Ok(OutputEnvelope::success(
@@ -2918,6 +3016,12 @@ fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
         name: name.to_string(),
         auth_type: profile.auth_type.to_string(),
         api_key_masked: profile.mask_api_key(),
+        secret_source: profile
+            .secret_source
+            .as_ref()
+            .map(|source| AuthSecretSourceView {
+                kind: source.kind().to_string(),
+            }),
         description: profile.description.clone(),
         oauth,
     }

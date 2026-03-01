@@ -17,6 +17,7 @@ struct TestEnv {
     temp_dir: TempDir,
     _home_guard: MutexGuard<'static, ()>,
     previous_home: Option<std::ffi::OsString>,
+    previous_path: Option<std::ffi::OsString>,
 }
 
 impl Drop for TestEnv {
@@ -24,6 +25,10 @@ impl Drop for TestEnv {
         match &self.previous_home {
             Some(prev) => std::env::set_var("HOME", prev),
             None => std::env::remove_var("HOME"),
+        }
+        match &self.previous_path {
+            Some(prev) => std::env::set_var("PATH", prev),
+            None => std::env::remove_var("PATH"),
         }
     }
 }
@@ -36,6 +41,7 @@ fn setup_test_env() -> TestEnv {
         .expect("Failed to lock HOME env guard");
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let previous_home = std::env::var_os("HOME");
+    let previous_path = std::env::var_os("PATH");
 
     // Set HOME to the temp directory for testing
     std::env::set_var("HOME", temp_dir.path());
@@ -44,6 +50,7 @@ fn setup_test_env() -> TestEnv {
         temp_dir,
         _home_guard: guard,
         previous_home,
+        previous_path,
     }
 }
 
@@ -266,6 +273,68 @@ fn test_json_format() {
 }
 
 #[test]
+fn test_load_legacy_api_key_and_migrate_on_save() {
+    let temp_dir = setup_test_env();
+    let auth_dir = temp_dir.temp_dir.path().join(".uxc");
+    fs::create_dir_all(&auth_dir).expect("auth dir should be created");
+    let profiles_path = auth_dir.join("credentials.json");
+
+    let legacy = r#"
+{
+  "version": 1,
+  "credentials": {
+    "legacy": {
+      "auth_type": "bearer",
+      "api_key": "legacy-secret"
+    }
+  }
+}
+"#;
+    fs::write(&profiles_path, legacy).expect("legacy credentials should be written");
+
+    let loaded = Profiles::load_profiles().expect("legacy credentials should load");
+    let profile = loaded
+        .get_profile("legacy")
+        .expect("legacy profile should exist");
+    assert_eq!(profile.api_key, "legacy-secret");
+    assert!(profile.secret_source.is_some());
+
+    loaded
+        .save_profiles()
+        .expect("saving migrated profiles should work");
+    let contents = fs::read_to_string(&profiles_path).expect("should read migrated file");
+    assert!(contents.contains("\"secret_source\""));
+    assert!(contents.contains("\"kind\": \"literal\""));
+    assert!(contents.contains("\"value\": \"legacy-secret\""));
+    assert!(!contents.contains("\"api_key\": \"legacy-secret\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_credentials_file_permissions_are_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = setup_test_env();
+
+    let mut profiles = Profiles::new();
+    profiles
+        .set_profile(
+            "secure".to_string(),
+            Profile::new("secret-token".to_string(), AuthType::Bearer),
+        )
+        .expect("set profile should succeed");
+    profiles.save_profiles().expect("save should succeed");
+
+    let profiles_path = temp_dir.temp_dir.path().join(".uxc/credentials.json");
+    let mode = fs::metadata(&profiles_path)
+        .expect("metadata should be readable")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "credentials file should be mode 0600");
+}
+
+#[test]
 fn test_mask_api_key() {
     let profile = Profile::new("sk-1234567890abcdefgh".to_string(), AuthType::Bearer);
     assert_eq!(profile.mask_api_key(), "sk-12345...efgh");
@@ -322,6 +391,77 @@ fn test_auth_type_display() {
     assert_eq!(AuthType::Bearer.to_string(), "bearer");
     assert_eq!(AuthType::ApiKey.to_string(), "api_key");
     assert_eq!(AuthType::Basic.to_string(), "basic");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_secret_from_op_provider() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = setup_test_env();
+    let bin_dir = temp_dir.temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir should be created");
+    let op_path = bin_dir.join("op");
+    let script = r#"#!/bin/sh
+if [ "$1" = "read" ] && [ "$2" = "op://Vault/Item/field" ]; then
+  printf "token-from-op"
+  exit 0
+fi
+echo "not found" >&2
+exit 1
+"#;
+    fs::write(&op_path, script).expect("op script should be written");
+    let mut perms = fs::metadata(&op_path)
+        .expect("op script metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&op_path, perms).expect("op script should be executable");
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
+
+    let mut profiles = Profiles::new();
+    let profile = Profile::new(String::new(), AuthType::Bearer)
+        .with_secret_op("op://Vault/Item/field".to_string());
+    profiles
+        .set_profile("op-cred".to_string(), profile)
+        .expect("set profile should succeed");
+    profiles
+        .save_profiles()
+        .expect("save profiles should succeed");
+
+    let resolved = uxc::auth::resolve_auth_for_endpoint(
+        "https://api.example.com",
+        Some("op-cred".to_string()),
+    )
+    .expect("op secret should resolve")
+    .expect("profile should be present");
+    assert_eq!(resolved.api_key, "token-from-op");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_resolve_secret_from_op_provider_missing_binary() {
+    let _temp_dir = setup_test_env();
+
+    std::env::set_var("PATH", "/definitely-missing-op-bin");
+
+    let mut profiles = Profiles::new();
+    let profile = Profile::new(String::new(), AuthType::Bearer)
+        .with_secret_op("op://Vault/Item/field".to_string());
+    profiles
+        .set_profile("op-cred".to_string(), profile)
+        .expect("set profile should succeed");
+    profiles
+        .save_profiles()
+        .expect("save profiles should succeed");
+
+    let err = uxc::auth::resolve_auth_for_endpoint(
+        "https://api.example.com",
+        Some("op-cred".to_string()),
+    )
+    .expect_err("resolution should fail without op binary");
+    assert!(err.to_string().contains("'op' CLI was not found"));
 }
 
 #[test]
