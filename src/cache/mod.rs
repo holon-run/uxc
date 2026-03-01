@@ -61,7 +61,6 @@ pub enum CacheLookup {
 pub struct CacheHit {
     pub schema: Value,
     pub fetched_at: u64,
-    pub expires_at: u64,
     pub stale: bool,
 }
 

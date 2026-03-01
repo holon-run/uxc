@@ -284,7 +284,6 @@ impl Cache for SchemaCache {
                     Ok(CacheLookup::Hit(CacheHit {
                         schema: entry.schema,
                         fetched_at: entry.fetched_at,
-                        expires_at: entry.expires_at,
                         stale,
                     }))
                 }
