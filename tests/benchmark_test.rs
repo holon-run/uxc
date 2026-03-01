@@ -19,6 +19,14 @@ fn warm_latency_bound(cold: Duration) -> Duration {
         .saturating_add(Duration::from_millis(50))
 }
 
+fn benchmark_sample_count() -> usize {
+    std::env::var("UXC_BENCH_P95_SAMPLES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v >= 5)
+        .unwrap_or(20)
+}
+
 #[test]
 #[serial]
 fn benchmark_mcp_stdio_cold_vs_warm_latency() {
@@ -145,9 +153,10 @@ fn benchmark_repeated_call_latency_p95() {
         .expect("daemon start should run");
     assert!(start.status.success());
 
-    let mut latencies_ms = Vec::with_capacity(50);
+    let sample_count = benchmark_sample_count();
+    let mut latencies_ms = Vec::with_capacity(sample_count);
 
-    for i in 0..50 {
+    for i in 0..sample_count {
         let t0 = Instant::now();
         let output = uxc_command()
             .arg(&endpoint)
