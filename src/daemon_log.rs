@@ -174,8 +174,8 @@ impl DaemonLogger {
         }
 
         // Perform initial rotation check if log exists
-        if log_file.exists() {
-            let _ = rotate_log_if_needed(&log_file, max_bytes, backups)?;
+        if should_rotate(&log_file, max_bytes)? {
+            rotate_log_if_needed(&log_file, backups)?;
         }
 
         let file = open_log_file(&log_file)?;
@@ -203,8 +203,10 @@ impl DaemonLogger {
         }
 
         // Keep write + rotate in one critical section to avoid races and stale fds.
-        if rotate_log_if_needed(&self.log_file, self.max_bytes, self.backups)? {
+        // Close the active fd before rotate so Windows rename can succeed.
+        if should_rotate(&self.log_file, self.max_bytes)? {
             inner.file.take();
+            rotate_log_if_needed(&self.log_file, self.backups)?;
             inner.file = Some(open_log_file(&self.log_file)?);
         }
 
@@ -222,37 +224,24 @@ impl DaemonLogger {
     }
 }
 
-/// Rotate log file if it exceeds maximum size
-fn rotate_log_if_needed(log_file: &Path, max_bytes: u64, backups: usize) -> Result<bool> {
-    let metadata = std::fs::metadata(log_file);
-
-    if let Ok(meta) = metadata {
-        if meta.len() > max_bytes {
-            // Rotate existing backups
-            for i in (1..backups).rev() {
-                let old_backup = log_file.with_extension(format!("log.{}", i));
-                let new_backup = log_file.with_extension(format!("log.{}", i + 1));
-                if old_backup.exists() {
-                    std::fs::rename(&old_backup, &new_backup)
-                        .context("Failed to rotate backup log file")?;
-                }
-            }
-
-            // Move current log to .1
-            let backup1 = log_file.with_extension("log.1");
-            std::fs::rename(log_file, &backup1).context("Failed to rotate current log file")?;
-
-            // Remove oldest backup if it exists
-            let oldest_backup = log_file.with_extension(format!("log.{}", backups + 1));
-            if oldest_backup.exists() {
-                std::fs::remove_file(&oldest_backup).context("Failed to remove oldest backup")?;
-            }
-
-            return Ok(true);
+/// Rotate log file
+fn rotate_log_if_needed(log_file: &Path, backups: usize) -> Result<()> {
+    // Rotate existing backups
+    for i in (1..backups).rev() {
+        let old_backup = log_file.with_extension(format!("log.{}", i));
+        let new_backup = log_file.with_extension(format!("log.{}", i + 1));
+        if old_backup.exists() {
+            rename_replace(&old_backup, &new_backup).context("Failed to rotate backup log file")?;
         }
     }
 
-    Ok(false)
+    // Move current log to .1
+    if log_file.exists() {
+        let backup1 = log_file.with_extension("log.1");
+        rename_replace(log_file, &backup1).context("Failed to rotate current log file")?;
+    }
+
+    Ok(())
 }
 
 fn open_log_file(log_file: &Path) -> Result<File> {
@@ -261,6 +250,22 @@ fn open_log_file(log_file: &Path) -> Result<File> {
         .append(true)
         .open(log_file)
         .context("Failed to open log file")
+}
+
+fn should_rotate(log_file: &Path, max_bytes: u64) -> Result<bool> {
+    if !log_file.exists() {
+        return Ok(false);
+    }
+    let meta = std::fs::metadata(log_file).context("Failed to read log file metadata")?;
+    Ok(meta.len() > max_bytes)
+}
+
+fn rename_replace(src: &Path, dst: &Path) -> Result<()> {
+    if dst.exists() {
+        std::fs::remove_file(dst).context("Failed to remove existing rotation destination")?;
+    }
+    std::fs::rename(src, dst).context("Failed to rename rotation file")?;
+    Ok(())
 }
 
 /// Redact sensitive information from endpoint URLs
