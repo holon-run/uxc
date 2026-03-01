@@ -871,9 +871,16 @@ fn sanitize_command_error(stderr: &str) -> String {
     }
 
     let single_line = trimmed.lines().next().unwrap_or(trimmed).trim();
-    let mut truncated = single_line.to_string();
-    if truncated.len() > 240 {
-        truncated.truncate(240);
+    let mut truncated = String::new();
+    let mut char_count = 0usize;
+    for ch in single_line.chars() {
+        if char_count >= 240 {
+            break;
+        }
+        truncated.push(ch);
+        char_count += 1;
+    }
+    if single_line.chars().count() > char_count {
         truncated.push_str("...");
     }
     truncated
@@ -905,12 +912,38 @@ fn write_secure_auth_file(path: &std::path::Path, contents: &str, label: &str) -
         .with_context(|| format!("Failed to sync temporary {} file: {:?}", label, temp_path))?;
     drop(file);
 
-    fs::rename(&temp_path, path).with_context(|| {
-        format!(
-            "Failed to atomically replace {} file: temp={:?}, target={:?}",
-            label, temp_path, path
-        )
-    })?;
+    if let Err(rename_err) = fs::rename(&temp_path, path) {
+        #[cfg(windows)]
+        {
+            if path.exists() {
+                fs::remove_file(path).with_context(|| {
+                    format!(
+                        "Failed to remove existing {} file before replace: {:?}",
+                        label, path
+                    )
+                })?;
+            }
+            if let Err(retry_err) = fs::rename(&temp_path, path) {
+                let _ = fs::remove_file(&temp_path);
+                return Err(retry_err).with_context(|| {
+                    format!(
+                        "Failed to replace {} file on Windows: temp={:?}, target={:?}",
+                        label, temp_path, path
+                    )
+                });
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = fs::remove_file(&temp_path);
+            return Err(rename_err).with_context(|| {
+                format!(
+                    "Failed to atomically replace {} file: temp={:?}, target={:?}",
+                    label, temp_path, path
+                )
+            });
+        }
+    }
 
     #[cfg(unix)]
     {

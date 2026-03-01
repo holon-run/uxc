@@ -346,3 +346,43 @@ fn auth_credential_set_supports_secret_op_source() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["data"]["secret_source"]["kind"], "op");
 }
+
+#[test]
+fn auth_credential_switch_from_oauth_requires_explicit_secret() {
+    let files = AuthFiles::new();
+
+    let create_oauth = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("oauth-switch")
+        .arg("--auth-type")
+        .arg("oauth")
+        .output()
+        .expect("oauth credential set should run");
+    assert!(create_oauth.status.success(), "oauth set should succeed");
+
+    let switch_without_secret = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("oauth-switch")
+        .arg("--auth-type")
+        .arg("bearer")
+        .output()
+        .expect("switch set should run");
+    assert!(
+        !switch_without_secret.status.success(),
+        "switch without explicit secret should fail"
+    );
+    let json = parse_stdout_json(&switch_without_secret);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("requires an explicit secret source"),
+        "error should explain oauth switch secret requirement"
+    );
+}

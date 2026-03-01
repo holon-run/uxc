@@ -2525,6 +2525,7 @@ async fn handle_auth_credential_command(
         } => {
             let mut profiles = Profiles::load_profiles()?;
             let existing = profiles.profiles.get(credential_id).cloned();
+            let previous_auth_type = existing.as_ref().map(|p| p.auth_type.clone());
 
             let resolved_auth_type = match auth_type {
                 Some(value) => value
@@ -2555,6 +2556,16 @@ async fn handle_auth_credential_command(
                 .into());
             }
 
+            if resolved_auth_type != AuthType::OAuth
+                && previous_auth_type == Some(AuthType::OAuth)
+                && provided_secret_flags == 0
+            {
+                return Err(UxcError::InvalidArguments(
+                    "Switching credential from oauth to non-oauth requires an explicit secret source (--secret, --secret-env, or --secret-op).".to_string(),
+                )
+                .into());
+            }
+
             let mut profile_obj =
                 existing.unwrap_or_else(|| Profile::new(String::new(), resolved_auth_type.clone()));
             profile_obj.auth_type = resolved_auth_type.clone();
@@ -2566,7 +2577,8 @@ async fn handle_auth_credential_command(
                     Some(crate::auth::SecretSource::Literal { .. })
                         | Some(crate::auth::SecretSource::Env { .. })
                         | Some(crate::auth::SecretSource::Op { .. })
-                ) || !profile_obj.api_key.is_empty();
+                ) || (previous_auth_type != Some(AuthType::OAuth)
+                    && !profile_obj.api_key.is_empty());
 
                 if provided_secret_flags == 0 && !has_existing_secret {
                     return Err(UxcError::InvalidArguments(
