@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use serial_test::serial;
 
 fn uxc_command() -> Command {
     Command::cargo_bin("uxc").expect("uxc binary should build")
@@ -9,6 +10,7 @@ fn daemon_stop_best_effort() {
 }
 
 #[test]
+#[serial]
 fn daemon_start_status_stop_lifecycle() {
     daemon_stop_best_effort();
 
@@ -39,6 +41,7 @@ fn daemon_start_status_stop_lifecycle() {
 }
 
 #[test]
+#[serial]
 fn endpoint_host_help_autostarts_daemon_and_sets_meta() {
     daemon_stop_best_effort();
 

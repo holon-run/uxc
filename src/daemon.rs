@@ -1,4 +1,7 @@
-use crate::adapters::{self, Adapter, AdapterEnum, DetectionOptions, Operation, OperationDetail, ProtocolDetector, ProtocolType};
+use crate::adapters::{
+    self, Adapter, AdapterEnum, DetectionOptions, Operation, OperationDetail, ProtocolDetector,
+    ProtocolType,
+};
 use crate::auth::{self, Profile};
 use crate::cache::{self, Cache, CacheConfig};
 use crate::error::UxcError;
@@ -7,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs;
 use std::ffi::OsString;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -20,7 +25,17 @@ use tokio::sync::{Mutex, RwLock};
 const JSONRPC_VERSION: &str = "2.0";
 const START_POLL_TRIES: usize = 30;
 const START_POLL_INTERVAL_MS: u64 = 100;
+const START_LOCK_STALE_SECS: u64 = 30;
 const MCP_IDLE_TTL_SECS: u64 = 600;
+const CONNECT_TIMEOUT_SECS: u64 = 2;
+const FRAME_IO_TIMEOUT_SECS: u64 = 120;
+const MAX_FRAME_BODY_BYTES: usize = 8 * 1024 * 1024;
+const ERR_PROTOCOL_DETECTION: i32 = -32010;
+const ERR_OPERATION_NOT_FOUND: i32 = -32011;
+const ERR_OAUTH_REQUIRED: i32 = -32012;
+const ERR_OAUTH_REFRESH_FAILED: i32 = -32013;
+const ERR_OAUTH_SCOPE_INSUFFICIENT: i32 = -32014;
+const ERR_RUNTIME_GENERIC: i32 = -32030;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -141,6 +156,7 @@ struct McpStdioSession {
 struct McpHttpSession {
     transport: adapters::mcp::McpHttpTransport,
     last_used: Arc<Mutex<Instant>>,
+    init_result: adapters::mcp::types::InitializeResult,
 }
 
 impl McpSessionManager {
@@ -224,11 +240,13 @@ impl McpSessionManager {
             }
         }
 
-        let transport = adapters::mcp::McpHttpTransport::with_auth(endpoint.to_string(), auth_profile)?;
-        let _ = transport.initialize().await?;
+        let transport =
+            adapters::mcp::McpHttpTransport::with_auth(endpoint.to_string(), auth_profile)?;
+        let init_result = transport.initialize().await?;
         let session = Arc::new(McpHttpSession {
             transport,
             last_used: Arc::new(Mutex::new(Instant::now())),
+            init_result,
         });
 
         let mut map = self.http.lock().await;
@@ -267,7 +285,7 @@ pub struct DaemonRuntime {
     state: Arc<Mutex<ServerState>>,
     mcp: McpSessionManager,
     should_stop: Arc<RwLock<bool>>,
-    invoke_lock: Arc<Mutex<()>>,
+    schema_mapping_lock: Arc<Mutex<()>>,
 }
 
 impl DaemonRuntime {
@@ -279,14 +297,27 @@ impl DaemonRuntime {
             })),
             mcp: McpSessionManager::new(),
             should_stop: Arc::new(RwLock::new(false)),
-            invoke_lock: Arc::new(Mutex::new(())),
+            schema_mapping_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub async fn invoke(&self, request: RuntimeInvokeRequest) -> Result<RuntimeInvokeResponse> {
-        let _invoke_guard = self.invoke_lock.lock().await;
-        let _schema_mapping_guard =
-            SchemaMappingEnvGuard::new(request.options.schema_mapping_file.clone());
+        if request
+            .options
+            .schema_mapping_file
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            let _invoke_guard = self.schema_mapping_lock.lock().await;
+            let _schema_mapping_guard =
+                SchemaMappingEnvGuard::new(request.options.schema_mapping_file.clone());
+            return self.invoke_inner(request).await;
+        }
+
+        self.invoke_inner(request).await
+    }
+
+    async fn invoke_inner(&self, request: RuntimeInvokeRequest) -> Result<RuntimeInvokeResponse> {
         self.mcp.cleanup_idle().await;
         {
             let mut st = self.state.lock().await;
@@ -295,7 +326,8 @@ impl DaemonRuntime {
 
         let start = Instant::now();
         let cache = self.build_cache(&request.options)?;
-        let auth_profile = auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+        let auth_profile =
+            auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
 
         let detection_options = DetectionOptions {
             schema_url: request.options.schema_url.clone(),
@@ -400,7 +432,11 @@ impl DaemonRuntime {
         let endpoint = &request.endpoint;
         if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
             let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;
-            let key = format!("stdio:{}:{}", endpoint, auth_fingerprint(auth_profile.as_ref()));
+            let key = format!(
+                "stdio:{}:{}",
+                endpoint,
+                auth_fingerprint(auth_profile.as_ref())
+            );
             let (session, reused) = self.mcp.get_or_create_stdio(&key, &cmd, &cmd_args).await?;
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
@@ -458,6 +494,8 @@ impl DaemonRuntime {
                         .as_ref()
                         .ok_or_else(|| anyhow!("operation_id is required"))?;
                     let args = request.args.clone().unwrap_or_default();
+                    let tools = guard.client.list_tools().await?;
+                    validate_mcp_tool_args(op, &tools, &args)?;
                     let arguments = if args.is_empty() {
                         None
                     } else {
@@ -473,7 +511,8 @@ impl DaemonRuntime {
                 }
             }
         } else {
-            let resolved_endpoint = resolve_mcp_http_endpoint(endpoint, auth_profile.clone()).await?;
+            let resolved_endpoint =
+                resolve_mcp_http_endpoint(endpoint, auth_profile.clone()).await?;
             let key = format!(
                 "http:{}:{}",
                 resolved_endpoint,
@@ -487,7 +526,6 @@ impl DaemonRuntime {
 
             match request.action {
                 RuntimeAction::HostHelp => {
-                    let init_result = session.transport.initialize().await?;
                     let operations = session
                         .transport
                         .list_tools()
@@ -501,8 +539,12 @@ impl DaemonRuntime {
                         .map(|op| to_operation_summary(protocol, op))
                         .collect::<Vec<_>>();
                     let service = Some(ServiceSummary {
-                        name: init_result.serverInfo.map(|i| i.name),
-                        description: init_result.instructions,
+                        name: session
+                            .init_result
+                            .serverInfo
+                            .as_ref()
+                            .map(|i| i.name.clone()),
+                        description: session.init_result.instructions.clone(),
                     });
                     Ok((
                         "host_help".to_string(),
@@ -540,6 +582,8 @@ impl DaemonRuntime {
                         .as_ref()
                         .ok_or_else(|| anyhow!("operation_id is required"))?;
                     let args = request.args.clone().unwrap_or_default();
+                    let tools = session.transport.list_tools().await?;
+                    validate_mcp_tool_args(op, &tools, &args)?;
                     let arguments = if args.is_empty() {
                         None
                     } else {
@@ -568,7 +612,9 @@ pub async fn daemon_stop_client() -> Result<()> {
     Ok(())
 }
 
-pub async fn runtime_invoke_client(request: &RuntimeInvokeRequest) -> Result<RuntimeInvokeResponse> {
+pub async fn runtime_invoke_client(
+    request: &RuntimeInvokeRequest,
+) -> Result<RuntimeInvokeResponse> {
     let params = serde_json::to_value(request)?;
     let value = client_call("runtime.invoke", Some(params)).await?;
     Ok(serde_json::from_value(value)?)
@@ -579,15 +625,11 @@ pub async fn ensure_daemon_running() -> Result<bool> {
         return Ok(false);
     }
 
-    let dir = daemon_dir()?;
-    fs::create_dir_all(&dir)?;
-
+    let dir = daemon_dir();
+    ensure_private_dir(&dir)?;
     let lock_path = dir.join("start.lock");
-    let got_lock = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&lock_path)
-        .is_ok();
+    let start_lock = try_acquire_start_lock(&lock_path)?;
+    let got_lock = start_lock.is_some();
 
     if got_lock {
         let current_exe = std::env::current_exe().context("Cannot resolve current executable")?;
@@ -604,22 +646,17 @@ pub async fn ensure_daemon_running() -> Result<bool> {
     for _ in 0..START_POLL_TRIES {
         tokio::time::sleep(Duration::from_millis(START_POLL_INTERVAL_MS)).await;
         if daemon_status_client().await.is_ok() {
-            if got_lock {
-                let _ = fs::remove_file(&lock_path);
-            }
             return Ok(true);
         }
     }
 
-    if got_lock {
-        let _ = fs::remove_file(&lock_path);
-    }
+    drop(start_lock);
     bail!("Daemon failed to start. Run `uxc daemon status` for diagnostics.")
 }
 
 pub async fn run_daemon_server() -> Result<()> {
-    let dir = daemon_dir()?;
-    fs::create_dir_all(&dir)?;
+    let dir = daemon_dir();
+    ensure_private_dir(&dir)?;
     let socket = socket_path();
     if socket.exists() {
         let _ = fs::remove_file(&socket);
@@ -649,20 +686,41 @@ pub async fn run_daemon_server() -> Result<()> {
 }
 
 async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) -> Result<()> {
-    let req_val = read_frame(&mut stream).await?;
-    let req: JsonRpcRequest = serde_json::from_value(req_val).context("Invalid JSON-RPC request")?;
+    let req_val = match read_frame(&mut stream).await {
+        Ok(value) => value,
+        Err(err) => {
+            let _ = write_jsonrpc_error(
+                &mut stream,
+                Value::Null,
+                -32700,
+                format!("Parse error: {err}"),
+            )
+            .await;
+            return Ok(());
+        }
+    };
+    let req: JsonRpcRequest = match serde_json::from_value(req_val) {
+        Ok(req) => req,
+        Err(err) => {
+            let _ = write_jsonrpc_error(
+                &mut stream,
+                Value::Null,
+                -32600,
+                format!("Invalid request: {err}"),
+            )
+            .await;
+            return Ok(());
+        }
+    };
 
     if req.jsonrpc != JSONRPC_VERSION {
-        let resp = JsonRpcResponse {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id: req.id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32600,
-                message: "Invalid jsonrpc version".to_string(),
-            }),
-        };
-        write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+        write_jsonrpc_error(
+            &mut stream,
+            req.id,
+            -32600,
+            "Invalid jsonrpc version".to_string(),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -692,8 +750,35 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
             }
         }
         "runtime.invoke" => {
-            let params = req.params.ok_or_else(|| anyhow!("Missing params"))?;
-            let invoke: RuntimeInvokeRequest = serde_json::from_value(params)?;
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let invoke: RuntimeInvokeRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
             match runtime.invoke(invoke).await {
                 Ok(result) => JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
@@ -744,9 +829,18 @@ pub async fn daemon_stop_local() -> Result<bool> {
 }
 
 async fn client_call(method: &str, params: Option<Value>) -> Result<Value> {
-    let mut stream = UnixStream::connect(socket_path())
-        .await
-        .with_context(|| format!("Failed to connect daemon socket {}", socket_path().display()))?;
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(CONNECT_TIMEOUT_SECS),
+        UnixStream::connect(socket_path()),
+    )
+    .await
+    .context("Timed out connecting to daemon socket")?
+    .with_context(|| {
+        format!(
+            "Failed to connect daemon socket {}",
+            socket_path().display()
+        )
+    })?;
 
     let request = json!({
         "jsonrpc": JSONRPC_VERSION,
@@ -762,20 +856,45 @@ async fn client_call(method: &str, params: Option<Value>) -> Result<Value> {
         if err.code == -32602 {
             return Err(UxcError::InvalidArguments(err.message).into());
         }
-        if err.code == -32010 {
+        if err.code == ERR_PROTOCOL_DETECTION {
             return Err(UxcError::ProtocolDetectionFailed(err.message).into());
+        }
+        if err.code == ERR_OPERATION_NOT_FOUND {
+            return Err(UxcError::OperationNotFound(err.message).into());
+        }
+        if err.code == ERR_OAUTH_REQUIRED {
+            return Err(UxcError::OAuthRequired(err.message).into());
+        }
+        if err.code == ERR_OAUTH_REFRESH_FAILED {
+            return Err(UxcError::OAuthRefreshFailed(err.message).into());
+        }
+        if err.code == ERR_OAUTH_SCOPE_INSUFFICIENT {
+            return Err(UxcError::OAuthScopeInsufficient(err.message).into());
         }
         bail!("{}", err.message);
     }
-    resp.result.ok_or_else(|| anyhow!("Missing JSON-RPC result"))
+    resp.result
+        .ok_or_else(|| anyhow!("Missing JSON-RPC result"))
 }
 
 async fn write_frame(stream: &mut UnixStream, value: &Value) -> Result<()> {
     let body = serde_json::to_vec(value)?;
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    stream.write_all(header.as_bytes()).await?;
-    stream.write_all(&body).await?;
-    stream.flush().await?;
+    tokio::time::timeout(
+        Duration::from_secs(FRAME_IO_TIMEOUT_SECS),
+        stream.write_all(header.as_bytes()),
+    )
+    .await
+    .context("Timed out writing frame header")??;
+    tokio::time::timeout(
+        Duration::from_secs(FRAME_IO_TIMEOUT_SECS),
+        stream.write_all(&body),
+    )
+    .await
+    .context("Timed out writing frame body")??;
+    tokio::time::timeout(Duration::from_secs(FRAME_IO_TIMEOUT_SECS), stream.flush())
+        .await
+        .context("Timed out flushing frame")??;
     Ok(())
 }
 
@@ -784,7 +903,12 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Value> {
     let mut byte = [0_u8; 1];
 
     loop {
-        let n = stream.read(&mut byte).await?;
+        let n = tokio::time::timeout(
+            Duration::from_secs(FRAME_IO_TIMEOUT_SECS),
+            stream.read(&mut byte),
+        )
+        .await
+        .context("Timed out reading frame header")??;
         if n == 0 {
             bail!("EOF while reading frame header");
         }
@@ -810,28 +934,60 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Value> {
     }
 
     let len = content_len.ok_or_else(|| anyhow!("Missing Content-Length header"))?;
+    if len > MAX_FRAME_BODY_BYTES {
+        bail!(
+            "Frame body too large: {} bytes (max {})",
+            len,
+            MAX_FRAME_BODY_BYTES
+        );
+    }
     let mut body = vec![0_u8; len];
-    stream.read_exact(&mut body).await?;
+    tokio::time::timeout(
+        Duration::from_secs(FRAME_IO_TIMEOUT_SECS),
+        stream.read_exact(&mut body),
+    )
+    .await
+    .context("Timed out reading frame body")??;
     Ok(serde_json::from_slice(&body)?)
 }
 
-fn daemon_dir() -> Result<PathBuf> {
-    let home = home_dir()?;
-    Ok(home.join(".uxc").join("daemon"))
+fn daemon_dir() -> PathBuf {
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return PathBuf::from(runtime).join("uxc");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".uxc").join("daemon");
+    }
+
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("uxc-{}", best_effort_user_label()));
+    dir.push("daemon");
+    dir
 }
 
 pub fn socket_path() -> PathBuf {
-    match daemon_dir() {
-        Ok(dir) => dir.join("uxc.sock"),
-        Err(_) => PathBuf::from("/tmp/uxc.sock"),
-    }
+    daemon_dir().join("uxc.sock")
 }
 
-fn home_dir() -> Result<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME") {
-        return Ok(PathBuf::from(home));
+fn best_effort_user_label() -> String {
+    let raw = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    let filtered = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if filtered.is_empty() {
+        "unknown".to_string()
+    } else {
+        filtered
     }
-    Err(anyhow!("Cannot resolve HOME directory"))
 }
 
 fn auth_fingerprint(profile: Option<&Profile>) -> String {
@@ -854,7 +1010,9 @@ fn now_unix_secs() -> u64 {
 }
 
 fn cache_age_ms(fetched_at: u64) -> u64 {
-    now_unix_secs().saturating_sub(fetched_at).saturating_mul(1000)
+    now_unix_secs()
+        .saturating_sub(fetched_at)
+        .saturating_mul(1000)
 }
 
 fn protocol_from_cached_schema(schema: &Value) -> Option<ProtocolType> {
@@ -895,7 +1053,8 @@ fn protocol_from_cached_schema(schema: &Value) -> Option<ProtocolType> {
 fn adapter_from_protocol(protocol: ProtocolType, options: &DetectionOptions) -> AdapterEnum {
     match protocol {
         ProtocolType::OpenAPI => AdapterEnum::OpenAPI(
-            adapters::openapi::OpenAPIAdapter::new().with_schema_url_override(options.schema_url.clone()),
+            adapters::openapi::OpenAPIAdapter::new()
+                .with_schema_url_override(options.schema_url.clone()),
         ),
         ProtocolType::GRpc => AdapterEnum::GRpc(adapters::grpc::GrpcAdapter::new()),
         ProtocolType::JsonRpc => AdapterEnum::JsonRpc(adapters::jsonrpc::JsonRpcAdapter::new()),
@@ -904,7 +1063,10 @@ fn adapter_from_protocol(protocol: ProtocolType, options: &DetectionOptions) -> 
     }
 }
 
-fn inject_cache_if_supported(adapter: adapters::AdapterEnum, cache: Arc<dyn cache::Cache>) -> adapters::AdapterEnum {
+fn inject_cache_if_supported(
+    adapter: adapters::AdapterEnum,
+    cache: Arc<dyn cache::Cache>,
+) -> adapters::AdapterEnum {
     match adapter {
         adapters::AdapterEnum::OpenAPI(a) => adapters::AdapterEnum::OpenAPI(a.with_cache(cache)),
         adapters::AdapterEnum::GraphQL(a) => adapters::AdapterEnum::GraphQL(a.with_cache(cache)),
@@ -914,20 +1076,32 @@ fn inject_cache_if_supported(adapter: adapters::AdapterEnum, cache: Arc<dyn cach
     }
 }
 
-fn inject_auth_if_supported(adapter: adapters::AdapterEnum, profile: Option<Profile>) -> adapters::AdapterEnum {
+fn inject_auth_if_supported(
+    adapter: adapters::AdapterEnum,
+    profile: Option<Profile>,
+) -> adapters::AdapterEnum {
     match profile {
         Some(profile) => match adapter {
-            adapters::AdapterEnum::OpenAPI(a) => adapters::AdapterEnum::OpenAPI(a.with_auth(profile)),
-            adapters::AdapterEnum::GraphQL(a) => adapters::AdapterEnum::GraphQL(a.with_auth(profile)),
+            adapters::AdapterEnum::OpenAPI(a) => {
+                adapters::AdapterEnum::OpenAPI(a.with_auth(profile))
+            }
+            adapters::AdapterEnum::GraphQL(a) => {
+                adapters::AdapterEnum::GraphQL(a.with_auth(profile))
+            }
             adapters::AdapterEnum::GRpc(a) => adapters::AdapterEnum::GRpc(a.with_auth(profile)),
-            adapters::AdapterEnum::JsonRpc(a) => adapters::AdapterEnum::JsonRpc(a.with_auth(profile)),
+            adapters::AdapterEnum::JsonRpc(a) => {
+                adapters::AdapterEnum::JsonRpc(a.with_auth(profile))
+            }
             adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_auth(profile)),
         },
         None => adapter,
     }
 }
 
-fn inject_refresh_if_supported(adapter: adapters::AdapterEnum, refresh_schema: bool) -> adapters::AdapterEnum {
+fn inject_refresh_if_supported(
+    adapter: adapters::AdapterEnum,
+    refresh_schema: bool,
+) -> adapters::AdapterEnum {
     match adapter {
         adapters::AdapterEnum::OpenAPI(a) => {
             adapters::AdapterEnum::OpenAPI(a.with_refresh_schema(refresh_schema))
@@ -935,11 +1109,15 @@ fn inject_refresh_if_supported(adapter: adapters::AdapterEnum, refresh_schema: b
         adapters::AdapterEnum::GraphQL(a) => {
             adapters::AdapterEnum::GraphQL(a.with_refresh_schema(refresh_schema))
         }
-        adapters::AdapterEnum::GRpc(a) => adapters::AdapterEnum::GRpc(a.with_refresh_schema(refresh_schema)),
+        adapters::AdapterEnum::GRpc(a) => {
+            adapters::AdapterEnum::GRpc(a.with_refresh_schema(refresh_schema))
+        }
         adapters::AdapterEnum::JsonRpc(a) => {
             adapters::AdapterEnum::JsonRpc(a.with_refresh_schema(refresh_schema))
         }
-        adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_refresh_schema(refresh_schema)),
+        adapters::AdapterEnum::Mcp(a) => {
+            adapters::AdapterEnum::Mcp(a.with_refresh_schema(refresh_schema))
+        }
     }
 }
 
@@ -974,7 +1152,10 @@ async fn resolve_adapter_with_schema_cache(
     }
 
     let detector = ProtocolDetector::new();
-    match detector.detect_adapter_with_options(url, detection_options).await {
+    match detector
+        .detect_adapter_with_options(url, detection_options)
+        .await
+    {
         Ok(mut adapter) => {
             adapter = inject_cache_if_supported(adapter, cache);
             adapter = inject_auth_if_supported(adapter, auth_profile);
@@ -1321,10 +1502,133 @@ async fn resolve_mcp_http_endpoint(url: &str, auth_profile: Option<Profile>) -> 
 fn map_runtime_error_code(err: &anyhow::Error) -> i32 {
     if let Some(uxc_err) = err.downcast_ref::<UxcError>() {
         return match uxc_err {
-            UxcError::ProtocolDetectionFailed(_) | UxcError::UnsupportedProtocol(_) => -32010,
-            UxcError::InvalidArguments(_) | UxcError::OperationNotFound(_) => -32602,
-            _ => -32030,
+            UxcError::ProtocolDetectionFailed(_) | UxcError::UnsupportedProtocol(_) => {
+                ERR_PROTOCOL_DETECTION
+            }
+            UxcError::InvalidArguments(_) => -32602,
+            UxcError::OperationNotFound(_) => ERR_OPERATION_NOT_FOUND,
+            UxcError::OAuthRequired(_) => ERR_OAUTH_REQUIRED,
+            UxcError::OAuthRefreshFailed(_) => ERR_OAUTH_REFRESH_FAILED,
+            UxcError::OAuthScopeInsufficient(_) => ERR_OAUTH_SCOPE_INSUFFICIENT,
+            _ => ERR_RUNTIME_GENERIC,
         };
     }
-    -32030
+    ERR_RUNTIME_GENERIC
+}
+
+impl Default for DaemonRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn validate_mcp_tool_args(
+    operation: &str,
+    tools: &[adapters::mcp::types::Tool],
+    args: &HashMap<String, Value>,
+) -> Result<()> {
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == operation)
+        .ok_or_else(|| UxcError::OperationNotFound(operation.to_string()))?;
+
+    let required = tool
+        .inputSchema
+        .as_ref()
+        .and_then(|schema| schema.get("required"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let missing = required
+        .into_iter()
+        .filter(|key| !args.contains_key(key))
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(UxcError::InvalidArguments(format!(
+        "Missing required arguments for MCP tool '{}': {}",
+        operation,
+        missing.join(", ")
+    ))
+    .into())
+}
+
+async fn write_jsonrpc_error(
+    stream: &mut UnixStream,
+    id: Value,
+    code: i32,
+    message: String,
+) -> Result<()> {
+    let resp = JsonRpcResponse {
+        jsonrpc: JSONRPC_VERSION.to_string(),
+        id,
+        result: None,
+        error: Some(JsonRpcError { code, message }),
+    };
+    write_frame(stream, &serde_json::to_value(resp)?).await
+}
+
+struct StartLockGuard {
+    path: PathBuf,
+}
+
+impl Drop for StartLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn try_acquire_start_lock(path: &Path) -> Result<Option<StartLockGuard>> {
+    match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(_) => Ok(Some(StartLockGuard {
+            path: path.to_path_buf(),
+        })),
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            if lock_is_stale(path, Duration::from_secs(START_LOCK_STALE_SECS))? {
+                let _ = fs::remove_file(path);
+                return try_acquire_start_lock(path);
+            }
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn lock_is_stale(path: &Path, max_age: Duration) -> Result<bool> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    let modified = metadata
+        .modified()
+        .context("Failed reading start.lock mtime")?;
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    Ok(age > max_age)
+}
+
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o700);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
 }

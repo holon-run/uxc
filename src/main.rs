@@ -1459,7 +1459,11 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
         }
         Some("daemon_start_result") => {
             let data = envelope.data.clone().unwrap_or(Value::Null);
-            if data.get("autostarted").and_then(Value::as_bool).unwrap_or(false) {
+            if data
+                .get("autostarted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 println!("Daemon started.");
             } else {
                 println!("Daemon already running.");
@@ -1471,7 +1475,11 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
         }
         Some("daemon_stop_result") => {
             let data = envelope.data.clone().unwrap_or(Value::Null);
-            if data.get("stopped").and_then(Value::as_bool).unwrap_or(false) {
+            if data
+                .get("stopped")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 println!("Daemon stopped.");
             } else {
                 println!("Daemon is not running.");
@@ -1480,7 +1488,10 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
         }
         Some("daemon_status") => {
             let data = envelope.data.clone().unwrap_or(Value::Null);
-            let running = data.get("running").and_then(Value::as_bool).unwrap_or(false);
+            let running = data
+                .get("running")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             println!("Running: {}", running);
             if let Some(pid) = data.get("pid").and_then(Value::as_u64) {
                 println!("PID: {}", pid);
@@ -1652,7 +1663,7 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
         | Some(Commands::Auth { .. })
         | Some(Commands::Link { .. })
         | Some(Commands::Daemon { .. }) => Err(UxcError::InvalidArguments(
-            "Internal routing error for cache/auth/link command".to_string(),
+            "Internal routing error for management command".to_string(),
         )
         .into()),
     }
