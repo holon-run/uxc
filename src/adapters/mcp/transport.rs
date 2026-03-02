@@ -847,7 +847,8 @@ mod tests {
 
     #[tokio::test]
     async fn find_complete_json_returns_byte_boundary_for_utf8_content() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"百度 历史"}]}}"#;
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"百度 历史"}]}}"#;
         let pos = find_complete_json(json).expect("should find complete json");
         assert_eq!(pos, json.len());
         assert!(serde_json::from_str::<JsonValue>(&json[..pos]).is_ok());
