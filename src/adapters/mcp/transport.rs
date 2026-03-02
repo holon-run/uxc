@@ -6,9 +6,12 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
+
+const DEFAULT_STDIO_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 /// Trait for executing MCP stdio processes (abstracted for testing)
 #[async_trait]
@@ -336,8 +339,22 @@ impl McpStdioTransport {
             return Err(anyhow!("Request channel closed"));
         }
 
-        // Wait for the response
-        let response = response_rx.await.context("Response channel closed")?;
+        // Wait for the response with timeout so a stuck MCP server/tool call
+        // does not block the caller indefinitely.
+        let timeout = stdio_request_timeout();
+        let response = match tokio::time::timeout(timeout, response_rx).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => return Err(anyhow!("Response channel closed")),
+            Err(_) => {
+                let mut channels = self.response_channels.lock().await;
+                channels.remove(&id);
+                return Err(anyhow!(
+                    "MCP stdio request timed out after {}ms: {}",
+                    timeout.as_millis(),
+                    method
+                ));
+            }
+        };
 
         if let Some(error) = response.error {
             bail!("JSON-RPC error: {} - {}", error.code, error.message);
@@ -392,6 +409,15 @@ impl McpStdioTransport {
         self.send_notification("notifications/initialized", None)
             .await
     }
+}
+
+fn stdio_request_timeout() -> Duration {
+    let ms = std::env::var("UXC_MCP_STDIO_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_STDIO_REQUEST_TIMEOUT_MS);
+    Duration::from_millis(ms)
 }
 
 /// Parse a command string into parts (handles quoted strings)
