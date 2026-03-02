@@ -198,15 +198,15 @@ impl McpSessionManager {
             }
         }
 
-        let session_keys = {
-            let map = self.stdio.lock().await;
-            map.keys()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>()
-        };
         let init_lock_cutoff = Instant::now() - Duration::from_secs(STDIO_INIT_LOCK_STALE_SECS);
         let mut lock_map = self.stdio_init_locks.lock().await;
-        lock_map.retain(|k, v| session_keys.contains(k) || v.touched_at >= init_lock_cutoff);
+        // Retain locks that are:
+        // 1. Still in use (strong_count > 1 means someone is holding the lock), or
+        // 2. Were touched recently (not stale)
+        // This avoids dropping an init lock during an ongoing initialization,
+        // which could otherwise allow a concurrent cold call to create a duplicate
+        // lock and spawn another MCP process, breaking the singleflight guarantee.
+        lock_map.retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
 
         {
             let mut map = self.http.lock().await;
