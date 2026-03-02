@@ -452,14 +452,14 @@ pub fn parse_command(cmd: &str) -> Vec<String> {
     parts
 }
 
-/// Find a complete JSON object in the string
-/// Returns the length of the JSON object if found
+/// Find a complete JSON object in the string.
+/// Returns the byte length of the JSON object if found.
 fn find_complete_json(s: &str) -> Option<usize> {
     let mut brace_count = 0;
     let mut in_string = false;
     let mut escape_next = false;
 
-    for (i, ch) in s.chars().enumerate() {
+    for (i, ch) in s.char_indices() {
         if escape_next {
             escape_next = false;
             continue;
@@ -481,7 +481,7 @@ fn find_complete_json(s: &str) -> Option<usize> {
             } else if ch == '}' {
                 brace_count -= 1;
                 if brace_count == 0 {
-                    return Some(i + 1);
+                    return Some(i + ch.len_utf8());
                 }
             }
         }
@@ -812,6 +812,14 @@ mod tests {
         let json = r#"{"key":
 "value"}"#;
         assert_eq!(find_complete_json(json), Some(json.len()));
+    }
+
+    #[tokio::test]
+    async fn find_complete_json_returns_byte_boundary_for_utf8_content() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"百度 历史"}]}}"#;
+        let pos = find_complete_json(json).expect("should find complete json");
+        assert_eq!(pos, json.len());
+        assert!(serde_json::from_str::<JsonValue>(&json[..pos]).is_ok());
     }
 
     #[tokio::test]
