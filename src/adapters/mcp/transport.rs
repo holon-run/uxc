@@ -643,6 +643,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_request_handles_large_utf8_json_payload() {
+        let text = "百度一下，你就知道 历史记录";
+        let large_text = text.repeat(2048);
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": large_text
+                    }
+                ]
+            }
+        });
+        let script = format!("read line; cat <<'EOF'\n{}\nEOF", response);
+        let mut transport =
+            McpStdioTransport::connect("sh", &["-c".to_string(), script.to_string()])
+                .await
+                .unwrap();
+
+        let result = transport.send_request("tools/call", None).await.unwrap();
+        let got = result["content"][0]["text"]
+            .as_str()
+            .expect("text content should be string");
+        assert!(got.starts_with("百度一下"));
+        assert!(got.contains("历史记录"));
+        assert!(got.len() > 10_000);
+    }
+
+    #[tokio::test]
     async fn send_notification_does_not_wait_for_response() {
         let script =
             "while read line; do echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'; done";
