@@ -2411,7 +2411,7 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
         DaemonCommands::Start => {
             let started_now = daemon::daemon_start_local().await?;
             let data = json!({
-                "started": true,
+                "started": started_now,
                 "autostarted": started_now,
                 "started_now": started_now,
                 "already_running": !started_now,

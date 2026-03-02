@@ -26,9 +26,10 @@ use tokio::sync::{Mutex, RwLock};
 const JSONRPC_VERSION: &str = "2.0";
 const START_POLL_TRIES: usize = 30;
 const START_POLL_INTERVAL_MS: u64 = 100;
-const STOP_POLL_TRIES: usize = 30;
+const STOP_POLL_TRIES: usize = 50;
 const STOP_POLL_INTERVAL_MS: u64 = 100;
 const START_LOCK_STALE_SECS: u64 = 30;
+const STDIO_INIT_LOCK_STALE_SECS: u64 = 30;
 const MCP_IDLE_TTL_SECS: u64 = 600;
 const CONNECT_TIMEOUT_SECS: u64 = 2;
 const FRAME_IO_TIMEOUT_SECS: u64 = 120;
@@ -149,9 +150,14 @@ struct ServerState {
 #[derive(Clone)]
 struct McpSessionManager {
     stdio: Arc<Mutex<HashMap<String, Arc<Mutex<McpStdioSession>>>>>,
-    stdio_init_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    stdio_init_locks: Arc<Mutex<HashMap<String, InitLockEntry>>>,
     http: Arc<Mutex<HashMap<String, Arc<McpHttpSession>>>>,
     reuse_hits: Arc<Mutex<u64>>,
+}
+
+struct InitLockEntry {
+    lock: Arc<Mutex<()>>,
+    touched_at: Instant,
 }
 
 struct McpStdioSession {
@@ -198,8 +204,9 @@ impl McpSessionManager {
                 .cloned()
                 .collect::<std::collections::HashSet<_>>()
         };
+        let init_lock_cutoff = Instant::now() - Duration::from_secs(STDIO_INIT_LOCK_STALE_SECS);
         let mut lock_map = self.stdio_init_locks.lock().await;
-        lock_map.retain(|k, _| session_keys.contains(k));
+        lock_map.retain(|k, v| session_keys.contains(k) || v.touched_at >= init_lock_cutoff);
 
         {
             let mut map = self.http.lock().await;
@@ -234,10 +241,14 @@ impl McpSessionManager {
         // This avoids duplicate process spawns under concurrent cold requests.
         let key_lock = {
             let mut lock_map = self.stdio_init_locks.lock().await;
-            lock_map
+            let entry = lock_map
                 .entry(key.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
+                .or_insert_with(|| InitLockEntry {
+                    lock: Arc::new(Mutex::new(())),
+                    touched_at: Instant::now(),
+                });
+            entry.touched_at = Instant::now();
+            entry.lock.clone()
         };
         let _guard = key_lock.lock().await;
 

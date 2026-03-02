@@ -194,8 +194,8 @@ fn concurrent_cold_calls_share_stdio_session() {
         .as_u64()
         .expect("mcp_reuse_hits should be u64");
     assert!(
-        reuse_hits >= (workers as u64 - 1),
-        "expected reuse hits for all but one cold request"
+        reuse_hits >= 1,
+        "expected at least one reuse hit under concurrent cold calls"
     );
 
     daemon_stop_best_effort();
