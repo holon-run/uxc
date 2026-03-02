@@ -4,6 +4,7 @@ use assert_cmd::Command;
 use common::test_server_binary;
 use serial_test::serial;
 use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 fn uxc_command() -> Command {
     Command::cargo_bin("uxc").expect("uxc binary should build")
@@ -197,6 +198,74 @@ fn concurrent_cold_calls_share_stdio_session() {
         reuse_hits >= 1,
         "expected at least one reuse hit under concurrent cold calls"
     );
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
+fn daemon_status_not_blocked_by_stuck_mcp_invoke() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} timeout", bin.display());
+
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let endpoint_first = endpoint.clone();
+    let first = std::thread::spawn(move || {
+        uxc_command()
+            .env("UXC_TEST_TIMEOUT_MS", "4000")
+            .arg(&endpoint_first)
+            .arg("echo")
+            .arg("--input-json")
+            .arg(r#"{"message":"first"}"#)
+            .output()
+            .expect("first timeout call should run")
+    });
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    let endpoint_second = endpoint.clone();
+    let second = std::thread::spawn(move || {
+        uxc_command()
+            .env("UXC_TEST_TIMEOUT_MS", "4000")
+            .arg(&endpoint_second)
+            .arg("echo")
+            .arg("--input-json")
+            .arg(r#"{"message":"second"}"#)
+            .output()
+            .expect("second timeout call should run")
+    });
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = uxc_command()
+            .arg("daemon")
+            .arg("status")
+            .output()
+            .expect("daemon status should run");
+        let _ = tx.send(out);
+    });
+
+    let status = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("daemon status should not block behind stuck mcp invoke");
+    assert!(status.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&status.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "daemon_status");
+    assert_eq!(json["data"]["running"], true);
+
+    let _ = first.join();
+    let _ = second.join();
 
     daemon_stop_best_effort();
 }
