@@ -264,8 +264,11 @@ fn daemon_status_not_blocked_by_stuck_mcp_invoke() {
     assert_eq!(json["kind"], "daemon_status");
     assert_eq!(json["data"]["running"], true);
 
-    let _ = first.join();
-    let _ = second.join();
+    let first_output = first.join().expect("first timeout thread panicked");
+    // The timeout calls are expected to succeed (they timeout after 4s)
+    // We don't assert on status.success() because the test is about
+    // daemon status being responsive, not about the timeout calls themselves
+    let second_output = second.join().expect("second timeout thread panicked");
 
     daemon_stop_best_effort();
 }

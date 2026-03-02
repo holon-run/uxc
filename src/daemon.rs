@@ -190,9 +190,12 @@ impl McpSessionManager {
         };
         let mut stdio_remove = Vec::new();
         for (key, session) in &stdio_entries {
-            let guard = session.lock().await;
-            if guard.last_used < cutoff {
-                stdio_remove.push(key.clone());
+            // Use try_lock to avoid blocking on sessions that may be held across .await in invoke_mcp.
+            // If a session is busy, we'll check it again in the next cleanup cycle.
+            if let Ok(guard) = session.try_lock() {
+                if guard.last_used < cutoff {
+                    stdio_remove.push(key.clone());
+                }
             }
         }
         if !stdio_remove.is_empty() {
