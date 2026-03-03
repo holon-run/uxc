@@ -1184,9 +1184,7 @@ fn extract_user_data_dir_from_stdio_cache_key(key: &str) -> Option<String> {
         return None;
     }
     let rest = key.trim_start_matches("stdio:");
-    let mut it = rest.rsplitn(2, ':');
-    let _fingerprint = it.next()?;
-    let endpoint = it.next()?;
+    let (endpoint, _fingerprint) = rest.rsplit_once(':')?;
     let tokens = adapters::mcp::transport::parse_command(endpoint);
     extract_user_data_dir_from_tokens(&tokens)
 }
