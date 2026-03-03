@@ -15,6 +15,7 @@ pub fn run(scenario: Scenario) -> Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    let mut tools_list_calls: u64 = 0;
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -84,6 +85,18 @@ pub fn run(scenario: Scenario) -> Result<()> {
                 )?;
             }
             "tools/list" => {
+                tools_list_calls = tools_list_calls.saturating_add(1);
+                if matches!(scenario, Scenario::ToolsListFailAfterFirst) && tools_list_calls > 1 {
+                    respond(
+                        &mut out,
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {"code": -32002, "message": "tools/list failed after first request"}
+                        }),
+                    )?;
+                    continue;
+                }
                 respond(
                     &mut out,
                     json!({

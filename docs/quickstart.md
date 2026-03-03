@@ -7,6 +7,7 @@ This guide expands the README quickstart with practical command patterns for UXC
 - `uxc` installed and available in `PATH`
 - Network access to target endpoints
 - For gRPC unary runtime calls: `grpcurl` installed in `PATH`
+- On Windows: run `uxc` inside WSL
 
 Install options are listed in the top-level README:
 [`README.md#install`](../README.md#install).

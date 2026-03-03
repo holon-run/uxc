@@ -28,13 +28,6 @@ pub struct McpAdapter {
     force_refresh_schema: bool,
     discovered_http_endpoints: Arc<RwLock<HashMap<String, String>>>,
     last_probe_diagnostics: Arc<RwLock<Option<String>>>,
-    service_metadata: Arc<RwLock<HashMap<String, McpServiceMetadata>>>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct McpServiceMetadata {
-    pub name: Option<String>,
-    pub description: Option<String>,
 }
 
 impl McpAdapter {
@@ -45,7 +38,6 @@ impl McpAdapter {
             force_refresh_schema: false,
             discovered_http_endpoints: Arc::new(RwLock::new(HashMap::new())),
             last_probe_diagnostics: Arc::new(RwLock::new(None)),
-            service_metadata: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -192,24 +184,6 @@ impl McpAdapter {
         self.last_probe_diagnostics.read().await.clone()
     }
 
-    async fn cache_service_metadata(
-        &self,
-        url: &str,
-        server_info: Option<&types::ServerInfo>,
-        instructions: Option<&str>,
-    ) {
-        let metadata = McpServiceMetadata {
-            name: server_info.map(|info| info.name.clone()),
-            description: instructions.map(ToString::to_string),
-        };
-        let mut map = self.service_metadata.write().await;
-        map.insert(url.to_string(), metadata);
-    }
-
-    pub async fn service_metadata_for(&self, url: &str) -> Option<McpServiceMetadata> {
-        self.service_metadata.read().await.get(url).cloned()
-    }
-
     fn tools_from_schema(schema: &Value) -> Option<Vec<types::Tool>> {
         let tools = schema.get("tools")?.as_array()?;
         Some(
@@ -271,36 +245,28 @@ impl McpAdapter {
 
         Self::validate_required_args(operation, tool.inputSchema.as_ref(), args)
     }
-}
 
-impl Default for McpAdapter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl Adapter for McpAdapter {
-    fn protocol_type(&self) -> ProtocolType {
-        ProtocolType::Mcp
-    }
-
-    async fn can_handle(&self, url: &str) -> Result<bool> {
-        // First, check if it's a stdio command
-        if Self::is_stdio_command(url) {
-            return Ok(true);
+    async fn tools_from_schema_or_refresh(&self, url: &str) -> Result<Vec<types::Tool>> {
+        let schema = self.fetch_schema(url).await?;
+        if let Some(tools) = Self::tools_from_schema(&schema) {
+            return Ok(tools);
         }
 
-        if Self::is_http_url(url) {
-            return Ok(self.resolve_http_endpoint(url).await?.is_some());
-        }
-
-        Ok(false)
-    }
-
-    async fn fetch_schema(&self, url: &str) -> Result<Value> {
-        // Try cache first if available
         if !self.force_refresh_schema {
+            let schema = self.fetch_schema_internal(url, false).await?;
+            if let Some(tools) = Self::tools_from_schema(&schema) {
+                return Ok(tools);
+            }
+        }
+
+        bail!(
+            "MCP tool catalog unavailable for endpoint '{}'; retry with --refresh-schema",
+            url
+        )
+    }
+
+    async fn fetch_schema_internal(&self, url: &str, allow_cache_read: bool) -> Result<Value> {
+        if allow_cache_read {
             if let Some(cache) = &self.cache {
                 match cache.get(url)? {
                     crate::cache::CacheResult::Hit(schema) => {
@@ -402,147 +368,89 @@ impl Adapter for McpAdapter {
         }
 
         // Default fallback for mcp:// URLs
-        let schema = serde_json::json!({
+        Ok(serde_json::json!({
             "protocol": "MCP",
             "protocolVersion": "2024-11-05",
             "transport": "stdio",
             "url": url
-        });
+        }))
+    }
+}
 
-        Ok(schema)
+impl Default for McpAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Adapter for McpAdapter {
+    fn protocol_type(&self) -> ProtocolType {
+        ProtocolType::Mcp
+    }
+
+    async fn can_handle(&self, url: &str) -> Result<bool> {
+        // First, check if it's a stdio command
+        if Self::is_stdio_command(url) {
+            return Ok(true);
+        }
+
+        if Self::is_http_url(url) {
+            return Ok(self.resolve_http_endpoint(url).await?.is_some());
+        }
+
+        Ok(false)
+    }
+
+    async fn fetch_schema(&self, url: &str) -> Result<Value> {
+        self.fetch_schema_internal(url, !self.force_refresh_schema)
+            .await
     }
 
     async fn list_operations(&self, url: &str) -> Result<Vec<Operation>> {
-        if Self::is_stdio_command(url) {
-            let (cmd, args) = Self::parse_stdio_command(url)?;
-            let mut client = McpStdioClient::connect(&cmd, &args).await?;
-            self.cache_service_metadata(url, client.server_info(), client.instructions())
-                .await;
+        let tools = self.tools_from_schema_or_refresh(url).await?;
+        let operations = tools
+            .into_iter()
+            .map(|tool| {
+                let parameters = if let Some(schema) = tool.inputSchema {
+                    parse_schema_to_parameters(&schema)
+                } else {
+                    Vec::new()
+                };
 
-            // List tools as operations
-            let tools = client.list_tools().await?;
-
-            let operations = tools
-                .into_iter()
-                .map(|tool| {
-                    let parameters = if let Some(schema) = tool.inputSchema {
-                        // Convert JSON Schema to our Parameter format
-                        parse_schema_to_parameters(&schema)
-                    } else {
-                        Vec::new()
-                    };
-
-                    Operation {
-                        operation_id: tool.name.clone(),
-                        display_name: tool.name.clone(),
-                        description: Some(tool.description),
-                        parameters,
-                        return_type: Some("ToolContent".to_string()),
-                    }
-                })
-                .collect();
-
-            return Ok(operations);
-        }
-
-        // For HTTP-based MCP
-        if Self::is_http_url(url) {
-            let endpoint = self.resolve_http_endpoint(url).await?.ok_or_else(|| {
-                anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
-            })?;
-            let transport = McpHttpTransport::with_auth(endpoint, self.auth_profile.clone())?;
-            let init_result = transport.initialize().await?;
-            self.cache_service_metadata(
-                url,
-                init_result.serverInfo.as_ref(),
-                init_result.instructions.as_deref(),
-            )
-            .await;
-            let tools = transport.list_tools().await?;
-
-            let operations = tools
-                .into_iter()
-                .map(|tool| {
-                    let parameters = if let Some(schema) = tool.inputSchema {
-                        parse_schema_to_parameters(&schema)
-                    } else {
-                        Vec::new()
-                    };
-
-                    Operation {
-                        operation_id: tool.name.clone(),
-                        display_name: tool.name.clone(),
-                        description: Some(tool.description),
-                        parameters,
-                        return_type: Some("ToolContent".to_string()),
-                    }
-                })
-                .collect();
-
-            return Ok(operations);
-        }
-
-        // Default fallback
-        Ok(Vec::new())
+                Operation {
+                    operation_id: tool.name.clone(),
+                    display_name: tool.name.clone(),
+                    description: Some(tool.description),
+                    parameters,
+                    return_type: Some("ToolContent".to_string()),
+                }
+            })
+            .collect();
+        Ok(operations)
     }
 
     async fn describe_operation(&self, url: &str, operation: &str) -> Result<OperationDetail> {
-        if Self::is_stdio_command(url) {
-            let (cmd, args) = Self::parse_stdio_command(url)?;
-            let mut client = McpStdioClient::connect(&cmd, &args).await?;
+        let tools = self.tools_from_schema_or_refresh(url).await?;
 
-            let tools = client.list_tools().await?;
-
-            for tool in tools {
-                if tool.name == operation {
-                    return Ok(OperationDetail {
-                        operation_id: tool.name.clone(),
-                        display_name: tool.name,
-                        description: Some(tool.description),
-                        parameters: tool
-                            .inputSchema
-                            .as_ref()
-                            .map(parse_schema_to_parameters)
-                            .unwrap_or_default(),
-                        return_type: Some("ToolContent".to_string()),
-                        input_schema: tool.inputSchema,
-                    });
-                }
+        for tool in tools {
+            if tool.name == operation {
+                return Ok(OperationDetail {
+                    operation_id: tool.name.clone(),
+                    display_name: tool.name,
+                    description: Some(tool.description),
+                    parameters: tool
+                        .inputSchema
+                        .as_ref()
+                        .map(parse_schema_to_parameters)
+                        .unwrap_or_default(),
+                    return_type: Some("ToolContent".to_string()),
+                    input_schema: tool.inputSchema,
+                });
             }
-
-            bail!("Tool '{}' not found", operation);
         }
 
-        // For HTTP-based MCP
-        if Self::is_http_url(url) {
-            let endpoint = self.resolve_http_endpoint(url).await?.ok_or_else(|| {
-                anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
-            })?;
-            let transport = McpHttpTransport::with_auth(endpoint, self.auth_profile.clone())?;
-            transport.initialize().await?;
-            let tools = transport.list_tools().await?;
-
-            for tool in tools {
-                if tool.name == operation {
-                    return Ok(OperationDetail {
-                        operation_id: tool.name.clone(),
-                        display_name: tool.name,
-                        description: Some(tool.description),
-                        parameters: tool
-                            .inputSchema
-                            .as_ref()
-                            .map(parse_schema_to_parameters)
-                            .unwrap_or_default(),
-                        return_type: Some("ToolContent".to_string()),
-                        input_schema: tool.inputSchema,
-                    });
-                }
-            }
-
-            bail!("Tool '{}' not found", operation);
-        }
-
-        bail!("Operation '{}' not found", operation);
+        bail!("Tool '{}' not found", operation);
     }
 
     async fn execute(

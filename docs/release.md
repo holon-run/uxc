@@ -40,11 +40,12 @@ git push origin vX.Y.Z
    - `x86_64-unknown-linux-musl`
    - `x86_64-apple-darwin`
    - `aarch64-apple-darwin`
-   - `x86_64-pc-windows-msvc`
 3. Generate `uxc-vX.Y.Z-checksums.txt`
 4. Create GitHub Release with all assets
 5. Publish crate to crates.io
 6. Update `holon-run/homebrew-tap` Formula
+
+Windows users should run UXC through WSL.
 
 ## Rollback
 

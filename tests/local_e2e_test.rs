@@ -596,6 +596,66 @@ fn test_mcp_http_text_help_prints_service_summary() {
 
 #[test]
 #[serial_test::serial]
+fn test_mcp_http_help_uses_cached_schema_when_tools_list_fails_after_first() {
+    let server = start_test_server("mcp-http", "tools_list_fail_after_first");
+    let endpoint = format!("http://{}", server.addr);
+
+    let first = run_uxc(&[&endpoint, "-h"]);
+    assert!(
+        first.is_ok(),
+        "Initial MCP HTTP help should succeed: {:?}",
+        first
+    );
+
+    let second = run_uxc(&[&endpoint, "-h"]);
+    assert!(
+        second.is_ok(),
+        "Second MCP HTTP help should use cache and succeed: {:?}",
+        second
+    );
+
+    let output = second.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "host_help");
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["meta"]["cache_source"], "schema_cache");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_mcp_http_execute_does_not_depend_on_tools_list() {
+    let server = start_test_server("mcp-http", "tools_list_fail_after_first");
+    let endpoint = format!("http://{}", server.addr);
+
+    let prime_help = run_uxc(&[&endpoint, "-h"]);
+    assert!(
+        prime_help.is_ok(),
+        "Initial MCP HTTP help should succeed: {:?}",
+        prime_help
+    );
+
+    let call = run_uxc(&[
+        &endpoint,
+        "echo",
+        "--input-json",
+        r#"{"message":"hello cache"}"#,
+    ]);
+    assert!(
+        call.is_ok(),
+        "MCP HTTP execute should succeed without tools/list dependency: {:?}",
+        call
+    );
+
+    let output = call.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["content"][0]["text"], "hello cache");
+}
+
+#[test]
+#[serial_test::serial]
 fn test_mcp_stdio_host_help_lists_operations() {
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} ok", bin.display());

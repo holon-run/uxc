@@ -272,3 +272,55 @@ fn daemon_status_not_blocked_by_stuck_mcp_invoke() {
 
     daemon_stop_best_effort();
 }
+
+#[test]
+#[serial]
+fn mcp_stdio_execute_does_not_relist_tools_on_reused_session() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} tools_list_fail_after_first", bin.display());
+
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let first = uxc_command()
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"first"}"#)
+        .output()
+        .expect("first call should run");
+    assert!(
+        first.status.success(),
+        "first call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let second = uxc_command()
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"second"}"#)
+        .output()
+        .expect("second call should run");
+    assert!(
+        second.status.success(),
+        "second call should succeed even when tools/list would fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&second.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["content"][0]["text"], "second");
+    assert_eq!(json["meta"]["daemon_session_reused"], true);
+
+    daemon_stop_best_effort();
+}

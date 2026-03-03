@@ -11,12 +11,17 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tokio::signal::ctrl_c;
 use tracing::info;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ServerState {
     scenario: Scenario,
+    tools_list_calls: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,21 +75,35 @@ async fn mcp_handler(
             },
             "instructions": "MCP HTTP test server for local e2e"
         }),
-        "tools/list" => json!({
-            "tools": [
-                {
-                    "name": "echo",
-                    "description": "Echo text back",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "message": {"type": "string", "description": "text to echo"}
-                        },
-                        "required": ["message"]
+        "tools/list" => {
+            let calls = state
+                .tools_list_calls
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
+            if matches!(state.scenario, Scenario::ToolsListFailAfterFirst) && calls > 1 {
+                return Ok(Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "error": {"code": -32002, "message": "tools/list failed after first request"}
+                }))
+                .into_response());
+            }
+            json!({
+                "tools": [
+                    {
+                        "name": "echo",
+                        "description": "Echo text back",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "message": {"type": "string", "description": "text to echo"}
+                            },
+                            "required": ["message"]
+                        }
                     }
-                }
-            ]
-        }),
+                ]
+            })
+        }
         "tools/call" => {
             let name = req
                 .params
@@ -143,7 +162,10 @@ fn create_router(state: ServerState) -> Router {
 
 pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
     let (listener, addr) = bind_available().await?;
-    let app = create_router(ServerState { scenario });
+    let app = create_router(ServerState {
+        scenario,
+        tools_list_calls: Arc::new(AtomicU64::new(0)),
+    });
 
     info!("MCP HTTP test server listening on http://{}", addr);
     write_addr_file(addr, "mcp-http")?;

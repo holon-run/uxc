@@ -52,9 +52,6 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             use_cross: "false"
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            use_cross: "false"
 
     steps:
       - name: Checkout
@@ -96,33 +93,12 @@ jobs:
           tar -czf "${PKG_ROOT}.tar.gz" "${PKG_ROOT}"
           echo "file=${PKG_ROOT}.tar.gz" >> "${GITHUB_OUTPUT}"
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        id: package_windows
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME.Substring(1)
-          $pkgRoot = "uxc-v$version-${{ matrix.target }}"
-          New-Item -ItemType Directory -Path $pkgRoot | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/uxc.exe" "$pkgRoot/uxc.exe"
-          Copy-Item "LICENSE" "$pkgRoot/LICENSE"
-          Copy-Item "README.md" "$pkgRoot/README.md"
-          Compress-Archive -Path "$pkgRoot/*" -DestinationPath "$pkgRoot.zip"
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "file=$pkgRoot.zip"
-
       - name: Upload artifact (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: pkg-${{ matrix.target }}
           path: ${{ steps.package_unix.outputs.file }}
-
-      - name: Upload artifact (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: pkg-${{ matrix.target }}
-          path: ${{ steps.package_windows.outputs.file }}
 
   release:
     name: Create GitHub Release

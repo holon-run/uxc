@@ -506,6 +506,7 @@ impl GrpcAdapter {
         type_name.trim_start_matches('.').to_string()
     }
 
+    #[allow(dead_code)]
     fn to_json_field_name(field: &FieldDescriptorProto) -> String {
         field
             .json_name
@@ -514,6 +515,7 @@ impl GrpcAdapter {
             .unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     fn collect_message_descriptors(
         prefix: &str,
         messages: &[DescriptorProto],
@@ -544,6 +546,7 @@ impl GrpcAdapter {
         }
     }
 
+    #[allow(dead_code)]
     fn build_descriptor_indexes(
         descriptors: &[FileDescriptorProto],
     ) -> (
@@ -576,6 +579,7 @@ impl GrpcAdapter {
         (message_index, enum_index)
     }
 
+    #[allow(dead_code)]
     fn find_message_descriptor<'a>(
         message_index: &'a HashMap<String, DescriptorProto>,
         type_name: &str,
@@ -597,6 +601,7 @@ impl GrpcAdapter {
         Some(first)
     }
 
+    #[allow(dead_code)]
     fn find_enum_descriptor<'a>(
         enum_index: &'a HashMap<String, EnumDescriptorProto>,
         type_name: &str,
@@ -618,6 +623,7 @@ impl GrpcAdapter {
         Some(first)
     }
 
+    #[allow(dead_code)]
     fn field_schema(
         field: &FieldDescriptorProto,
         message_index: &HashMap<String, DescriptorProto>,
@@ -693,6 +699,7 @@ impl GrpcAdapter {
         }
     }
 
+    #[allow(dead_code)]
     fn build_message_schema(
         type_name: &str,
         message_index: &HashMap<String, DescriptorProto>,
@@ -748,6 +755,7 @@ impl GrpcAdapter {
         Value::Object(message_schema)
     }
 
+    #[allow(dead_code)]
     fn build_operation_input_schema(
         descriptors: &[FileDescriptorProto],
         input_type: &str,
@@ -764,6 +772,50 @@ impl GrpcAdapter {
                 8,
             )
         })
+    }
+
+    fn method_info_from_schema(service_name: &str, method: &Value) -> Option<MethodInfo> {
+        Some(MethodInfo {
+            name: method.get("name")?.as_str()?.to_string(),
+            service_name: service_name.to_string(),
+            input_type: method.get("input_type")?.as_str()?.to_string(),
+            output_type: method.get("output_type")?.as_str()?.to_string(),
+            is_server_streaming: method
+                .get("server_streaming")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            is_client_streaming: method
+                .get("client_streaming")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            description: method
+                .get("description")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        })
+    }
+
+    fn methods_from_schema(schema: &Value) -> Vec<MethodInfo> {
+        let Some(services) = schema.get("services").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+
+        let mut methods = Vec::new();
+        for service in services {
+            let Some(service_name) = service.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(service_methods) = service.get("methods").and_then(Value::as_array) else {
+                continue;
+            };
+            for method in service_methods {
+                if let Some(method) = Self::method_info_from_schema(service_name, method) {
+                    methods.push(method);
+                }
+            }
+        }
+
+        methods
     }
 
     /// Execute a gRPC method call
@@ -974,34 +1026,37 @@ impl Adapter for GrpcAdapter {
     }
 
     async fn list_operations(&self, url: &str) -> Result<Vec<Operation>> {
-        let services = self.get_service_info(url).await?;
+        let schema = self.fetch_schema(url).await?;
+        let methods = Self::methods_from_schema(&schema);
 
         let mut operations = Vec::new();
-        for (service_name, service_info) in &services {
-            for (method_name, method_info) in &service_info.methods {
-                operations.push(Operation {
-                    operation_id: format!("{}/{}", service_name, method_name),
-                    display_name: format!("{}/{}", service_name, method_name),
-                    description: method_info.description.clone(),
-                    parameters: vec![Parameter {
-                        name: "request".to_string(),
-                        param_type: method_info.input_type.clone(),
-                        required: true,
-                        description: Some(format!(
-                            "Request message of type {}",
-                            method_info.input_type
-                        )),
-                    }],
-                    return_type: Some(method_info.output_type.clone()),
-                });
-            }
+        for method_info in methods {
+            operations.push(Operation {
+                operation_id: format!("{}/{}", method_info.service_name, method_info.name),
+                display_name: format!("{}/{}", method_info.service_name, method_info.name),
+                description: method_info.description.clone(),
+                parameters: vec![Parameter {
+                    name: "request".to_string(),
+                    param_type: method_info.input_type.clone(),
+                    required: true,
+                    description: Some(format!(
+                        "Request message of type {}",
+                        method_info.input_type
+                    )),
+                }],
+                return_type: Some(method_info.output_type),
+            });
         }
 
         Ok(operations)
     }
 
     async fn describe_operation(&self, url: &str, operation: &str) -> Result<OperationDetail> {
-        let (method_info, descriptors) = self.find_method_context(url, operation).await?;
+        let schema = self.fetch_schema(url).await?;
+        let method_info = Self::methods_from_schema(&schema)
+            .into_iter()
+            .find(|method| format!("{}/{}", method.service_name, method.name) == operation)
+            .ok_or_else(|| UxcError::OperationNotFound(operation.to_string()))?;
         let stream_type = match (
             method_info.is_client_streaming,
             method_info.is_server_streaming,
@@ -1025,10 +1080,10 @@ impl Adapter for GrpcAdapter {
                 description: Some(format!("gRPC request payload ({})", stream_type)),
             }],
             return_type: Some(output_type),
-            input_schema: Some(Self::build_operation_input_schema(
-                &descriptors,
-                &input_type,
-            )),
+            input_schema: Some(serde_json::json!({
+                "kind": "grpc_message",
+                "message_type": Self::normalize_type_name(&input_type)
+            })),
         })
     }
 
