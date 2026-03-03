@@ -613,12 +613,13 @@ fn normalize_global_args(raw_args: Vec<String>) -> Vec<String> {
         let is_global_bool = matches!(arg.as_str(), "--text" | "--no-cache" | "--refresh-schema");
         let is_global_kv = matches!(
             arg.as_str(),
-            "--format" | "--auth" | "--cache-ttl" | "--schema-url"
+            "--format" | "--auth" | "--cache-ttl" | "--schema-url" | "--daemon-exclusive"
         );
         let is_global_inline = arg.starts_with("--format=")
             || arg.starts_with("--auth=")
             || arg.starts_with("--cache-ttl=")
-            || arg.starts_with("--schema-url=");
+            || arg.starts_with("--schema-url=")
+            || arg.starts_with("--daemon-exclusive=");
 
         if is_global_bool || is_global_inline {
             global_args.push(arg.clone());
@@ -658,7 +659,10 @@ fn is_global_bool_arg(arg: &str) -> bool {
 }
 
 fn is_global_kv_arg(arg: &str) -> bool {
-    matches!(arg, "--format" | "--auth" | "--cache-ttl" | "--schema-url")
+    matches!(
+        arg,
+        "--format" | "--auth" | "--cache-ttl" | "--schema-url" | "--daemon-exclusive"
+    )
 }
 
 fn is_global_inline_arg(arg: &str) -> bool {
@@ -666,6 +670,7 @@ fn is_global_inline_arg(arg: &str) -> bool {
         || arg.starts_with("--auth=")
         || arg.starts_with("--cache-ttl=")
         || arg.starts_with("--schema-url=")
+        || arg.starts_with("--daemon-exclusive=")
 }
 
 fn non_global_tokens(raw_args: &[String]) -> Vec<String> {
@@ -2084,10 +2089,7 @@ fn build_link_launcher(name: &str, host: &str, daemon_exclusive: &[String]) -> S
         let exclusive_line = if exclusive.is_empty() {
             String::new()
         } else {
-            format!(
-                "UXC_DAEMON_EXCLUSIVE={} ",
-                shell_single_quote(&exclusive)
-            )
+            format!("UXC_DAEMON_EXCLUSIVE={} ", shell_single_quote(&exclusive))
         };
         format!(
             "#!/usr/bin/env sh\n{}\n{}UXC_LINK_NAME={} exec uxc {} \"$@\"\n",
@@ -2116,8 +2118,13 @@ fn collect_daemon_exclusive_keys(cli: &Cli) -> Result<Vec<String>> {
             let parts: Vec<&str> = if trimmed.contains(';') {
                 trimmed.split(';').collect()
             } else {
-                // Support ":" for POSIX convenience. On Windows, prefer ";" to avoid drive letter ambiguity.
-                trimmed.split(':').collect()
+                // Support ":" for POSIX convenience.
+                // On Windows, do NOT split on ":" to avoid drive letter ambiguity (C:\...).
+                if cfg!(windows) {
+                    vec![trimmed]
+                } else {
+                    trimmed.split(':').collect()
+                }
             };
             for part in parts {
                 let t = part.trim();
@@ -2135,14 +2142,18 @@ fn collect_daemon_exclusive_keys(cli: &Cli) -> Result<Vec<String>> {
 }
 
 fn expand_tilde_key(key: &str) -> Result<String> {
-    if key == "~" || key.starts_with("~/") {
+    if key == "~" || key.starts_with("~/") || key.starts_with("~\\") {
         let home = resolve_home_dir().ok_or_else(|| {
             UxcError::ExecutionFailed("Could not determine home directory".to_string())
         })?;
         if key == "~" {
             return Ok(home.display().to_string());
         }
-        return Ok(home.join(key.trim_start_matches("~/")).display().to_string());
+        let rest = key
+            .strip_prefix("~/")
+            .or_else(|| key.strip_prefix("~\\"))
+            .unwrap_or("");
+        return Ok(home.join(rest).display().to_string());
     }
     Ok(key.to_string())
 }

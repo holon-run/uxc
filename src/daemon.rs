@@ -3,6 +3,7 @@ use crate::adapters::{
 };
 use crate::auth::{self, Profile};
 use crate::cache::{self, Cache, CacheConfig};
+use crate::daemon_log::{redact_endpoint, redact_sensitive};
 use crate::daemon_log::{DaemonEventType, DaemonLogEntry, DaemonLogger};
 use crate::error::UxcError;
 use anyhow::{anyhow, bail, Context, Result};
@@ -346,12 +347,10 @@ impl McpSessionManager {
         for key in keys {
             let lock = {
                 let mut lock_map = self.stdio_exclusive_locks.lock().await;
-                let entry = lock_map
-                    .entry(key)
-                    .or_insert_with(|| InitLockEntry {
-                        lock: Arc::new(Mutex::new(())),
-                        touched_at: Instant::now(),
-                    });
+                let entry = lock_map.entry(key).or_insert_with(|| InitLockEntry {
+                    lock: Arc::new(Mutex::new(())),
+                    touched_at: Instant::now(),
+                });
                 entry.touched_at = Instant::now();
                 entry.lock.clone()
             };
@@ -391,15 +390,13 @@ impl McpSessionManager {
                 {
                     let mut owners_map = self.stdio_exclusive_owners.lock().await;
                     for key in exclusive_keys {
-                        if owners_map
-                            .get(key)
-                            .is_some_and(|o| o == &owner_session_key)
-                        {
+                        if owners_map.get(key).is_some_and(|o| o == &owner_session_key) {
                             owners_map.remove(key);
                         }
                     }
                 }
-                self.cleanup_stdio_exclusive_for_session_key(&owner_session_key).await;
+                self.cleanup_stdio_exclusive_for_session_key(&owner_session_key)
+                    .await;
                 continue;
             };
 
@@ -419,18 +416,32 @@ impl McpSessionManager {
                     let mut conflicting = None;
                     let owners_map = self.stdio_exclusive_owners.lock().await;
                     for key in exclusive_keys {
-                        if owners_map
-                            .get(key)
-                            .is_some_and(|o| o == &owner_session_key)
-                        {
+                        if owners_map.get(key).is_some_and(|o| o == &owner_session_key) {
                             conflicting = Some(key.clone());
                             break;
                         }
                     }
                     let key = conflicting.unwrap_or_else(|| "<unknown>".to_string());
+
+                    // session_key format: "stdio:{endpoint}:{auth_fingerprint}"
+                    // endpoint can contain ":", so parse from the last ":".
+                    let (owner_endpoint, owner_fp) = match owner_session_key.strip_prefix("stdio:")
+                    {
+                        Some(rest) => match rest.rsplit_once(':') {
+                            Some((endpoint, fp)) => (Some(endpoint), Some(fp)),
+                            None => (Some(rest), None),
+                        },
+                        None => (None, None),
+                    };
+                    let owner_endpoint = owner_endpoint
+                        .map(redact_endpoint)
+                        .map(|s| redact_sensitive(&s));
+                    let owner_fp = owner_fp.map(|s| s.to_string());
                     bail!(
-                        "Another MCP stdio session is currently using daemon exclusive key {}. Close it (or run `uxc daemon stop`) before switching.",
-                        key
+                        "Another MCP stdio session is currently using daemon exclusive key {} (owner_endpoint={}, owner_fingerprint={}). Close it (or run `uxc daemon stop`) before switching.",
+                        key,
+                        owner_endpoint.unwrap_or_else(|| "<unknown>".to_string()),
+                        owner_fp.unwrap_or_else(|| "<unknown>".to_string()),
                     );
                 }
             };
@@ -693,8 +704,9 @@ impl DaemonRuntime {
         let mut result: Result<(String, Option<String>, Value)> =
             if protocol == "mcp" && matches!(request.action, RuntimeAction::Execute) {
                 validate_execute_preflight(&resolved.adapter, &request).await?;
-                let (kind, operation, data, reused) =
-                    self.invoke_mcp_execute(&request, auth_profile.clone()).await?;
+                let (kind, operation, data, reused) = self
+                    .invoke_mcp_execute(&request, auth_profile.clone())
+                    .await?;
                 meta.daemon_session_reused = Some(reused);
 
                 if reused {
@@ -722,10 +734,12 @@ impl DaemonRuntime {
                     if let Some(fallback_protocol) = protocol_from_cached_schema(&hit.schema) {
                         // Refresh TTL so adapters using normal cache reads can consume this schema.
                         let _ = cache_for_fallback.put(&request.endpoint, &hit.schema);
-                        let mut adapter = adapter_from_protocol(fallback_protocol, &detection_options);
+                        let mut adapter =
+                            adapter_from_protocol(fallback_protocol, &detection_options);
                         adapter = inject_cache_if_supported(adapter, cache_for_fallback.clone());
                         adapter = inject_auth_if_supported(adapter, auth_profile.clone());
-                        adapter = inject_refresh_if_supported(adapter, request.options.refresh_schema);
+                        adapter =
+                            inject_refresh_if_supported(adapter, request.options.refresh_schema);
 
                         protocol = adapter.protocol_type().as_str().to_string();
                         meta.schema_involved = Some(true);
@@ -746,8 +760,9 @@ impl DaemonRuntime {
                             && matches!(request.action, RuntimeAction::Execute)
                         {
                             validate_execute_preflight(&adapter, &request).await?;
-                            let (kind, operation, data, reused) =
-                                self.invoke_mcp_execute(&request, auth_profile.clone()).await?;
+                            let (kind, operation, data, reused) = self
+                                .invoke_mcp_execute(&request, auth_profile.clone())
+                                .await?;
                             meta.daemon_session_reused = Some(reused);
                             Ok((kind, operation, data))
                         } else {

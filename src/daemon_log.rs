@@ -271,7 +271,7 @@ fn rename_replace(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Redact sensitive information from endpoint URLs
-fn redact_endpoint(endpoint: &str) -> String {
+pub(crate) fn redact_endpoint(endpoint: &str) -> String {
     // Use regex for proper pattern matching with capture groups
     let api_key_re = regex::Regex::new(r"([?&]api_key=)[^&]*").unwrap();
     let token_re = regex::Regex::new(r"([?&](?:access_)?token=)[^&]*").unwrap();
@@ -290,7 +290,7 @@ fn redact_endpoint(endpoint: &str) -> String {
 }
 
 /// Redact sensitive information from general strings
-fn redact_sensitive(text: &str) -> String {
+pub(crate) fn redact_sensitive(text: &str) -> String {
     // Check if text contains patterns that look like secrets
     let mut redacted = text.to_string();
 

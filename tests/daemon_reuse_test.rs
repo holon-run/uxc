@@ -431,8 +431,7 @@ fn mcp_stdio_exclusive_key_refuses_to_evict_busy_session() {
         if !status.status.success() {
             continue;
         }
-        let json: serde_json::Value =
-            serde_json::from_slice(&status.stdout).expect("valid json");
+        let json: serde_json::Value = serde_json::from_slice(&status.stdout).expect("valid json");
         if json["data"]["running"].as_bool().unwrap_or(false)
             && json["data"]["mcp_stdio_sessions"].as_u64().unwrap_or(0) >= 1
         {
