@@ -141,6 +141,7 @@ impl DaemonLogEntry {
     }
 
     /// Add metadata (with automatic redaction)
+    #[allow(dead_code)]
     pub fn with_meta(mut self, meta: serde_json::Value) -> Self {
         self.meta = Some(redact_value(meta));
         self
@@ -219,6 +220,7 @@ impl DaemonLogger {
     }
 
     /// Check if logging is enabled
+    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         true // Logging is always enabled when logger is created
     }
@@ -319,6 +321,7 @@ fn redact_sensitive(text: &str) -> String {
 }
 
 /// Recursively redact sensitive values in JSON
+#[allow(dead_code)]
 fn redact_value(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(mut map) => {

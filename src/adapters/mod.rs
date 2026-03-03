@@ -155,11 +155,13 @@ pub struct OperationDetail {
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub data: Value,
+    #[allow(dead_code)]
     pub metadata: ExecutionMetadata,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExecutionMetadata {
+    #[allow(dead_code)]
     pub duration_ms: u64,
     #[allow(dead_code)]
     pub operation: String,
