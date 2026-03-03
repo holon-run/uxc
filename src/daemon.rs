@@ -1394,7 +1394,17 @@ async fn validate_execute_preflight(
         .operation_id
         .as_ref()
         .ok_or_else(|| anyhow!("operation_id is required"))?;
-    let detail = adapter.describe_operation(&request.endpoint, op).await?;
+    let detail = match adapter.describe_operation(&request.endpoint, op).await {
+        Ok(detail) => detail,
+        Err(err) => {
+            tracing::debug!(
+                "Skip MCP execute preflight validation for {} due to operation schema lookup error: {}",
+                op,
+                err
+            );
+            return Ok(());
+        }
+    };
     let args = request.args.as_ref();
     let required = detail
         .input_schema
