@@ -94,6 +94,10 @@ impl McpStdioClient {
         self.instructions.as_deref()
     }
 
+    pub fn start_kill(&mut self) {
+        self.transport.start_kill();
+    }
+
     /// List available tools
     pub async fn list_tools(&mut self) -> Result<Vec<Tool>> {
         if !self.supports_tools() {

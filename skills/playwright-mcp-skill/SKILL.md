@@ -65,8 +65,8 @@ Endpoint candidate inputs before finalizing:
 - Use direct `uxc "<endpoint>" ...` only as temporary fallback when link setup is unavailable.
 - If browser profile conflict appears, keep `--isolated` in endpoint and retry via the same fixed link command.
 - When using shared `--user-data-dir`, run headless/headed links serially (not concurrently).
-- Before switching between `playwright-mcp-headless` and `playwright-mcp-ui`, stop daemon first:
-  - `uxc daemon stop`
+- When switching between `playwright-mcp-headless` and `playwright-mcp-ui` with the same `--user-data-dir`, uxc will evict the previous cached stdio session so the profile lock is released.
+  - If you're on an older uxc version (or the profile is still busy), fallback: `uxc daemon stop`
 - Prefer `browser_snapshot` over screenshots for model-action loops.
 
 ## References

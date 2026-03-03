@@ -169,6 +169,7 @@ struct InitLockEntry {
 struct McpStdioSession {
     client: adapters::mcp::McpStdioClient,
     last_used: Instant,
+    user_data_dir: Option<String>,
 }
 
 struct McpHttpSession {
@@ -197,8 +198,9 @@ impl McpSessionManager {
         for (key, session) in &stdio_entries {
             // Use try_lock to avoid blocking on sessions that may be held across .await in invoke_mcp.
             // If a session is busy, we'll check it again in the next cleanup cycle.
-            if let Ok(guard) = session.try_lock() {
+            if let Ok(mut guard) = session.try_lock() {
                 if guard.last_used < cutoff {
+                    guard.client.start_kill();
                     stdio_remove.push(key.clone());
                 }
             }
@@ -253,6 +255,14 @@ impl McpSessionManager {
             }
         }
 
+        // If this endpoint uses a persistent browser profile, we must avoid keeping a stale
+        // session alive that still holds a lock on the same profile dir. This shows up in the
+        // "headed login first, then headless automation" workflow.
+        if let Some(user_data_dir) = extract_user_data_dir(args) {
+            self.evict_stdio_user_data_dir_conflicts(key, &user_data_dir)
+                .await?;
+        }
+
         // Singleflight for stdio process initialization by endpoint key.
         // This avoids duplicate process spawns under concurrent cold requests.
         let key_lock = {
@@ -280,11 +290,59 @@ impl McpSessionManager {
         let session = Arc::new(Mutex::new(McpStdioSession {
             client,
             last_used: Instant::now(),
+            user_data_dir: extract_user_data_dir(args),
         }));
 
         let mut map = self.stdio.lock().await;
         map.insert(key.to_string(), session.clone());
         Ok((session, false))
+    }
+
+    async fn evict_stdio_user_data_dir_conflicts(
+        &self,
+        keep_key: &str,
+        user_data_dir: &str,
+    ) -> Result<()> {
+        let candidates: Vec<(String, Arc<Mutex<McpStdioSession>>)> = {
+            let map = self.stdio.lock().await;
+            map.iter()
+                .filter(|(k, _)| k.as_str() != keep_key)
+                .map(|(k, s)| (k.clone(), s.clone()))
+                .collect()
+        };
+
+        let mut to_remove = Vec::new();
+        for (key, session) in candidates {
+            // Prefer fast non-blocking checks. If a session is busy and appears to use the same
+            // profile dir, we fail fast with a clear message.
+            if let Ok(mut guard) = session.try_lock() {
+                if guard
+                    .user_data_dir
+                    .as_deref()
+                    .is_some_and(|d| d == user_data_dir)
+                {
+                    guard.client.start_kill();
+                    to_remove.push(key);
+                }
+            } else if extract_user_data_dir_from_stdio_cache_key(&key)
+                .as_deref()
+                .is_some_and(|d| d == user_data_dir)
+            {
+                bail!(
+                    "Another MCP stdio session is currently using --user-data-dir {}. Close it (or run `uxc daemon stop`) before switching.",
+                    user_data_dir
+                );
+            }
+        }
+
+        if to_remove.is_empty() {
+            return Ok(());
+        }
+        let mut map = self.stdio.lock().await;
+        for key in to_remove {
+            map.remove(&key);
+        }
+        Ok(())
     }
 
     async fn get_or_create_http(
@@ -1115,6 +1173,74 @@ fn auth_fingerprint(profile: Option<&Profile>) -> String {
         }
     }
     format!("{:x}", hasher.finalize())
+}
+
+fn extract_user_data_dir(args: &[String]) -> Option<String> {
+    extract_user_data_dir_from_tokens(args)
+}
+
+fn extract_user_data_dir_from_stdio_cache_key(key: &str) -> Option<String> {
+    if !key.starts_with("stdio:") {
+        return None;
+    }
+    let rest = key.trim_start_matches("stdio:");
+    let mut it = rest.rsplitn(2, ':');
+    let _fingerprint = it.next()?;
+    let endpoint = it.next()?;
+    let tokens = adapters::mcp::transport::parse_command(endpoint);
+    extract_user_data_dir_from_tokens(&tokens)
+}
+
+fn extract_user_data_dir_from_tokens(tokens: &[String]) -> Option<String> {
+    // Flag shapes seen in MCP stdio servers (not shell-expanded):
+    //   --user-data-dir <path>
+    //   --user-data-dir=<path>
+    for (idx, tok) in tokens.iter().enumerate() {
+        if tok == "--user-data-dir" {
+            let next = tokens.get(idx + 1)?;
+            return Some(expand_tilde_path(next));
+        }
+        if let Some(value) = tok.strip_prefix("--user-data-dir=") {
+            return Some(expand_tilde_path(value));
+        }
+    }
+    None
+}
+
+fn expand_tilde_path(path: &str) -> String {
+    let Some(home) = resolve_home_dir_for_tilde() else {
+        return path.to_string();
+    };
+    if path == "~" {
+        return home.to_string_lossy().to_string();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home.join(rest).to_string_lossy().to_string();
+    }
+    if let Some(rest) = path.strip_prefix("~\\") {
+        return home.join(rest).to_string_lossy().to_string();
+    }
+    path.to_string()
+}
+
+fn resolve_home_dir_for_tilde() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(PathBuf::from(home));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            return Some(PathBuf::from(profile));
+        }
+        let home_drive = std::env::var_os("HOMEDRIVE");
+        let home_path = std::env::var_os("HOMEPATH");
+        if let (Some(drive), Some(path)) = (home_drive, home_path) {
+            let mut combined = PathBuf::from(drive);
+            combined.push(path);
+            return Some(combined);
+        }
+    }
+    None
 }
 
 fn now_unix_secs() -> u64 {

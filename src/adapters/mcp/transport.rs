@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{path::PathBuf, str::FromStr};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
@@ -40,12 +41,16 @@ impl StdioProcessExecutor for DefaultStdioProcessExecutor {
         let parts = parse_command(command);
         let (cmd, cmd_args) = parts.split_first().context("Empty command")?;
 
-        // Build the full argument list
-        let full_args: Vec<&str> = cmd_args
+        // Build the full argument list.
+        //
+        // Note: stdio endpoints are executed without a shell, so "~" and "$HOME" won't expand.
+        // We support "~/" expansion for common path-like flags to make linked endpoints ergonomic.
+        let mut full_args: Vec<String> = cmd_args
             .iter()
-            .map(|s| s.as_str())
-            .chain(args.iter().map(|s| s.as_str()))
+            .cloned()
+            .chain(args.iter().cloned())
             .collect();
+        expand_tilde_args(&mut full_args);
 
         tracing::info!("Spawning MCP server: {} {:?}", cmd, full_args);
 
@@ -154,7 +159,7 @@ impl StdioProcessExecutor for MockStdioExecutor {
 /// MCP stdio transport client
 pub struct McpStdioTransport {
     /// Child process handle
-    _child: tokio::process::Child,
+    child: tokio::process::Child,
     /// Request ID counter
     next_id: Arc<Mutex<i64>>,
     /// Request sender
@@ -284,12 +289,19 @@ impl McpStdioTransport {
         });
 
         Ok(Self {
-            _child: child,
+            child,
             next_id,
             request_tx,
             response_channels,
             _executor: executor,
         })
+    }
+
+    pub fn start_kill(&mut self) {
+        // Best-effort: ensure cached/evicted MCP processes are terminated promptly.
+        // Many MCP servers (including Node-based) will exit when their stdio is closed, but
+        // explicitly killing here avoids profile dir locks and long-lived orphans.
+        let _ = self.child.start_kill();
     }
 
     /// Send a request and wait for the response
@@ -411,6 +423,12 @@ impl McpStdioTransport {
     }
 }
 
+impl Drop for McpStdioTransport {
+    fn drop(&mut self) {
+        self.start_kill();
+    }
+}
+
 fn stdio_request_timeout() -> Duration {
     let ms = std::env::var("UXC_MCP_STDIO_TIMEOUT_MS")
         .ok()
@@ -418,6 +436,67 @@ fn stdio_request_timeout() -> Duration {
         .filter(|v| *v > 0)
         .unwrap_or(DEFAULT_STDIO_REQUEST_TIMEOUT_MS);
     Duration::from_millis(ms)
+}
+
+fn expand_tilde_args(args: &mut [String]) {
+    let Some(home) = resolve_home_dir() else {
+        return;
+    };
+    let home_str = home.to_string_lossy().to_string();
+
+    for arg in args {
+        if let Some(expanded) = expand_tilde_token(arg, &home_str) {
+            *arg = expanded;
+        }
+    }
+}
+
+fn resolve_home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(PathBuf::from(home));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            return Some(PathBuf::from(profile));
+        }
+        let home_drive = std::env::var_os("HOMEDRIVE");
+        let home_path = std::env::var_os("HOMEPATH");
+        if let (Some(drive), Some(path)) = (home_drive, home_path) {
+            let mut combined = PathBuf::from(drive);
+            combined.push(path);
+            return Some(combined);
+        }
+    }
+    None
+}
+
+fn expand_tilde_token(token: &str, home: &str) -> Option<String> {
+    if token == "~" {
+        return Some(home.to_string());
+    }
+    if token.starts_with("~/") {
+        return Some(format!("{}/{}", home, token.trim_start_matches("~/")));
+    }
+
+    // Support common "--flag=~/path" shape.
+    if let Some((k, v)) = token.split_once('=') {
+        if v == "~" {
+            return Some(format!("{}={}", k, home));
+        }
+        if v.starts_with("~/") {
+            return Some(format!("{}={}/{}", k, home, v.trim_start_matches("~/")));
+        }
+    }
+
+    // Windows-ish "~\\path"
+    if token.starts_with("~\\") {
+        let mut pb = PathBuf::from_str(home).ok()?;
+        pb.push(token.trim_start_matches("~\\"));
+        return Some(pb.to_string_lossy().to_string());
+    }
+
+    None
 }
 
 /// Parse a command string into parts (handles quoted strings)
