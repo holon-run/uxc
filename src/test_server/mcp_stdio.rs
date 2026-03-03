@@ -40,7 +40,9 @@ pub fn run(scenario: Scenario) -> Result<()> {
 
         let id = req.get("id").cloned().unwrap_or(json!(null));
 
-        if matches!(scenario, Scenario::Timeout) {
+        if matches!(scenario, Scenario::Timeout)
+            || (matches!(scenario, Scenario::ToolCallTimeout) && method == "tools/call")
+        {
             std::thread::sleep(super::common::timeout_duration());
             respond(
                 &mut out,

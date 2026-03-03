@@ -15,6 +15,8 @@ pub enum Scenario {
     Malformed,
     /// Simulate timeout
     Timeout,
+    /// Only tools/call sleeps then returns an error (used for daemon busy-session testing)
+    ToolCallTimeout,
     /// tools/list succeeds once, then fails (used to verify cache-first help behavior)
     ToolsListFailAfterFirst,
 }
@@ -27,9 +29,10 @@ impl Scenario {
             "auth_required" => Ok(Self::AuthRequired),
             "malformed" => Ok(Self::Malformed),
             "timeout" => Ok(Self::Timeout),
+            "tool_call_timeout" => Ok(Self::ToolCallTimeout),
             "tools_list_fail_after_first" => Ok(Self::ToolsListFailAfterFirst),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, tools_list_fail_after_first",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, tool_call_timeout, tools_list_fail_after_first",
                 s
             ),
         }

@@ -23,9 +23,9 @@ Endpoint candidate inputs before finalizing:
 - Reliable non-interactive form: `npx -y @playwright/mcp@latest`
 - Isolated/headless stable form (default for this skill):
   - `npx -y @playwright/mcp@latest --headless --isolated`
-- Shared-profile headless form (for persistent login state):
+  - Shared-profile headless form (for persistent login state):
   - `npx -y @playwright/mcp@latest --headless --user-data-dir ~/.uxc/playwright-profile`
-- Shared-profile headed form (for interactive debug with same login state):
+  - Shared-profile headed form (for interactive debug with same login state):
   - `npx -y @playwright/mcp@latest --user-data-dir ~/.uxc/playwright-profile`
 
 1. Verify protocol/path from official source and probe:
@@ -43,8 +43,8 @@ Endpoint candidate inputs before finalizing:
    - Optional shared-profile dual command setup for persistent sessions:
      - `command -v playwright-mcp-headless`
      - `command -v playwright-mcp-ui`
-     - `uxc link playwright-mcp-headless "npx -y @playwright/mcp@latest --headless --user-data-dir ~/.uxc/playwright-profile"`
-     - `uxc link playwright-mcp-ui "npx -y @playwright/mcp@latest --user-data-dir ~/.uxc/playwright-profile"`
+     - `uxc link --daemon-exclusive ~/.uxc/playwright-profile playwright-mcp-headless "npx -y @playwright/mcp@latest --headless --user-data-dir ~/.uxc/playwright-profile"`
+     - `uxc link --daemon-exclusive ~/.uxc/playwright-profile playwright-mcp-ui "npx -y @playwright/mcp@latest --user-data-dir ~/.uxc/playwright-profile"`
    - `playwright-mcp-cli -h`
    - If command conflict is detected and cannot be safely reused, stop and ask skill maintainers to pick another fixed command name.
 4. Inspect operation schema before execution:
@@ -65,8 +65,9 @@ Endpoint candidate inputs before finalizing:
 - Use direct `uxc "<endpoint>" ...` only as temporary fallback when link setup is unavailable.
 - If browser profile conflict appears, keep `--isolated` in endpoint and retry via the same fixed link command.
 - When using shared `--user-data-dir`, run headless/headed links serially (not concurrently).
-- When switching between `playwright-mcp-headless` and `playwright-mcp-ui` with the same `--user-data-dir`, uxc will evict the previous cached stdio session so the profile lock is released.
-  - If you're on an older uxc version (or the profile is still busy), fallback: `uxc daemon stop`
+- To enable seamless switching between headed UI login and headless CLI automation using the same profile directory, set a daemon exclusive key:
+  - Prefer link-level setup (recommended above), or set `UXC_DAEMON_EXCLUSIVE=~/.uxc/playwright-profile` for ad-hoc runs.
+  - If the profile is still busy (another session is actively running), fallback: `uxc daemon stop`
 - Prefer `browser_snapshot` over screenshots for model-action loops.
 
 ## References

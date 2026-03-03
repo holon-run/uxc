@@ -232,7 +232,10 @@ async fn execute_query(
     }
 
     match state.scenario {
-        Scenario::Ok | Scenario::AuthRequired | Scenario::ToolsListFailAfterFirst => {
+        Scenario::Ok
+        | Scenario::AuthRequired
+        | Scenario::ToolsListFailAfterFirst
+        | Scenario::ToolCallTimeout => {
             // Introspection query
             if query.contains("__schema") || query.contains("__type(") {
                 return Ok(GraphQLResponse {

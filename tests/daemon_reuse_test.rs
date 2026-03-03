@@ -324,3 +324,148 @@ fn mcp_stdio_execute_does_not_relist_tools_on_reused_session() {
 
     daemon_stop_best_effort();
 }
+
+#[test]
+#[serial]
+fn mcp_stdio_exclusive_key_allows_switching_endpoints_without_daemon_restart() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint_a = format!("{} ok --tag=a", bin.display());
+    let endpoint_b = format!("{} ok --tag=b", bin.display());
+
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let first = uxc_command()
+        .env("UXC_DAEMON_EXCLUSIVE", "~/.uxc/test-exclusive")
+        .arg(&endpoint_a)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"a"}"#)
+        .output()
+        .expect("first call should run");
+    assert!(
+        first.status.success(),
+        "first call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let second = uxc_command()
+        .env("UXC_DAEMON_EXCLUSIVE", "~/.uxc/test-exclusive")
+        .arg(&endpoint_b)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"b"}"#)
+        .output()
+        .expect("second call should run");
+    assert!(
+        second.status.success(),
+        "second call should succeed after switching endpoints\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let status = uxc_command()
+        .arg("daemon")
+        .arg("status")
+        .output()
+        .expect("daemon status should run");
+    assert!(status.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&status.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "daemon_status");
+    assert_eq!(json["data"]["running"], true);
+    let stdio_sessions = json["data"]["mcp_stdio_sessions"]
+        .as_u64()
+        .expect("mcp_stdio_sessions should be u64");
+    assert_eq!(stdio_sessions, 1, "expected a single stdio session");
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
+fn mcp_stdio_exclusive_key_refuses_to_evict_busy_session() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint_busy = format!("{} tool_call_timeout --tag=busy", bin.display());
+    let endpoint_other = format!("{} ok --tag=other", bin.display());
+
+    // Start daemon with the timeout env so the MCP stdio test server (spawned by daemon)
+    // inherits it and sleeps for a predictable duration.
+    let start = uxc_command()
+        .env("UXC_TEST_TIMEOUT_MS", "4000")
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let busy = std::thread::spawn(move || {
+        uxc_command()
+            .env("UXC_DAEMON_EXCLUSIVE", "~/.uxc/test-exclusive")
+            .arg(&endpoint_busy)
+            .arg("echo")
+            .arg("--input-json")
+            .arg(r#"{"message":"busy"}"#)
+            .output()
+            .expect("busy call should run")
+    });
+
+    // Wait for session to be created so the exclusive owner is registered.
+    let mut ready = false;
+    for _ in 0..120 {
+        std::thread::sleep(Duration::from_millis(100));
+        let status = uxc_command()
+            .arg("daemon")
+            .arg("status")
+            .output()
+            .expect("daemon status should run");
+        if !status.status.success() {
+            continue;
+        }
+        let json: serde_json::Value =
+            serde_json::from_slice(&status.stdout).expect("valid json");
+        if json["data"]["running"].as_bool().unwrap_or(false)
+            && json["data"]["mcp_stdio_sessions"].as_u64().unwrap_or(0) >= 1
+        {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "daemon did not become ready in time");
+
+    let other = uxc_command()
+        .env("UXC_DAEMON_EXCLUSIVE", "~/.uxc/test-exclusive")
+        .arg(&endpoint_other)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"other"}"#)
+        .output()
+        .expect("other call should run");
+    assert!(
+        !other.status.success(),
+        "expected other call to fail when busy session holds exclusive key\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&other.stdout),
+        String::from_utf8_lossy(&other.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&other.stdout).expect("valid json");
+    assert_eq!(json["ok"], false);
+    let msg = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("daemon exclusive key"),
+        "expected error message to mention daemon exclusive key, got: {}",
+        msg
+    );
+
+    let _busy_out = busy.join().expect("busy thread should join");
+    daemon_stop_best_effort();
+}

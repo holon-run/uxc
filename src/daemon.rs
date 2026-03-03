@@ -74,6 +74,8 @@ pub struct RuntimeInvokeOptions {
     pub schema_url: Option<String>,
     pub link_name: Option<String>,
     pub schema_mapping_file: Option<String>,
+    #[serde(default)]
+    pub daemon_exclusive: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +159,9 @@ struct ServerState {
 struct McpSessionManager {
     stdio: Arc<Mutex<HashMap<String, Arc<Mutex<McpStdioSession>>>>>,
     stdio_init_locks: Arc<Mutex<HashMap<String, InitLockEntry>>>,
+    stdio_exclusive_locks: Arc<Mutex<HashMap<String, InitLockEntry>>>,
+    stdio_exclusive_owners: Arc<Mutex<HashMap<String, String>>>, // exclusive_key -> session_key
+    stdio_session_exclusives: Arc<Mutex<HashMap<String, Vec<String>>>>, // session_key -> [exclusive_key]
     http: Arc<Mutex<HashMap<String, Arc<McpHttpSession>>>>,
     reuse_hits: Arc<Mutex<u64>>,
 }
@@ -169,7 +174,6 @@ struct InitLockEntry {
 struct McpStdioSession {
     client: adapters::mcp::McpStdioClient,
     last_used: Instant,
-    user_data_dir: Option<String>,
 }
 
 struct McpHttpSession {
@@ -182,6 +186,9 @@ impl McpSessionManager {
         Self {
             stdio: Arc::new(Mutex::new(HashMap::new())),
             stdio_init_locks: Arc::new(Mutex::new(HashMap::new())),
+            stdio_exclusive_locks: Arc::new(Mutex::new(HashMap::new())),
+            stdio_exclusive_owners: Arc::new(Mutex::new(HashMap::new())),
+            stdio_session_exclusives: Arc::new(Mutex::new(HashMap::new())),
             http: Arc::new(Mutex::new(HashMap::new())),
             reuse_hits: Arc::new(Mutex::new(0)),
         }
@@ -206,9 +213,14 @@ impl McpSessionManager {
             }
         }
         if !stdio_remove.is_empty() {
-            let mut map = self.stdio.lock().await;
+            {
+                let mut map = self.stdio.lock().await;
+                for key in &stdio_remove {
+                    map.remove(key);
+                }
+            }
             for key in stdio_remove {
-                map.remove(&key);
+                self.cleanup_stdio_exclusive_for_session_key(&key).await;
             }
         }
 
@@ -221,6 +233,10 @@ impl McpSessionManager {
         // which could otherwise allow a concurrent cold call to create a duplicate
         // lock and spawn another MCP process, breaking the singleflight guarantee.
         lock_map.retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
+
+        let mut exclusive_lock_map = self.stdio_exclusive_locks.lock().await;
+        exclusive_lock_map
+            .retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
 
         let http_entries: Vec<(String, Arc<McpHttpSession>)> = {
             let map = self.http.lock().await;
@@ -243,24 +259,36 @@ impl McpSessionManager {
 
     async fn get_or_create_stdio(
         &self,
-        key: &str,
+        session_key: &str,
         command: &str,
         args: &[String],
+        exclusive_keys: &[String],
     ) -> Result<(Arc<Mutex<McpStdioSession>>, bool)> {
-        {
-            let map = self.stdio.lock().await;
-            if let Some(s) = map.get(key) {
-                *self.reuse_hits.lock().await += 1;
-                return Ok((s.clone(), true));
-            }
+        let exclusive_keys = normalize_exclusive_keys(exclusive_keys);
+
+        // If exclusives are requested, enforce/claim them before returning an existing session
+        // so the invariant holds even when the session was created without exclusives.
+        let _exclusive_guards = if exclusive_keys.is_empty() {
+            Vec::new()
+        } else {
+            self.acquire_stdio_exclusive_locks(&exclusive_keys).await
+        };
+
+        if !exclusive_keys.is_empty() {
+            self.evict_stdio_exclusive_conflicts(session_key, &exclusive_keys)
+                .await?;
         }
 
-        // If this endpoint uses a persistent browser profile, we must avoid keeping a stale
-        // session alive that still holds a lock on the same profile dir. This shows up in the
-        // "headed login first, then headless automation" workflow.
-        if let Some(user_data_dir) = extract_user_data_dir(args) {
-            self.evict_stdio_user_data_dir_conflicts(key, &user_data_dir)
-                .await?;
+        {
+            let map = self.stdio.lock().await;
+            if let Some(s) = map.get(session_key) {
+                *self.reuse_hits.lock().await += 1;
+                if !exclusive_keys.is_empty() {
+                    self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
+                        .await;
+                }
+                return Ok((s.clone(), true));
+            }
         }
 
         // Singleflight for stdio process initialization by endpoint key.
@@ -268,7 +296,7 @@ impl McpSessionManager {
         let key_lock = {
             let mut lock_map = self.stdio_init_locks.lock().await;
             let entry = lock_map
-                .entry(key.to_string())
+                .entry(session_key.to_string())
                 .or_insert_with(|| InitLockEntry {
                     lock: Arc::new(Mutex::new(())),
                     touched_at: Instant::now(),
@@ -280,8 +308,12 @@ impl McpSessionManager {
 
         {
             let map = self.stdio.lock().await;
-            if let Some(s) = map.get(key) {
+            if let Some(s) = map.get(session_key) {
                 *self.reuse_hits.lock().await += 1;
+                if !exclusive_keys.is_empty() {
+                    self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
+                        .await;
+                }
                 return Ok((s.clone(), true));
             }
         }
@@ -290,59 +322,160 @@ impl McpSessionManager {
         let session = Arc::new(Mutex::new(McpStdioSession {
             client,
             last_used: Instant::now(),
-            user_data_dir: extract_user_data_dir(args),
         }));
 
         let mut map = self.stdio.lock().await;
-        map.insert(key.to_string(), session.clone());
+        map.insert(session_key.to_string(), session.clone());
+        if !exclusive_keys.is_empty() {
+            self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
+                .await;
+        }
         Ok((session, false))
     }
 
-    async fn evict_stdio_user_data_dir_conflicts(
+    async fn acquire_stdio_exclusive_locks(
         &self,
-        keep_key: &str,
-        user_data_dir: &str,
-    ) -> Result<()> {
-        let candidates: Vec<(String, Arc<Mutex<McpStdioSession>>)> = {
-            let map = self.stdio.lock().await;
-            map.iter()
-                .filter(|(k, _)| k.as_str() != keep_key)
-                .map(|(k, s)| (k.clone(), s.clone()))
-                .collect()
-        };
+        exclusive_keys: &[String],
+    ) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+        let mut keys = exclusive_keys.to_vec();
+        keys.sort();
+        keys.dedup();
 
-        let mut to_remove = Vec::new();
-        for (key, session) in candidates {
-            // Prefer fast non-blocking checks. If a session is busy and appears to use the same
-            // profile dir, we fail fast with a clear message.
-            if let Ok(mut guard) = session.try_lock() {
-                if guard
-                    .user_data_dir
-                    .as_deref()
-                    .is_some_and(|d| d == user_data_dir)
-                {
-                    guard.client.start_kill();
-                    to_remove.push(key);
+        // Hold guards to keep locks alive for the duration of get_or_create_stdio.
+        let mut guards = Vec::new();
+        for key in keys {
+            let lock = {
+                let mut lock_map = self.stdio_exclusive_locks.lock().await;
+                let entry = lock_map
+                    .entry(key)
+                    .or_insert_with(|| InitLockEntry {
+                        lock: Arc::new(Mutex::new(())),
+                        touched_at: Instant::now(),
+                    });
+                entry.touched_at = Instant::now();
+                entry.lock.clone()
+            };
+            guards.push(lock.clone().lock_owned().await);
+        }
+        guards
+    }
+
+    async fn evict_stdio_exclusive_conflicts(
+        &self,
+        session_key: &str,
+        exclusive_keys: &[String],
+    ) -> Result<()> {
+        // Discover distinct conflicting owners first so we don't scan the session map repeatedly.
+        let mut owners = Vec::new();
+        {
+            let owners_map = self.stdio_exclusive_owners.lock().await;
+            for key in exclusive_keys {
+                if let Some(owner) = owners_map.get(key) {
+                    if owner != session_key {
+                        owners.push(owner.clone());
+                    }
                 }
-            } else if extract_user_data_dir_from_stdio_cache_key(&key)
-                .as_deref()
-                .is_some_and(|d| d == user_data_dir)
-            {
-                bail!(
-                    "Another MCP stdio session is currently using --user-data-dir {}. Close it (or run `uxc daemon stop`) before switching.",
-                    user_data_dir
-                );
             }
         }
+        owners.sort();
+        owners.dedup();
 
-        if to_remove.is_empty() {
-            return Ok(());
+        for owner_session_key in owners {
+            // Try-lock to avoid blocking; if busy, refuse to evict by default.
+            let session_opt = {
+                let map = self.stdio.lock().await;
+                map.get(&owner_session_key).cloned()
+            };
+            let Some(session) = session_opt else {
+                // Best-effort cleanup for stale owner mapping.
+                {
+                    let mut owners_map = self.stdio_exclusive_owners.lock().await;
+                    for key in exclusive_keys {
+                        if owners_map
+                            .get(key)
+                            .is_some_and(|o| o == &owner_session_key)
+                        {
+                            owners_map.remove(key);
+                        }
+                    }
+                }
+                self.cleanup_stdio_exclusive_for_session_key(&owner_session_key).await;
+                continue;
+            };
+
+            match session.try_lock() {
+                Ok(mut guard) => {
+                    guard.client.start_kill();
+                    // Remove session + exclusive registry entries.
+                    {
+                        let mut map = self.stdio.lock().await;
+                        map.remove(&owner_session_key);
+                    }
+                    self.cleanup_stdio_exclusive_for_session_key(&owner_session_key)
+                        .await;
+                }
+                Err(_) => {
+                    // Find the first conflicting key for a helpful message.
+                    let mut conflicting = None;
+                    let owners_map = self.stdio_exclusive_owners.lock().await;
+                    for key in exclusive_keys {
+                        if owners_map
+                            .get(key)
+                            .is_some_and(|o| o == &owner_session_key)
+                        {
+                            conflicting = Some(key.clone());
+                            break;
+                        }
+                    }
+                    let key = conflicting.unwrap_or_else(|| "<unknown>".to_string());
+                    bail!(
+                        "Another MCP stdio session is currently using daemon exclusive key {}. Close it (or run `uxc daemon stop`) before switching.",
+                        key
+                    );
+                }
+            };
         }
-        let mut map = self.stdio.lock().await;
-        for key in to_remove {
-            map.remove(&key);
-        }
+
         Ok(())
+    }
+
+    async fn register_stdio_exclusive_keys(&self, session_key: &str, exclusive_keys: &[String]) {
+        if exclusive_keys.is_empty() {
+            return;
+        }
+
+        // Replace previous mapping for this session key.
+        self.cleanup_stdio_exclusive_for_session_key(session_key)
+            .await;
+
+        {
+            let mut session_map = self.stdio_session_exclusives.lock().await;
+            session_map.insert(session_key.to_string(), exclusive_keys.to_vec());
+        }
+        {
+            let mut owners_map = self.stdio_exclusive_owners.lock().await;
+            for key in exclusive_keys {
+                owners_map.insert(key.clone(), session_key.to_string());
+            }
+        }
+    }
+
+    async fn cleanup_stdio_exclusive_for_session_key(&self, session_key: &str) {
+        let keys = {
+            let mut session_map = self.stdio_session_exclusives.lock().await;
+            session_map.remove(session_key).unwrap_or_default()
+        };
+
+        if keys.is_empty() {
+            return;
+        }
+
+        let mut owners_map = self.stdio_exclusive_owners.lock().await;
+        for key in keys {
+            if owners_map.get(&key).is_some_and(|o| o == session_key) {
+                owners_map.remove(&key);
+            }
+        }
     }
 
     async fn get_or_create_http(
@@ -477,6 +610,7 @@ impl DaemonRuntime {
         .await;
 
         let cache = self.build_cache(&request.options)?;
+        let cache_for_fallback = cache.clone();
         let auth_profile =
             auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
 
@@ -517,7 +651,7 @@ impl DaemonRuntime {
             }
         };
 
-        let protocol = resolved.adapter.protocol_type().as_str().to_string();
+        let mut protocol = resolved.adapter.protocol_type().as_str().to_string();
         let mut meta = RuntimeMeta::default();
         if let Some(cache_meta) = resolved.cache_meta {
             meta.schema_involved = Some(true);
@@ -556,11 +690,11 @@ impl DaemonRuntime {
             meta.schema_involved = Some(true);
         }
 
-        let result: Result<(String, Option<String>, Value)> =
+        let mut result: Result<(String, Option<String>, Value)> =
             if protocol == "mcp" && matches!(request.action, RuntimeAction::Execute) {
                 validate_execute_preflight(&resolved.adapter, &request).await?;
                 let (kind, operation, data, reused) =
-                    self.invoke_mcp_execute(&request, auth_profile).await?;
+                    self.invoke_mcp_execute(&request, auth_profile.clone()).await?;
                 meta.daemon_session_reused = Some(reused);
 
                 if reused {
@@ -576,6 +710,53 @@ impl DaemonRuntime {
             } else {
                 invoke_with_adapter(&resolved.adapter, &request).await
             };
+
+        // If invocation failed, attempt a stale-cache fallback even when protocol detection
+        // succeeded without network access. This keeps `-h` flows resilient when the cached
+        // schema is expired but still useful.
+        if result.is_err() && !request.options.no_cache && !request.options.refresh_schema {
+            if let cache::CacheLookup::Hit(hit) = cache_for_fallback
+                .get_with_policy(&request.endpoint, cache::CacheReadPolicy::AllowStale)?
+            {
+                if hit.stale {
+                    if let Some(fallback_protocol) = protocol_from_cached_schema(&hit.schema) {
+                        // Refresh TTL so adapters using normal cache reads can consume this schema.
+                        let _ = cache_for_fallback.put(&request.endpoint, &hit.schema);
+                        let mut adapter = adapter_from_protocol(fallback_protocol, &detection_options);
+                        adapter = inject_cache_if_supported(adapter, cache_for_fallback.clone());
+                        adapter = inject_auth_if_supported(adapter, auth_profile.clone());
+                        adapter = inject_refresh_if_supported(adapter, request.options.refresh_schema);
+
+                        protocol = adapter.protocol_type().as_str().to_string();
+                        meta.schema_involved = Some(true);
+                        meta.cache_source = Some("schema_cache".to_string());
+                        meta.cache_age_ms = Some(cache_age_ms(hit.fetched_at));
+                        meta.cache_stale = Some(true);
+                        meta.cache_fallback = Some(true);
+
+                        self.log(
+                            DaemonLogEntry::new(DaemonEventType::CacheFallback)
+                                .with_request_id(request.request_id.clone())
+                                .with_endpoint(request.endpoint.clone())
+                                .with_protocol(protocol.clone()),
+                        )
+                        .await;
+
+                        result = if protocol == "mcp"
+                            && matches!(request.action, RuntimeAction::Execute)
+                        {
+                            validate_execute_preflight(&adapter, &request).await?;
+                            let (kind, operation, data, reused) =
+                                self.invoke_mcp_execute(&request, auth_profile.clone()).await?;
+                            meta.daemon_session_reused = Some(reused);
+                            Ok((kind, operation, data))
+                        } else {
+                            invoke_with_adapter(&adapter, &request).await
+                        };
+                    }
+                }
+            }
+        }
 
         match result {
             Ok((kind, operation, data)) => {
@@ -689,7 +870,10 @@ impl DaemonRuntime {
                 endpoint,
                 auth_fingerprint(auth_profile.as_ref())
             );
-            let (session, reused) = self.mcp.get_or_create_stdio(&key, &cmd, &cmd_args).await?;
+            let (session, reused) = self
+                .mcp
+                .get_or_create_stdio(&key, &cmd, &cmd_args, &request.options.daemon_exclusive)
+                .await?;
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
             let result = guard.client.call_tool(op, arguments).await?;
@@ -1175,50 +1359,34 @@ fn auth_fingerprint(profile: Option<&Profile>) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn extract_user_data_dir(args: &[String]) -> Option<String> {
-    extract_user_data_dir_from_tokens(args)
-}
-
-fn extract_user_data_dir_from_stdio_cache_key(key: &str) -> Option<String> {
-    if !key.starts_with("stdio:") {
-        return None;
-    }
-    let rest = key.trim_start_matches("stdio:");
-    let (endpoint, _fingerprint) = rest.rsplit_once(':')?;
-    let tokens = adapters::mcp::transport::parse_command(endpoint);
-    extract_user_data_dir_from_tokens(&tokens)
-}
-
-fn extract_user_data_dir_from_tokens(tokens: &[String]) -> Option<String> {
-    // Flag shapes seen in MCP stdio servers (not shell-expanded):
-    //   --user-data-dir <path>
-    //   --user-data-dir=<path>
-    for (idx, tok) in tokens.iter().enumerate() {
-        if tok == "--user-data-dir" {
-            let next = tokens.get(idx + 1)?;
-            return Some(expand_tilde_path(next));
+fn normalize_exclusive_keys(keys: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for k in keys {
+        let trimmed = k.trim();
+        if trimmed.is_empty() {
+            continue;
         }
-        if let Some(value) = tok.strip_prefix("--user-data-dir=") {
-            return Some(expand_tilde_path(value));
-        }
+        out.push(expand_tilde_key(trimmed));
     }
-    None
+    out.sort();
+    out.dedup();
+    out
 }
 
-fn expand_tilde_path(path: &str) -> String {
+fn expand_tilde_key(key: &str) -> String {
     let Some(home) = resolve_home_dir_for_tilde() else {
-        return path.to_string();
+        return key.to_string();
     };
-    if path == "~" {
+    if key == "~" {
         return home.to_string_lossy().to_string();
     }
-    if let Some(rest) = path.strip_prefix("~/") {
+    if let Some(rest) = key.strip_prefix("~/") {
         return home.join(rest).to_string_lossy().to_string();
     }
-    if let Some(rest) = path.strip_prefix("~\\") {
+    if let Some(rest) = key.strip_prefix("~\\") {
         return home.join(rest).to_string_lossy().to_string();
     }
-    path.to_string()
+    key.to_string()
 }
 
 fn resolve_home_dir_for_tilde() -> Option<PathBuf> {
