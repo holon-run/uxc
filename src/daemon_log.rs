@@ -304,16 +304,32 @@ pub(crate) fn redact_sensitive(text: &str) -> String {
         (r"(?i)(secret\s*[=:]\s*)[^\s,']+", "${1}***"),
         (r"(?i)(password\s*[=:]\s*)[^\s,']+", "${1}***"),
         (r"(?i)(authorization\s*[=:]\s*)[^\s,']+", "${1}***"),
-        (
-            r"(?i)\b([a-z0-9-]*(?:auth|token|secret|key|passphrase)[a-z0-9-]*\s*:\s*)[^\s,']+",
-            "${1}***",
-        ),
     ];
 
     for (pattern, replacement) in patterns {
         let re = regex::Regex::new(pattern).unwrap();
         redacted = re.replace_all(&redacted, replacement).to_string();
     }
+
+    // Redact header-like key/value pairs using semantic key checks to avoid
+    // accidental matches like "monkey: banana".
+    let header_re = regex::Regex::new(r"(?i)\b([a-z0-9_-]+\s*:\s*)([^\s,']+)").unwrap();
+    redacted = header_re
+        .replace_all(&redacted, |caps: &regex::Captures| {
+            let key_with_colon = caps.get(1).map_or("", |m| m.as_str());
+            let key = key_with_colon
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            if is_sensitive_header_name(&key) {
+                format!("{}***", key_with_colon)
+            } else {
+                caps.get(0).map_or("", |m| m.as_str()).to_string()
+            }
+        })
+        .to_string();
 
     // Also redact things that look like JWTs (long base64-like strings with dots)
     let jwt_re = regex::Regex::new(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+").unwrap();
@@ -322,6 +338,12 @@ pub(crate) fn redact_sensitive(text: &str) -> String {
     }
 
     redacted
+}
+
+fn is_sensitive_header_name(name: &str) -> bool {
+    let keywords = ["auth", "token", "secret", "key", "passphrase"];
+    name.split(['-', '_'])
+        .any(|segment| keywords.iter().any(|kw| segment.eq_ignore_ascii_case(kw)))
 }
 
 /// Recursively redact sensitive values in JSON
@@ -406,6 +428,17 @@ mod tests {
         assert_eq!(
             redact_sensitive("Failed with api_key=secret123"),
             "Failed with api_key=***"
+        );
+
+        assert_eq!(
+            redact_sensitive("monkey: banana"),
+            "monkey: banana",
+            "non-sensitive header-like labels should not be redacted"
+        );
+        assert_eq!(
+            redact_sensitive("x-api-key: secret123"),
+            "x-api-key: ***",
+            "sensitive header names should be redacted"
         );
 
         // Bearer tokens get redacted - both "Bearer" keyword and JWT pattern match

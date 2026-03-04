@@ -418,6 +418,7 @@ struct StoredCredential {
     secret_source: Option<SecretSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
+    // auth_headers persistence is handled by serde derives on AuthHeader.
     #[serde(skip_serializing_if = "Option::is_none")]
     auth_headers: Option<Vec<AuthHeader>>,
 }

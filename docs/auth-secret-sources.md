@@ -27,7 +27,7 @@ uxc auth credential set demo --auth-type api_key --header "OK-ACCESS-KEY={{secre
 - `--secret`, `--secret-env`, and `--secret-op` are mutually exclusive.
 - `--api-key-header` is a shortcut for one header using `{{secret}}`.
 - `--header` can be repeated and supports `{{secret}}`, `{{env:...}}`, and `{{op://...}}`.
-- `auth credential info` and `auth credential list` expose only `secret_source.kind`.
+- `auth credential info` and `auth credential list` expose `secret_source.kind` and `auth_headers` (header names with masked values), but not underlying secret values.
 - Resolved values from `env` and `op` are used at runtime and are not persisted as plaintext values.
 - `op` mode requires 1Password CLI (`op`) in `PATH`.
 - `op` references are resolved during request execution, not at `auth credential set` time.

@@ -1170,6 +1170,7 @@ impl GrpcurlAuthHeaders for Profile {
         let header = match self.auth_type {
             crate::auth::AuthType::Bearer => format!("authorization: Bearer {}", self.api_key),
             crate::auth::AuthType::ApiKey => {
+                // Return early for api_key to support multiple custom headers.
                 let headers = self.resolved_api_key_headers()?;
                 let mut rendered = Vec::with_capacity(headers.len());
                 for (name, value) in headers {
