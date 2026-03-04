@@ -188,3 +188,20 @@ fn cache_clear_by_key_accepts_json_suffix() {
     assert_eq!(clear_json["data"]["scope"], "key");
     assert_eq!(clear_json["data"]["key"], key);
 }
+
+#[test]
+fn cache_clear_rejects_all_with_url() {
+    let temp_home = TempDir::new().expect("temp home should be created");
+    let output = uxc_with_home(temp_home.path())
+        .arg("cache")
+        .arg("clear")
+        .arg("--all")
+        .arg("https://api.example.com/openapi.json")
+        .output()
+        .expect("cache clear should run");
+
+    assert!(!output.status.success(), "command should fail");
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+}

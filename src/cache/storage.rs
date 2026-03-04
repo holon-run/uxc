@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
+use std::path::Component;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -137,8 +138,20 @@ impl CacheStorage {
         if trimmed.is_empty() {
             anyhow::bail!("cache key cannot be empty");
         }
+        if trimmed.contains("..") {
+            anyhow::bail!("cache key must not contain '..'");
+        }
         if trimmed.contains('/') || trimmed.contains('\\') {
             anyhow::bail!("cache key must not contain path separators");
+        }
+        if trimmed.contains(':') {
+            anyhow::bail!("cache key must not contain ':'");
+        }
+        if !std::path::Path::new(trimmed)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        {
+            anyhow::bail!("cache key must be a single filename");
         }
         let normalized = if trimmed.ends_with(".json") {
             trimmed.to_string()
@@ -707,5 +720,19 @@ mod tests {
             .find(|e| e.key == "legacy-entry")
             .expect("legacy entry should be listed");
         assert_eq!(legacy_entry.url, "");
+    }
+
+    #[test]
+    fn test_invalidate_by_key_rejects_parent_dir_sequence() {
+        let (cache, _temp) = create_test_cache();
+        let err = cache.invalidate_by_key("../foo").unwrap_err();
+        assert!(err.to_string().contains("must not contain"));
+    }
+
+    #[test]
+    fn test_invalidate_by_key_rejects_colon() {
+        let (cache, _temp) = create_test_cache();
+        let err = cache.invalidate_by_key("C:temp").unwrap_err();
+        assert!(err.to_string().contains("must not contain ':'"));
     }
 }

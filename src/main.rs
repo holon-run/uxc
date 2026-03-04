@@ -165,10 +165,11 @@ enum CacheCommands {
     /// Clear cache entries
     Clear {
         /// Optional URL to clear specific cache entry
+        #[arg(conflicts_with_all = ["all", "key"])]
         url: Option<String>,
 
         /// Clear all cached entries
-        #[arg(long, conflicts_with = "key")]
+        #[arg(long, conflicts_with_all = ["key", "url"])]
         all: bool,
 
         /// Cache key to clear
@@ -2574,8 +2575,12 @@ async fn handle_cache_command(
                     None,
                 ))
             } else if let Some(key) = key {
-                cache.invalidate_by_key(key)?;
-                let normalized_key = key.strip_suffix(".json").unwrap_or(key).to_string();
+                let normalized_input = key.trim();
+                cache.invalidate_by_key(normalized_input)?;
+                let normalized_key = normalized_input
+                    .strip_suffix(".json")
+                    .unwrap_or(normalized_input)
+                    .to_string();
                 let data = serde_json::to_value(CacheClearData {
                     scope: "key".to_string(),
                     url: None,
