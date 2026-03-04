@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 use tempfile::TempDir;
 
 fn parse_stdout_json(output: &std::process::Output) -> Value {
@@ -70,29 +71,31 @@ fn cache_list_and_clear_by_key_flow() {
         .expect("prime cache should run");
     assert!(prime.status.success(), "prime cache should succeed");
 
-    let list = uxc_with_home(temp_home.path())
-        .arg("cache")
-        .arg("list")
-        .output()
-        .expect("cache list should run");
-    assert!(list.status.success(), "cache list should succeed");
-    let list_json = parse_stdout_json(&list);
-    assert_eq!(list_json["ok"], true);
-    assert_eq!(list_json["kind"], "cache_list");
-    assert!(
-        list_json["data"]["count"].as_u64().unwrap_or(0) >= 1,
-        "cache list should include at least one entry"
-    );
-    let key = list_json["data"]["entries"]
-        .as_array()
-        .and_then(|entries| {
+    let mut key = None;
+    for _ in 0..20 {
+        let list = uxc_with_home(temp_home.path())
+            .arg("cache")
+            .arg("list")
+            .output()
+            .expect("cache list should run");
+        assert!(list.status.success(), "cache list should succeed");
+        let list_json = parse_stdout_json(&list);
+        assert_eq!(list_json["ok"], true);
+        assert_eq!(list_json["kind"], "cache_list");
+
+        key = list_json["data"]["entries"].as_array().and_then(|entries| {
             entries
                 .iter()
                 .find(|entry| entry["url"] == server.url())
                 .and_then(|entry| entry["key"].as_str())
-        })
-        .expect("cache key for target endpoint should exist")
-        .to_string();
+                .map(|v| v.to_string())
+        });
+        if key.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let key = key.expect("cache key for target endpoint should exist");
 
     let clear = uxc_with_home(temp_home.path())
         .arg("cache")
