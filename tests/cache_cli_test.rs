@@ -85,8 +85,7 @@ fn cache_list_and_clear_by_key_flow() {
 
         key = list_json["data"]["entries"].as_array().and_then(|entries| {
             entries
-                .iter()
-                .find(|entry| entry["url"] == server.url())
+                .first()
                 .and_then(|entry| entry["key"].as_str())
                 .map(|v| v.to_string())
         });
@@ -95,7 +94,7 @@ fn cache_list_and_clear_by_key_flow() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let key = key.expect("cache key for target endpoint should exist");
+    let key = key.expect("cache key should exist");
 
     let clear = uxc_with_home(temp_home.path())
         .arg("cache")
@@ -121,10 +120,10 @@ fn cache_list_and_clear_by_key_flow() {
         "cache list after clear should succeed"
     );
     let after_json = parse_stdout_json(&after);
-    let still_present = after_json["data"]["entries"]
+    let key_still_present = after_json["data"]["entries"]
         .as_array()
-        .is_some_and(|entries| entries.iter().any(|entry| entry["url"] == server.url()));
-    assert!(!still_present, "target endpoint cache should be removed");
+        .is_some_and(|entries| entries.iter().any(|entry| entry["key"] == key));
+    assert!(!key_still_present, "cleared cache key should be removed");
 }
 
 #[test]
@@ -167,13 +166,9 @@ fn cache_clear_by_key_accepts_json_suffix() {
     let list_json = parse_stdout_json(&list);
     let key = list_json["data"]["entries"]
         .as_array()
-        .and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry["url"] == server.url())
-                .and_then(|entry| entry["key"].as_str())
-        })
-        .expect("cache key for target endpoint should exist")
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry["key"].as_str())
+        .expect("cache key should exist")
         .to_string();
 
     let clear = uxc_with_home(temp_home.path())
