@@ -1,7 +1,8 @@
 use serde_json::Value;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 fn parse_stdout_json(output: &std::process::Output) -> Value {
@@ -13,6 +14,29 @@ fn uxc_with_home(home: &Path) -> Command {
     cmd.env("HOME", home);
     cmd.env("USERPROFILE", home);
     cmd
+}
+
+fn seed_cache_entry(home: &Path, key: &str, url: &str) {
+    let cache_dir = home.join(".uxc").join("cache").join("schemas");
+    fs::create_dir_all(&cache_dir).expect("cache dir should be created");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be after epoch")
+        .as_secs();
+    let entry = serde_json::json!({
+        "url": url,
+        "schema": { "openapi": "3.0.0" },
+        "fetched_at": now,
+        "expires_at": now + 3600,
+        "etag": null,
+        "protocol": "openapi"
+    });
+    let path = cache_dir.join(format!("{key}.json"));
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&entry).expect("entry json should serialize"),
+    )
+    .expect("cache entry should be written");
 }
 
 #[test]
@@ -42,59 +66,32 @@ fn cache_clear_normalizes_shorthand_url() {
 #[test]
 fn cache_list_and_clear_by_key_flow() {
     let temp_home = TempDir::new().expect("temp home should be created");
-    let mut server = mockito::Server::new();
-    let _schema = server
-        .mock("GET", "/openapi.json")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            r##"{
-  "openapi": "3.0.0",
-  "info": { "title": "test", "version": "1.0.0" },
-  "paths": {
-    "/pets": {
-      "get": {
-        "summary": "list pets",
-        "responses": { "200": { "description": "ok" } }
-      }
-    }
-  }
-}"##,
-        )
-        .create();
+    let key = "manual-cache-key";
+    seed_cache_entry(
+        temp_home.path(),
+        key,
+        "https://api.example.com/openapi.json",
+    );
 
-    let prime = uxc_with_home(temp_home.path())
-        .arg(server.url())
-        .arg("get:/pets")
-        .arg("-h")
+    let list = uxc_with_home(temp_home.path())
+        .arg("cache")
+        .arg("list")
         .output()
-        .expect("prime cache should run");
-    assert!(prime.status.success(), "prime cache should succeed");
-
-    let mut key = None;
-    for _ in 0..20 {
-        let list = uxc_with_home(temp_home.path())
-            .arg("cache")
-            .arg("list")
-            .output()
-            .expect("cache list should run");
-        assert!(list.status.success(), "cache list should succeed");
-        let list_json = parse_stdout_json(&list);
-        assert_eq!(list_json["ok"], true);
-        assert_eq!(list_json["kind"], "cache_list");
-
-        key = list_json["data"]["entries"].as_array().and_then(|entries| {
+        .expect("cache list should run");
+    assert!(list.status.success(), "cache list should succeed");
+    let list_json = parse_stdout_json(&list);
+    assert_eq!(list_json["ok"], true);
+    assert_eq!(list_json["kind"], "cache_list");
+    let key = list_json["data"]["entries"]
+        .as_array()
+        .and_then(|entries| {
             entries
-                .first()
+                .iter()
+                .find(|entry| entry["key"] == key)
                 .and_then(|entry| entry["key"].as_str())
-                .map(|v| v.to_string())
-        });
-        if key.is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let key = key.expect("cache key should exist");
+        })
+        .expect("seeded cache key should exist")
+        .to_string();
 
     let clear = uxc_with_home(temp_home.path())
         .arg("cache")
@@ -129,34 +126,12 @@ fn cache_list_and_clear_by_key_flow() {
 #[test]
 fn cache_clear_by_key_accepts_json_suffix() {
     let temp_home = TempDir::new().expect("temp home should be created");
-    let mut server = mockito::Server::new();
-    let _schema = server
-        .mock("GET", "/openapi.json")
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(
-            r##"{
-  "openapi": "3.0.0",
-  "info": { "title": "test", "version": "1.0.0" },
-  "paths": {
-    "/pets": {
-      "get": {
-        "summary": "list pets",
-        "responses": { "200": { "description": "ok" } }
-      }
-    }
-  }
-}"##,
-        )
-        .create();
-
-    let prime = uxc_with_home(temp_home.path())
-        .arg(server.url())
-        .arg("get:/pets")
-        .arg("-h")
-        .output()
-        .expect("prime cache should run");
-    assert!(prime.status.success(), "prime cache should succeed");
+    let key = "manual-cache-key-with-suffix";
+    seed_cache_entry(
+        temp_home.path(),
+        key,
+        "https://api.example.com/openapi.json",
+    );
 
     let list = uxc_with_home(temp_home.path())
         .arg("cache")
@@ -166,9 +141,13 @@ fn cache_clear_by_key_accepts_json_suffix() {
     let list_json = parse_stdout_json(&list);
     let key = list_json["data"]["entries"]
         .as_array()
-        .and_then(|entries| entries.first())
-        .and_then(|entry| entry["key"].as_str())
-        .expect("cache key should exist")
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["key"] == key)
+                .and_then(|entry| entry["key"].as_str())
+        })
+        .expect("seeded cache key should exist")
         .to_string();
 
     let clear = uxc_with_home(temp_home.path())
