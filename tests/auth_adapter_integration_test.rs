@@ -6,7 +6,7 @@
 use std::env;
 use std::ffi::OsString;
 use tempfile::TempDir;
-use uxc::auth::{AuthType, Profile, Profiles};
+use uxc::auth::{AuthHeader, AuthType, Profile, Profiles};
 
 struct TestEnv {
     _temp_dir: TempDir,
@@ -171,4 +171,56 @@ fn test_auth_to_metadata_invalid_token() {
     let result = uxc::auth::auth_to_metadata(&AuthType::Bearer, "test\n token");
 
     assert!(result.is_err());
+}
+
+#[test]
+fn test_auth_apply_profile_to_request_api_key_custom_headers() {
+    use reqwest::Client;
+
+    let mut profile = Profile::new("test-secret".to_string(), AuthType::ApiKey);
+    profile.auth_headers = Some(vec![
+        AuthHeader::new("ok-access-key", "{{secret}}").unwrap(),
+        AuthHeader::new("x-client", "uxc").unwrap(),
+    ]);
+
+    let client = Client::new();
+    let req = client.post("http://example.com");
+    let req = uxc::auth::apply_profile_auth_to_request(req, &profile)
+        .expect("custom auth headers should render");
+
+    let built_req = req.build().expect("Failed to build request");
+    assert_eq!(
+        built_req.headers().get("ok-access-key"),
+        Some(&"test-secret".parse().unwrap())
+    );
+    assert_eq!(
+        built_req.headers().get("x-client"),
+        Some(&"uxc".parse().unwrap())
+    );
+    assert!(built_req.headers().get("x-api-key").is_none());
+}
+
+#[test]
+fn test_auth_apply_profile_to_request_api_key_env_template() {
+    use reqwest::Client;
+
+    env::set_var("UXC_TEST_HEADER_ENV", "tenant-a");
+    let mut profile = Profile::new("test-secret".to_string(), AuthType::ApiKey);
+    profile.auth_headers = Some(vec![AuthHeader::new(
+        "x-tenant",
+        "{{env:UXC_TEST_HEADER_ENV}}",
+    )
+    .unwrap()]);
+
+    let client = Client::new();
+    let req = client.post("http://example.com");
+    let req = uxc::auth::apply_profile_auth_to_request(req, &profile)
+        .expect("env template should render");
+
+    let built_req = req.build().expect("Failed to build request");
+    assert_eq!(
+        built_req.headers().get("x-tenant"),
+        Some(&"tenant-a".parse().unwrap())
+    );
+    env::remove_var("UXC_TEST_HEADER_ENV");
 }

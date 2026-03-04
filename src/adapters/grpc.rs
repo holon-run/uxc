@@ -1169,7 +1169,14 @@ impl GrpcurlAuthHeaders for Profile {
 
         let header = match self.auth_type {
             crate::auth::AuthType::Bearer => format!("authorization: Bearer {}", self.api_key),
-            crate::auth::AuthType::ApiKey => format!("x-api-key: {}", self.api_key),
+            crate::auth::AuthType::ApiKey => {
+                let headers = self.resolved_api_key_headers()?;
+                let mut rendered = Vec::with_capacity(headers.len());
+                for (name, value) in headers {
+                    rendered.push(format!("{}: {}", name, value));
+                }
+                return Ok(rendered);
+            }
             crate::auth::AuthType::Basic => {
                 let encoded = base64::engine::general_purpose::STANDARD.encode(&self.api_key);
                 format!("authorization: Basic {}", encoded)
@@ -1253,6 +1260,20 @@ mod tests {
             "unexpected error: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_to_grpcurl_headers_api_key_custom_headers() {
+        let mut profile = Profile::new("my-secret".to_string(), crate::auth::AuthType::ApiKey);
+        profile.auth_headers = Some(vec![
+            crate::auth::AuthHeader::new("ok-access-key", "{{secret}}").unwrap(),
+            crate::auth::AuthHeader::new("x-client", "uxc").unwrap(),
+        ]);
+
+        let headers = profile.to_grpcurl_headers().expect("should render headers");
+        assert_eq!(headers.len(), 2);
+        assert!(headers.contains(&"ok-access-key: my-secret".to_string()));
+        assert!(headers.contains(&"x-client: uxc".to_string()));
     }
 
     #[tokio::test]

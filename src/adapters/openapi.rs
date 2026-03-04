@@ -662,7 +662,7 @@ impl Adapter for OpenAPIAdapter {
 
         // Apply authentication if profile is set
         let req = if let Some(profile) = &self.auth_profile {
-            crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key)
+            crate::auth::apply_profile_auth_to_request(req, profile)?
         } else {
             req
         };

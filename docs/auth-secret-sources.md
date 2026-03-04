@@ -6,17 +6,27 @@ UXC supports three secret source kinds for non-OAuth credentials:
 - `env`: secret is resolved from environment variable via `--secret-env`
 - `op`: secret is resolved from 1Password CLI reference via `--secret-op`
 
+For `api_key` credentials, you can also configure custom auth headers with templates:
+
+- `{{secret}}`: resolved from the credential secret source
+- `{{env:VAR_NAME}}`: resolved from environment variable
+- `{{op://...}}`: resolved through 1Password CLI secret reference
+
 Examples:
 
 ```bash
 uxc auth credential set demo --secret sk-demo-token
 uxc auth credential set demo --secret-env DEMO_TOKEN
 uxc auth credential set demo --secret-op op://Engineering/demo/token
+uxc auth credential set demo --auth-type api_key --api-key-header OK-ACCESS-KEY --secret-env OKX_ACCESS_KEY
+uxc auth credential set demo --auth-type api_key --header "OK-ACCESS-KEY={{secret}}" --header "OK-ACCESS-PASSPHRASE={{env:OKX_PASSPHRASE}}"
 ```
 
 ## Behavior
 
 - `--secret`, `--secret-env`, and `--secret-op` are mutually exclusive.
+- `--api-key-header` is a shortcut for one header using `{{secret}}`.
+- `--header` can be repeated and supports `{{secret}}`, `{{env:...}}`, and `{{op://...}}`.
 - `auth credential info` and `auth credential list` expose only `secret_source.kind`.
 - Resolved values from `env` and `op` are used at runtime and are not persisted as plaintext values.
 - `op` mode requires 1Password CLI (`op`) in `PATH`.

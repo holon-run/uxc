@@ -183,7 +183,7 @@ impl McpHttpTransport {
         }
 
         if let Some(profile) = profile {
-            req = Self::apply_profile_auth(req, &profile);
+            req = Self::apply_profile_auth(req, &profile)?;
         }
 
         req.json(request).send().await.map_err(Into::into)
@@ -262,16 +262,18 @@ impl McpHttpTransport {
     fn apply_profile_auth(
         req: reqwest::RequestBuilder,
         profile: &Profile,
-    ) -> reqwest::RequestBuilder {
+    ) -> Result<reqwest::RequestBuilder> {
         match profile.auth_type {
             AuthType::OAuth => {
                 if let Some(token) = profile.bearer_token() {
-                    crate::auth::apply_auth_to_request(req, &profile.auth_type, token)
+                    let mut token_profile = profile.clone();
+                    token_profile.api_key = token.to_string();
+                    crate::auth::apply_profile_auth_to_request(req, &token_profile)
                 } else {
-                    req
+                    Ok(req)
                 }
             }
-            _ => crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key),
+            _ => crate::auth::apply_profile_auth_to_request(req, profile),
         }
     }
 
@@ -467,7 +469,15 @@ impl McpHttpTransport {
             .header("Accept", "application/json, text/event-stream");
 
         if let Some(profile) = auth_profile {
-            req = Self::apply_profile_auth(req, profile);
+            req = match Self::apply_profile_auth(req, profile) {
+                Ok(req) => req,
+                Err(err) => {
+                    return ProbeAttemptResult::NotMcp(format!(
+                        "failed to apply auth profile: {}",
+                        err
+                    ));
+                }
+            };
         }
 
         let mut response = match req.json(request).send().await {
@@ -1788,6 +1798,34 @@ data: invalid json
             .await;
 
         let profile = Profile::new("test-key".to_string(), AuthType::ApiKey);
+        let transport = McpHttpTransport::with_auth(server.url(), Some(profile)).unwrap();
+
+        let result = transport.send_request("test", None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn send_request_with_api_key_custom_header_template() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .match_header(
+                "ok-access-key",
+                mockito::Matcher::Exact("test-key".to_string()),
+            )
+            .match_header("x-client", mockito::Matcher::Exact("uxc".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)
+            .create_async()
+            .await;
+
+        let mut profile = Profile::new("test-key".to_string(), AuthType::ApiKey);
+        profile.auth_headers = Some(vec![
+            crate::auth::AuthHeader::new("ok-access-key", "{{secret}}").unwrap(),
+            crate::auth::AuthHeader::new("x-client", "uxc").unwrap(),
+        ]);
         let transport = McpHttpTransport::with_auth(server.url(), Some(profile)).unwrap();
 
         let result = transport.send_request("test", None).await;

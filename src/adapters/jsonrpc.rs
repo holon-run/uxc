@@ -427,7 +427,7 @@ impl JsonRpcAdapter {
             .header("Accept", "application/json");
 
         if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key);
+            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
         }
 
         let response = match req.json(&request).send().await {
@@ -467,7 +467,7 @@ impl JsonRpcAdapter {
                 .header("Accept", "application/json");
 
             if let Some(profile) = &self.auth_profile {
-                req = crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key);
+                req = crate::auth::apply_profile_auth_to_request(req, profile)?;
             }
 
             let response = match req.send().await {
@@ -575,7 +575,7 @@ impl JsonRpcAdapter {
             .header("Accept", "application/json");
 
         if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key);
+            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
         }
 
         let response = req

@@ -304,6 +304,10 @@ pub(crate) fn redact_sensitive(text: &str) -> String {
         (r"(?i)(secret\s*[=:]\s*)[^\s,']+", "${1}***"),
         (r"(?i)(password\s*[=:]\s*)[^\s,']+", "${1}***"),
         (r"(?i)(authorization\s*[=:]\s*)[^\s,']+", "${1}***"),
+        (
+            r"(?i)\b([a-z0-9-]*(?:auth|token|secret|key|passphrase)[a-z0-9-]*\s*:\s*)[^\s,']+",
+            "${1}***",
+        ),
     ];
 
     for (pattern, replacement) in patterns {

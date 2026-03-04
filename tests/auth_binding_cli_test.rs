@@ -348,6 +348,86 @@ fn auth_credential_set_supports_secret_op_source() {
 }
 
 #[test]
+fn auth_credential_set_supports_api_key_header_shortcut() {
+    let files = AuthFiles::new();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("okx-short")
+        .arg("--auth-type")
+        .arg("api_key")
+        .arg("--secret")
+        .arg("okx-secret")
+        .arg("--api-key-header")
+        .arg("OK-ACCESS-KEY")
+        .output()
+        .expect("credential set should run");
+    assert!(output.status.success(), "credential set should succeed");
+
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["auth_headers"][0]["name"], "OK-ACCESS-KEY");
+}
+
+#[test]
+fn auth_credential_set_supports_header_template_without_primary_secret() {
+    let files = AuthFiles::new();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("header-only")
+        .arg("--auth-type")
+        .arg("api_key")
+        .arg("--header")
+        .arg("X-Tenant={{env:UXC_TEST_TENANT}}")
+        .output()
+        .expect("credential set should run");
+    assert!(
+        output.status.success(),
+        "credential set with env-only header should succeed"
+    );
+
+    let info = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("info")
+        .arg("header-only")
+        .output()
+        .expect("credential info should run");
+    assert!(info.status.success(), "credential info should succeed");
+    let json = parse_stdout_json(&info);
+    assert_eq!(json["data"]["auth_headers"][0]["name"], "X-Tenant");
+}
+
+#[test]
+fn auth_credential_set_rejects_header_for_non_api_key() {
+    let files = AuthFiles::new();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("bad-header")
+        .arg("--auth-type")
+        .arg("bearer")
+        .arg("--secret")
+        .arg("token")
+        .arg("--header")
+        .arg("X-Test=value")
+        .output()
+        .expect("credential set should run");
+
+    assert!(!output.status.success(), "command should fail");
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+}
+
+#[test]
 fn auth_credential_switch_from_oauth_requires_explicit_secret() {
     let files = AuthFiles::new();
 

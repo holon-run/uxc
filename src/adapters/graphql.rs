@@ -79,7 +79,7 @@ impl GraphQLAdapter {
 
         // Apply authentication if profile is set
         if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key);
+            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
         }
 
         let resp = req.json(&payload).send().await?;
@@ -727,7 +727,7 @@ impl Adapter for GraphQLAdapter {
 
         // Apply authentication if profile is set
         if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key);
+            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
         }
 
         let resp = match req
@@ -787,7 +787,7 @@ impl Adapter for GraphQLAdapter {
 
         // Apply authentication if profile is set
         if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_auth_to_request(req, &profile.auth_type, &profile.api_key);
+            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
         }
 
         let resp = req

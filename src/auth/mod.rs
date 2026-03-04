@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -179,6 +179,41 @@ impl SecretSource {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthHeader {
+    pub name: String,
+    pub template: String,
+}
+
+impl AuthHeader {
+    pub fn parse(spec: &str) -> Result<Self> {
+        let Some((name, template)) = spec.split_once('=') else {
+            anyhow::bail!(
+                "Invalid --header '{}'. Expected format: <header-name>=<template>",
+                spec
+            );
+        };
+        Self::new(name, template)
+    }
+
+    pub fn new(name: &str, template: &str) -> Result<Self> {
+        let normalized_name = validate_header_name(name)?;
+        validate_header_template(template)?;
+        Ok(Self {
+            name: normalized_name,
+            template: template.to_string(),
+        })
+    }
+
+    pub fn requires_primary_secret(&self) -> bool {
+        template_has_secret(&self.template)
+    }
+
+    pub fn render_value(&self, profile: &Profile) -> Result<String> {
+        render_header_template(&self.template, profile)
+    }
+}
+
 /// Runtime authentication credential.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
@@ -204,6 +239,10 @@ pub struct Profile {
     /// Optional secret source for non-OAuth credentials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret_source: Option<SecretSource>,
+
+    /// Optional custom auth headers used by api_key auth type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_headers: Option<Vec<AuthHeader>>,
 }
 
 impl Profile {
@@ -224,6 +263,7 @@ impl Profile {
             oauth: None,
             name: None,
             secret_source,
+            auth_headers: None,
         }
     }
 
@@ -319,6 +359,39 @@ impl Profile {
 
         String::new()
     }
+
+    pub fn has_custom_api_key_headers(&self) -> bool {
+        self.auth_type == AuthType::ApiKey
+            && self
+                .auth_headers
+                .as_ref()
+                .is_some_and(|headers| !headers.is_empty())
+    }
+
+    pub fn api_key_headers_require_secret(&self) -> bool {
+        self.auth_type == AuthType::ApiKey
+            && self.auth_headers.as_ref().is_some_and(|headers| {
+                !headers.is_empty() && headers.iter().any(AuthHeader::requires_primary_secret)
+            })
+    }
+
+    pub fn resolved_api_key_headers(&self) -> Result<Vec<(String, String)>> {
+        if self.auth_type != AuthType::ApiKey {
+            return Ok(Vec::new());
+        }
+
+        if let Some(headers) = &self.auth_headers {
+            if !headers.is_empty() {
+                let mut values = Vec::with_capacity(headers.len());
+                for header in headers {
+                    values.push((header.name.clone(), header.render_value(self)?));
+                }
+                return Ok(values);
+            }
+        }
+
+        Ok(vec![("x-api-key".to_string(), self.api_key.clone())])
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,6 +418,8 @@ struct StoredCredential {
     secret_source: Option<SecretSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_headers: Option<Vec<AuthHeader>>,
 }
 
 impl StoredCredential {
@@ -374,6 +449,7 @@ impl StoredCredential {
             oauth: profile.oauth.clone(),
             secret_source,
             api_key,
+            auth_headers: profile.auth_headers.clone(),
         }
     }
 
@@ -395,6 +471,7 @@ impl StoredCredential {
             oauth: self.oauth.clone(),
             name: Some(name.to_string()),
             secret_source,
+            auth_headers: self.auth_headers.clone(),
         };
 
         if profile.auth_type == AuthType::OAuth {
@@ -806,6 +883,9 @@ fn validate_ready(profile: &Profile) -> Result<()> {
             }
         }
         _ => {
+            if profile.has_custom_api_key_headers() && !profile.api_key_headers_require_secret() {
+                return Ok(());
+            }
             if profile.api_key.is_empty() {
                 anyhow::bail!(
                     "Credential '{}' does not have a usable secret. Set it with --secret, --secret-env, or --secret-op.",
@@ -816,6 +896,134 @@ fn validate_ready(profile: &Profile) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn validate_auth_headers(headers: &[AuthHeader]) -> Result<()> {
+    if headers.is_empty() {
+        anyhow::bail!("Custom auth headers cannot be empty");
+    }
+
+    let mut seen = HashSet::new();
+    for header in headers {
+        validate_header_name(&header.name)?;
+        validate_header_template(&header.template)?;
+        let key = header.name.to_ascii_lowercase();
+        if !seen.insert(key) {
+            anyhow::bail!("Duplicate auth header '{}'", header.name);
+        }
+    }
+    Ok(())
+}
+
+fn validate_header_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Header name cannot be empty");
+    }
+
+    reqwest::header::HeaderName::from_bytes(trimmed.as_bytes())
+        .map_err(|_| anyhow::anyhow!("Invalid header name '{}'", trimmed))?;
+    Ok(trimmed.to_string())
+}
+
+fn validate_header_template(template: &str) -> Result<()> {
+    parse_template_tokens(template).map(|_| ())
+}
+
+fn template_has_secret(template: &str) -> bool {
+    match parse_template_tokens(template) {
+        Ok(tokens) => tokens
+            .iter()
+            .any(|token| matches!(token, TemplateToken::Secret)),
+        Err(_) => false,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TemplateToken {
+    Secret,
+    Env(String),
+    Op(String),
+}
+
+fn parse_template_tokens(template: &str) -> Result<Vec<TemplateToken>> {
+    let mut tokens = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(start_rel) = template[cursor..].find("{{") {
+        let start = cursor + start_rel;
+        let rest = &template[start + 2..];
+        let Some(end_rel) = rest.find("}}") else {
+            anyhow::bail!("Unclosed template token in '{}'", template);
+        };
+        let end = start + 2 + end_rel;
+        let raw = template[start + 2..end].trim();
+
+        let token = if raw == "secret" {
+            TemplateToken::Secret
+        } else if let Some(env_key) = raw.strip_prefix("env:") {
+            let env_key = env_key.trim();
+            if env_key.is_empty() {
+                anyhow::bail!("Invalid template token '{{{{{}}}}}'", raw);
+            }
+            TemplateToken::Env(env_key.to_string())
+        } else if raw.starts_with("op://") {
+            TemplateToken::Op(raw.to_string())
+        } else {
+            anyhow::bail!("Unsupported template token '{{{{{}}}}}'", raw);
+        };
+        tokens.push(token);
+        cursor = end + 2;
+    }
+    if template[cursor..].contains("}}") {
+        anyhow::bail!("Unexpected closing template token in '{}'", template);
+    }
+    Ok(tokens)
+}
+
+fn render_header_template(template: &str, profile: &Profile) -> Result<String> {
+    let _ = parse_template_tokens(template)?;
+
+    let mut rendered = String::new();
+    let mut cursor = 0usize;
+    while let Some(start_rel) = template[cursor..].find("{{") {
+        let start = cursor + start_rel;
+        rendered.push_str(&template[cursor..start]);
+        let rest = &template[start + 2..];
+        let end_rel = rest
+            .find("}}")
+            .ok_or_else(|| anyhow::anyhow!("Unclosed template token in '{}'", template))?;
+        let end = start + 2 + end_rel;
+        let raw = template[start + 2..end].trim();
+
+        if raw == "secret" {
+            if profile.api_key.is_empty() {
+                anyhow::bail!(
+                    "Credential '{}' requires a secret for '{{{{secret}}}}' template",
+                    profile.name.as_deref().unwrap_or("unknown")
+                );
+            }
+            rendered.push_str(&profile.api_key);
+        } else if let Some(env_key) = raw.strip_prefix("env:") {
+            let env_key = env_key.trim();
+            let value = std::env::var(env_key).map_err(|_| {
+                anyhow::anyhow!(
+                    "Credential '{}' expects env var '{}' for auth header template but it is not set",
+                    profile.name.as_deref().unwrap_or("unknown"),
+                    env_key
+                )
+            })?;
+            rendered.push_str(&value);
+        } else if raw.starts_with("op://") {
+            let value = resolve_op_secret(raw, profile.name.as_deref())?;
+            rendered.push_str(&value);
+        } else {
+            anyhow::bail!("Unsupported template token '{{{{{}}}}}'", raw);
+        }
+
+        cursor = end + 2;
+    }
+    rendered.push_str(&template[cursor..]);
+    Ok(rendered)
 }
 
 fn resolve_op_secret(reference: &str, credential_name: Option<&str>) -> Result<String> {
@@ -982,6 +1190,7 @@ fn temporary_auth_file_path(path: &std::path::Path) -> PathBuf {
 }
 
 /// Apply authentication to a reqwest request builder.
+#[allow(dead_code)]
 pub fn apply_auth_to_request(
     request_builder: reqwest::RequestBuilder,
     auth_type: &AuthType,
@@ -1002,37 +1211,69 @@ pub fn apply_auth_to_request(
     }
 }
 
-/// Convert auth credential to tonic metadata map for gRPC.
-#[allow(dead_code)]
-pub fn auth_to_metadata(
-    auth_type: &AuthType,
-    api_key: &str,
+/// Apply authentication from a credential profile to a reqwest request builder.
+pub fn apply_profile_auth_to_request(
+    mut request_builder: reqwest::RequestBuilder,
+    profile: &Profile,
+) -> Result<reqwest::RequestBuilder> {
+    match profile.auth_type {
+        AuthType::Bearer => Ok(request_builder.bearer_auth(&profile.api_key)),
+        AuthType::ApiKey => {
+            for (name, value) in profile.resolved_api_key_headers()? {
+                request_builder = request_builder.header(name, value);
+            }
+            Ok(request_builder)
+        }
+        AuthType::Basic => {
+            let parts: Vec<&str> = profile.api_key.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                Ok(request_builder.basic_auth(parts[0], Some(parts[1])))
+            } else {
+                Ok(request_builder.basic_auth(&profile.api_key, Option::<&str>::None))
+            }
+        }
+        AuthType::OAuth => Ok(request_builder.bearer_auth(&profile.api_key)),
+    }
+}
+
+pub fn auth_profile_to_metadata(
+    profile: &Profile,
 ) -> Result<tonic::metadata::MetadataMap, anyhow::Error> {
     use base64::Engine;
 
     let mut metadata = tonic::metadata::MetadataMap::new();
 
-    match auth_type {
-        AuthType::Bearer => {
-            let value = tonic::metadata::MetadataValue::try_from(&format!("Bearer {}", api_key))
-                .map_err(|_| {
-                    anyhow::anyhow!("Invalid Bearer token: contains invalid metadata characters")
-                })?;
+    match profile.auth_type {
+        AuthType::Bearer | AuthType::OAuth => {
+            let value =
+                tonic::metadata::MetadataValue::try_from(&format!("Bearer {}", profile.api_key))
+                    .map_err(|_| {
+                        anyhow::anyhow!("Invalid token: contains invalid metadata characters")
+                    })?;
             metadata.insert("authorization", value);
         }
         AuthType::ApiKey => {
-            let value = tonic::metadata::MetadataValue::try_from(api_key).map_err(|_| {
-                anyhow::anyhow!("Invalid API key: contains invalid metadata characters")
-            })?;
-            metadata.insert("x-api-key", value);
+            for (name, value) in profile.resolved_api_key_headers()? {
+                let key =
+                    tonic::metadata::MetadataKey::from_bytes(name.as_bytes()).map_err(|_| {
+                        anyhow::anyhow!("Invalid metadata key '{}' for api_key auth", name)
+                    })?;
+                let value =
+                    tonic::metadata::MetadataValue::try_from(value.as_str()).map_err(|_| {
+                        anyhow::anyhow!(
+                            "Invalid API key value: contains invalid metadata characters"
+                        )
+                    })?;
+                metadata.insert(key, value);
+            }
         }
         AuthType::Basic => {
-            let parts: Vec<&str> = api_key.splitn(2, ':').collect();
+            let parts: Vec<&str> = profile.api_key.splitn(2, ':').collect();
             let creds = if parts.len() == 2 {
                 base64::engine::general_purpose::STANDARD
                     .encode(format!("{}:{}", parts[0], parts[1]))
             } else {
-                base64::engine::general_purpose::STANDARD.encode(format!("{}:", api_key))
+                base64::engine::general_purpose::STANDARD.encode(format!("{}:", profile.api_key))
             };
             let value = tonic::metadata::MetadataValue::try_from(&format!("Basic {}", creds))
                 .map_err(|_| {
@@ -1042,16 +1283,19 @@ pub fn auth_to_metadata(
                 })?;
             metadata.insert("authorization", value);
         }
-        AuthType::OAuth => {
-            let value = tonic::metadata::MetadataValue::try_from(&format!("Bearer {}", api_key))
-                .map_err(|_| {
-                    anyhow::anyhow!("Invalid OAuth token: contains invalid metadata characters")
-                })?;
-            metadata.insert("authorization", value);
-        }
     }
 
     Ok(metadata)
+}
+
+/// Convert auth credential to tonic metadata map for gRPC.
+#[allow(dead_code)]
+pub fn auth_to_metadata(
+    auth_type: &AuthType,
+    api_key: &str,
+) -> Result<tonic::metadata::MetadataMap, anyhow::Error> {
+    let profile = Profile::new(api_key.to_string(), auth_type.clone());
+    auth_profile_to_metadata(&profile)
 }
 
 /// Get home directory.
@@ -1220,5 +1464,28 @@ mod tests {
             .matching_rule("https://api.example.com/admin/users")
             .unwrap();
         assert_eq!(matched.id, "priority");
+    }
+
+    #[test]
+    fn auth_header_parse_and_render_secret_template() {
+        let header = AuthHeader::parse("OK-ACCESS-KEY={{secret}}").unwrap();
+        let profile = Profile::new("secret-value".to_string(), AuthType::ApiKey);
+        assert_eq!(header.name, "OK-ACCESS-KEY");
+        assert_eq!(header.render_value(&profile).unwrap(), "secret-value");
+    }
+
+    #[test]
+    fn auth_header_render_env_template() {
+        std::env::set_var("UXC_TEST_ENV_TEMPLATE", "tenant-1");
+        let header = AuthHeader::parse("X-Tenant={{env:UXC_TEST_ENV_TEMPLATE}}").unwrap();
+        let profile = Profile::new("unused".to_string(), AuthType::ApiKey);
+        assert_eq!(header.render_value(&profile).unwrap(), "tenant-1");
+        std::env::remove_var("UXC_TEST_ENV_TEMPLATE");
+    }
+
+    #[test]
+    fn auth_header_invalid_template_token() {
+        let err = AuthHeader::parse("x-test={{unknown}}").unwrap_err();
+        assert!(err.to_string().contains("Unsupported template token"));
     }
 }
