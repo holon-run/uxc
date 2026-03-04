@@ -977,6 +977,9 @@ pub async fn ensure_daemon_running() -> Result<bool> {
         let _child = std::process::Command::new(current_exe)
             .arg("daemon")
             .arg("_serve")
+            // Avoid corrupting coverage artifacts when parent test runners
+            // terminate long-lived daemon processes in CI.
+            .env_remove("LLVM_PROFILE_FILE")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
