@@ -150,9 +150,10 @@ fn create_router(state: ServerState) -> Router {
     // Health check endpoint
     async fn health_check(State(state): State<ServerState>) -> Result<Response, StatusCode> {
         match state.scenario {
-            Scenario::Ok | Scenario::ToolsListFailAfterFirst | Scenario::ToolCallTimeout => {
-                Ok(Json(json!({"status": "ok"})).into_response())
-            }
+            Scenario::Ok
+            | Scenario::ToolsListFailAfterFirst
+            | Scenario::ToolCallTimeout
+            | Scenario::StructuredContent => Ok(Json(json!({"status": "ok"})).into_response()),
             Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
             Scenario::Malformed => {
                 // Return invalid JSON
@@ -171,7 +172,10 @@ fn create_router(state: ServerState) -> Router {
     // List users endpoint
     async fn list_users(State(state): State<ServerState>) -> Result<Response, StatusCode> {
         match state.scenario {
-            Scenario::Ok | Scenario::ToolsListFailAfterFirst | Scenario::ToolCallTimeout => {
+            Scenario::Ok
+            | Scenario::ToolsListFailAfterFirst
+            | Scenario::ToolCallTimeout
+            | Scenario::StructuredContent => {
                 let users = vec![
                     json!({"id": 1, "name": "Alice", "email": "alice@example.com"}),
                     json!({"id": 2, "name": "Bob", "email": "bob@example.com"}),
@@ -196,7 +200,10 @@ fn create_router(state: ServerState) -> Router {
         Json(payload): Json<serde_json::Value>,
     ) -> Result<Response, StatusCode> {
         match state.scenario {
-            Scenario::Ok | Scenario::ToolsListFailAfterFirst | Scenario::ToolCallTimeout => {
+            Scenario::Ok
+            | Scenario::ToolsListFailAfterFirst
+            | Scenario::ToolCallTimeout
+            | Scenario::StructuredContent => {
                 let name = payload
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -229,7 +236,10 @@ fn create_router(state: ServerState) -> Router {
         AxumPath(id): AxumPath<u32>,
     ) -> Result<Response, StatusCode> {
         match state.scenario {
-            Scenario::Ok | Scenario::ToolsListFailAfterFirst | Scenario::ToolCallTimeout => {
+            Scenario::Ok
+            | Scenario::ToolsListFailAfterFirst
+            | Scenario::ToolCallTimeout
+            | Scenario::StructuredContent => {
                 if id == 1 {
                     Ok(
                         Json(json!({"id": 1, "name": "Alice", "email": "alice@example.com"}))

@@ -24,7 +24,10 @@ impl addsvc::add_server::Add for AddService {
         request: Request<addsvc::SumRequest>,
     ) -> std::result::Result<Response<addsvc::SumReply>, Status> {
         match self.scenario {
-            Scenario::Ok | Scenario::ToolsListFailAfterFirst | Scenario::ToolCallTimeout => {
+            Scenario::Ok
+            | Scenario::ToolsListFailAfterFirst
+            | Scenario::ToolCallTimeout
+            | Scenario::StructuredContent => {
                 let req = request.into_inner();
                 Ok(Response::new(addsvc::SumReply { v: req.a + req.b }))
             }

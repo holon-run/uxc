@@ -136,16 +136,25 @@ pub fn run(scenario: Scenario) -> Result<()> {
                     .and_then(Value::as_str)
                     .unwrap_or("hello");
 
+                let mut result = json!({
+                    "content": [
+                        {"type": "text", "text": message}
+                    ]
+                });
+                if matches!(scenario, Scenario::StructuredContent) {
+                    result["structuredContent"] = json!({
+                        "message": message,
+                        "source": "mcp-stdio",
+                        "length": message.len()
+                    });
+                }
+
                 respond(
                     &mut out,
                     json!({
                         "jsonrpc": "2.0",
                         "id": id,
-                        "result": {
-                            "content": [
-                                {"type": "text", "text": message}
-                            ]
-                        }
+                        "result": result
                     }),
                 )?;
             }

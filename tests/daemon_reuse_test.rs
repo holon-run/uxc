@@ -327,6 +327,48 @@ fn mcp_stdio_execute_does_not_relist_tools_on_reused_session() {
 
 #[test]
 #[serial]
+fn mcp_stdio_execute_includes_structured_content_via_daemon() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} structured_content", bin.display());
+
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let call = uxc_command()
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"daemon structured"}"#)
+        .output()
+        .expect("call should run");
+    assert!(
+        call.status.success(),
+        "call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&call.stdout),
+        String::from_utf8_lossy(&call.stderr)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&call.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["content"][0]["text"], "daemon structured");
+    assert_eq!(
+        json["data"]["structuredContent"]["message"],
+        "daemon structured"
+    );
+    assert_eq!(json["data"]["structuredContent"]["source"], "mcp-stdio");
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
 fn mcp_stdio_exclusive_key_allows_switching_endpoints_without_daemon_restart() {
     daemon_stop_best_effort();
 

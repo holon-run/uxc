@@ -19,6 +19,8 @@ pub enum Scenario {
     ToolCallTimeout,
     /// tools/list succeeds once, then fails (used to verify cache-first help behavior)
     ToolsListFailAfterFirst,
+    /// tools/call returns content + structuredContent payload
+    StructuredContent,
 }
 
 impl Scenario {
@@ -31,8 +33,9 @@ impl Scenario {
             "timeout" => Ok(Self::Timeout),
             "tool_call_timeout" => Ok(Self::ToolCallTimeout),
             "tools_list_fail_after_first" => Ok(Self::ToolsListFailAfterFirst),
+            "structured_content" => Ok(Self::StructuredContent),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, tool_call_timeout, tools_list_fail_after_first",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, tool_call_timeout, tools_list_fail_after_first, structured_content",
                 s
             ),
         }

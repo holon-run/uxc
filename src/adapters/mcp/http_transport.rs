@@ -1499,6 +1499,38 @@ data: invalid json
         assert_eq!(tool_result.isError, Some(true));
     }
 
+    #[tokio::test]
+    async fn call_tool_parses_structured_content() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":1,
+                "result":{
+                    "content":[{"type":"text","text":"ok"}],
+                    "structuredContent":{"status":"ok","count":1}
+                }
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::new(server.url()).unwrap();
+
+        let result = transport.call_tool("test_tool", None).await;
+        assert!(result.is_ok());
+        let tool_result = result.unwrap();
+        assert_eq!(
+            tool_result.structuredContent,
+            Some(serde_json::json!({"status":"ok","count":1}))
+        );
+    }
+
     // ===== Resource Tests =====
 
     #[tokio::test]

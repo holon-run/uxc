@@ -124,11 +124,19 @@ async fn mcp_handler(
                 }))
                 .into_response());
             }
-            json!({
+            let mut result = json!({
                 "content": [
                     {"type": "text", "text": message}
                 ]
-            })
+            });
+            if matches!(state.scenario, Scenario::StructuredContent) {
+                result["structuredContent"] = json!({
+                    "message": message,
+                    "source": "mcp-http",
+                    "length": message.len()
+                });
+            }
+            result
         }
         _ => {
             return Ok(Json(json!({

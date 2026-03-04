@@ -475,8 +475,7 @@ impl Adapter for McpAdapter {
 
             let result = client.call_tool(operation, arguments).await?;
 
-            // Convert tool content to a simple JSON output
-            let output = convert_tool_content_to_value(&result.content);
+            let output = convert_tool_result_to_value(&result);
 
             return Ok(ExecutionResult {
                 data: output,
@@ -504,8 +503,7 @@ impl Adapter for McpAdapter {
 
             let result = transport.call_tool(operation, arguments).await?;
 
-            // Convert tool content to a simple JSON output
-            let output = convert_tool_content_to_value(&result.content);
+            let output = convert_tool_result_to_value(&result);
 
             return Ok(ExecutionResult {
                 data: output,
@@ -561,8 +559,23 @@ fn parse_schema_to_parameters(schema: &Value) -> Vec<super::Parameter> {
     parameters
 }
 
-/// Convert tool content to a JSON value for output
-fn convert_tool_content_to_value(content: &[types::ToolContent]) -> Value {
+/// Convert MCP tool call result to a JSON value for output.
+pub(crate) fn convert_tool_result_to_value(result: &types::ToolCallResult) -> Value {
+    let mut output = serde_json::json!({
+        "content": convert_tool_content_to_json(&result.content)
+    });
+
+    if let Some(is_error) = result.isError {
+        output["isError"] = serde_json::json!(is_error);
+    }
+    if let Some(structured) = &result.structuredContent {
+        output["structuredContent"] = structured.clone();
+    }
+
+    output
+}
+
+fn convert_tool_content_to_json(content: &[types::ToolContent]) -> Value {
     let mut results = Vec::new();
 
     for item in content {
@@ -601,12 +614,31 @@ fn convert_tool_content_to_value(content: &[types::ToolContent]) -> Value {
         results.push(value);
     }
 
-    serde_json::json!({ "content": results })
+    Value::Array(results)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn convert_tool_result_includes_structured_content_and_error_flag() {
+        let result = types::ToolCallResult {
+            content: vec![types::ToolContent::Text {
+                text: "hello".to_string(),
+            }],
+            isError: Some(true),
+            structuredContent: Some(json!({ "message": "hello", "count": 1 })),
+        };
+
+        let output = convert_tool_result_to_value(&result);
+        assert_eq!(output["content"][0]["type"], "text");
+        assert_eq!(output["content"][0]["text"], "hello");
+        assert_eq!(output["isError"], true);
+        assert_eq!(output["structuredContent"]["message"], "hello");
+        assert_eq!(output["structuredContent"]["count"], 1);
+    }
 
     fn initialize_response() -> &'static str {
         r#"{

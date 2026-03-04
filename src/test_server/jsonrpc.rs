@@ -155,7 +155,10 @@ async fn execute_method(
     state: ServerState,
 ) -> Result<JsonRpcResponse, StatusCode> {
     match state.scenario {
-        Scenario::Ok | Scenario::ToolsListFailAfterFirst | Scenario::ToolCallTimeout => {
+        Scenario::Ok
+        | Scenario::ToolsListFailAfterFirst
+        | Scenario::ToolCallTimeout
+        | Scenario::StructuredContent => {
             let result = match method {
                 "rpc.discover" => schema_value(),
                 "health" => json!({"status": "ok"}),

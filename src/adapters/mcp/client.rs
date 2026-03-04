@@ -374,7 +374,7 @@ mod tests {
             read line
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
             read line
-            echo '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Tool executed successfully"}]}}'
+            echo '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Tool executed successfully"}],"structuredContent":{"message":"Tool executed successfully"}}}'
         "#;
 
         let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
@@ -389,6 +389,10 @@ mod tests {
             ToolContent::Text { text } => assert_eq!(text, "Tool executed successfully"),
             _ => panic!("Expected text content"),
         }
+        assert_eq!(
+            result.structuredContent,
+            Some(serde_json::json!({ "message": "Tool executed successfully" }))
+        );
     }
 
     #[tokio::test]

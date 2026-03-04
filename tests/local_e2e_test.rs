@@ -552,6 +552,34 @@ fn test_mcp_http_call_tool() {
 
 #[test]
 #[serial_test::serial]
+fn test_mcp_http_call_tool_includes_structured_content() {
+    let _server = start_test_server("mcp-http", "structured_content");
+
+    let result = run_uxc(&[
+        &format!("http://{}", _server.addr),
+        "echo",
+        "--input-json",
+        r#"{"message":"hello structured"}"#,
+    ]);
+
+    assert!(result.is_ok(), "Failed to call MCP HTTP tool: {:?}", result);
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["content"][0]["text"], "hello structured");
+    assert_eq!(
+        json["data"]["structuredContent"]["message"],
+        "hello structured"
+    );
+    assert_eq!(json["data"]["structuredContent"]["source"], "mcp-http");
+    assert_eq!(json["data"]["structuredContent"]["length"], 16);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_mcp_http_auth_required() {
     let _server = start_test_server("mcp-http", "auth_required");
 
@@ -709,6 +737,39 @@ fn test_mcp_stdio_call_tool() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["protocol"], "mcp");
     assert_eq!(json["data"]["content"][0]["text"], "from stdio");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_mcp_stdio_call_tool_includes_structured_content() {
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} structured_content", bin.display());
+
+    let result = run_uxc(&[
+        &endpoint,
+        "echo",
+        "--input-json",
+        r#"{"message":"stdio structured"}"#,
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call MCP stdio tool: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["content"][0]["text"], "stdio structured");
+    assert_eq!(
+        json["data"]["structuredContent"]["message"],
+        "stdio structured"
+    );
+    assert_eq!(json["data"]["structuredContent"]["source"], "mcp-stdio");
+    assert_eq!(json["data"]["structuredContent"]["length"], 16);
 }
 
 #[test]

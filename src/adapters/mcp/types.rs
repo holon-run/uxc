@@ -163,6 +163,8 @@ pub struct CallToolResult {
     pub content: Vec<ToolContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isError: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structuredContent: Option<JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

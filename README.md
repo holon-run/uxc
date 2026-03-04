@@ -301,6 +301,8 @@ Success envelope shape:
 }
 ```
 
+For MCP `tools/call`, `data` may include `content`, optional `structuredContent`, and optional `isError`.
+
 Failure envelope shape:
 
 ```json

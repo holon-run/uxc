@@ -895,7 +895,7 @@ impl DaemonRuntime {
             Ok((
                 "call_result".to_string(),
                 Some(op.clone()),
-                convert_tool_content_to_value(&result.content),
+                adapters::mcp::convert_tool_result_to_value(&result),
                 reused,
             ))
         } else {
@@ -915,7 +915,7 @@ impl DaemonRuntime {
             Ok((
                 "call_result".to_string(),
                 Some(op.clone()),
-                convert_tool_content_to_value(&result.content),
+                adapters::mcp::convert_tool_result_to_value(&result),
                 reused,
             ))
         }
@@ -1833,48 +1833,6 @@ impl Drop for SchemaMappingEnvGuard {
             None => std::env::remove_var("UXC_SCHEMA_MAPPINGS_FILE"),
         }
     }
-}
-
-fn convert_tool_content_to_value(content: &[adapters::mcp::types::ToolContent]) -> Value {
-    let mut results = Vec::new();
-
-    for item in content {
-        let value = match item {
-            adapters::mcp::types::ToolContent::Text { text } => serde_json::json!({
-                "type": "text",
-                "text": text
-            }),
-            adapters::mcp::types::ToolContent::Image { data, mimeType } => serde_json::json!({
-                "type": "image",
-                "data": data,
-                "mimeType": mimeType
-            }),
-            adapters::mcp::types::ToolContent::Resource {
-                uri,
-                mimeType,
-                text,
-                blob,
-            } => {
-                let mut obj = serde_json::json!({
-                    "type": "resource",
-                    "uri": uri
-                });
-                if let Some(mt) = mimeType {
-                    obj["mimeType"] = serde_json::json!(mt);
-                }
-                if let Some(t) = text {
-                    obj["text"] = serde_json::json!(t);
-                }
-                if let Some(b) = blob {
-                    obj["blob"] = serde_json::json!(b);
-                }
-                obj
-            }
-        };
-        results.push(value);
-    }
-
-    serde_json::json!({ "content": results })
 }
 
 fn normalize_http_url(url: &str) -> String {
