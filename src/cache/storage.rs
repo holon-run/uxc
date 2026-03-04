@@ -14,9 +14,25 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
+/// Cache list entry for CLI/API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheListEntry {
+    pub key: String,
+    pub url: String,
+    pub protocol: String,
+    pub fetched_at: u64,
+    pub expires_at: u64,
+    pub stale: bool,
+    pub size_bytes: u64,
+}
+
 /// Cache entry containing the schema and metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheEntry {
+    /// Original endpoint URL
+    #[serde(default)]
+    pub url: String,
+
     /// The cached schema data
     pub schema: Value,
 
@@ -35,13 +51,14 @@ pub struct CacheEntry {
 
 impl CacheEntry {
     /// Create a new cache entry
-    pub fn new(schema: Value, ttl: u64, protocol: String) -> Self {
+    pub fn new(url: String, schema: Value, ttl: u64, protocol: String) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
         Self {
+            url,
             schema,
             fetched_at: now,
             expires_at: now + ttl,
@@ -109,6 +126,26 @@ impl CacheStorage {
     /// Get the full path for a cache key
     fn cache_path(&self, key: &str) -> PathBuf {
         self.cache_dir.join(key)
+    }
+
+    fn cache_key_to_id(&self, key: &str) -> String {
+        key.strip_suffix(".json").unwrap_or(key).to_string()
+    }
+
+    fn normalize_cache_key_input(&self, key: &str) -> Result<String> {
+        let trimmed = key.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("cache key cannot be empty");
+        }
+        if trimmed.contains('/') || trimmed.contains('\\') {
+            anyhow::bail!("cache key must not contain path separators");
+        }
+        let normalized = if trimmed.ends_with(".json") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}.json")
+        };
+        Ok(normalized)
     }
 
     /// Load a cache entry from disk
@@ -308,7 +345,12 @@ impl Cache for SchemaCache {
 
         let key = self.storage.generate_cache_key(url);
         let protocol = self.detect_protocol(url);
-        let entry = CacheEntry::new(schema.clone(), self.storage.config.ttl, protocol);
+        let entry = CacheEntry::new(
+            url.to_string(),
+            schema.clone(),
+            self.storage.config.ttl,
+            protocol,
+        );
 
         self.storage.save_entry(&key, &entry)?;
         info!("Cached schema for: {}", url);
@@ -320,6 +362,16 @@ impl Cache for SchemaCache {
         let key = self.storage.generate_cache_key(url);
         self.storage.delete_entry(&key)?;
         info!("Invalidated cache for: {}", url);
+        Ok(())
+    }
+
+    fn invalidate_by_key(&self, key: &str) -> Result<()> {
+        let normalized = self.storage.normalize_cache_key_input(key)?;
+        self.storage.delete_entry(&normalized)?;
+        info!(
+            "Invalidated cache for key: {}",
+            self.storage.cache_key_to_id(&normalized)
+        );
         Ok(())
     }
 
@@ -345,6 +397,46 @@ impl Cache for SchemaCache {
         }
 
         Ok(())
+    }
+
+    fn list_entries(&self) -> Result<Vec<CacheListEntry>> {
+        let mut results = Vec::new();
+        let entries = fs::read_dir(&self.storage.cache_dir).with_context(|| {
+            format!(
+                "Failed to read cache directory: {:?}",
+                self.storage.cache_dir
+            )
+        })?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+
+            let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let cache_key = self.storage.cache_key_to_id(file_name);
+
+            if let Ok(Some(cache_entry)) = self.storage.load_entry(file_name) {
+                let stale = cache_entry.is_expired();
+                let size_bytes = cache_entry.size();
+                results.push(CacheListEntry {
+                    key: cache_key,
+                    url: cache_entry.url,
+                    protocol: cache_entry.protocol,
+                    fetched_at: cache_entry.fetched_at,
+                    expires_at: cache_entry.expires_at,
+                    stale,
+                    size_bytes,
+                });
+            }
+        }
+
+        results.sort_by(|a, b| b.fetched_at.cmp(&a.fetched_at));
+        Ok(results)
     }
 
     fn stats(&self) -> Result<CacheStats> {
@@ -386,8 +478,14 @@ mod tests {
     #[test]
     fn test_cache_entry_new() {
         let schema = serde_json::json!({"test": "data"});
-        let entry = CacheEntry::new(schema.clone(), 3600, "openapi".to_string());
+        let entry = CacheEntry::new(
+            "https://api.example.com/openapi.json".to_string(),
+            schema.clone(),
+            3600,
+            "openapi".to_string(),
+        );
 
+        assert_eq!(entry.url, "https://api.example.com/openapi.json");
         assert_eq!(entry.schema, schema);
         assert_eq!(entry.protocol, "openapi");
         assert!(!entry.is_expired());
@@ -396,7 +494,12 @@ mod tests {
     #[test]
     fn test_cache_entry_expired() {
         let schema = serde_json::json!({"test": "data"});
-        let entry = CacheEntry::new(schema, 0, "openapi".to_string());
+        let entry = CacheEntry::new(
+            "https://api.example.com/openapi.json".to_string(),
+            schema,
+            0,
+            "openapi".to_string(),
+        );
 
         // Should be expired immediately with 0 TTL
         assert!(entry.is_expired());
@@ -534,5 +637,75 @@ mod tests {
             "graphql"
         );
         assert_eq!(cache.detect_protocol("https://api.example.com/mcp"), "mcp");
+    }
+
+    #[test]
+    fn test_cache_invalidate_by_key() {
+        let (cache, temp) = create_test_cache();
+        let url = "https://api.example.com/openapi.json";
+        let schema = serde_json::json!({"openapi": "3.0"});
+
+        cache.put(url, &schema).unwrap();
+
+        let file_name = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|s| s.to_str()) == Some("json"))
+                    .then(|| {
+                        path.file_name()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())
+                    })
+                    .flatten()
+            })
+            .expect("cache file should exist");
+
+        let key = file_name.trim_end_matches(".json").to_string();
+        cache.invalidate_by_key(&key).unwrap();
+
+        match cache.get(url).unwrap() {
+            CacheResult::Miss => {}
+            _ => panic!("Expected cache miss after clear by key"),
+        }
+    }
+
+    #[test]
+    fn test_list_entries_includes_url_and_key() {
+        let (cache, _temp) = create_test_cache();
+        let url = "https://api.example.com/openapi.json";
+        let schema = serde_json::json!({"openapi": "3.0"});
+
+        cache.put(url, &schema).unwrap();
+
+        let entries = cache.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].url, url);
+        assert_eq!(entries[0].protocol, "openapi");
+        assert!(!entries[0].key.is_empty());
+        assert!(entries[0].size_bytes > 0);
+    }
+
+    #[test]
+    fn test_list_entries_legacy_entry_defaults_empty_url() {
+        let (cache, temp) = create_test_cache();
+
+        let legacy = serde_json::json!({
+            "schema": {"openapi": "3.0"},
+            "fetched_at": 100,
+            "expires_at": 9_999_999_999u64,
+            "etag": null,
+            "protocol": "openapi"
+        });
+        let file = temp.path().join("legacy-entry.json");
+        fs::write(file, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let entries = cache.list_entries().unwrap();
+        let legacy_entry = entries
+            .iter()
+            .find(|e| e.key == "legacy-entry")
+            .expect("legacy entry should be listed");
+        assert_eq!(legacy_entry.url, "");
     }
 }

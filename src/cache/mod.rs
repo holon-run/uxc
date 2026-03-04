@@ -11,6 +11,7 @@ pub use config::CacheConfig;
 #[allow(unused_imports)]
 pub use config::CacheOptions;
 pub use stats::CacheStats;
+pub use storage::CacheListEntry;
 pub use storage::SchemaCache;
 #[allow(unused_imports)]
 pub use storage::{CacheEntry, CacheStorage};
@@ -105,8 +106,14 @@ pub trait Cache: Send + Sync {
     /// Invalidate a specific cache entry
     fn invalidate(&self, url: &str) -> Result<()>;
 
+    /// Invalidate a specific cache entry by cache key
+    fn invalidate_by_key(&self, key: &str) -> Result<()>;
+
     /// Clear all cache entries
     fn clear(&self) -> Result<()>;
+
+    /// List current cache entries
+    fn list_entries(&self) -> Result<Vec<CacheListEntry>>;
 
     /// Get cache statistics
     fn stats(&self) -> Result<CacheStats>;

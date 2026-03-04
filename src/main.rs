@@ -156,6 +156,9 @@ enum DaemonCommands {
 
 #[derive(Subcommand)]
 enum CacheCommands {
+    /// List cache entries
+    List,
+
     /// Show cache statistics
     Stats,
 
@@ -165,8 +168,12 @@ enum CacheCommands {
         url: Option<String>,
 
         /// Clear all cached entries
-        #[arg(long)]
+        #[arg(long, conflicts_with = "key")]
         all: bool,
+
+        /// Cache key to clear
+        #[arg(long, conflicts_with = "url")]
+        key: Option<String>,
     },
 }
 
@@ -426,6 +433,13 @@ struct HelpCommand {
 struct CacheClearData {
     scope: String,
     url: Option<String>,
+    key: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CacheListData {
+    entries: Vec<cache::CacheListEntry>,
+    count: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -851,6 +865,7 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
 
     match &cli.command {
         Some(Commands::Cache { cache_command }) => match cache_command {
+            CacheCommands::List => Some(vec!["cache", "list"]),
             CacheCommands::Clear { .. } => Some(vec!["cache", "clear"]),
             CacheCommands::Stats => Some(vec!["cache", "stats"]),
         },
@@ -1214,16 +1229,26 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["cache"] => HelpData {
             path: "uxc cache".to_string(),
             about: "Manage schema cache".to_string(),
-            usage: "uxc cache <stats|clear>".to_string(),
+            usage: "uxc cache <list|stats|clear>".to_string(),
             commands: commands(&[
+                ("list", "List cache entries"),
                 ("stats", "Show cache statistics"),
                 ("clear", "Clear cache entries"),
             ]),
             notes: vec![],
             examples: vec![
+                "uxc cache list".to_string(),
                 "uxc cache stats".to_string(),
                 "uxc cache clear --all".to_string(),
             ],
+        },
+        ["cache", "list"] => HelpData {
+            path: "uxc cache list".to_string(),
+            about: "List cache entries".to_string(),
+            usage: "uxc cache list".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc cache list".to_string()],
         },
         ["cache", "stats"] => HelpData {
             path: "uxc cache stats".to_string(),
@@ -1236,11 +1261,12 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["cache", "clear"] => HelpData {
             path: "uxc cache clear".to_string(),
             about: "Clear cache entries".to_string(),
-            usage: "uxc cache clear <url> | uxc cache clear --all".to_string(),
+            usage: "uxc cache clear <url> | uxc cache clear --key <cache_key> | uxc cache clear --all".to_string(),
             commands: vec![],
             notes: vec![],
             examples: vec![
                 "uxc cache clear https://petstore3.swagger.io/api/v3".to_string(),
+                "uxc cache clear --key 767d50e00f278ca8".to_string(),
                 "uxc cache clear --all".to_string(),
             ],
         },
@@ -1503,10 +1529,30 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             println!("{}", stats.display());
             Ok(())
         }
+        Some("cache_list") => {
+            let data: CacheListData = decode_envelope_data(envelope)?;
+            if data.entries.is_empty() {
+                println!("No cache entries.");
+                return Ok(());
+            }
+            for entry in data.entries {
+                println!(
+                    "{} [{}] stale={} url={}",
+                    entry.key, entry.protocol, entry.stale, entry.url
+                );
+            }
+            Ok(())
+        }
         Some("cache_clear_result") => {
             let data: CacheClearData = decode_envelope_data(envelope)?;
             if data.scope == "all" {
                 println!("Cache cleared successfully.");
+            } else if data.scope == "key" {
+                if let Some(key) = data.key {
+                    println!("Cache entry cleared for key: {}", key);
+                } else {
+                    println!("Cache cleared.");
+                }
             } else if let Some(url) = data.url {
                 println!("Cache entry cleared for: {}", url);
             } else {
@@ -2484,6 +2530,21 @@ async fn handle_cache_command(
     let cache = cache::create_cache(cache_config)?;
 
     match command {
+        CacheCommands::List => {
+            let entries = cache.list_entries()?;
+            let data = serde_json::to_value(CacheListData {
+                count: entries.len(),
+                entries,
+            })?;
+            Ok(OutputEnvelope::success(
+                "cache_list",
+                "cli",
+                "uxc",
+                None,
+                data,
+                None,
+            ))
+        }
         CacheCommands::Stats => {
             let stats = cache.stats()?;
             let data = serde_json::to_value(stats)?;
@@ -2496,12 +2557,29 @@ async fn handle_cache_command(
                 None,
             ))
         }
-        CacheCommands::Clear { url, all } => {
+        CacheCommands::Clear { url, all, key } => {
             if *all {
                 cache.clear()?;
                 let data = serde_json::to_value(CacheClearData {
                     scope: "all".to_string(),
                     url: None,
+                    key: None,
+                })?;
+                Ok(OutputEnvelope::success(
+                    "cache_clear_result",
+                    "cli",
+                    "uxc",
+                    None,
+                    data,
+                    None,
+                ))
+            } else if let Some(key) = key {
+                cache.invalidate_by_key(key)?;
+                let normalized_key = key.strip_suffix(".json").unwrap_or(key).to_string();
+                let data = serde_json::to_value(CacheClearData {
+                    scope: "key".to_string(),
+                    url: None,
+                    key: Some(normalized_key),
                 })?;
                 Ok(OutputEnvelope::success(
                     "cache_clear_result",
@@ -2517,6 +2595,7 @@ async fn handle_cache_command(
                 let data = serde_json::to_value(CacheClearData {
                     scope: "url".to_string(),
                     url: Some(normalized_url),
+                    key: None,
                 })?;
                 Ok(OutputEnvelope::success(
                     "cache_clear_result",
@@ -2528,7 +2607,7 @@ async fn handle_cache_command(
                 ))
             } else {
                 Err(UxcError::InvalidArguments(
-                    "Usage: uxc cache clear <url> OR uxc cache clear --all".to_string(),
+                    "Usage: uxc cache clear <url> | uxc cache clear --key <cache_key> | uxc cache clear --all".to_string(),
                 )
                 .into())
             }

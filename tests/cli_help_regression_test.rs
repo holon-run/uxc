@@ -507,6 +507,24 @@ fn cache_stats_help_outputs_specific_subcommand_path() {
 
 #[test]
 #[serial]
+fn cache_list_help_outputs_specific_subcommand_path() {
+    let output = uxc_command()
+        .arg("cache")
+        .arg("list")
+        .arg("-h")
+        .output()
+        .expect("failed to run uxc");
+
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc cache list");
+}
+
+#[test]
+#[serial]
 fn auth_credential_without_subcommand_outputs_subcommand_help_json() {
     let output = uxc_command()
         .arg("auth")
