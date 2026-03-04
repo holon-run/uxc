@@ -66,12 +66,34 @@ fn cache_clear_normalizes_shorthand_url() {
 #[test]
 fn cache_list_and_clear_by_key_flow() {
     let temp_home = TempDir::new().expect("temp home should be created");
-    let key = "manual-cache-key";
-    seed_cache_entry(
-        temp_home.path(),
-        key,
-        "https://api.example.com/openapi.json",
-    );
+    let mut server = mockito::Server::new();
+    let _schema = server
+        .mock("GET", "/openapi.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r##"{
+  "openapi": "3.0.0",
+  "info": { "title": "test", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "list pets",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"##,
+        )
+        .create();
+
+    let prime = uxc_with_home(temp_home.path())
+        .arg(server.url())
+        .arg("get:/pets")
+        .arg("-h")
+        .output()
+        .expect("prime cache should run");
+    assert!(prime.status.success(), "prime cache should succeed");
 
     let list = uxc_with_home(temp_home.path())
         .arg("cache")
@@ -82,16 +104,37 @@ fn cache_list_and_clear_by_key_flow() {
     let list_json = parse_stdout_json(&list);
     assert_eq!(list_json["ok"], true);
     assert_eq!(list_json["kind"], "cache_list");
-    let key = list_json["data"]["entries"]
+    let mut key = list_json["data"]["entries"]
         .as_array()
-        .and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry["key"] == key)
-                .and_then(|entry| entry["key"].as_str())
-        })
-        .expect("seeded cache key should exist")
-        .to_string();
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry["key"].as_str())
+        .map(|v| v.to_string());
+
+    if key.is_none() {
+        let fallback_key = "manual-cache-key";
+        seed_cache_entry(
+            temp_home.path(),
+            fallback_key,
+            "https://api.example.com/openapi.json",
+        );
+        let list = uxc_with_home(temp_home.path())
+            .arg("cache")
+            .arg("list")
+            .output()
+            .expect("cache list should run after fallback seed");
+        let list_json = parse_stdout_json(&list);
+        key = list_json["data"]["entries"]
+            .as_array()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry["key"] == fallback_key)
+                    .and_then(|entry| entry["key"].as_str())
+            })
+            .map(|v| v.to_string());
+    }
+
+    let key = key.expect("cache key should exist");
 
     let clear = uxc_with_home(temp_home.path())
         .arg("cache")
@@ -126,12 +169,34 @@ fn cache_list_and_clear_by_key_flow() {
 #[test]
 fn cache_clear_by_key_accepts_json_suffix() {
     let temp_home = TempDir::new().expect("temp home should be created");
-    let key = "manual-cache-key-with-suffix";
-    seed_cache_entry(
-        temp_home.path(),
-        key,
-        "https://api.example.com/openapi.json",
-    );
+    let mut server = mockito::Server::new();
+    let _schema = server
+        .mock("GET", "/openapi.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r##"{
+  "openapi": "3.0.0",
+  "info": { "title": "test", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "list pets",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"##,
+        )
+        .create();
+
+    let prime = uxc_with_home(temp_home.path())
+        .arg(server.url())
+        .arg("get:/pets")
+        .arg("-h")
+        .output()
+        .expect("prime cache should run");
+    assert!(prime.status.success(), "prime cache should succeed");
 
     let list = uxc_with_home(temp_home.path())
         .arg("cache")
@@ -139,16 +204,37 @@ fn cache_clear_by_key_accepts_json_suffix() {
         .output()
         .expect("cache list should run");
     let list_json = parse_stdout_json(&list);
-    let key = list_json["data"]["entries"]
+    let mut key = list_json["data"]["entries"]
         .as_array()
-        .and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry["key"] == key)
-                .and_then(|entry| entry["key"].as_str())
-        })
-        .expect("seeded cache key should exist")
-        .to_string();
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry["key"].as_str())
+        .map(|v| v.to_string());
+
+    if key.is_none() {
+        let fallback_key = "manual-cache-key-with-suffix";
+        seed_cache_entry(
+            temp_home.path(),
+            fallback_key,
+            "https://api.example.com/openapi.json",
+        );
+        let list = uxc_with_home(temp_home.path())
+            .arg("cache")
+            .arg("list")
+            .output()
+            .expect("cache list should run after fallback seed");
+        let list_json = parse_stdout_json(&list);
+        key = list_json["data"]["entries"]
+            .as_array()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry["key"] == fallback_key)
+                    .and_then(|entry| entry["key"].as_str())
+            })
+            .map(|v| v.to_string());
+    }
+
+    let key = key.expect("cache key should exist");
 
     let clear = uxc_with_home(temp_home.path())
         .arg("cache")
