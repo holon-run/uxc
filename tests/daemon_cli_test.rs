@@ -122,3 +122,78 @@ fn daemon_start_reports_started_now_and_already_running() {
 
     daemon_stop_best_effort();
 }
+
+#[test]
+#[serial]
+fn daemon_restart_when_running() {
+    daemon_stop_best_effort();
+
+    // Start daemon first
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    // Restart should stop and start
+    let restart = uxc_command()
+        .arg("daemon")
+        .arg("restart")
+        .output()
+        .expect("daemon restart should run");
+    assert!(restart.status.success());
+    let restart_json: serde_json::Value =
+        serde_json::from_slice(&restart.stdout).expect("valid json");
+    assert_eq!(restart_json["ok"], true);
+    assert_eq!(restart_json["kind"], "daemon_restart_result");
+    assert_eq!(restart_json["data"]["stopped"], true);
+    assert_eq!(restart_json["data"]["started"], true);
+    assert!(restart_json["data"]["socket"].as_str().is_some());
+
+    // Verify daemon is running after restart
+    let status = uxc_command()
+        .arg("daemon")
+        .arg("status")
+        .output()
+        .expect("daemon status should run");
+    assert!(status.status.success());
+    let status_json: serde_json::Value = serde_json::from_slice(&status.stdout).expect("valid json");
+    assert_eq!(status_json["data"]["running"], true);
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
+fn daemon_restart_when_not_running() {
+    daemon_stop_best_effort();
+
+    // Restart when daemon is not running should just start it
+    let restart = uxc_command()
+        .arg("daemon")
+        .arg("restart")
+        .output()
+        .expect("daemon restart should run");
+    assert!(restart.status.success());
+    let restart_json: serde_json::Value =
+        serde_json::from_slice(&restart.stdout).expect("valid json");
+    assert_eq!(restart_json["ok"], true);
+    assert_eq!(restart_json["kind"], "daemon_restart_result");
+    assert_eq!(restart_json["data"]["stopped"], false);
+    assert_eq!(restart_json["data"]["started"], true);
+    assert!(restart_json["data"]["socket"].as_str().is_some());
+
+    // Verify daemon is running after restart
+    let status = uxc_command()
+        .arg("daemon")
+        .arg("status")
+        .output()
+        .expect("daemon status should run");
+    assert!(status.status.success());
+    let status_json: serde_json::Value = serde_json::from_slice(&status.stdout).expect("valid json");
+    assert_eq!(status_json["data"]["running"], true);
+
+    daemon_stop_best_effort();
+}
+
