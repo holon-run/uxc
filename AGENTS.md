@@ -26,6 +26,7 @@
 - Add/extend integration tests in `tests/` with descriptive names ending in `_test.rs`.
 - Cover both success and failure paths (argument validation, protocol errors, output shape).
 - For output assertions, validate stable keys like `ok`, `kind`, and `protocol`.
+- Avoid cross-test shared state (cache, daemon socket, temp files, ports). Prefer per-test isolated HOME/tmp dirs; only share state within a single test when the test explicitly validates cache/session reuse behavior.
 - Run `cargo test -- --test-threads=1` when reproducing CI behavior.
 
 ## Commit & Pull Request Guidelines

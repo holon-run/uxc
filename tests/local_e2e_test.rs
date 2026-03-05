@@ -5,7 +5,9 @@
 
 mod common;
 
-use common::{run_uxc, start_test_server, test_server_binary};
+use common::{
+    fresh_test_home_dir, run_uxc, run_uxc_in_home, start_test_server, test_server_binary,
+};
 use std::process::Command;
 
 fn grpcurl_available() -> bool {
@@ -14,6 +16,10 @@ fn grpcurl_available() -> bool {
         .output()
         .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
         .unwrap_or(false)
+}
+
+fn mcp_http_endpoint(addr: &str) -> String {
+    format!("http://{addr}/mcp")
 }
 
 #[test]
@@ -503,8 +509,9 @@ fn test_grpc_auth_required() {
 #[serial_test::serial]
 fn test_mcp_http_host_help_lists_operations() {
     let _server = start_test_server("mcp-http", "ok");
+    let endpoint = mcp_http_endpoint(&_server.addr);
 
-    let result = run_uxc(&[&format!("http://{}", _server.addr), "-h"]);
+    let result = run_uxc(&[&endpoint, "-h"]);
 
     assert!(
         result.is_ok(),
@@ -532,9 +539,10 @@ fn test_mcp_http_host_help_lists_operations() {
 #[serial_test::serial]
 fn test_mcp_http_call_tool() {
     let _server = start_test_server("mcp-http", "ok");
+    let endpoint = mcp_http_endpoint(&_server.addr);
 
     let result = run_uxc(&[
-        &format!("http://{}", _server.addr),
+        &endpoint,
         "echo",
         "--input-json",
         r#"{"message":"hello mcp"}"#,
@@ -554,9 +562,10 @@ fn test_mcp_http_call_tool() {
 #[serial_test::serial]
 fn test_mcp_http_call_tool_includes_structured_content() {
     let _server = start_test_server("mcp-http", "structured_content");
+    let endpoint = mcp_http_endpoint(&_server.addr);
 
     let result = run_uxc(&[
-        &format!("http://{}", _server.addr),
+        &endpoint,
         "echo",
         "--input-json",
         r#"{"message":"hello structured"}"#,
@@ -582,12 +591,9 @@ fn test_mcp_http_call_tool_includes_structured_content() {
 #[serial_test::serial]
 fn test_mcp_http_auth_required() {
     let _server = start_test_server("mcp-http", "auth_required");
+    let endpoint = mcp_http_endpoint(&_server.addr);
 
-    let result = run_uxc(&[
-        "--refresh-schema",
-        &format!("http://{}", _server.addr),
-        "-h",
-    ]);
+    let result = run_uxc(&["--refresh-schema", &endpoint, "-h"]);
 
     let err = result.expect_err("Expected MCP HTTP auth error, got success");
     let err_lower = err.to_ascii_lowercase();
@@ -605,8 +611,9 @@ fn test_mcp_http_auth_required() {
 #[serial_test::serial]
 fn test_mcp_http_host_help_includes_service_metadata() {
     let _server = start_test_server("mcp-http", "ok");
+    let endpoint = mcp_http_endpoint(&_server.addr);
 
-    let result = run_uxc(&[&format!("http://{}", _server.addr), "-h"]);
+    let result = run_uxc(&[&endpoint, "-h"]);
     assert!(result.is_ok(), "Failed to run MCP HTTP help: {:?}", result);
 
     let output = result.unwrap();
@@ -625,8 +632,9 @@ fn test_mcp_http_host_help_includes_service_metadata() {
 #[serial_test::serial]
 fn test_mcp_http_text_help_prints_service_summary() {
     let _server = start_test_server("mcp-http", "ok");
+    let endpoint = mcp_http_endpoint(&_server.addr);
 
-    let result = run_uxc(&["--text", &format!("http://{}", _server.addr), "-h"]);
+    let result = run_uxc(&["--text", &endpoint, "-h"]);
     assert!(result.is_ok(), "Failed to run MCP HTTP help: {:?}", result);
 
     let output = result.unwrap();
@@ -639,16 +647,17 @@ fn test_mcp_http_text_help_prints_service_summary() {
 #[serial_test::serial]
 fn test_mcp_http_help_uses_cached_schema_when_tools_list_fails_after_first() {
     let server = start_test_server("mcp-http", "tools_list_fail_after_first");
-    let endpoint = format!("http://{}", server.addr);
+    let endpoint = mcp_http_endpoint(&server.addr.to_string());
+    let test_home = fresh_test_home_dir();
 
-    let first = run_uxc(&[&endpoint, "-h"]);
+    let first = run_uxc_in_home(&[&endpoint, "-h"], &test_home);
     assert!(
         first.is_ok(),
         "Initial MCP HTTP help should succeed: {:?}",
         first
     );
 
-    let second = run_uxc(&[&endpoint, "-h"]);
+    let second = run_uxc_in_home(&[&endpoint, "-h"], &test_home);
     assert!(
         second.is_ok(),
         "Second MCP HTTP help should use cache and succeed: {:?}",
@@ -667,21 +676,25 @@ fn test_mcp_http_help_uses_cached_schema_when_tools_list_fails_after_first() {
 #[serial_test::serial]
 fn test_mcp_http_execute_does_not_depend_on_tools_list() {
     let server = start_test_server("mcp-http", "tools_list_fail_after_first");
-    let endpoint = format!("http://{}", server.addr);
+    let endpoint = mcp_http_endpoint(&server.addr.to_string());
+    let test_home = fresh_test_home_dir();
 
-    let prime_help = run_uxc(&[&endpoint, "-h"]);
+    let prime_help = run_uxc_in_home(&[&endpoint, "-h"], &test_home);
     assert!(
         prime_help.is_ok(),
         "Initial MCP HTTP help should succeed: {:?}",
         prime_help
     );
 
-    let call = run_uxc(&[
-        &endpoint,
-        "echo",
-        "--input-json",
-        r#"{"message":"hello cache"}"#,
-    ]);
+    let call = run_uxc_in_home(
+        &[
+            &endpoint,
+            "echo",
+            "--input-json",
+            r#"{"message":"hello cache"}"#,
+        ],
+        &test_home,
+    );
     assert!(
         call.is_ok(),
         "MCP HTTP execute should succeed without tools/list dependency: {:?}",
@@ -880,8 +893,9 @@ fn test_grpc_describe_operation() {
 #[serial_test::serial]
 fn test_mcp_http_describe_operation() {
     let _server = start_test_server("mcp-http", "ok");
+    let endpoint = mcp_http_endpoint(&_server.addr);
 
-    let result = run_uxc(&[&format!("http://{}", _server.addr), "echo", "-h"]);
+    let result = run_uxc(&[&endpoint, "echo", "-h"]);
 
     assert!(
         result.is_ok(),

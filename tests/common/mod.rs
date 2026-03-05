@@ -4,6 +4,7 @@ use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -120,11 +121,17 @@ pub fn start_test_server(protocol: &str, scenario: &str) -> TestServerHandle {
 
 /// Run uxc command and check result
 pub fn run_uxc(args: &[&str]) -> Result<String, String> {
+    let test_home = fresh_test_home_dir();
+    run_uxc_in_home(args, &test_home)
+}
+
+/// Run uxc command using an explicit HOME path.
+/// Useful when a single test intentionally needs shared cache/daemon state across calls.
+pub fn run_uxc_in_home(args: &[&str], test_home: &std::path::Path) -> Result<String, String> {
     let uxc = uxc_binary();
-    let test_home = test_home_dir();
     let output = Command::new(&uxc)
         .args(args)
-        .env("HOME", &test_home)
+        .env("HOME", test_home)
         .output()
         .map_err(|e| format!("Failed to run uxc: {}", e))?;
 
@@ -143,14 +150,12 @@ pub fn run_uxc(args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn test_home_dir() -> PathBuf {
-    static TEST_HOME: OnceLock<PathBuf> = OnceLock::new();
-    TEST_HOME
-        .get_or_init(|| {
-            // Keep HOME path short to avoid Unix socket path length limits for daemon socket.
-            let dir = PathBuf::from(format!("/tmp/uxc-test-home-{}", std::process::id()));
-            fs::create_dir_all(&dir).expect("Failed to create test HOME");
-            dir
-        })
-        .clone()
+/// Create a fresh HOME directory for test isolation.
+pub fn fresh_test_home_dir() -> PathBuf {
+    static TEST_HOME_SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = TEST_HOME_SEQ.fetch_add(1, Ordering::SeqCst);
+    // Keep path short to avoid Unix socket path length limits for daemon socket.
+    let dir = PathBuf::from(format!("/tmp/uxcth-{}-{}", std::process::id(), n));
+    fs::create_dir_all(&dir).expect("Failed to create test HOME");
+    dir
 }
