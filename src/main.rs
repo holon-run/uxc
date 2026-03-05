@@ -1640,13 +1640,13 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
                 println!("Daemon was not running.");
             }
             if data
-                .get("started")
+                .get("started_now")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
                 println!("Daemon started.");
             } else {
-                println!("Daemon start failed.");
+                println!("Daemon was already running.");
             }
             if let Some(socket) = data.get("socket").and_then(Value::as_str) {
                 println!("Socket: {}", socket);
@@ -2716,10 +2716,10 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
         }
         DaemonCommands::Restart => {
             let stopped = daemon::daemon_stop_local().await?;
-            let started = daemon::daemon_start_local().await?;
+            let started_now = daemon::daemon_start_local().await?;
             let data = json!({
                 "stopped": stopped,
-                "started": started,
+                "started_now": started_now,
                 "socket": daemon::socket_path().display().to_string()
             });
             Ok(OutputEnvelope::success(
