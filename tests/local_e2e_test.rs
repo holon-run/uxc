@@ -583,7 +583,11 @@ fn test_mcp_http_call_tool_includes_structured_content() {
 fn test_mcp_http_auth_required() {
     let _server = start_test_server("mcp-http", "auth_required");
 
-    let result = run_uxc(&["--refresh-schema", &format!("http://{}", _server.addr), "-h"]);
+    let result = run_uxc(&[
+        "--refresh-schema",
+        &format!("http://{}", _server.addr),
+        "-h",
+    ]);
 
     let err = result.expect_err("Expected MCP HTTP auth error, got success");
     let err_lower = err.to_ascii_lowercase();

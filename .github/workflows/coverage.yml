@@ -90,21 +90,21 @@ jobs:
         run: cargo llvm-cov --all-features --workspace --no-report -- --test-threads=1
 
       - name: Generate coverage JSON summary
-        run: cargo llvm-cov report --json --summary-only --output-path coverage.json
+        run: cargo llvm-cov report --json --summary-only --output-path coverage.json --ignore-filename-regex '^(test_server/|bin/uxc-test-.*\.rs$)'
 
       - name: Display coverage report
         run: |
           echo "=== Coverage Summary ==="
-          cargo llvm-cov report
+          cargo llvm-cov report --ignore-filename-regex '^(test_server/|bin/uxc-test-.*\.rs$)'
 
       - name: Check coverage threshold (65%)
         run: |
           echo "=== Checking Coverage Threshold ==="
-          cargo llvm-cov report --fail-under-lines 65
+          cargo llvm-cov report --ignore-filename-regex '^(test_server/|bin/uxc-test-.*\.rs$)' --fail-under-lines 65
           echo "✅ Coverage meets minimum threshold of 65%"
 
       - name: Generate coverage HTML report
-        run: cargo llvm-cov report --html --output-dir html
+        run: cargo llvm-cov report --html --output-dir html --ignore-filename-regex '^(test_server/|bin/uxc-test-.*\.rs$)'
 
       - name: Upload coverage JSON report
         uses: actions/upload-artifact@v4
