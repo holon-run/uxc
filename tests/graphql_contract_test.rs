@@ -407,6 +407,148 @@ fn test_graphql_execute_rejects_unknown_arguments_before_request() {
 }
 
 #[test]
+fn test_graphql_execute_honors_select_override() {
+    run_async(|mut server| {
+        let introspection_response = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": {
+                        "name": "Query",
+                        "fields": [
+                            {
+                                "name": "issues",
+                                "args": [
+                                    {
+                                        "name": "first",
+                                        "type": { "kind": "SCALAR", "name": "Int" }
+                                    }
+                                ],
+                                "type": { "kind": "OBJECT", "name": "IssueConnection" }
+                            }
+                        ]
+                    },
+                    "mutationType": null,
+                    "subscriptionType": null,
+                    "types": [
+                        {
+                            "name": "IssueConnection",
+                            "kind": "OBJECT",
+                            "fields": [
+                                {
+                                    "name": "nodes",
+                                    "type": {
+                                        "kind": "LIST",
+                                        "ofType": { "kind": "OBJECT", "name": "Issue" }
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Issue",
+                            "kind": "OBJECT",
+                            "fields": [
+                                { "name": "identifier", "type": { "kind": "SCALAR", "name": "String" } },
+                                { "name": "title", "type": { "kind": "SCALAR", "name": "String" } }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let call_response = serde_json::json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        { "identifier": "JOL-5", "title": "Test from UXC" }
+                    ]
+                }
+            }
+        });
+
+        let _introspection = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&introspection_response.to_string())
+            .create();
+
+        let _execute = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "query": "query ($first: Int) { issues(first: $first) { nodes { identifier title } } }",
+                "variables": {
+                    "first": 1
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&call_response.to_string())
+            .create();
+
+        let mut args = HashMap::new();
+        args.insert("first".to_string(), serde_json::json!(1));
+        args.insert(
+            "_select".to_string(),
+            serde_json::json!("nodes { identifier title }"),
+        );
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = GraphQLAdapter::new();
+        let result = rt
+            .block_on(async { adapter.execute(&server.url(), "query/issues", args).await })
+            .unwrap();
+
+        assert_eq!(result.data["issues"]["nodes"][0]["identifier"], "JOL-5");
+    });
+}
+
+#[test]
+fn test_graphql_execute_rejects_non_string_select_override() {
+    run_async(|mut server| {
+        let introspection_response = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": {
+                        "name": "Query",
+                        "fields": [
+                            {
+                                "name": "issues",
+                                "args": [],
+                                "type": { "kind": "OBJECT", "name": "IssueConnection" }
+                            }
+                        ]
+                    },
+                    "mutationType": null,
+                    "subscriptionType": null
+                }
+            }
+        });
+        let _introspection = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&introspection_response.to_string())
+            .create();
+
+        let mut args = HashMap::new();
+        args.insert("_select".to_string(), serde_json::json!({"nodes": true}));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = GraphQLAdapter::new();
+        let err = rt
+            .block_on(async { adapter.execute(&server.url(), "query/issues", args).await })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("must be a string"));
+    });
+}
+
+#[test]
 fn test_graphql_parses_subscription_fields() {
     run_async(|mut server| {
         let introspection_response = serde_json::json!({

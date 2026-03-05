@@ -27,6 +27,8 @@ pub struct GraphQLAdapter {
 
 impl GraphQLAdapter {
     const MAX_INPUT_SCHEMA_DEPTH: usize = 8;
+    const MAX_SELECTION_DEPTH: usize = 3;
+    const MAX_SELECTION_FIELDS_PER_OBJECT: usize = 12;
 
     pub fn new() -> Self {
         Self {
@@ -643,6 +645,147 @@ impl GraphQLAdapter {
         Some(Value::Object(input))
     }
 
+    fn is_scalar_or_enum(type_info: &Value) -> bool {
+        let kind = type_info.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        match kind {
+            "SCALAR" | "ENUM" => true,
+            "NON_NULL" | "LIST" => type_info
+                .get("ofType")
+                .map(Self::is_scalar_or_enum)
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    fn named_type_name(type_info: &Value) -> Option<String> {
+        let kind = type_info.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        match kind {
+            "NON_NULL" | "LIST" => type_info.get("ofType").and_then(Self::named_type_name),
+            _ => type_info
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string()),
+        }
+    }
+
+    fn field_priority(name: &str, is_leaf: bool) -> i32 {
+        if name == "nodes" {
+            return 0;
+        }
+        if is_leaf
+            && matches!(
+                name,
+                "id" | "identifier"
+                    | "key"
+                    | "name"
+                    | "title"
+                    | "url"
+                    | "state"
+                    | "status"
+                    | "createdAt"
+                    | "updatedAt"
+            )
+        {
+            return 1;
+        }
+        if is_leaf {
+            return 2;
+        }
+        if matches!(name, "state" | "assignee" | "team" | "project" | "pageInfo") {
+            return 3;
+        }
+        4
+    }
+
+    fn build_selection_set_for_type(
+        type_info: &Value,
+        type_index: &HashMap<String, &Value>,
+        visiting: &mut HashSet<String>,
+        depth: usize,
+    ) -> Option<String> {
+        if depth == 0 {
+            return Some("__typename".to_string());
+        }
+
+        let Some(type_name) = Self::named_type_name(type_info) else {
+            return Some("__typename".to_string());
+        };
+        let Some(type_def) = type_index.get(&type_name).copied() else {
+            return Some("__typename".to_string());
+        };
+        let fields = type_def.get("fields").and_then(|f| f.as_array())?;
+
+        if !visiting.insert(type_name.clone()) {
+            return Some("__typename".to_string());
+        }
+
+        let mut ranked: Vec<(usize, i32)> = fields
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, field)| {
+                let name = field.get("name").and_then(|n| n.as_str())?;
+                let field_type = field.get("type")?;
+                let is_leaf = Self::is_scalar_or_enum(field_type);
+                Some((idx, Self::field_priority(name, is_leaf)))
+            })
+            .collect();
+        ranked.sort_by_key(|(idx, priority)| (*priority, *idx));
+
+        let mut selections = Vec::new();
+        for (idx, _) in ranked {
+            if selections.len() >= Self::MAX_SELECTION_FIELDS_PER_OBJECT {
+                break;
+            }
+            let field = &fields[idx];
+            let Some(name) = field.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let Some(field_type) = field.get("type") else {
+                continue;
+            };
+
+            if Self::is_scalar_or_enum(field_type) {
+                selections.push(name.to_string());
+                continue;
+            }
+
+            let child = Self::build_selection_set_for_type(
+                field_type,
+                type_index,
+                visiting,
+                depth.saturating_sub(1),
+            );
+            if let Some(child_selection) = child {
+                selections.push(format!("{} {{ {} }}", name, child_selection));
+            }
+        }
+
+        visiting.remove(&type_name);
+
+        if selections.is_empty() {
+            Some("__typename".to_string())
+        } else {
+            Some(selections.join(" "))
+        }
+    }
+
+    fn default_selection_set(schema: &Value, operation: &str) -> String {
+        let Some(field) = Self::find_operation_field(schema, operation) else {
+            return "__typename".to_string();
+        };
+        let Some(return_type) = field.get("type") else {
+            return "__typename".to_string();
+        };
+        let type_index = Self::build_type_index(schema);
+        Self::build_selection_set_for_type(
+            return_type,
+            &type_index,
+            &mut HashSet::new(),
+            Self::MAX_SELECTION_DEPTH,
+        )
+        .unwrap_or_else(|| "__typename".to_string())
+    }
+
     /// Find operation details from parsed operations
     fn find_operation(schema: &Value, operation: &str) -> Option<Operation> {
         let operations = Self::parse_schema_to_operations(schema).ok()?;
@@ -850,9 +993,22 @@ impl Adapter for GraphQLAdapter {
         args: HashMap<String, Value>,
     ) -> Result<ExecutionResult> {
         let start = std::time::Instant::now();
+        let mut args = args;
 
         // Parse operation name to determine type
         let (op_type, field_name) = Self::parse_operation_name(operation)?;
+        let selection_override = args.remove("_select");
+        let selection_override = match selection_override {
+            Some(Value::String(s)) => Some(s),
+            Some(other) => {
+                bail!(
+                    "GraphQL reserved argument '_select' must be a string, got {}",
+                    other
+                );
+            }
+            None => None,
+        };
+
         let schema = self.fetch_schema(url).await?;
         let field = Self::find_operation_field(&schema, operation)
             .ok_or_else(|| anyhow!("Operation '{}' not found", operation))?;
@@ -944,18 +1100,8 @@ impl Adapter for GraphQLAdapter {
             format!("({})", arg_bindings.join(", "))
         };
 
-        // For GraphQL, we need to introspect to get the return type fields
-        // For now, use a default selection set that requests common fields
-        // This is a pragmatic approach since we can't know the schema without introspection
-        let selection_set = match field_name.as_str() {
-            "country" => "name code native capital emoji currency languages { name code native }",
-            "countries" => "name code",
-            "continent" => "name code",
-            "continents" => "name code",
-            "language" => "name code native",
-            "languages" => "name code native",
-            _ => "__typename",
-        };
+        let selection_set =
+            selection_override.unwrap_or_else(|| Self::default_selection_set(&schema, operation));
 
         let query_string = format!(
             "{}{} {{ {}{} {{ {} }} }}",

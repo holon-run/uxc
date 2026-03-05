@@ -230,6 +230,8 @@ uxc countries.trevorblades.com -h
 uxc countries.trevorblades.com query/country code=US
 # 非字符串对象参数推荐使用位置 JSON
 uxc api.linear.app/graphql mutation/issueCreate '{"input":{"teamId":"TEAM_ID","title":"Test"}}'
+# 可选：通过保留参数 _select 指定 GraphQL 返回字段
+uxc api.linear.app/graphql query/issues '{"first":5,"_select":"nodes { identifier title url state { name } }"}'
 ```
 
 ### MCP

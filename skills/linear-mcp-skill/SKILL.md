@@ -69,15 +69,18 @@ Linear supports two authentication methods:
 
 4. Execute queries:
    ```bash
-   # Query issues
-   linear-mcp-cli query/issues first=10
+   # Query issues (simple)
+   linear-mcp-cli query/issues '{"first":10}'
+
+   # Query issues with explicit selection set for useful fields
+   linear-mcp-cli query/issues '{"first":10,"_select":"nodes { identifier title url state { name } assignee { name } }"}'
 
    # Query teams
-   linear-mcp-cli query/teams first=10
+   linear-mcp-cli query/teams '{"first":10}'
 
    # Create issue (requires write scope)
    linear-mcp-cli mutation/issueCreate '{
-     "issueCreateInput": {
+     "input": {
        "teamId": "TEAM_ID",
        "title": "New Issue Title",
        "description": "Issue description"
@@ -105,7 +108,7 @@ Linear supports two authentication methods:
 
 ### List recent issues
 ```bash
-linear-mcp-cli query/issues first=20
+linear-mcp-cli query/issues '{"first":20,"_select":"nodes { identifier title url state { name } assignee { name } }"}'
 ```
 
 ### Get issue by ID
@@ -120,14 +123,15 @@ linear-mcp-cli query/teams
 
 ### Create issue
 ```bash
-linear-mcp-cli mutation/issueCreate '{"issueCreateInput":{"teamId":"YOUR_TEAM_ID","title":"Fix bug"}}'
+linear-mcp-cli mutation/issueCreate '{"input":{"teamId":"YOUR_TEAM_ID","title":"Fix bug"}}'
 ```
 
 ## Guardrails
 
 - Keep automation on JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `data`, `error`.
-- Prefer positional JSON for non-string object arguments (for example: `linear-mcp-cli mutation/issueCreate '{"input":{"teamId":"TEAM_ID","title":"Test"}}'`).
+- Prefer positional JSON for non-string and typed arguments (for example: `linear-mcp-cli query/issues '{"first":10}'` and `linear-mcp-cli mutation/issueCreate '{"input":{"teamId":"TEAM_ID","title":"Test"}}'`).
+- Use reserved GraphQL argument `_select` (string) when you need explicit return fields, e.g. `{"_select":"nodes { identifier title }"}`.
 - Use `linear-mcp-cli` as the default command path.
 - `linear-mcp-cli <operation> ...` is equivalent to `uxc https://api.linear.app/graphql <operation> ...`.
 - Prefer read operations first (query/*), then write operations (mutation/*).

@@ -232,6 +232,8 @@ uxc countries.trevorblades.com -h
 uxc countries.trevorblades.com query/country code=US
 # Prefer positional JSON for non-string object arguments
 uxc api.linear.app/graphql mutation/issueCreate '{"input":{"teamId":"TEAM_ID","title":"Test"}}'
+# Optional: control GraphQL return fields via reserved _select argument
+uxc api.linear.app/graphql query/issues '{"first":5,"_select":"nodes { identifier title url state { name } }"}'
 ```
 
 ### MCP
