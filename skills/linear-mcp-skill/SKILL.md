@@ -127,6 +127,7 @@ linear-mcp-cli mutation/issueCreate '{"issueCreateInput":{"teamId":"YOUR_TEAM_ID
 
 - Keep automation on JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `data`, `error`.
+- Prefer positional JSON for non-string object arguments (for example: `linear-mcp-cli mutation/issueCreate '{"input":{"teamId":"TEAM_ID","title":"Test"}}'`).
 - Use `linear-mcp-cli` as the default command path.
 - `linear-mcp-cli <operation> ...` is equivalent to `uxc https://api.linear.app/graphql <operation> ...`.
 - Prefer read operations first (query/*), then write operations (mutation/*).

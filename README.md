@@ -230,6 +230,8 @@ Note: gRPC unary runtime invocation requires `grpcurl` on `PATH`.
 ```bash
 uxc countries.trevorblades.com -h
 uxc countries.trevorblades.com query/country code=US
+# Prefer positional JSON for non-string object arguments
+uxc api.linear.app/graphql mutation/issueCreate '{"input":{"teamId":"TEAM_ID","title":"Test"}}'
 ```
 
 ### MCP

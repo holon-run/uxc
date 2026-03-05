@@ -228,6 +228,8 @@ uxc grpcb.in:9000 addsvc.Add/Sum a=1 b=2
 ```bash
 uxc countries.trevorblades.com -h
 uxc countries.trevorblades.com query/country code=US
+# 非字符串对象参数推荐使用位置 JSON
+uxc api.linear.app/graphql mutation/issueCreate '{"input":{"teamId":"TEAM_ID","title":"Test"}}'
 ```
 
 ### MCP

@@ -853,38 +853,95 @@ impl Adapter for GraphQLAdapter {
 
         // Parse operation name to determine type
         let (op_type, field_name) = Self::parse_operation_name(operation)?;
+        let schema = self.fetch_schema(url).await?;
+        let field = Self::find_operation_field(&schema, operation)
+            .ok_or_else(|| anyhow!("Operation '{}' not found", operation))?;
 
-        // Build query arguments string
-        let args_str = if !args.is_empty() {
-            let args_parts: Vec<String> = args
-                .iter()
-                .map(|(k, v)| {
-                    let value_str = match v {
-                        Value::String(s) => format!("\"{}\"", s),
-                        Value::Bool(b) => b.to_string(),
-                        Value::Number(n) => n.to_string(),
-                        Value::Null => "null".to_string(),
-                        Value::Array(arr) => {
-                            let items: Vec<String> = arr
-                                .iter()
-                                .map(|item| match item {
-                                    Value::String(s) => format!("\"{}\"", s),
-                                    _ => item.to_string(),
-                                })
-                                .collect();
-                            format!("[{}]", items.join(", "))
-                        }
-                        Value::Object(_obj) => {
-                            // For nested objects, use variable syntax
-                            format!("${}", k)
-                        }
-                    };
-                    format!("{}: {}", k, value_str)
-                })
-                .collect();
-            format!("({})", args_parts.join(", "))
-        } else {
+        let declared_args = field
+            .get("args")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let known_arg_names: HashSet<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                arg.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.to_string())
+            })
+            .collect();
+        let unknown_args: Vec<String> = args
+            .keys()
+            .filter(|k| !known_arg_names.contains(*k))
+            .cloned()
+            .collect();
+        if !unknown_args.is_empty() {
+            bail!(
+                "Unknown argument(s) for GraphQL operation '{}': {}",
+                operation,
+                unknown_args.join(", ")
+            );
+        }
+
+        let missing_required: Vec<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                let name = arg.get("name").and_then(|n| n.as_str())?;
+                let required = arg
+                    .get("type")
+                    .and_then(|t| t.get("kind"))
+                    .and_then(|k| k.as_str())
+                    == Some("NON_NULL");
+                if required && !args.contains_key(name) {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !missing_required.is_empty() {
+            bail!(
+                "Missing required GraphQL argument(s) for '{}': {}",
+                operation,
+                missing_required.join(", ")
+            );
+        }
+
+        let var_defs: Vec<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                let name = arg.get("name").and_then(|n| n.as_str())?;
+                if !args.contains_key(name) {
+                    return None;
+                }
+                let type_info = arg.get("type")?;
+                let type_name = Self::type_to_string(type_info);
+                Some(format!("${}: {}", name, type_name))
+            })
+            .collect();
+
+        let arg_bindings: Vec<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                let name = arg.get("name").and_then(|n| n.as_str())?;
+                if args.contains_key(name) {
+                    Some(format!("{}: ${}", name, name))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let var_defs_str = if var_defs.is_empty() {
             String::new()
+        } else {
+            format!(" ({})", var_defs.join(", "))
+        };
+        let args_str = if arg_bindings.is_empty() {
+            String::new()
+        } else {
+            format!("({})", arg_bindings.join(", "))
         };
 
         // For GraphQL, we need to introspect to get the return type fields
@@ -900,44 +957,23 @@ impl Adapter for GraphQLAdapter {
             _ => "__typename",
         };
 
-        // Check if we have complex nested objects that need variables
-        let has_complex_objects = args.values().any(|v| matches!(v, Value::Object(_)));
+        let query_string = format!(
+            "{}{} {{ {}{} {{ {} }} }}",
+            match op_type {
+                OperationType::Query => "query",
+                OperationType::Mutation => "mutation",
+                OperationType::Subscription => "subscription",
+            },
+            var_defs_str,
+            field_name,
+            args_str,
+            selection_set
+        );
 
-        let (query_string, variables) = if has_complex_objects {
-            // Use variables for complex types
-            let var_names: Vec<String> = args
-                .keys()
-                .map(|k| format!("${}: String", k)) // Simplified type
-                .collect();
-
-            let query = format!(
-                "{} {}{} {{ {} {{ {} }} }}",
-                match op_type {
-                    OperationType::Query => "query",
-                    OperationType::Mutation => "mutation",
-                    OperationType::Subscription => "subscription",
-                },
-                field_name,
-                var_names.join(", "),
-                field_name,
-                selection_set
-            );
-
-            (query, Some(Value::Object(args.into_iter().collect())))
+        let variables = if args.is_empty() {
+            None
         } else {
-            let query = format!(
-                "{} {{ {}{} {{ {} }} }}",
-                match op_type {
-                    OperationType::Query => "query",
-                    OperationType::Mutation => "mutation",
-                    OperationType::Subscription => "subscription",
-                },
-                field_name,
-                args_str,
-                selection_set
-            );
-
-            (query, None)
+            Some(Value::Object(args.into_iter().collect()))
         };
 
         let result = self

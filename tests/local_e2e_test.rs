@@ -226,6 +226,72 @@ fn test_graphql_call_mutation() {
 
 #[test]
 #[serial_test::serial]
+fn test_graphql_call_mutation_with_input_object_via_positional_json() {
+    let _server = start_test_server("graphql", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}/", _server.addr),
+        "mutation/issueCreate",
+        r#"{"input":{"teamId":"T1","title":"GraphQL input object"}}"#,
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call GraphQL mutation with positional JSON object: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "graphql");
+    assert_eq!(json["data"]["issueCreate"]["teamId"], "T1");
+    assert_eq!(json["data"]["issueCreate"]["title"], "GraphQL input object");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_graphql_call_mutation_rejects_unknown_argument() {
+    let _server = start_test_server("graphql", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}/", _server.addr),
+        "mutation/issueCreate",
+        r#"{"unknown":"value"}"#,
+    ]);
+
+    assert!(result.is_err(), "Expected unknown argument error");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("Unknown argument(s)") && err.contains("unknown"),
+        "Expected unknown argument details, got: {}",
+        err
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_graphql_call_mutation_rejects_missing_required_argument() {
+    let _server = start_test_server("graphql", "ok");
+
+    let result = run_uxc(&[
+        &format!("http://{}/", _server.addr),
+        "mutation/issueCreate",
+        r#"{}"#,
+    ]);
+
+    assert!(result.is_err(), "Expected missing required argument error");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("Missing required GraphQL argument(s)") && err.contains("input"),
+        "Expected missing required argument details, got: {}",
+        err
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn test_graphql_auth_required() {
     let _server = start_test_server("graphql", "auth_required");
 
