@@ -583,9 +583,18 @@ fn test_mcp_http_call_tool_includes_structured_content() {
 fn test_mcp_http_auth_required() {
     let _server = start_test_server("mcp-http", "auth_required");
 
-    let result = run_uxc(&[&format!("http://{}", _server.addr), "-h"]);
+    let result = run_uxc(&["--refresh-schema", &format!("http://{}", _server.addr), "-h"]);
 
-    assert!(result.is_err(), "Expected MCP HTTP auth error, got success");
+    let err = result.expect_err("Expected MCP HTTP auth error, got success");
+    let err_lower = err.to_ascii_lowercase();
+    assert!(
+        err_lower.contains("401")
+            || err_lower.contains("unauthorized")
+            || err_lower.contains("oauth")
+            || err_lower.contains("auth"),
+        "Expected auth-related error, got: {}",
+        err
+    );
 }
 
 #[test]
