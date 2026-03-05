@@ -1639,15 +1639,7 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             } else {
                 println!("Daemon was not running.");
             }
-            if data
-                .get("started_now")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                println!("Daemon started.");
-            } else {
-                println!("Daemon was already running.");
-            }
+            println!("Daemon started.");
             if let Some(socket) = data.get("socket").and_then(Value::as_str) {
                 println!("Socket: {}", socket);
             }
