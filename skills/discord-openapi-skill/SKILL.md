@@ -48,15 +48,46 @@ uxc auth binding add \
 - Client ID: `1479302369723285736`
 - Redirect URI: `http://127.0.0.1:11111/callback`
 
+**OAuth2 Scopes:**
+
+Discord user OAuth2 supports **read-only operations**. It cannot send messages or manage servers as a user (use Bot Token for those operations).
+
+**Recommended Scopes (Full Functionality):**
+```bash
+--scope "identify email connections guilds guilds.join guilds.members.read messages.read applications.commands webhook.incoming openid"
+```
+
+**Minimal Read-Only Scopes:**
+```bash
+--scope "identify email connections guilds guilds.members.read"
+```
+
+**Scope Reference:**
+
+| Scope | Description | Write Operation |
+|-------|-------------|-----------------|
+| `identify` | Basic user info (username, avatar, etc.) | ❌ Read |
+| `email` | User's email address | ❌ Read |
+| `connections` | Linked third-party accounts (Twitch, YouTube, etc.) | ❌ Read |
+| `guilds` | User's server list | ❌ Read |
+| `guilds.join` | Join user to servers | ✅ **Write** |
+| `guilds.members.read` | User's member info in servers | ❌ Read |
+| `messages.read` | Read messages (local RPC only) | ❌ Read |
+| `applications.commands` | Use slash commands | ❌ Read |
+| `webhook.incoming` | Create webhooks | ✅ Write |
+| `openid` | OpenID Connect support | ❌ Read |
+
+**Note:** User OAuth2 **cannot** send messages or manage servers as the user. Use Bot Token for write operations. See [Discord OAuth2 documentation](https://docs.discord.com/developers/topics/oauth2) for complete scope list.
+
 **Two-Stage OAuth Flow (Agent-Friendly):**
 
-1. Start OAuth flow:
+1. Start OAuth flow with desired scopes:
 ```bash
 uxc auth oauth start discord-user \
   --endpoint https://discord.com/api/v10/oauth2/token \
   --client-id 1479302369723285736 \
   --redirect-uri http://127.0.0.1:11111/callback \
-  --scope "identify email guilds guilds.join guilds.members.read connections messages.read"
+  --scope "identify email connections guilds guilds.join guilds.members.read messages.read applications.commands webhook.incoming openid"
 ```
 
 2. Open the displayed authorization URL in browser, complete authorization, then copy the callback URL from browser address bar.
@@ -87,7 +118,7 @@ uxc auth oauth login discord-user \
   --flow authorization_code \
   --client-id 1479302369723285736 \
   --redirect-uri http://127.0.0.1:11111/callback \
-  --scope "identify email guilds guilds.join guilds.members.read connections messages.read"
+  --scope "identify email connections guilds guilds.join guilds.members.read messages.read applications.commands webhook.incoming openid"
 ```
 
 Then paste the callback URL when prompted.
@@ -112,8 +143,26 @@ Then paste the callback URL when prompted.
    - positional JSON: `discord-openapi-cli post:/channels/{channel_id}/messages '{"channel_id":"CHANNEL_ID","content":"Hello from uxc"}'`
    - binding check when auth looks wrong: `uxc auth binding match https://discord.com/api/v10`
 
+## Authentication Methods Comparison
+
+| Feature | User OAuth2 | Bot Token |
+|---------|-------------|-----------|
+| **Read user info** | ✅ As the user | ❌ Not available |
+| **List user's servers** | ✅ User's servers | ✅ Servers bot is in |
+| **Send messages** | ❌ Not supported | ✅ As the bot |
+| **Manage channels/roles** | ❌ Not supported | ✅ Bot permissions |
+| **Moderation actions** | ❌ Not supported | ✅ Bot permissions |
+| **Message appearance** | N/A | Bot badge "BOT" |
+
+**Key Limitation:** User OAuth2 **cannot** send messages or manage servers as the user. Discord intentionally restricts user OAuth2 to read-only operations for security. To perform write operations, you must use a Bot Token (which will display messages as coming from a bot).
+
+**Recommendation:**
+- Use **User OAuth2** for reading user data and identity verification
+- Use **Bot Token** for automated tasks, message sending, and server management
+
 ## Guardrails
 
+- **OAuth2 Scope Limitation:** User OAuth2 tokens cannot send messages or manage servers. These operations require Bot Token authentication.
 - Discord OpenAPI spec is persisted in the generated link via `uxc link --schema-url ...`; pass `--schema-url <other-url>` only when you need to override it temporarily.
 - Keep automation on JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
