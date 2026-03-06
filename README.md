@@ -58,6 +58,7 @@ UXC is a practical fit for skill-based agents:
 - Deterministic JSON envelopes for automation and agents
 - Auth model with reusable credentials and endpoint bindings
 - Host shortcut commands via `uxc link`
+- Link-level default OpenAPI schema persistence via `uxc link --schema-url`
 
 Supported protocols:
 

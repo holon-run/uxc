@@ -50,28 +50,28 @@ uxc auth binding match https://discord.com/api/v10
 
 1. Use fixed link command by default:
    - `command -v discord-openapi-cli`
-   - If missing, create it: `uxc link discord-openapi-cli https://discord.com/api/v10`
-   - `discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json -h`
+   - If missing, create it: `uxc link discord-openapi-cli https://discord.com/api/v10 --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json`
+   - `discord-openapi-cli -h`
 
 2. Discover operations with schema mapping:
-   - `discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json -h`
+   - `discord-openapi-cli -h`
 
 3. Inspect operation schema first:
-   - `discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json get:/users/@me -h`
-   - `discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json post:/channels/{channel_id}/messages -h`
+   - `discord-openapi-cli get:/users/@me -h`
+   - `discord-openapi-cli post:/channels/{channel_id}/messages -h`
 
 4. Execute operation:
-   - connectivity check (no auth): `discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json get:/gateway`
-   - key/value: `discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json get:/guilds/{guild_id}/channels guild_id=GUILD_ID`
-   - positional JSON: `discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json post:/channels/{channel_id}/messages '{"channel_id":"CHANNEL_ID","content":"Hello from uxc"}'`
+   - connectivity check (no auth): `discord-openapi-cli get:/gateway`
+   - key/value: `discord-openapi-cli get:/guilds/{guild_id}/channels guild_id=GUILD_ID`
+   - positional JSON: `discord-openapi-cli post:/channels/{channel_id}/messages '{"channel_id":"CHANNEL_ID","content":"Hello from uxc"}'`
 
 ## Guardrails
 
-- Discord OpenAPI spec is currently consumed via `--schema-url`; do not omit it in this skill workflow.
+- Discord OpenAPI spec is persisted in the generated link via `uxc link --schema-url ...`; pass `--schema-url <other-url>` only when you need to override it temporarily.
 - Keep automation on JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Prefer positional JSON for non-string objects instead of `--input-json`.
-- `discord-openapi-cli <operation> ...` is equivalent to `uxc https://discord.com/api/v10 <operation> ...` with same `--schema-url`.
+- `discord-openapi-cli <operation> ...` is equivalent to `uxc https://discord.com/api/v10 --schema-url <discord_openapi_spec> <operation> ...`.
 - Treat `post:/channels/{channel_id}/messages`, delete/update endpoints, and moderation endpoints as write/high-risk operations; require explicit user confirmation before execution.
 
 ## References
