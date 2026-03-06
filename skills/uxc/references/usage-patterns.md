@@ -39,6 +39,13 @@ uxc link <provider>-mcp-cli <host>
 <provider>-mcp-cli <operation> field=value
 ```
 
+For OpenAPI services whose runtime URL and schema URL differ, persist the schema on the link itself:
+
+```bash
+uxc link <provider>-openapi-cli <host> --schema-url <schema_url>
+<provider>-openapi-cli -h
+```
+
 Examples:
 
 ```bash
@@ -51,6 +58,12 @@ uxc mcp.notion.com/mcp -h
 context7-mcp-cli query-docs libraryId=/reactjs/react.dev query=useState
 # Equivalent:
 uxc mcp.context7.com/mcp query-docs libraryId=/reactjs/react.dev query=useState
+```
+
+```bash
+discord-openapi-cli get:/gateway
+# Equivalent if the link was created with --schema-url:
+uxc https://discord.com/api/v10 --schema-url <discord_openapi_spec> get:/gateway
 ```
 
 ### Conflict Handling For Wrapper Skills
