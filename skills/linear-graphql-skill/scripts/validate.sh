@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Validate Linear MCP Skill
+# Validate Linear GraphQL Skill
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "Validating Linear MCP Skill..."
+echo "Validating Linear GraphQL Skill..."
 
 # Check required files exist
 echo "Checking required files..."
@@ -23,6 +23,6 @@ fi
 
 # Check skill name
 echo "Checking skill name..."
-grep -q "^name: linear-mcp-skill" "$ROOT_DIR/SKILL.md" || { echo "ERROR: Invalid skill name"; exit 1; }
+grep -q "^name: linear-graphql-skill" "$ROOT_DIR/SKILL.md" || { echo "ERROR: Invalid skill name"; exit 1; }
 
 echo "Validation passed!"

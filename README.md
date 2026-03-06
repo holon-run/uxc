@@ -285,6 +285,7 @@ Use `uxc` skill as the shared execution layer, and add wrappers when they fit yo
 | `context7-mcp-skill` | Query up-to-date library documentation/examples over MCP | [`skills/context7-mcp-skill/SKILL.md`](skills/context7-mcp-skill/SKILL.md) |
 | `okx-mcp-skill` | Query OKX MCP for token, market, wallet, and swap workflows | [`skills/okx-mcp-skill/SKILL.md`](skills/okx-mcp-skill/SKILL.md) |
 | `notion-mcp-skill` | Operate Notion MCP workflows with OAuth-aware guidance | [`skills/notion-mcp-skill/SKILL.md`](skills/notion-mcp-skill/SKILL.md) |
+| `discord-openapi-skill` | Operate Discord REST API via UXC + OpenAPI schema mapping | [`skills/discord-openapi-skill/SKILL.md`](skills/discord-openapi-skill/SKILL.md) |
 | `playwright-mcp-skill` | Run `@playwright/mcp` over MCP stdio through `uxc` (browser automation) | [`skills/playwright-mcp-skill/SKILL.md`](skills/playwright-mcp-skill/SKILL.md) |
 
 ### Install Skills
@@ -296,7 +297,7 @@ Install from this repository using `npx skills`:
 npx -y skills@latest add holon-run/uxc --skill uxc --agent codex -y
 
 # Install wrappers as needed
-npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill okx-mcp-skill --agent codex -y
+npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill okx-mcp-skill --skill discord-openapi-skill --agent codex -y
 ```
 
 Install published skills from ClawHub:
@@ -306,6 +307,7 @@ Install published skills from ClawHub:
 clawhub --workdir ~/.openclaw --dir skills install uxc
 clawhub --workdir ~/.openclaw --dir skills install playwright-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install okx-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
 ```
 
 See [`docs/skills.md`](docs/skills.md) for install methods and maintenance rules.
