@@ -57,6 +57,7 @@ fn link_create_outputs_json_default() {
     assert_eq!(json["data"]["name"], "petcli");
     assert_eq!(json["data"]["host"], "petstore3.swagger.io/api/v3");
     assert_eq!(json["data"]["dir_in_path"], true);
+    assert!(json["data"]["schema_url"].is_null());
 }
 
 #[test]
@@ -95,6 +96,45 @@ fn link_create_writes_executable_script() {
             .permissions()
             .mode();
         assert_ne!(mode & 0o111, 0, "script should be executable");
+    }
+}
+
+#[test]
+fn link_create_with_schema_url_writes_script_and_json() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+    let script_path = link_script_path(&link_dir, "discord-openapi-cli");
+    let schema_url =
+        "https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json";
+
+    let output = uxc_command()
+        .arg("link")
+        .arg("discord-openapi-cli")
+        .arg("https://discord.com/api/v10")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--schema-url")
+        .arg(schema_url)
+        .output()
+        .expect("uxc link should run");
+    assert!(output.status.success(), "command should succeed");
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["data"]["schema_url"], schema_url);
+
+    let script = fs::read_to_string(&script_path).expect("script should be readable");
+    #[cfg(unix)]
+    {
+        assert!(script.contains("has_schema_url=false"));
+        assert!(script.contains("--schema-url|--schema-url=*"));
+        assert!(script.contains(schema_url));
+    }
+    #[cfg(windows)]
+    {
+        assert!(script.contains("UXC_HAS_SCHEMA_URL"));
+        assert!(script.contains("--schema-url"));
+        assert!(script.contains(schema_url));
     }
 }
 
@@ -254,6 +294,32 @@ fn link_create_supports_text_output() {
     assert!(stdout.contains("Path:"));
 }
 
+#[test]
+fn link_create_rejects_empty_schema_url() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+
+    let output = uxc_command()
+        .arg("link")
+        .arg("discord-openapi-cli")
+        .arg("https://discord.com/api/v10")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--schema-url")
+        .arg("   ")
+        .output()
+        .expect("uxc link should run");
+
+    assert!(!output.status.success(), "command should fail");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Schema URL cannot be empty"));
+}
+
 #[cfg(unix)]
 #[test]
 fn link_shortcut_is_runnable_and_forwards_args() {
@@ -303,4 +369,184 @@ fn link_shortcut_is_runnable_and_forwards_args() {
         stdout.contains("get:/pet/{petId}") && stdout.contains("-h"),
         "user arguments should be forwarded"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn link_shortcut_injects_default_schema_url_when_missing() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+    let script_path = link_script_path(&link_dir, "discord-openapi-cli");
+    let fake_uxc_path = link_dir.join("uxc");
+    let schema_url =
+        "https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json";
+
+    let create = uxc_command()
+        .arg("link")
+        .arg("discord-openapi-cli")
+        .arg("https://discord.com/api/v10")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--schema-url")
+        .arg(schema_url)
+        .output()
+        .expect("uxc link should run");
+    assert!(create.status.success(), "link creation should succeed");
+
+    fs::write(&fake_uxc_path, "#!/usr/bin/env sh\nprintf '%s\\n' \"$@\"\n")
+        .expect("fake uxc should be written");
+    let mut perms = fs::metadata(&fake_uxc_path)
+        .expect("fake uxc metadata should be readable")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake_uxc_path, perms).expect("fake uxc should be executable");
+
+    let output = Command::new(&script_path)
+        .env("PATH", prepend_path(&link_dir))
+        .arg("get:/gateway")
+        .output()
+        .expect("shortcut should run");
+
+    assert!(
+        output.status.success(),
+        "shortcut invocation should succeed"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("https://discord.com/api/v10"));
+    assert!(stdout.contains("--schema-url"));
+    assert!(stdout.contains(schema_url));
+    assert!(stdout.contains("get:/gateway"));
+}
+
+#[cfg(unix)]
+#[test]
+fn link_shortcut_does_not_inject_schema_url_when_user_provides_separate_form() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+    let script_path = link_script_path(&link_dir, "discord-openapi-cli");
+    let fake_uxc_path = link_dir.join("uxc");
+    let default_schema =
+        "https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json";
+    let override_schema = "https://example.com/override.json";
+
+    let create = uxc_command()
+        .arg("link")
+        .arg("discord-openapi-cli")
+        .arg("https://discord.com/api/v10")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--schema-url")
+        .arg(default_schema)
+        .output()
+        .expect("uxc link should run");
+    assert!(create.status.success(), "link creation should succeed");
+
+    fs::write(&fake_uxc_path, "#!/usr/bin/env sh\nprintf '%s\\n' \"$@\"\n")
+        .expect("fake uxc should be written");
+    let mut perms = fs::metadata(&fake_uxc_path)
+        .expect("fake uxc metadata should be readable")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake_uxc_path, perms).expect("fake uxc should be executable");
+
+    let output = Command::new(&script_path)
+        .env("PATH", prepend_path(&link_dir))
+        .arg("--schema-url")
+        .arg(override_schema)
+        .arg("get:/gateway")
+        .output()
+        .expect("shortcut should run");
+
+    assert!(
+        output.status.success(),
+        "shortcut invocation should succeed"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(override_schema));
+    assert!(!stdout.contains(default_schema));
+}
+
+#[cfg(unix)]
+#[test]
+fn link_shortcut_does_not_inject_schema_url_when_user_provides_inline_form() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+    let script_path = link_script_path(&link_dir, "discord-openapi-cli");
+    let fake_uxc_path = link_dir.join("uxc");
+    let default_schema =
+        "https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json";
+    let override_arg = "--schema-url=https://example.com/override-inline.json";
+
+    let create = uxc_command()
+        .arg("link")
+        .arg("discord-openapi-cli")
+        .arg("https://discord.com/api/v10")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--schema-url")
+        .arg(default_schema)
+        .output()
+        .expect("uxc link should run");
+    assert!(create.status.success(), "link creation should succeed");
+
+    fs::write(&fake_uxc_path, "#!/usr/bin/env sh\nprintf '%s\\n' \"$@\"\n")
+        .expect("fake uxc should be written");
+    let mut perms = fs::metadata(&fake_uxc_path)
+        .expect("fake uxc metadata should be readable")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake_uxc_path, perms).expect("fake uxc should be executable");
+
+    let output = Command::new(&script_path)
+        .env("PATH", prepend_path(&link_dir))
+        .arg(override_arg)
+        .arg("get:/gateway")
+        .output()
+        .expect("shortcut should run");
+
+    assert!(
+        output.status.success(),
+        "shortcut invocation should succeed"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(override_arg));
+    assert!(!stdout.contains(default_schema));
+}
+
+#[test]
+fn link_create_force_overwrite_updates_schema_url() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+    let script_path = link_script_path(&link_dir, "discord-openapi-cli");
+    let first_schema = "https://example.com/one.json";
+    let second_schema = "https://example.com/two.json";
+
+    let first = uxc_command()
+        .arg("link")
+        .arg("discord-openapi-cli")
+        .arg("https://discord.com/api/v10")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--schema-url")
+        .arg(first_schema)
+        .output()
+        .expect("initial create should run");
+    assert!(first.status.success(), "initial create should succeed");
+
+    let second = uxc_command()
+        .arg("link")
+        .arg("discord-openapi-cli")
+        .arg("https://discord.com/api/v10")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--schema-url")
+        .arg(second_schema)
+        .arg("--force")
+        .output()
+        .expect("overwrite create should run");
+    assert!(second.status.success(), "overwrite create should succeed");
+
+    let script = fs::read_to_string(&script_path).expect("script should be readable");
+    assert!(script.contains(second_schema));
+    assert!(!script.contains(first_schema));
 }

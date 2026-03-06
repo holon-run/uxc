@@ -4,8 +4,9 @@
 
 ```bash
 command -v discord-openapi-cli
-uxc link discord-openapi-cli https://discord.com/api/v10
-discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json -h
+uxc link discord-openapi-cli https://discord.com/api/v10 \
+  --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json
+discord-openapi-cli -h
 ```
 
 ## Auth Setup (Bot Token)
@@ -29,23 +30,23 @@ uxc auth binding add \
 
 ```bash
 # Connectivity check (public endpoint)
-discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json get:/gateway
+discord-openapi-cli get:/gateway
 
 # Get current bot/application user
-discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json get:/users/@me
+discord-openapi-cli get:/users/@me
 
 # List channels in a guild
-discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json get:/guilds/{guild_id}/channels guild_id=YOUR_GUILD_ID
+discord-openapi-cli get:/guilds/{guild_id}/channels guild_id=YOUR_GUILD_ID
 ```
 
 ## Write Example (Confirm Intent First)
 
 ```bash
 # Create a channel message
-discord-openapi-cli --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json post:/channels/{channel_id}/messages '{"channel_id":"YOUR_CHANNEL_ID","content":"Hello from UXC"}'
+discord-openapi-cli post:/channels/{channel_id}/messages '{"channel_id":"YOUR_CHANNEL_ID","content":"Hello from UXC"}'
 ```
 
 ## Fallback Equivalence
 
-- `discord-openapi-cli --schema-url <discord_openapi_spec> <operation> ...` is equivalent to
+- `discord-openapi-cli <operation> ...` is equivalent to
   `uxc https://discord.com/api/v10 --schema-url <discord_openapi_spec> <operation> ...`.

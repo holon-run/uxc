@@ -31,9 +31,9 @@ rg -q '^name:\s*discord-openapi-skill\s*$' "${SKILL_FILE}" || fail 'invalid skil
 rg -q '^description:\s*.+' "${SKILL_FILE}" || fail 'missing description'
 
 rg -q 'command -v discord-openapi-cli' "${SKILL_FILE}" || fail 'missing link-first command check'
-rg -q 'uxc link discord-openapi-cli https://discord.com/api/v10' "${SKILL_FILE}" || fail 'missing fixed link create command'
-rg -q 'discord-openapi-cli --schema-url .* -h' "${SKILL_FILE}" || fail 'missing help-first host discovery with schema-url'
-rg -q 'discord-openapi-cli --schema-url .* get:/users/@me -h' "${SKILL_FILE}" || fail 'missing operation-level help example'
+rg -q 'uxc link discord-openapi-cli https://discord.com/api/v10 --schema-url ' "${SKILL_FILE}" || fail 'missing fixed link create command with schema-url'
+rg -q 'discord-openapi-cli -h' "${SKILL_FILE}" || fail 'missing help-first host discovery example'
+rg -q 'discord-openapi-cli get:/users/@me -h' "${SKILL_FILE}" || fail 'missing operation-level help example'
 
 rg -q 'Authorization:Bot \{\{secret\}\}' "${SKILL_FILE}" || fail 'missing Discord bot auth header format'
 rg -q 'uxc auth binding match https://discord.com/api/v10' "${SKILL_FILE}" || fail 'missing binding match check'

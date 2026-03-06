@@ -173,6 +173,14 @@ petcli -h
 petcli get:/pet/{petId} -h
 ```
 
+For OpenAPI services with a separate fixed schema URL, persist it in the shortcut:
+
+```bash
+uxc link discord-openapi-cli https://discord.com/api/v10 \
+  --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json
+discord-openapi-cli -h
+```
+
 ## 8. Next Docs
 
 - Public endpoints without API keys: [`public-endpoints.md`](public-endpoints.md)
