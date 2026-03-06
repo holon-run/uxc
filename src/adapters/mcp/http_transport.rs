@@ -292,7 +292,16 @@ impl McpHttpTransport {
                     oauth::parse_resource_metadata_from_www_authenticate(header)
                 {
                     let next_step = format!(
-                        "OAuth required. For agents: uxc auth oauth start <credential_id> --endpoint <mcp_url> --redirect-uri <callback_uri>. Then: uxc auth oauth complete <credential_id> --session-id <session_id> --authorization-response '<callback_url_or_code>'. Interactive fallback: uxc auth oauth login <credential_id> --endpoint <mcp_url> --client-id <client_id> (resource_metadata: {})",
+                        "OAuth required.\n\
+                         \n\
+                         For agents:\n\
+                           1. uxc auth oauth start <credential_id> --endpoint <mcp_url> --redirect-uri <callback_uri>\n\
+                           2. uxc auth oauth complete <credential_id> --session-id <session_id> --authorization-response '<callback_url_or_code>'\n\
+                         \n\
+                         Interactive fallback:\n\
+                           uxc auth oauth login <credential_id> --endpoint <mcp_url> --client-id <client_id>\n\
+                         \n\
+                         (resource_metadata: {})",
                         resource_metadata
                     );
                     return Err(UxcError::OAuthRequired(next_step).into());
