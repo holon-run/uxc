@@ -4,20 +4,21 @@ use super::{
     Adapter, ExecutionMetadata, ExecutionResult, Operation, OperationDetail, Parameter,
     ProtocolType,
 };
-use crate::auth::Profile;
+use crate::auth::{oauth, AuthType, Profile};
 use crate::error::UxcError;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
 
 pub struct OpenAPIAdapter {
     client: reqwest::Client,
     cache: Option<Arc<dyn crate::cache::Cache>>,
     auth_profile: Option<Profile>,
+    runtime_auth_profile: Arc<Mutex<Option<Profile>>>,
     discovered_schema_urls: Arc<RwLock<HashMap<String, String>>>,
     schema_url_override: Option<String>,
     force_refresh_schema: bool,
@@ -43,6 +44,7 @@ impl OpenAPIAdapter {
             client: reqwest::Client::new(),
             cache: None,
             auth_profile: None,
+            runtime_auth_profile: Arc::new(Mutex::new(None)),
             discovered_schema_urls: Arc::new(RwLock::new(HashMap::new())),
             schema_url_override: None,
             force_refresh_schema: false,
@@ -67,6 +69,73 @@ impl OpenAPIAdapter {
     pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
         self.force_refresh_schema = refresh;
         self
+    }
+
+    async fn effective_auth_profile(&self) -> Option<Profile> {
+        self.runtime_auth_profile
+            .lock()
+            .await
+            .clone()
+            .or_else(|| self.auth_profile.clone())
+    }
+
+    async fn set_effective_auth_profile(&self, profile: Profile) {
+        *self.runtime_auth_profile.lock().await = Some(profile);
+    }
+
+    fn apply_auth_profile(
+        mut req: reqwest::RequestBuilder,
+        profile: Option<&Profile>,
+    ) -> Result<reqwest::RequestBuilder> {
+        if let Some(profile) = profile {
+            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
+        }
+        Ok(req)
+    }
+
+    async fn maybe_refresh_profile(&self, profile: &mut Profile) -> Result<()> {
+        if profile.auth_type != AuthType::OAuth {
+            return Ok(());
+        }
+        if oauth::maybe_refresh_oauth_profile(profile, &self.client, 60).await? {
+            crate::auth::persist_profile_if_named(profile)?;
+            self.set_effective_auth_profile(profile.clone()).await;
+        }
+        Ok(())
+    }
+
+    async fn force_refresh_profile(&self, profile: &mut Profile) -> Result<()> {
+        if profile.auth_type != AuthType::OAuth {
+            return Ok(());
+        }
+        oauth::refresh_oauth_profile(profile, &self.client).await?;
+        crate::auth::persist_profile_if_named(profile)?;
+        self.set_effective_auth_profile(profile.clone()).await;
+        Ok(())
+    }
+
+    async fn send_with_oauth_retry<F>(&self, build_request: F) -> Result<reqwest::Response>
+    where
+        F: Fn(Option<&Profile>) -> Result<reqwest::RequestBuilder>,
+    {
+        let mut profile = self.effective_auth_profile().await;
+        if let Some(active) = profile.as_mut() {
+            self.maybe_refresh_profile(active).await?;
+        }
+
+        let mut response = build_request(profile.as_ref())?.send().await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && profile
+                .as_ref()
+                .is_some_and(|active| active.auth_type == AuthType::OAuth)
+        {
+            if let Some(active) = profile.as_mut() {
+                self.force_refresh_profile(active).await?;
+            }
+            response = build_request(profile.as_ref())?.send().await?;
+        }
+
+        Ok(response)
     }
 
     fn normalized_url(url: &str) -> String {
@@ -102,11 +171,14 @@ impl OpenAPIAdapter {
 
     async fn check_schema_url(&self, schema_url: &str) -> Result<bool> {
         let response = self
-            .client
-            .get(schema_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .header("Accept", "application/json")
-            .send()
+            .send_with_oauth_retry(|profile| {
+                let req = self
+                    .client
+                    .get(schema_url)
+                    .timeout(std::time::Duration::from_secs(10))
+                    .header("Accept", "application/json");
+                Self::apply_auth_profile(req, profile)
+            })
             .await?;
 
         if !response.status().is_success() {
@@ -212,11 +284,14 @@ impl OpenAPIAdapter {
 
         for full_url in Self::schema_candidates(&normalized) {
             let resp = match self
-                .client
-                .get(&full_url)
-                .timeout(std::time::Duration::from_secs(2))
-                .header("Accept", "application/json")
-                .send()
+                .send_with_oauth_retry(|profile| {
+                    let req = self
+                        .client
+                        .get(&full_url)
+                        .timeout(std::time::Duration::from_secs(2))
+                        .header("Accept", "application/json");
+                    Self::apply_auth_profile(req, profile)
+                })
                 .await
             {
                 Ok(r) => r,
@@ -538,7 +613,12 @@ impl Adapter for OpenAPIAdapter {
         }
 
         // Fetch from remote
-        let resp = self.client.get(&schema_url).send().await?;
+        let resp = self
+            .send_with_oauth_retry(|profile| {
+                let req = self.client.get(&schema_url);
+                Self::apply_auth_profile(req, profile)
+            })
+            .await?;
         let schema: Value = resp.json().await?;
 
         // Store in cache if available
@@ -642,41 +722,34 @@ impl Adapter for OpenAPIAdapter {
         // DELETE can but rarely does; POST, PUT, PATCH commonly do
         let has_body_support = matches!(method.as_str(), "post" | "put" | "patch");
 
-        let req = match method.as_str() {
-            "get" => self.client.get(&full_url),
-            "post" => self.client.post(&full_url),
-            "put" => self.client.put(&full_url),
-            "delete" => self.client.delete(&full_url),
-            "patch" => self.client.patch(&full_url),
-            "head" => self.client.head(&full_url),
-            "options" => self.client.request(reqwest::Method::OPTIONS, &full_url),
-            "trace" => self.client.request(reqwest::Method::TRACE, &full_url),
-            _ => {
-                return Err(UxcError::InvalidArguments(format!(
-                    "Unsupported HTTP method: {}",
-                    method
-                ))
-                .into())
-            }
-        };
-
-        // Apply authentication if profile is set
-        let req = if let Some(profile) = &self.auth_profile {
-            crate::auth::apply_profile_auth_to_request(req, profile)?
-        } else {
-            req
-        };
-
-        // Apply arguments based on HTTP method semantics
-        let req = if has_body_support {
-            // For POST/PUT/PATCH, send JSON body
-            req.json(&args)
-        } else {
-            // For GET/DELETE/HEAD/OPTIONS/TRACE, use query parameters
-            req.query(&args)
-        };
-
-        let resp = req.send().await?;
+        let resp = self
+            .send_with_oauth_retry(|profile| {
+                let req = match method.as_str() {
+                    "get" => self.client.get(&full_url),
+                    "post" => self.client.post(&full_url),
+                    "put" => self.client.put(&full_url),
+                    "delete" => self.client.delete(&full_url),
+                    "patch" => self.client.patch(&full_url),
+                    "head" => self.client.head(&full_url),
+                    "options" => self.client.request(reqwest::Method::OPTIONS, &full_url),
+                    "trace" => self.client.request(reqwest::Method::TRACE, &full_url),
+                    _ => {
+                        return Err(UxcError::InvalidArguments(format!(
+                            "Unsupported HTTP method: {}",
+                            method
+                        ))
+                        .into())
+                    }
+                };
+                let req = Self::apply_auth_profile(req, profile)?;
+                let req = if has_body_support {
+                    req.json(&args)
+                } else {
+                    req.query(&args)
+                };
+                Ok(req)
+            })
+            .await?;
         let status = resp.status();
 
         // Check HTTP status and provide detailed error info
@@ -941,5 +1014,96 @@ mod tests {
             .await
             .unwrap();
         assert!(detail.input_schema.is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_with_oauth_401_refreshes_and_retries() {
+        let mut server = mockito::Server::new_async().await;
+        let schema_url = format!("{}/openapi.json", server.url());
+        let token_endpoint = format!("{}/token", server.url());
+
+        let _schema = server
+            .mock("GET", "/openapi.json")
+            .match_header("authorization", "Bearer old-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                  "openapi": "3.0.0",
+                  "info": {"title":"Test","version":"1.0.0"},
+                  "paths": {
+                    "/health": {
+                      "get": {
+                        "responses": {
+                          "200": {
+                            "description":"ok",
+                            "content": {"application/json": {"schema": {"type":"object"}}}
+                          }
+                        }
+                      }
+                    }
+                  }
+                }"#,
+            )
+            .expect(2)
+            .create_async()
+            .await;
+
+        let _unauthorized = server
+            .mock("GET", "/health")
+            .match_header("authorization", "Bearer old-token")
+            .with_status(401)
+            .with_body("Unauthorized")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::Regex(
+                "grant_type=refresh_token".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "access_token":"new-token",
+                    "token_type":"Bearer",
+                    "expires_in":3600,
+                    "refresh_token":"refresh-2"
+                }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _success = server
+            .mock("GET", "/health")
+            .match_header("authorization", "Bearer new-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"ok"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut profile = Profile::new("old-token".to_string(), crate::auth::AuthType::OAuth);
+        profile.oauth = Some(crate::auth::OAuthProfile {
+            token_endpoint: Some(token_endpoint),
+            refresh_token: Some("refresh-1".to_string()),
+            access_token: Some("old-token".to_string()),
+            token_type: Some("Bearer".to_string()),
+            oauth_flow: Some(crate::auth::OAuthFlow::AuthorizationCode),
+            ..Default::default()
+        });
+
+        let adapter = OpenAPIAdapter::new()
+            .with_auth(profile)
+            .with_schema_url_override(Some(schema_url));
+        let result = adapter
+            .execute(&server.url(), "get:/health", HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(result.data["status"], "ok");
     }
 }

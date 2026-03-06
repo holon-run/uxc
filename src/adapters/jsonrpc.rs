@@ -8,7 +8,7 @@ use super::{
     Adapter, ExecutionMetadata, ExecutionResult, Operation, OperationDetail, Parameter,
     ProtocolType,
 };
-use crate::auth::Profile;
+use crate::auth::{oauth, AuthType, Profile};
 use crate::error::UxcError;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -28,6 +28,7 @@ pub struct JsonRpcAdapter {
     client: reqwest::Client,
     cache: Option<Arc<dyn crate::cache::Cache>>,
     auth_profile: Option<Profile>,
+    runtime_auth_profile: Arc<Mutex<Option<Profile>>>,
     force_refresh_schema: bool,
     discovered: Arc<RwLock<HashMap<String, ResolvedOpenRpc>>>,
     next_id: Arc<Mutex<i64>>,
@@ -42,6 +43,7 @@ impl JsonRpcAdapter {
             client: reqwest::Client::new(),
             cache: None,
             auth_profile: None,
+            runtime_auth_profile: Arc::new(Mutex::new(None)),
             force_refresh_schema: false,
             discovered: Arc::new(RwLock::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
@@ -61,6 +63,73 @@ impl JsonRpcAdapter {
     pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
         self.force_refresh_schema = refresh;
         self
+    }
+
+    async fn effective_auth_profile(&self) -> Option<Profile> {
+        self.runtime_auth_profile
+            .lock()
+            .await
+            .clone()
+            .or_else(|| self.auth_profile.clone())
+    }
+
+    async fn set_effective_auth_profile(&self, profile: Profile) {
+        *self.runtime_auth_profile.lock().await = Some(profile);
+    }
+
+    fn apply_auth_profile(
+        mut req: reqwest::RequestBuilder,
+        profile: Option<&Profile>,
+    ) -> Result<reqwest::RequestBuilder> {
+        if let Some(profile) = profile {
+            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
+        }
+        Ok(req)
+    }
+
+    async fn maybe_refresh_profile(&self, profile: &mut Profile) -> Result<()> {
+        if profile.auth_type != AuthType::OAuth {
+            return Ok(());
+        }
+        if oauth::maybe_refresh_oauth_profile(profile, &self.client, 60).await? {
+            crate::auth::persist_profile_if_named(profile)?;
+            self.set_effective_auth_profile(profile.clone()).await;
+        }
+        Ok(())
+    }
+
+    async fn force_refresh_profile(&self, profile: &mut Profile) -> Result<()> {
+        if profile.auth_type != AuthType::OAuth {
+            return Ok(());
+        }
+        oauth::refresh_oauth_profile(profile, &self.client).await?;
+        crate::auth::persist_profile_if_named(profile)?;
+        self.set_effective_auth_profile(profile.clone()).await;
+        Ok(())
+    }
+
+    async fn send_with_oauth_retry<F>(&self, build_request: F) -> Result<reqwest::Response>
+    where
+        F: Fn(Option<&Profile>) -> Result<reqwest::RequestBuilder>,
+    {
+        let mut profile = self.effective_auth_profile().await;
+        if let Some(active) = profile.as_mut() {
+            self.maybe_refresh_profile(active).await?;
+        }
+
+        let mut response = build_request(profile.as_ref())?.send().await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && profile
+                .as_ref()
+                .is_some_and(|active| active.auth_type == AuthType::OAuth)
+        {
+            if let Some(active) = profile.as_mut() {
+                self.force_refresh_profile(active).await?;
+            }
+            response = build_request(profile.as_ref())?.send().await?;
+        }
+
+        Ok(response)
     }
 
     fn normalized_url(url: &str) -> String {
@@ -419,18 +488,19 @@ impl JsonRpcAdapter {
             "params": []
         });
 
-        let mut req = self
-            .client
-            .post(url)
-            .timeout(std::time::Duration::from_secs(3))
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json");
-
-        if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
-        }
-
-        let response = match req.json(&request).send().await {
+        let response = match self
+            .send_with_oauth_retry(|profile| {
+                let req = self
+                    .client
+                    .post(url)
+                    .timeout(std::time::Duration::from_secs(3))
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .json(&request);
+                Self::apply_auth_profile(req, profile)
+            })
+            .await
+        {
             Ok(response) => response,
             Err(_) => return Ok(None),
         };
@@ -460,17 +530,17 @@ impl JsonRpcAdapter {
 
     async fn discover_via_schema_urls(&self, url: &str) -> Result<Option<ResolvedOpenRpc>> {
         for schema_url in Self::schema_candidates(url) {
-            let mut req = self
-                .client
-                .get(&schema_url)
-                .timeout(std::time::Duration::from_secs(3))
-                .header("Accept", "application/json");
-
-            if let Some(profile) = &self.auth_profile {
-                req = crate::auth::apply_profile_auth_to_request(req, profile)?;
-            }
-
-            let response = match req.send().await {
+            let response = match self
+                .send_with_oauth_retry(|profile| {
+                    let req = self
+                        .client
+                        .get(&schema_url)
+                        .timeout(std::time::Duration::from_secs(3))
+                        .header("Accept", "application/json");
+                    Self::apply_auth_profile(req, profile)
+                })
+                .await
+            {
                 Ok(response) => response,
                 Err(_) => continue,
             };
@@ -568,19 +638,16 @@ impl JsonRpcAdapter {
             request.insert("params".to_string(), params);
         }
 
-        let mut req = self
-            .client
-            .post(rpc_url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json");
-
-        if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
-        }
-
-        let response = req
-            .json(&request)
-            .send()
+        let response = self
+            .send_with_oauth_retry(|profile| {
+                let req = self
+                    .client
+                    .post(rpc_url)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .json(&request);
+                Self::apply_auth_profile(req, profile)
+            })
             .await
             .context("Failed to send JSON-RPC request")?;
 
@@ -818,5 +885,91 @@ mod tests {
             ),
             "https://example.com"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_with_oauth_401_refreshes_and_retries() {
+        let mut server = mockito::Server::new_async().await;
+        let token_endpoint = format!("{}/token", server.url());
+
+        let _discover = server
+            .mock("POST", "/")
+            .match_header("authorization", "Bearer old-token")
+            .match_body(mockito::Matcher::Regex(
+                "\"method\":\"rpc.discover\"".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "jsonrpc":"2.0",
+                    "id":1,
+                    "result":{
+                        "openrpc":"1.3.2",
+                        "methods":[{"name":"health","params":[],"result":{"name":"result"}}]
+                    }
+                }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _unauthorized = server
+            .mock("POST", "/")
+            .match_header("authorization", "Bearer old-token")
+            .match_body(mockito::Matcher::Regex("\"method\":\"health\"".to_string()))
+            .with_status(401)
+            .with_body("Unauthorized")
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::Regex(
+                "grant_type=refresh_token".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "access_token":"new-token",
+                    "token_type":"Bearer",
+                    "expires_in":3600,
+                    "refresh_token":"refresh-2"
+                }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _success = server
+            .mock("POST", "/")
+            .match_header("authorization", "Bearer new-token")
+            .match_body(mockito::Matcher::Regex("\"method\":\"health\"".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":2,"result":{"status":"ok"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut profile =
+            crate::auth::Profile::new("old-token".to_string(), crate::auth::AuthType::OAuth);
+        profile.oauth = Some(crate::auth::OAuthProfile {
+            token_endpoint: Some(token_endpoint),
+            refresh_token: Some("refresh-1".to_string()),
+            access_token: Some("old-token".to_string()),
+            token_type: Some("Bearer".to_string()),
+            oauth_flow: Some(crate::auth::OAuthFlow::AuthorizationCode),
+            ..Default::default()
+        });
+
+        let adapter = JsonRpcAdapter::new().with_auth(profile);
+        let result = adapter
+            .execute(&server.url(), "health", HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(result.data["status"], "ok");
     }
 }

@@ -8,7 +8,7 @@
 //! - Proper error handling and status code mapping
 
 use super::{Adapter, ExecutionResult, Operation, OperationDetail, Parameter, ProtocolType};
-use crate::auth::Profile;
+use crate::auth::{oauth, AuthType, Profile};
 use crate::error::UxcError;
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -22,7 +22,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Endpoint;
 use tonic::Status;
@@ -103,6 +103,8 @@ pub struct GrpcAdapter {
     schema_cache: Option<Arc<dyn crate::cache::Cache>>,
     /// Authentication profile
     auth_profile: Option<Profile>,
+    /// Runtime-updated authentication profile (after OAuth refresh)
+    runtime_auth_profile: Arc<Mutex<Option<Profile>>>,
     /// Force online schema refresh by bypassing schema cache reads.
     force_refresh_schema: bool,
     /// grpcurl executor (abstracted for testing)
@@ -141,6 +143,7 @@ impl GrpcAdapter {
             in_memory_cache: Arc::new(RwLock::new(HashMap::new())),
             schema_cache: None,
             auth_profile: None,
+            runtime_auth_profile: Arc::new(Mutex::new(None)),
             force_refresh_schema: false,
             grpcurl_executor: Arc::new(DefaultGrpcurlExecutor),
         }
@@ -166,6 +169,31 @@ impl GrpcAdapter {
     pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
         self.force_refresh_schema = refresh;
         self
+    }
+
+    async fn effective_auth_profile(&self) -> Option<Profile> {
+        self.runtime_auth_profile
+            .lock()
+            .await
+            .clone()
+            .or_else(|| self.auth_profile.clone())
+    }
+
+    async fn set_effective_auth_profile(&self, profile: Profile) {
+        *self.runtime_auth_profile.lock().await = Some(profile);
+    }
+
+    async fn maybe_refresh_runtime_oauth_profile(&self) -> Result<Option<Profile>> {
+        let mut profile = self.effective_auth_profile().await;
+        if let Some(active) = profile.as_mut() {
+            if active.auth_type == AuthType::OAuth
+                && oauth::maybe_refresh_oauth_profile(active, &reqwest::Client::new(), 60).await?
+            {
+                crate::auth::persist_profile_if_named(active)?;
+                self.set_effective_auth_profile(active.clone()).await;
+            }
+        }
+        Ok(profile)
     }
 
     /// Parse URL to get host:port
@@ -884,7 +912,8 @@ impl GrpcAdapter {
         let attempts = Self::grpcurl_attempts(original_url, target);
         let mut last_error = String::new();
 
-        let headers = if let Some(profile) = &self.auth_profile {
+        let profile = self.maybe_refresh_runtime_oauth_profile().await?;
+        let headers = if let Some(profile) = profile.as_ref() {
             profile.to_grpcurl_headers()?
         } else {
             Vec::new()
@@ -1198,7 +1227,7 @@ impl GrpcurlAuthHeaders for Profile {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     /// Mock grpcurl executor for testing
     struct MockGrpcurlExecutor {
@@ -1218,6 +1247,26 @@ mod tests {
             self.response
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("No response configured"))
+        }
+    }
+
+    struct CapturingGrpcurlExecutor {
+        headers: Arc<Mutex<Vec<Vec<String>>>>,
+        response: GrpcurlResult,
+    }
+
+    #[async_trait]
+    impl GrpcurlExecutor for CapturingGrpcurlExecutor {
+        async fn execute(
+            &self,
+            _plaintext: bool,
+            headers: Vec<String>,
+            _request_json: &str,
+            _target: &str,
+            _method: &str,
+        ) -> Result<GrpcurlResult> {
+            self.headers.lock().unwrap().push(headers);
+            Ok(self.response.clone())
         }
     }
 
@@ -1310,6 +1359,75 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("only unary methods are supported"));
+    }
+
+    #[tokio::test]
+    async fn oauth_unary_call_refreshes_before_invocation() {
+        let mut server = mockito::Server::new_async().await;
+        let token_endpoint = format!("{}/token", server.url());
+
+        let _refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::Regex(
+                "grant_type=refresh_token".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "access_token":"new-token",
+                    "token_type":"Bearer",
+                    "expires_in":3600,
+                    "refresh_token":"refresh-2"
+                }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let captured_headers = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let executor = CapturingGrpcurlExecutor {
+            headers: captured_headers.clone(),
+            response: GrpcurlResult {
+                success: true,
+                stdout: "{}".to_string(),
+                stderr: String::new(),
+            },
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let mut profile = Profile::new("old-token".to_string(), crate::auth::AuthType::OAuth);
+        profile.oauth = Some(crate::auth::OAuthProfile {
+            token_endpoint: Some(token_endpoint),
+            refresh_token: Some("refresh-1".to_string()),
+            access_token: Some("old-token".to_string()),
+            token_type: Some("Bearer".to_string()),
+            expires_at: Some(now + 30),
+            oauth_flow: Some(crate::auth::OAuthFlow::AuthorizationCode),
+            ..Default::default()
+        });
+
+        let adapter = GrpcAdapter::new()
+            .with_auth(profile)
+            .with_executor(Arc::new(executor));
+        let _ = adapter
+            .invoke_unary_with_grpcurl(
+                "http://localhost:50051",
+                "localhost:50051",
+                "example.Service/Method",
+                &serde_json::json!({"id":1}),
+            )
+            .await
+            .unwrap();
+
+        let headers = captured_headers.lock().unwrap();
+        assert_eq!(headers.len(), 1);
+        assert!(headers[0]
+            .iter()
+            .any(|h| h == "authorization: Bearer new-token"));
     }
 
     #[test]
