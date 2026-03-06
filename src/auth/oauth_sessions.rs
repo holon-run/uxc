@@ -47,7 +47,26 @@ fn session_path_with_dir(dir: &Path, session_id: &str) -> PathBuf {
 }
 
 pub fn session_path(session_id: &str) -> Result<PathBuf> {
+    validate_session_id(session_id)?;
     Ok(session_path_with_dir(&session_dir()?, session_id))
+}
+
+fn validate_session_id(session_id: &str) -> Result<()> {
+    if session_id.is_empty() {
+        anyhow::bail!("OAuth session ID cannot be empty");
+    }
+
+    if !session_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        anyhow::bail!(
+            "OAuth session ID '{}' contains invalid characters. Allowed: letters, digits, '_', '-'",
+            session_id
+        );
+    }
+
+    Ok(())
 }
 
 pub fn save_session(session: &PendingAuthorizationCodeSession) -> Result<()> {
@@ -118,7 +137,36 @@ pub fn purge_expired_sessions(now_unix: i64) -> Result<usize> {
 mod tests {
     use super::*;
     use crate::auth::oauth::OAuthProviderMetadata;
+    use serial_test::serial;
+    use std::ffi::OsString;
     use tempfile::TempDir;
+
+    struct SessionDirGuard {
+        previous: Option<OsString>,
+        temp_dir: TempDir,
+    }
+
+    impl SessionDirGuard {
+        fn new() -> Self {
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let previous = std::env::var_os(OAUTH_SESSION_DIR_ENV);
+            std::env::set_var(OAUTH_SESSION_DIR_ENV, temp_dir.path());
+            Self { previous, temp_dir }
+        }
+
+        fn path(&self) -> &Path {
+            self.temp_dir.path()
+        }
+    }
+
+    impl Drop for SessionDirGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(OAUTH_SESSION_DIR_ENV, value),
+                None => std::env::remove_var(OAUTH_SESSION_DIR_ENV),
+            }
+        }
+    }
 
     fn sample_session(id: &str, expires_at: i64) -> PendingAuthorizationCodeSession {
         PendingAuthorizationCodeSession {
@@ -146,34 +194,29 @@ mod tests {
         }
     }
 
-    fn with_temp_session_dir() -> TempDir {
-        let dir = tempfile::tempdir().expect("temp dir");
-        std::env::set_var(OAUTH_SESSION_DIR_ENV, dir.path());
-        dir
-    }
-
     #[test]
+    #[serial]
     fn session_dir_uses_env_override() {
-        let dir = with_temp_session_dir();
+        let dir = SessionDirGuard::new();
         assert_eq!(session_dir().unwrap(), dir.path());
-        std::env::remove_var(OAUTH_SESSION_DIR_ENV);
     }
 
     #[test]
+    #[serial]
     fn save_and_load_session_round_trip() {
-        let _dir = with_temp_session_dir();
+        let _dir = SessionDirGuard::new();
         let session = sample_session("abc", 1000);
         save_session(&session).unwrap();
 
         let loaded = load_session("abc").unwrap();
         assert_eq!(loaded.session_id, "abc");
         assert_eq!(loaded.client_id, "client-id");
-        std::env::remove_var(OAUTH_SESSION_DIR_ENV);
     }
 
     #[test]
+    #[serial]
     fn purge_expired_sessions_removes_only_expired_entries() {
-        let _dir = with_temp_session_dir();
+        let _dir = SessionDirGuard::new();
         save_session(&sample_session("expired", 100)).unwrap();
         save_session(&sample_session("active", 1000)).unwrap();
 
@@ -181,6 +224,13 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(load_session("expired").is_err());
         assert!(load_session("active").is_ok());
-        std::env::remove_var(OAUTH_SESSION_DIR_ENV);
+    }
+
+    #[test]
+    fn session_path_rejects_invalid_session_ids() {
+        assert!(session_path("../escape").is_err());
+        assert!(session_path("bad/name").is_err());
+        assert!(session_path("bad.name").is_err());
+        assert!(session_path("").is_err());
     }
 }
