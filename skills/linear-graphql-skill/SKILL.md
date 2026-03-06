@@ -61,12 +61,18 @@ Credential/binding IDs in this skill use `linear-graphql` by convention; IDs are
 
 2. Start OAuth login:
    ```bash
-   uxc auth oauth login linear-graphql \
+   uxc auth oauth start linear-graphql \
      --endpoint https://api.linear.app/graphql \
-     --flow authorization_code \
      --redirect-uri http://127.0.0.1:8788/callback \
      --scope read \
      --scope write
+   ```
+
+   After approval, complete it with:
+   ```bash
+   uxc auth oauth complete linear-graphql \
+     --session-id <session_id> \
+     --authorization-response 'http://127.0.0.1:8788/callback?code=...&state=...'
    ```
 
 3. Bind endpoint:
@@ -169,6 +175,10 @@ linear-graphql-cli mutation/issueCreate '{"input":{"teamId":"YOUR_TEAM_ID","titl
 - Check credential exists: `uxc auth credential list`
 - Verify binding: `uxc auth binding list`
 - Create binding if missing (see Authentication section)
+
+**OAuth login spans multiple agent turns**
+- Prefer `uxc auth oauth start ...` and `uxc auth oauth complete ...`
+- Use `uxc auth oauth login ... --flow authorization_code` only when one process can wait for the pasted callback URL
 
 **Error: "No binding matched"**
 - Check binding exists: `uxc auth binding match api.linear.app/graphql`

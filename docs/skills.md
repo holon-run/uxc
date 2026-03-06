@@ -14,9 +14,9 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
 - `skills/okx-mcp-skill`
   - Unified wrapper for OKX MCP workflows (token/market/wallet/swap).
 - `skills/notion-mcp-skill`
-  - Wrapper for Notion MCP workflows with OAuth and guarded-write guidance.
+  - Wrapper for Notion MCP workflows with OAuth two-step login guidance and guarded-write guidance.
 - `skills/discord-openapi-skill`
-  - Wrapper for Discord REST workflows via UXC + OpenAPI schema mapping (`--schema-url`).
+  - Wrapper for Discord REST workflows via UXC + link-persisted OpenAPI schema mapping (`uxc link --schema-url`).
 - `skills/uxc-skill-creator`
   - Creator skill for authoring new UXC-based wrapper skills with strict conventions.
 

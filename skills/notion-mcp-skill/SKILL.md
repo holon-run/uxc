@@ -26,9 +26,10 @@ Endpoint argument style in this skill:
 1. Ensure endpoint mapping exists:
    - `uxc auth binding match mcp.notion.com/mcp`
 2. If mapping/auth is not ready, start OAuth login:
-   - `uxc auth oauth login notion-mcp --endpoint mcp.notion.com/mcp --flow authorization_code --redirect-uri http://127.0.0.1:8788/callback --scope read --scope write`
+   - `uxc auth oauth start notion-mcp --endpoint mcp.notion.com/mcp --redirect-uri http://127.0.0.1:8788/callback --scope read --scope write`
    - Prompt user to open the printed authorization URL.
    - Ask user to paste the full callback URL after consent.
+   - Complete login with `uxc auth oauth complete notion-mcp --session-id <session_id> --authorization-response '<callback-url>'`
 3. Bind endpoint to the credential:
    - `uxc auth binding add --id notion-mcp --host mcp.notion.com --path-prefix /mcp --scheme https --credential notion-mcp --priority 100`
 4. Use fixed link command by default:
@@ -57,11 +58,12 @@ Use this exact operator-facing flow:
    - Open this URL in browser and approve Notion access.
    - Copy the full callback URL from browser address bar.
    - Paste the callback URL back in chat.
-3. Resume the waiting `uxc` login prompt with the pasted callback URL.
+3. Run `uxc auth oauth complete notion-mcp --session-id <session_id> --authorization-response '<callback-url>'`.
 4. Optionally confirm success with:
    - `uxc auth oauth info <credential_id>`
 
 Do not ask user to manually extract or copy bearer tokens. Token exchange is handled by `uxc`.
+Use `uxc auth oauth login ... --flow authorization_code` only for a single-process interactive fallback.
 
 ## Guardrails
 

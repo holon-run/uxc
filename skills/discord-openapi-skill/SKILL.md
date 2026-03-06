@@ -65,7 +65,7 @@ uxc auth oauth start discord-user \
 ```bash
 uxc auth oauth complete discord-user \
   --session-id <session_id_from_step_1> \
-  --callback-url "<callback_url_from_browser>"
+  --authorization-response "<callback_url_from_browser>"
 ```
 
 4. Bind credential:
@@ -110,6 +110,7 @@ Then paste the callback URL when prompted.
    - connectivity check (no auth): `discord-openapi-cli get:/gateway`
    - key/value: `discord-openapi-cli get:/guilds/{guild_id}/channels guild_id=GUILD_ID`
    - positional JSON: `discord-openapi-cli post:/channels/{channel_id}/messages '{"channel_id":"CHANNEL_ID","content":"Hello from uxc"}'`
+   - binding check when auth looks wrong: `uxc auth binding match https://discord.com/api/v10`
 
 ## Guardrails
 

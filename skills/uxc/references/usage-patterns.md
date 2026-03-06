@@ -98,8 +98,11 @@ uxc auth binding match <endpoint>
 ```bash
 uxc auth oauth info <credential_id>
 uxc auth oauth refresh <credential_id>
-uxc auth oauth login <credential_id> --endpoint <endpoint> --flow authorization_code
+uxc auth oauth start <credential_id> --endpoint <endpoint> --redirect-uri <callback_uri>
+uxc auth oauth complete <credential_id> --session-id <session_id> --authorization-response '<callback_url_or_code>'
 ```
+
+Use `uxc auth oauth login <credential_id> --endpoint <endpoint> --flow authorization_code` only when one interactive process can wait for the callback input.
 
 4. If multiple bindings match, verify explicit credential:
 
