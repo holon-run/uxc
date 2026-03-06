@@ -12,7 +12,23 @@ Use this guide for OAuth-backed endpoints across protocols and providers.
 
 ## Setup Flow
 
-1. Login:
+1. Login. Prefer the two-step flow for agents and any multi-turn workflow:
+
+```bash
+uxc auth oauth start <credential_id> \
+  --endpoint <endpoint> \
+  --redirect-uri <callback_uri>
+```
+
+After the user finishes browser authorization:
+
+```bash
+uxc auth oauth complete <credential_id> \
+  --session-id <session_id> \
+  --authorization-response '<callback_url_or_code>'
+```
+
+Single-process interactive fallback:
 
 ```bash
 uxc auth oauth login <credential_id> \
@@ -84,6 +100,8 @@ If auth failures persist:
 
 - `OAUTH_REQUIRED`
 - `OAUTH_DISCOVERY_FAILED`
+- `OAUTH_SESSION_NOT_FOUND`
+- `OAUTH_SESSION_EXPIRED`
 - `OAUTH_TOKEN_EXCHANGE_FAILED`
 - `OAUTH_REFRESH_FAILED`
 - `OAUTH_SCOPE_INSUFFICIENT`

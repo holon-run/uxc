@@ -20,14 +20,17 @@ uxc auth credential set linear-graphql \
 ### OAuth Flow
 ```bash
 # Start OAuth login
-uxc auth oauth login linear-graphql \
+uxc auth oauth start linear-graphql \
   --endpoint https://api.linear.app/graphql \
-  --flow authorization_code \
   --redirect-uri http://127.0.0.1:8788/callback \
   --scope read \
   --scope write
 
-# After user approves, paste callback URL
+# After user approves, complete exchange
+uxc auth oauth complete linear-graphql \
+  --session-id <session_id> \
+  --authorization-response 'http://127.0.0.1:8788/callback?code=...&state=...'
+
 # Then bind endpoint
 uxc auth binding add \
   --id linear-graphql \
@@ -37,6 +40,8 @@ uxc auth binding add \
   --credential linear-graphql \
   --priority 100
 ```
+
+`uxc auth oauth login linear-graphql ... --flow authorization_code` is still available as a single-process interactive fallback.
 
 ## Link Setup
 ```bash

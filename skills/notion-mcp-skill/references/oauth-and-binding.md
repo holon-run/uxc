@@ -17,25 +17,33 @@ For canonical OAuth and binding workflow, use `uxc` skill:
 ## Recommended Notion Login
 
 ```bash
-uxc auth oauth login notion-mcp \
+uxc auth oauth start notion-mcp \
   --endpoint mcp.notion.com/mcp \
-  --flow authorization_code \
   --redirect-uri http://127.0.0.1:8788/callback \
   --scope read \
   --scope write
 ```
 
+After the user approves access, finish with:
+
+```bash
+uxc auth oauth complete notion-mcp \
+  --session-id <session_id> \
+  --authorization-response 'http://127.0.0.1:8788/callback?code=...&state=...'
+```
+
 Notes:
 - Omit `--client-id` by default. `uxc` will try dynamic client registration.
 - If provider/workspace policy rejects dynamic registration, rerun with explicit `--client-id`.
+- `uxc auth oauth login notion-mcp ... --flow authorization_code` remains available as a single-process interactive fallback.
 
 ## Interactive Callback Handoff
 
 For agent-driven/manual runs:
-1. Run the login command and capture the authorization URL printed by `uxc`.
+1. Run the start command and capture the authorization URL plus `session_id` printed by `uxc`.
 2. Ask the user to open the URL and approve access.
 3. Ask the user to paste the full callback URL (for example: `http://127.0.0.1:8788/callback?code=...&state=...`).
-4. Paste that callback URL into the waiting `uxc` login prompt.
+4. Run `uxc auth oauth complete notion-mcp --session-id <session_id> --authorization-response '<callback-url>'`.
 5. Optionally verify with `uxc auth oauth info <credential_id>` when you know the credential id.
 
 ## Notion Binding Example

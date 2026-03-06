@@ -75,6 +75,7 @@ Wrapper skills should default to a fixed local link command instead of calling `
    - `command -v <link_name>`
 3. If command is missing, create it:
    - `uxc link <link_name> <host>`
+   - For OpenAPI services whose schema is hosted at a separate fixed URL, create the link with `uxc link <link_name> <host> --schema-url <schema_url>`
 4. Validate link command:
    - `<link_name> -h`
 5. Use only the link command for the rest of the skill flow.
@@ -89,6 +90,8 @@ Wrapper skills should default to a fixed local link command instead of calling `
 ### Equivalence Rule
 
 - `<link_name> <operation> ...` is equivalent to `uxc <host> <operation> ...`.
+- If the link was created with `--schema-url <schema_url>`, it is equivalent to `uxc <host> --schema-url <schema_url> <operation> ...`.
+- Callers can still override that persisted schema by passing `--schema-url <other_url>` explicitly at runtime.
 - Use `uxc <host> ...` only as a temporary fallback when link setup is unavailable.
 
 ## Input Modes

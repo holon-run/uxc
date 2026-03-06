@@ -39,6 +39,13 @@ uxc link <provider>-mcp-cli <host>
 <provider>-mcp-cli <operation> field=value
 ```
 
+For OpenAPI services whose runtime URL and schema URL differ, persist the schema on the link itself:
+
+```bash
+uxc link <provider>-openapi-cli <host> --schema-url <schema_url>
+<provider>-openapi-cli -h
+```
+
 Examples:
 
 ```bash
@@ -51,6 +58,12 @@ uxc mcp.notion.com/mcp -h
 context7-mcp-cli query-docs libraryId=/reactjs/react.dev query=useState
 # Equivalent:
 uxc mcp.context7.com/mcp query-docs libraryId=/reactjs/react.dev query=useState
+```
+
+```bash
+discord-openapi-cli get:/gateway
+# Equivalent if the link was created with --schema-url:
+uxc https://discord.com/api/v10 --schema-url <discord_openapi_spec> get:/gateway
 ```
 
 ### Conflict Handling For Wrapper Skills
@@ -98,8 +111,11 @@ uxc auth binding match <endpoint>
 ```bash
 uxc auth oauth info <credential_id>
 uxc auth oauth refresh <credential_id>
-uxc auth oauth login <credential_id> --endpoint <endpoint> --flow authorization_code
+uxc auth oauth start <credential_id> --endpoint <endpoint> --redirect-uri <callback_uri>
+uxc auth oauth complete <credential_id> --session-id <session_id> --authorization-response '<callback_url_or_code>'
 ```
+
+Use `uxc auth oauth login <credential_id> --endpoint <endpoint> --flow authorization_code` only when one interactive process can wait for the callback input.
 
 4. If multiple bindings match, verify explicit credential:
 
