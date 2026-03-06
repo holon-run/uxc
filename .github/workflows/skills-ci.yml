@@ -1,0 +1,156 @@
+name: Skills CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'skills/**'
+      - '.github/workflows/skills-ci.yml'
+      - '.github/workflows/skills-publish.yml'
+
+concurrency:
+  group: skills-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    name: Detect Changed Skills
+    runs-on: ubuntu-latest
+    outputs:
+      has_skill_changes: ${{ steps.collect.outputs.has_skill_changes }}
+      matrix: ${{ steps.collect.outputs.matrix }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed files
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          list-files: json
+          filters: |
+            skills:
+              - 'skills/**'
+
+      - name: Collect changed skill directories
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ steps.filter.outputs.skills }}" != "true" ]]; then
+            echo "has_skill_changes=false" >> "${GITHUB_OUTPUT}"
+            echo 'matrix={"include":[]}' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          files_json='${{ steps.filter.outputs.skills_files }}'
+          skill_dirs_json="$(python3 - "${files_json}" <<'PY'
+          import json
+          import re
+          import sys
+
+          files = json.loads(sys.argv[1])
+          seen = set()
+          ordered = []
+          for path in files:
+              match = re.match(r'^skills/([^/]+)/', path)
+              if not match:
+                  continue
+              skill_dir = f"skills/{match.group(1)}"
+              if skill_dir in seen:
+                  continue
+              seen.add(skill_dir)
+              ordered.append(skill_dir)
+          print(json.dumps(ordered))
+          PY
+          )"
+
+          skill_count="$(python3 - "${skill_dirs_json}" <<'PY'
+          import json
+          import sys
+
+          print(len(json.loads(sys.argv[1])))
+          PY
+          )"
+
+          if [[ "${skill_count}" == "0" ]]; then
+            echo "has_skill_changes=false" >> "${GITHUB_OUTPUT}"
+            echo 'matrix={"include":[]}' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          while IFS= read -r dir; do
+            script="${dir}/scripts/validate.sh"
+            if [[ ! -f "${script}" ]]; then
+              echo "Missing validator script: ${script}" >&2
+              exit 1
+            fi
+          done < <(python3 - "${skill_dirs_json}" <<'PY'
+          import json
+          import sys
+
+          for skill_dir in json.loads(sys.argv[1]):
+              print(skill_dir)
+          PY
+          )
+
+          matrix_json="$(python3 - "${skill_dirs_json}" <<'PY'
+          import json
+          import sys
+
+          skill_dirs = json.loads(sys.argv[1])
+          matrix = {
+              "include": [
+                  {
+                      "skill_dir": skill_dir,
+                      "skill_slug": skill_dir.split("/")[1],
+                      "validate_script": f"{skill_dir}/scripts/validate.sh",
+                  }
+                  for skill_dir in skill_dirs
+              ]
+          }
+          print(json.dumps(matrix))
+          PY
+          )"
+
+          echo "has_skill_changes=true" >> "${GITHUB_OUTPUT}"
+          {
+            echo "matrix<<EOF"
+            echo "${matrix_json}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+  validate:
+    name: Validate (${{ matrix.skill_slug }})
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has_skill_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Run skill validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Validating ${{ matrix.skill_dir }}"
+          bash "${{ matrix.validate_script }}"
+
+  noop:
+    name: No Skill Changes
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has_skill_changes != 'true'
+
+    steps:
+      - name: Skip validation
+        run: echo "No skill directory changes detected; skipping validators."

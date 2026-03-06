@@ -15,6 +15,8 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Unified wrapper for OKX MCP workflows (token/market/wallet/swap).
 - `skills/notion-mcp-skill`
   - Wrapper for Notion MCP workflows with OAuth and guarded-write guidance.
+- `skills/discord-api-skill`
+  - Wrapper for Discord REST workflows via UXC + OpenAPI schema mapping (`--schema-url`).
 - `skills/uxc-skill-creator`
   - Creator skill for authoring new UXC-based wrapper skills with strict conventions.
 
@@ -43,7 +45,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, or `skills/notion-mcp-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/notion-mcp-skill`, or `skills/discord-api-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -71,6 +73,48 @@ bash skills/uxc-skill-creator/scripts/validate.sh
 ```bash
 bash skills/notion-mcp-skill/scripts/validate.sh
 ```
+
+- Validate Discord wrapper docs when touched:
+
+```bash
+bash skills/discord-api-skill/scripts/validate.sh
+```
+
+## Manual Publish Workflow (GitHub Actions)
+
+Skill publishing is intentionally manual to avoid registry rate-limit issues during high-frequency merges.
+
+### Trigger
+
+Run `.github/workflows/skills-publish.yml` with `workflow_dispatch`.
+
+- `mode`:
+  - `dry-run`: preview upload plan only
+  - `publish`: dry-run first, then real sync
+- `bump`:
+  - `patch` (default)
+  - `minor`
+  - `major`
+
+### Requirements
+
+- Repository secret `CLAWHUB_TOKEN` must be configured.
+- Workflow validates all `skills/*/scripts/validate.sh` before any sync.
+
+### Behavior
+
+- Sync command uses:
+
+```bash
+clawhub --no-input --workdir "$GITHUB_WORKSPACE" --dir skills sync --all
+```
+
+- `clawhub sync` compares local fingerprint with registry state:
+  - unchanged skills: `Already synced`
+  - changed/new skills: included in `To sync`
+  - no changes: `Nothing to sync`
+
+This makes repeated runs idempotent and safe.
 
 ## ClawHub Publish Log (2026-03-03)
 

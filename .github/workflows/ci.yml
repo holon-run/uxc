@@ -21,8 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
-      workflow_ci: ${{ steps.filter.outputs.workflow_ci }}
-      skills: ${{ steps.filter.outputs.skills }}
       run_rust_ci: ${{ steps.classify.outputs.run_rust_ci }}
 
     steps:
@@ -40,10 +38,6 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
-            workflow_ci:
-              - '.github/workflows/ci.yml'
-            skills:
-              - 'skills/**'
 
       - name: Classify CI scope
         id: classify
@@ -51,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           run_rust_ci=false
-          if [[ "${{ steps.filter.outputs.rust }}" == "true" || "${{ steps.filter.outputs.workflow_ci }}" == "true" ]]; then
+          if [[ "${{ steps.filter.outputs.rust }}" == "true" ]]; then
             run_rust_ci=true
           fi
           echo "run_rust_ci=${run_rust_ci}" >> "${GITHUB_OUTPUT}"
@@ -60,34 +54,11 @@ jobs:
     name: Fast Path (docs-only)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.run_rust_ci != 'true' && needs.changes.outputs.skills != 'true'
+    if: needs.changes.outputs.run_rust_ci != 'true'
 
     steps:
       - name: Skip heavy jobs
-        run: echo "No Rust/workflow/skills changes detected; skipping heavy CI jobs."
-
-  lint-skills:
-    name: Lint (skills)
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.skills == 'true' || needs.changes.outputs.workflow_ci == 'true'
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
-
-      - name: Validate skills
-        run: |
-          set -euo pipefail
-          for script in skills/*/scripts/validate.sh; do
-            if [ -f "$script" ]; then
-              echo "Running validator: $script"
-              bash "$script"
-            fi
-          done
+        run: echo "No Rust changes detected; skipping heavy CI jobs."
 
   rust-quality:
     name: Rust Quality (stable)

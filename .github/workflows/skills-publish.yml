@@ -1,0 +1,108 @@
+name: Skills Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Publish mode'
+        required: true
+        default: publish
+        type: choice
+        options:
+          - dry-run
+          - publish
+      bump:
+        description: 'Version bump type for updated skills'
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: skills-publish-manual
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate-all:
+    name: Validate All Skills
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Run all skill validators
+        shell: bash
+        run: |
+          set -euo pipefail
+          for script in skills/*/scripts/validate.sh; do
+            if [[ -f "${script}" ]]; then
+              echo "Running validator: ${script}"
+              bash "${script}"
+            fi
+          done
+
+  sync:
+    name: ClawHub Sync (${{ inputs.mode }}, ${{ inputs.bump }})
+    runs-on: ubuntu-latest
+    needs: validate-all
+    env:
+      CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install clawhub CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g clawhub@0.7.0
+          clawhub --cli-version
+
+      - name: Validate CLAWHUB_TOKEN
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLAWHUB_TOKEN}" ]]; then
+            echo "CLAWHUB_TOKEN is not configured"
+            exit 1
+          fi
+
+      - name: Login and verify auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          clawhub login --token "${CLAWHUB_TOKEN}" --no-browser
+          clawhub whoami
+
+      - name: Preview sync (dry-run)
+        shell: bash
+        run: |
+          set -euo pipefail
+          clawhub --no-input --workdir "${GITHUB_WORKSPACE}" --dir skills sync --all --dry-run --bump "${{ inputs.bump }}"
+
+      - name: Publish sync
+        if: inputs.mode == 'publish'
+        shell: bash
+        run: |
+          set -euo pipefail
+          clawhub --no-input --workdir "${GITHUB_WORKSPACE}" --dir skills sync --all --bump "${{ inputs.bump }}" --changelog "Automated sync from ${GITHUB_SHA}"
+
+      - name: Skip publish in dry-run mode
+        if: inputs.mode == 'dry-run'
+        run: echo "Dry-run mode selected; publish step skipped."
