@@ -21,7 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
-      workflow_ci: ${{ steps.filter.outputs.workflow_ci }}
       run_rust_ci: ${{ steps.classify.outputs.run_rust_ci }}
 
     steps:
@@ -39,8 +38,6 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
-            workflow_ci:
-              - '.github/workflows/ci.yml'
 
       - name: Classify CI scope
         id: classify
@@ -48,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           run_rust_ci=false
-          if [[ "${{ steps.filter.outputs.rust }}" == "true" || "${{ steps.filter.outputs.workflow_ci }}" == "true" ]]; then
+          if [[ "${{ steps.filter.outputs.rust }}" == "true" ]]; then
             run_rust_ci=true
           fi
           echo "run_rust_ci=${run_rust_ci}" >> "${GITHUB_OUTPUT}"
@@ -61,7 +58,7 @@ jobs:
 
     steps:
       - name: Skip heavy jobs
-        run: echo "No Rust/workflow changes detected; skipping heavy CI jobs."
+        run: echo "No Rust changes detected; skipping heavy CI jobs."
 
   rust-quality:
     name: Rust Quality (stable)
