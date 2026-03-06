@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod oauth;
+pub mod oauth_sessions;
 
 /// Default auth directory relative to home directory.
 pub const DEFAULT_AUTH_DIR: &str = ".uxc";
@@ -516,8 +517,7 @@ impl Profiles {
             return Ok(PathBuf::from(path));
         }
 
-        let home = dirs::home_dir().context("Could not determine home directory")?;
-        Ok(home.join(DEFAULT_AUTH_DIR).join(CREDENTIALS_FILE))
+        Ok(auth_base_dir()?.join(CREDENTIALS_FILE))
     }
 
     /// Load credentials from disk.
@@ -698,8 +698,7 @@ impl AuthBindings {
             return Ok(PathBuf::from(path));
         }
 
-        let home = dirs::home_dir().context("Could not determine home directory")?;
-        Ok(home.join(DEFAULT_AUTH_DIR).join(AUTH_BINDINGS_FILE))
+        Ok(auth_base_dir()?.join(AUTH_BINDINGS_FILE))
     }
 
     pub fn load_bindings() -> Result<Self> {
@@ -1115,7 +1114,16 @@ fn sanitize_command_error(stderr: &str) -> String {
     truncated
 }
 
-fn write_secure_auth_file(path: &std::path::Path, contents: &str, label: &str) -> Result<()> {
+pub(crate) fn auth_base_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not determine home directory")?;
+    Ok(home.join(DEFAULT_AUTH_DIR))
+}
+
+pub(crate) fn write_secure_auth_file(
+    path: &std::path::Path,
+    contents: &str,
+    label: &str,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent)

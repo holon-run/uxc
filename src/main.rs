@@ -322,6 +322,72 @@ enum AuthOauthCommands {
     /// List OAuth credentials
     List,
 
+    /// Start non-interactive OAuth authorization_code login
+    Start {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
+
+        /// Service endpoint URL used for OAuth discovery
+        #[arg(long)]
+        endpoint: String,
+
+        /// OAuth scope (can be repeated)
+        #[arg(long)]
+        scope: Vec<String>,
+
+        /// OAuth client ID
+        #[arg(long)]
+        client_id: Option<String>,
+
+        /// OAuth client secret
+        #[arg(long)]
+        client_secret: Option<String>,
+
+        /// Redirect URI for authorization_code flow
+        #[arg(long)]
+        redirect_uri: String,
+
+        /// OAuth issuer URL (overrides auto-discovery)
+        #[arg(long)]
+        issuer: Option<String>,
+
+        /// OAuth authorization endpoint URL (overrides auto-discovery)
+        #[arg(long)]
+        authorization_endpoint: Option<String>,
+
+        /// OAuth token endpoint URL (overrides auto-discovery)
+        #[arg(long)]
+        token_endpoint: Option<String>,
+
+        /// OAuth dynamic client registration endpoint URL (overrides auto-discovery)
+        #[arg(long)]
+        registration_endpoint: Option<String>,
+
+        /// OAuth resource metadata URL (overrides auto-discovery)
+        #[arg(long)]
+        resource_metadata_url: Option<String>,
+    },
+
+    /// Complete non-interactive OAuth authorization_code login
+    Complete {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
+
+        /// OAuth session ID
+        #[arg(long)]
+        session_id: String,
+
+        /// Authorization response, callback URL, or plain authorization code
+        #[arg(
+            long = "authorization-response",
+            visible_alias = "callback-url",
+            visible_alias = "authorization-code"
+        )]
+        authorization_response: String,
+    },
+
     /// Login with OAuth and save tokens
     Login {
         /// Credential ID
@@ -512,6 +578,17 @@ struct AuthListData {
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthRemoveData {
     credential: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthOAuthStartData {
+    credential: String,
+    flow: String,
+    session_id: String,
+    authorization_url: String,
+    redirect_uri: String,
+    expires_at: i64,
+    scopes: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -914,6 +991,8 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             },
             AuthCommands::Oauth { oauth_command } => match oauth_command {
                 AuthOauthCommands::List => Some(vec!["auth", "oauth", "list"]),
+                AuthOauthCommands::Start { .. } => Some(vec!["auth", "oauth", "start"]),
+                AuthOauthCommands::Complete { .. } => Some(vec!["auth", "oauth", "complete"]),
                 AuthOauthCommands::Login { .. } => Some(vec!["auth", "oauth", "login"]),
                 AuthOauthCommands::Refresh { .. } => Some(vec!["auth", "oauth", "refresh"]),
                 AuthOauthCommands::Info { .. } => Some(vec!["auth", "oauth", "info"]),
@@ -1439,9 +1518,11 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth", "oauth"] => HelpData {
             path: "uxc auth oauth".to_string(),
             about: "Manage OAuth credentials".to_string(),
-            usage: "uxc auth oauth <list|login|refresh|info|logout> ...".to_string(),
+            usage: "uxc auth oauth <list|start|complete|login|refresh|info|logout> ...".to_string(),
             commands: commands(&[
                 ("list", "List OAuth credentials"),
+                ("start", "Start non-interactive OAuth authorization_code login"),
+                ("complete", "Complete non-interactive OAuth authorization_code login"),
                 ("login", "Login with OAuth and save tokens"),
                 ("refresh", "Refresh OAuth token"),
                 ("info", "Show OAuth credential information"),
@@ -1461,6 +1542,22 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: vec![],
             notes: vec![],
             examples: vec!["uxc auth oauth list".to_string()],
+        },
+        ["auth", "oauth", "start"] => HelpData {
+            path: "uxc auth oauth start".to_string(),
+            about: "Start non-interactive OAuth authorization_code login".to_string(),
+            usage: "uxc auth oauth start <credential_id> --endpoint <url> --redirect-uri <uri> [--scope <scope>] [--client-id <id>] [--client-secret <secret>] [--issuer <url>] [--authorization-endpoint <url>] [--token-endpoint <url>] [--registration-endpoint <url>] [--resource-metadata-url <url>]".to_string(),
+            commands: vec![],
+            notes: vec!["Returns an authorization URL and session ID for agent-driven completion.".to_string()],
+            examples: vec!["uxc auth oauth start notion --endpoint https://mcp.notion.com/mcp --redirect-uri http://127.0.0.1:11111/callback --client-id <id> --scope read".to_string()],
+        },
+        ["auth", "oauth", "complete"] => HelpData {
+            path: "uxc auth oauth complete".to_string(),
+            about: "Complete non-interactive OAuth authorization_code login".to_string(),
+            usage: "uxc auth oauth complete <credential_id> --session-id <id> --authorization-response <callback_url_or_code>".to_string(),
+            commands: vec![],
+            notes: vec!["The authorization response can be a callback URL, query string, or plain authorization code.".to_string()],
+            examples: vec!["uxc auth oauth complete notion --session-id abc123 --authorization-response 'http://127.0.0.1:11111/callback?code=...'".to_string()],
         },
         ["auth", "oauth", "login"] => HelpData {
             path: "uxc auth oauth login".to_string(),
@@ -1749,6 +1846,20 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             if let Some(desc) = credential.description {
                 println!("  Description: {}", desc);
             }
+            Ok(())
+        }
+        Some("auth_oauth_start_result") => {
+            let data: AuthOAuthStartData = decode_envelope_data(envelope)?;
+            println!("Open this URL to authorize:");
+            println!("{}", data.authorization_url);
+            println!();
+            println!("Session ID: {}", data.session_id);
+            println!("Expires At: {}", data.expires_at);
+            println!();
+            println!(
+                "Complete with:\nuxc auth oauth complete {} --session-id {} --authorization-response '<callback-url>'",
+                data.credential, data.session_id
+            );
             Ok(())
         }
         Some("auth_remove_result") => {
@@ -2561,6 +2672,8 @@ fn error_code(err: &anyhow::Error) -> &'static str {
                 UxcError::OAuthRequired(_) => "OAUTH_REQUIRED",
                 UxcError::OAuthDiscoveryFailed(_) => "OAUTH_DISCOVERY_FAILED",
                 UxcError::OAuthTokenExchangeFailed(_) => "OAUTH_TOKEN_EXCHANGE_FAILED",
+                UxcError::OAuthSessionNotFound(_) => "OAUTH_SESSION_NOT_FOUND",
+                UxcError::OAuthSessionExpired(_) => "OAUTH_SESSION_EXPIRED",
                 UxcError::OAuthRefreshFailed(_) => "OAUTH_REFRESH_FAILED",
                 UxcError::OAuthScopeInsufficient(_) => "OAUTH_SCOPE_INSUFFICIENT",
                 UxcError::ExecutionFailed(_)
@@ -3160,6 +3273,136 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                 None,
             ))
         }
+        AuthOauthCommands::Start {
+            credential_id,
+            endpoint,
+            scope,
+            client_id,
+            client_secret,
+            redirect_uri,
+            issuer,
+            authorization_endpoint,
+            token_endpoint,
+            registration_endpoint,
+            resource_metadata_url,
+        } => {
+            auth::oauth_sessions::purge_expired_sessions(current_unix_timestamp())?;
+            let scopes = auth::oauth::parse_scopes(scope);
+            let endpoint = normalize_endpoint_url(endpoint);
+            let client = build_resilient_http_client(
+                std::time::Duration::from_secs(30),
+                "OAuth start command",
+            )?;
+            let discovery_overrides = build_oauth_discovery_overrides(
+                issuer,
+                authorization_endpoint,
+                token_endpoint,
+                &None,
+                registration_endpoint,
+                resource_metadata_url,
+            );
+            let prepared = auth::oauth::prepare_authorization_code_login(
+                &endpoint,
+                &client,
+                credential_id,
+                client_id.as_deref(),
+                client_secret.as_deref(),
+                &scopes,
+                redirect_uri,
+                &discovery_overrides,
+            )
+            .await?;
+            auth::oauth_sessions::save_session(&prepared.session)?;
+
+            let data = serde_json::to_value(AuthOAuthStartData {
+                credential: credential_id.clone(),
+                flow: "authorization_code".to_string(),
+                session_id: prepared.session.session_id,
+                authorization_url: prepared.authorization_url,
+                redirect_uri: redirect_uri.clone(),
+                expires_at: prepared.session.expires_at,
+                scopes,
+            })?;
+            Ok(OutputEnvelope::success(
+                "auth_oauth_start_result",
+                "cli",
+                "uxc",
+                Some(credential_id),
+                data,
+                None,
+            ))
+        }
+        AuthOauthCommands::Complete {
+            credential_id,
+            session_id,
+            authorization_response,
+        } => {
+            let client = build_resilient_http_client(
+                std::time::Duration::from_secs(30),
+                "OAuth complete command",
+            )?;
+            let session = auth::oauth_sessions::load_session(session_id).map_err(|err| {
+                let path = auth::oauth_sessions::session_path(session_id)
+                    .ok()
+                    .map(|value| value.display().to_string())
+                    .unwrap_or_else(|| session_id.clone());
+                if err
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+                {
+                    UxcError::OAuthSessionNotFound(format!(
+                        "session '{}' was not found at {}",
+                        session_id, path
+                    ))
+                    .into()
+                } else {
+                    err
+                }
+            })?;
+
+            if session.credential_id != *credential_id {
+                return Err(UxcError::InvalidArguments(format!(
+                    "OAuth session '{}' belongs to credential '{}', not '{}'",
+                    session_id, session.credential_id, credential_id
+                ))
+                .into());
+            }
+            if session.is_expired(current_unix_timestamp()) {
+                auth::oauth_sessions::remove_session(session_id)?;
+                return Err(UxcError::OAuthSessionExpired(format!(
+                    "session '{}' has expired",
+                    session_id
+                ))
+                .into());
+            }
+
+            let completion = auth::oauth::finish_authorization_code_login(
+                &client,
+                &session,
+                authorization_response,
+            )
+            .await;
+            match completion {
+                Ok(login) => {
+                    auth::oauth_sessions::remove_session(session_id)?;
+                    persist_oauth_login(
+                        credential_id,
+                        OAuthFlow::AuthorizationCode,
+                        login.login.metadata,
+                        login.login.token,
+                        Some(login.client_id),
+                        login.client_secret,
+                        session.scopes,
+                    )
+                }
+                Err(err) => {
+                    if err.should_remove_session() {
+                        auth::oauth_sessions::remove_session(session_id)?;
+                    }
+                    Err(err.into_error())
+                }
+            }
+        }
         AuthOauthCommands::Login {
             credential_id,
             endpoint,
@@ -3183,14 +3426,14 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                 std::time::Duration::from_secs(30),
                 "OAuth login command",
             )?;
-            let discovery_overrides = auth::oauth::OAuthDiscoveryOverrides {
-                issuer: issuer.clone(),
-                authorization_endpoint: authorization_endpoint.clone(),
-                token_endpoint: token_endpoint.clone(),
-                device_authorization_endpoint: device_authorization_endpoint.clone(),
-                registration_endpoint: registration_endpoint.clone(),
-                resource_metadata_url: resource_metadata_url.clone(),
-            };
+            let discovery_overrides = build_oauth_discovery_overrides(
+                issuer,
+                authorization_endpoint,
+                token_endpoint,
+                device_authorization_endpoint,
+                registration_endpoint,
+                resource_metadata_url,
+            );
 
             let (metadata, token, resolved_client_id, resolved_client_secret) = match flow {
                 OAuthFlow::DeviceCode => {
@@ -3223,6 +3466,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                     let login = auth::oauth::login_with_authorization_code(
                         &endpoint,
                         &client,
+                        credential_id,
                         client_id.as_deref(),
                         client_secret.as_deref(),
                         &scopes,
@@ -3266,34 +3510,15 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                     )
                 }
             };
-
-            let mut profiles = Profiles::load_profiles()?;
-            let mut profile_obj = profiles
-                .get_profile(credential_id)
-                .cloned()
-                .unwrap_or_else(|_| Profile::new(String::new(), AuthType::OAuth));
-            profile_obj.name = Some(credential_id.clone());
-            auth::oauth::apply_token_to_profile(
-                &mut profile_obj,
+            persist_oauth_login(
+                credential_id,
                 flow,
                 metadata,
                 token,
                 resolved_client_id,
                 resolved_client_secret,
                 scopes,
-            );
-            profiles.set_profile(credential_id.clone(), profile_obj.clone())?;
-            profiles.save_profiles()?;
-
-            let data = serde_json::to_value(to_auth_profile_view(credential_id, &profile_obj))?;
-            Ok(OutputEnvelope::success(
-                "auth_set_result",
-                "cli",
-                "uxc",
-                Some(credential_id),
-                data,
-                None,
-            ))
+            )
         }
         AuthOauthCommands::Refresh { credential_id } => {
             let client = build_resilient_http_client(
@@ -3360,6 +3585,69 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
             ))
         }
     }
+}
+
+fn build_oauth_discovery_overrides(
+    issuer: &Option<String>,
+    authorization_endpoint: &Option<String>,
+    token_endpoint: &Option<String>,
+    device_authorization_endpoint: &Option<String>,
+    registration_endpoint: &Option<String>,
+    resource_metadata_url: &Option<String>,
+) -> auth::oauth::OAuthDiscoveryOverrides {
+    auth::oauth::OAuthDiscoveryOverrides {
+        issuer: issuer.clone(),
+        authorization_endpoint: authorization_endpoint.clone(),
+        token_endpoint: token_endpoint.clone(),
+        device_authorization_endpoint: device_authorization_endpoint.clone(),
+        registration_endpoint: registration_endpoint.clone(),
+        resource_metadata_url: resource_metadata_url.clone(),
+    }
+}
+
+fn persist_oauth_login(
+    credential_id: &str,
+    flow: OAuthFlow,
+    metadata: auth::oauth::OAuthProviderMetadata,
+    token: auth::oauth::OAuthTokenResponse,
+    resolved_client_id: Option<String>,
+    resolved_client_secret: Option<String>,
+    scopes: Vec<String>,
+) -> Result<OutputEnvelope> {
+    let mut profiles = Profiles::load_profiles()?;
+    let mut profile_obj = profiles
+        .get_profile(credential_id)
+        .cloned()
+        .unwrap_or_else(|_| Profile::new(String::new(), AuthType::OAuth));
+    profile_obj.name = Some(credential_id.to_string());
+    auth::oauth::apply_token_to_profile(
+        &mut profile_obj,
+        flow,
+        metadata,
+        token,
+        resolved_client_id,
+        resolved_client_secret,
+        scopes,
+    );
+    profiles.set_profile(credential_id.to_string(), profile_obj.clone())?;
+    profiles.save_profiles()?;
+
+    let data = serde_json::to_value(to_auth_profile_view(credential_id, &profile_obj))?;
+    Ok(OutputEnvelope::success(
+        "auth_set_result",
+        "cli",
+        "uxc",
+        Some(credential_id),
+        data,
+        None,
+    ))
+}
+
+fn current_unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
