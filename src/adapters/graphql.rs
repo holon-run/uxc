@@ -190,6 +190,7 @@ impl GraphQLAdapter {
                 args {
                     name
                     description
+                    defaultValue
                     type {
                         ...TypeRef
                     }
@@ -1044,11 +1045,21 @@ impl Adapter for GraphQLAdapter {
             .iter()
             .filter_map(|arg| {
                 let name = arg.get("name").and_then(|n| n.as_str())?;
-                let required = arg
+                let is_non_null = arg
                     .get("type")
                     .and_then(|t| t.get("kind"))
                     .and_then(|k| k.as_str())
                     == Some("NON_NULL");
+                let required = if !is_non_null {
+                    false
+                } else {
+                    match arg.get("defaultValue") {
+                        // defaultValue explicitly null => no default => required
+                        Some(v) => v.is_null(),
+                        // defaultValue missing from schema => avoid false positives
+                        None => false,
+                    }
+                };
                 if required && !args.contains_key(name) {
                     Some(name.to_string())
                 } else {

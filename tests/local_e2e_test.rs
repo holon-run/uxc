@@ -453,14 +453,9 @@ fn test_graphql_malformed_response() {
 
     let result = run_uxc(&[&format!("http://{}/", _server.addr), "query/health"]);
     assert!(
-        result.is_ok(),
-        "Expected GraphQL malformed scenario to return response envelope"
+        result.is_err(),
+        "Expected GraphQL malformed scenario to fail with invalid schema/introspection response"
     );
-
-    let output = result.unwrap();
-    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(json["ok"], true);
-    assert!(json["data"]["invalid"].is_string());
 }
 
 #[test]

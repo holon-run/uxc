@@ -549,6 +549,95 @@ fn test_graphql_execute_rejects_non_string_select_override() {
 }
 
 #[test]
+fn test_graphql_execute_non_null_with_default_value_is_not_required() {
+    run_async(|mut server| {
+        let introspection_response = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": {
+                        "name": "Query",
+                        "fields": [
+                            {
+                                "name": "issues",
+                                "args": [
+                                    {
+                                        "name": "first",
+                                        "defaultValue": "20",
+                                        "type": {
+                                            "kind": "NON_NULL",
+                                            "ofType": { "kind": "SCALAR", "name": "Int" }
+                                        }
+                                    }
+                                ],
+                                "type": { "kind": "OBJECT", "name": "IssueConnection" }
+                            }
+                        ]
+                    },
+                    "mutationType": null,
+                    "subscriptionType": null,
+                    "types": [
+                        {
+                            "name": "IssueConnection",
+                            "kind": "OBJECT",
+                            "fields": [
+                                { "name": "nodes", "type": { "kind": "LIST", "ofType": { "kind": "OBJECT", "name": "Issue" } } }
+                            ]
+                        },
+                        {
+                            "name": "Issue",
+                            "kind": "OBJECT",
+                            "fields": [
+                                { "name": "id", "type": { "kind": "SCALAR", "name": "ID" } }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let call_response = serde_json::json!({
+            "data": {
+                "issues": {
+                    "nodes": []
+                }
+            }
+        });
+
+        let _introspection = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&introspection_response.to_string())
+            .create();
+
+        let _execute = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "query": "query { issues { nodes { id } } }"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&call_response.to_string())
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = GraphQLAdapter::new();
+        let result = rt.block_on(async {
+            adapter
+                .execute(&server.url(), "query/issues", HashMap::new())
+                .await
+        });
+
+        assert!(
+            result.is_ok(),
+            "NON_NULL argument with defaultValue should not be treated as missing required"
+        );
+    });
+}
+
+#[test]
 fn test_graphql_parses_subscription_fields() {
     run_async(|mut server| {
         let introspection_response = serde_json::json!({
