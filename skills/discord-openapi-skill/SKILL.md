@@ -54,7 +54,7 @@ Discord user OAuth2 supports **read-only operations**. It cannot send messages o
 
 **Recommended Scopes (Full Functionality):**
 ```bash
---scope "identify email connections guilds guilds.join guilds.members.read messages.read applications.commands webhook.incoming openid"
+--scope "identify email connections guilds guilds.join guilds.members.read messages.read openid"
 ```
 
 **Minimal Read-Only Scopes:**
@@ -73,8 +73,6 @@ Discord user OAuth2 supports **read-only operations**. It cannot send messages o
 | `guilds.join` | Join user to servers | ✅ **Write** |
 | `guilds.members.read` | User's member info in servers | ❌ Read |
 | `messages.read` | Read messages (local RPC only) | ❌ Read |
-| `applications.commands` | Use slash commands | ❌ Read |
-| `webhook.incoming` | Create webhooks | ✅ Write |
 | `openid` | OpenID Connect support | ❌ Read |
 
 **Note:** User OAuth2 **cannot** send messages or manage servers as the user. Use Bot Token for write operations. See [Discord OAuth2 documentation](https://docs.discord.com/developers/topics/oauth2) for complete scope list.
@@ -87,7 +85,7 @@ uxc auth oauth start discord-user \
   --endpoint https://discord.com/api/v10/oauth2/token \
   --client-id 1479302369723285736 \
   --redirect-uri http://127.0.0.1:11111/callback \
-  --scope "identify email connections guilds guilds.join guilds.members.read messages.read applications.commands webhook.incoming openid"
+  --scope "identify email connections guilds guilds.join guilds.members.read messages.read openid"
 ```
 
 2. Open the displayed authorization URL in browser, complete authorization, then copy the callback URL from browser address bar.
@@ -118,7 +116,7 @@ uxc auth oauth login discord-user \
   --flow authorization_code \
   --client-id 1479302369723285736 \
   --redirect-uri http://127.0.0.1:11111/callback \
-  --scope "identify email connections guilds guilds.join guilds.members.read messages.read applications.commands webhook.incoming openid"
+  --scope "identify email connections guilds guilds.join guilds.members.read messages.read openid"
 ```
 
 Then paste the callback URL when prompted.
