@@ -38,6 +38,12 @@ pub enum UxcError {
     #[error("OAuth token exchange failed: {0}")]
     OAuthTokenExchangeFailed(String),
 
+    #[error("OAuth session not found: {0}")]
+    OAuthSessionNotFound(String),
+
+    #[error("OAuth session expired: {0}")]
+    OAuthSessionExpired(String),
+
     #[error("OAuth refresh failed: {0}")]
     OAuthRefreshFailed(String),
 

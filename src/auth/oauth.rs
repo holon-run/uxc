@@ -1,10 +1,11 @@
+use crate::auth::oauth_sessions::{PendingAuthorizationCodeSession, DEFAULT_SESSION_TTL_SECONDS};
 use crate::auth::{OAuthFlow, OAuthProfile, Profile};
 use crate::error::UxcError;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use getrandom::getrandom;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -13,7 +14,7 @@ use url::Url;
 
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthProviderMetadata {
     pub provider_issuer: Option<String>,
     pub resource_metadata_url: Option<String>,
@@ -83,6 +84,35 @@ pub struct AuthorizationCodeLoginResult {
     pub client_secret: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedAuthorizationCodeLogin {
+    pub session: PendingAuthorizationCodeSession,
+    pub authorization_url: String,
+}
+
+#[derive(Debug)]
+pub struct SessionCompletionError {
+    error: anyhow::Error,
+    remove_session: bool,
+}
+
+impl SessionCompletionError {
+    fn new(error: anyhow::Error, remove_session: bool) -> Self {
+        Self {
+            error,
+            remove_session,
+        }
+    }
+
+    pub fn should_remove_session(&self) -> bool {
+        self.remove_session
+    }
+
+    pub fn into_error(self) -> anyhow::Error {
+        self.error
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct OAuthErrorResponse {
     error: String,
@@ -93,6 +123,48 @@ struct OAuthErrorResponse {
 enum TokenEndpointResponse {
     Token(OAuthTokenResponse),
     Error(OAuthErrorResponse),
+}
+
+enum TokenExchangeFailure {
+    OAuth {
+        error: String,
+        description: Option<String>,
+        status: reqwest::StatusCode,
+    },
+    Transport(anyhow::Error),
+    Decode(anyhow::Error),
+}
+
+impl TokenExchangeFailure {
+    fn to_anyhow(&self) -> anyhow::Error {
+        match self {
+            Self::OAuth {
+                error, description, ..
+            } => {
+                let message = match description {
+                    Some(desc) if !desc.is_empty() => format!("{}: {}", error, desc),
+                    _ => error.clone(),
+                };
+                UxcError::OAuthTokenExchangeFailed(message).into()
+            }
+            Self::Transport(err) | Self::Decode(err) => {
+                UxcError::OAuthTokenExchangeFailed(err.to_string()).into()
+            }
+        }
+    }
+
+    fn should_remove_session(&self) -> bool {
+        match self {
+            Self::OAuth { error, status, .. } => {
+                *status == reqwest::StatusCode::BAD_REQUEST
+                    && matches!(
+                        error.as_str(),
+                        "invalid_grant" | "invalid_request" | "access_denied"
+                    )
+            }
+            Self::Transport(_) | Self::Decode(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +282,7 @@ pub fn apply_token_to_profile(
     });
 }
 
+#[allow(dead_code)]
 pub async fn discover_provider_metadata(
     endpoint: &str,
     client: &Client,
@@ -218,6 +291,7 @@ pub async fn discover_provider_metadata(
         .await
 }
 
+#[allow(dead_code)]
 pub async fn discover_provider_metadata_with_overrides(
     endpoint: &str,
     client: &Client,
@@ -407,6 +481,7 @@ pub async fn discover_provider_metadata_with_requirements(
 pub async fn login_with_authorization_code(
     endpoint: &str,
     client: &Client,
+    credential_id: &str,
     client_id: Option<&str>,
     client_secret: Option<&str>,
     scopes: &[String],
@@ -414,6 +489,42 @@ pub async fn login_with_authorization_code(
     authorization_code: Option<String>,
     overrides: &OAuthDiscoveryOverrides,
 ) -> Result<AuthorizationCodeLoginResult> {
+    let prepared = prepare_authorization_code_login(
+        endpoint,
+        client,
+        credential_id,
+        client_id,
+        client_secret,
+        scopes,
+        redirect_uri,
+        overrides,
+    )
+    .await?;
+    print_authorization_url(&prepared.authorization_url);
+
+    let input = authorization_code
+        .or_else(read_authorization_code_from_stdin)
+        .ok_or_else(|| {
+            UxcError::OAuthTokenExchangeFailed(
+                "Authorization code is required to continue".to_string(),
+            )
+        })?;
+    finish_authorization_code_login(client, &prepared.session, &input)
+        .await
+        .map_err(SessionCompletionError::into_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_authorization_code_login(
+    endpoint: &str,
+    client: &Client,
+    credential_id: &str,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+    scopes: &[String],
+    redirect_uri: &str,
+    overrides: &OAuthDiscoveryOverrides,
+) -> Result<PreparedAuthorizationCodeLogin> {
     let metadata = discover_provider_metadata_with_requirements(
         endpoint,
         client,
@@ -443,7 +554,7 @@ pub async fn login_with_authorization_code(
     } else {
         Some(scopes.join(" "))
     };
-    let authorize_url = build_authorize_url(
+    let authorization_url = build_authorize_url(
         &authorization_endpoint,
         &resolved_client_id,
         redirect_uri,
@@ -451,52 +562,91 @@ pub async fn login_with_authorization_code(
         &state,
         &code_challenge,
     )?;
+    let created_at = now_unix();
 
-    eprintln!("Open this URL to authorize:");
-    eprintln!("{}", authorize_url);
-    eprintln!();
+    Ok(PreparedAuthorizationCodeLogin {
+        session: PendingAuthorizationCodeSession {
+            version: 1,
+            session_id: random_urlsafe(18)?,
+            credential_id: credential_id.to_string(),
+            endpoint: endpoint.to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            scopes: scopes.to_vec(),
+            metadata,
+            client_id: resolved_client_id,
+            client_secret: resolved_client_secret,
+            state,
+            code_verifier,
+            created_at,
+            expires_at: created_at + DEFAULT_SESSION_TTL_SECONDS,
+        },
+        authorization_url,
+    })
+}
 
-    let input = authorization_code
-        .or_else(read_authorization_code_from_stdin)
+pub async fn finish_authorization_code_login(
+    client: &Client,
+    session: &PendingAuthorizationCodeSession,
+    authorization_response: &str,
+) -> std::result::Result<AuthorizationCodeLoginResult, SessionCompletionError> {
+    let (code, returned_state) = parse_authorization_code_input(authorization_response)
         .ok_or_else(|| {
-            UxcError::OAuthTokenExchangeFailed(
-                "Authorization code is required to continue".to_string(),
+            SessionCompletionError::new(
+                UxcError::OAuthTokenExchangeFailed(
+                    "Could not parse authorization code from input".to_string(),
+                )
+                .into(),
+                false,
             )
         })?;
-    let (code, returned_state) = parse_authorization_code_input(&input).ok_or_else(|| {
-        UxcError::OAuthTokenExchangeFailed(
-            "Could not parse authorization code from input".to_string(),
-        )
-    })?;
 
     if let Some(returned_state) = returned_state {
-        if returned_state != state {
-            return Err(UxcError::OAuthTokenExchangeFailed(
-                "OAuth state mismatch from authorization response".to_string(),
-            )
-            .into());
+        if returned_state != session.state {
+            return Err(SessionCompletionError::new(
+                UxcError::OAuthTokenExchangeFailed(
+                    "OAuth state mismatch from authorization response".to_string(),
+                )
+                .into(),
+                true,
+            ));
         }
     }
 
     let mut form: HashMap<&str, String> = HashMap::new();
     form.insert("grant_type", "authorization_code".to_string());
     form.insert("code", code);
-    form.insert("redirect_uri", redirect_uri.to_string());
-    form.insert("client_id", resolved_client_id.clone());
-    form.insert("code_verifier", code_verifier);
-    if let Some(secret) = resolved_client_secret.clone() {
+    form.insert("redirect_uri", session.redirect_uri.clone());
+    form.insert("client_id", session.client_id.clone());
+    form.insert("code_verifier", session.code_verifier.clone());
+    if let Some(secret) = session.client_secret.clone() {
         form.insert("client_secret", secret);
     }
 
-    let token = exchange_token(client, &metadata.token_endpoint, &form)
-        .await
-        .map_err(|err| UxcError::OAuthTokenExchangeFailed(err.to_string()))?;
+    let token = match exchange_token_detailed(client, &session.metadata.token_endpoint, &form).await
+    {
+        Ok(token) => token,
+        Err(err) => {
+            return Err(SessionCompletionError::new(
+                err.to_anyhow(),
+                err.should_remove_session(),
+            ))
+        }
+    };
 
     Ok(AuthorizationCodeLoginResult {
-        login: OAuthLoginResult { metadata, token },
-        client_id: resolved_client_id,
-        client_secret: resolved_client_secret,
+        login: OAuthLoginResult {
+            metadata: session.metadata.clone(),
+            token,
+        },
+        client_id: session.client_id.clone(),
+        client_secret: session.client_secret.clone(),
     })
+}
+
+fn print_authorization_url(authorize_url: &str) {
+    eprintln!("Open this URL to authorize:");
+    eprintln!("{}", authorize_url);
+    eprintln!();
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1151,23 +1301,42 @@ async fn exchange_token(
     token_endpoint: &str,
     form: &HashMap<&str, String>,
 ) -> Result<OAuthTokenResponse> {
+    exchange_token_detailed(client, token_endpoint, form)
+        .await
+        .map_err(|err| err.to_anyhow())
+}
+
+async fn exchange_token_detailed(
+    client: &Client,
+    token_endpoint: &str,
+    form: &HashMap<&str, String>,
+) -> std::result::Result<OAuthTokenResponse, TokenExchangeFailure> {
     let response = client
         .post(token_endpoint)
         .header("Accept", "application/json")
         .form(form)
         .send()
         .await
-        .with_context(|| format!("Failed to call token endpoint: {}", token_endpoint))?;
+        .with_context(|| format!("Failed to call token endpoint: {}", token_endpoint))
+        .map_err(TokenExchangeFailure::Transport)?;
 
     let status = response.status();
     let body = response
         .text()
         .await
-        .context("Failed to read OAuth token response body")?;
+        .context("Failed to read OAuth token response body")
+        .map_err(TokenExchangeFailure::Transport)?;
 
-    match parse_token_endpoint_response(status, &body)? {
+    match parse_token_endpoint_response(status, &body)
+        .context("Failed to decode OAuth token response")
+        .map_err(TokenExchangeFailure::Decode)?
+    {
         TokenEndpointResponse::Token(token) => Ok(token),
-        TokenEndpointResponse::Error(err) => Err(anyhow!(format_oauth_error(err))),
+        TokenEndpointResponse::Error(err) => Err(TokenExchangeFailure::OAuth {
+            error: err.error,
+            description: err.error_description,
+            status,
+        }),
     }
 }
 

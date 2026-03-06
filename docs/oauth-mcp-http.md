@@ -51,11 +51,29 @@ uxc auth oauth login <credential_id> \
 Use `--authorization-code` to provide the code directly, or run interactively and paste the
 authorization code / callback URL when prompted.
 
+Agent-friendly two-step Authorization Code + PKCE:
+
+```bash
+uxc auth oauth start <credential_id> \
+  --endpoint <mcp_url> \
+  --redirect-uri <redirect_uri> \
+  --client-id <client_id> \
+  --scope "openid profile"
+```
+
+```bash
+uxc auth oauth complete <credential_id> \
+  --session-id <session_id> \
+  --authorization-response "http://127.0.0.1:11111/callback?code=..."
+```
+
 Notes:
 - `--client-id` is optional for `authorization_code`.
 - When omitted, `uxc` will attempt OAuth Dynamic Client Registration via provider
   `registration_endpoint` (RFC 7591).
 - If provider does not expose registration, pass `--client-id` explicitly.
+- `uxc auth oauth login ... --flow authorization_code` remains available for single-process interactive use.
+- `uxc auth oauth start/complete` is intended for agents or any workflow where authorization must span multiple CLI invocations.
 
 Refresh token manually:
 
