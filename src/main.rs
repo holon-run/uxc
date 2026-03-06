@@ -97,6 +97,7 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     /// Manage schema cache
@@ -315,6 +316,7 @@ enum AuthBindingCommands {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum AuthOauthCommands {
     /// List OAuth credentials
@@ -326,7 +328,7 @@ enum AuthOauthCommands {
         #[arg(value_name = "CREDENTIAL_ID")]
         credential_id: String,
 
-        /// MCP HTTP endpoint URL
+        /// Service endpoint URL used for OAuth discovery
         #[arg(long)]
         endpoint: String,
 
@@ -353,6 +355,30 @@ enum AuthOauthCommands {
         /// Authorization code or callback URL for authorization_code flow
         #[arg(long)]
         authorization_code: Option<String>,
+
+        /// OAuth issuer URL (overrides auto-discovery)
+        #[arg(long)]
+        issuer: Option<String>,
+
+        /// OAuth authorization endpoint URL (overrides auto-discovery)
+        #[arg(long)]
+        authorization_endpoint: Option<String>,
+
+        /// OAuth token endpoint URL (overrides auto-discovery)
+        #[arg(long)]
+        token_endpoint: Option<String>,
+
+        /// OAuth device authorization endpoint URL (overrides auto-discovery)
+        #[arg(long)]
+        device_authorization_endpoint: Option<String>,
+
+        /// OAuth dynamic client registration endpoint URL (overrides auto-discovery)
+        #[arg(long)]
+        registration_endpoint: Option<String>,
+
+        /// OAuth resource metadata URL (overrides auto-discovery)
+        #[arg(long)]
+        resource_metadata_url: Option<String>,
     },
 
     /// Refresh OAuth token
@@ -1439,7 +1465,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth", "oauth", "login"] => HelpData {
             path: "uxc auth oauth login".to_string(),
             about: "Login with OAuth and save tokens".to_string(),
-            usage: "uxc auth oauth login <credential_id> --endpoint <url> [--flow <device_code|authorization_code|client_credentials>] [--scope <scope>] [--client-id <id>] [--client-secret <secret>] [--redirect-uri <uri>] [--authorization-code <code>]".to_string(),
+            usage: "uxc auth oauth login <credential_id> --endpoint <url> [--flow <device_code|authorization_code|client_credentials>] [--scope <scope>] [--client-id <id>] [--client-secret <secret>] [--redirect-uri <uri>] [--authorization-code <code>] [--issuer <url>] [--authorization-endpoint <url>] [--token-endpoint <url>] [--device-authorization-endpoint <url>] [--registration-endpoint <url>] [--resource-metadata-url <url>]".to_string(),
             commands: vec![],
             notes: vec![],
             examples: vec!["uxc auth oauth login deepwiki --endpoint https://mcp.deepwiki.com/mcp --flow device_code --client-id <id>".to_string()],
@@ -3143,6 +3169,12 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
             client_secret,
             redirect_uri,
             authorization_code,
+            issuer,
+            authorization_endpoint,
+            token_endpoint,
+            device_authorization_endpoint,
+            registration_endpoint,
+            resource_metadata_url,
         } => {
             let flow = parse_oauth_flow(flow)?;
             let scopes = auth::oauth::parse_scopes(scope);
@@ -3151,6 +3183,14 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                 std::time::Duration::from_secs(30),
                 "OAuth login command",
             )?;
+            let discovery_overrides = auth::oauth::OAuthDiscoveryOverrides {
+                issuer: issuer.clone(),
+                authorization_endpoint: authorization_endpoint.clone(),
+                token_endpoint: token_endpoint.clone(),
+                device_authorization_endpoint: device_authorization_endpoint.clone(),
+                registration_endpoint: registration_endpoint.clone(),
+                resource_metadata_url: resource_metadata_url.clone(),
+            };
 
             let (metadata, token, resolved_client_id, resolved_client_secret) = match flow {
                 OAuthFlow::DeviceCode => {
@@ -3160,7 +3200,11 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                         )
                     })?;
                     let login = auth::oauth::login_with_device_code(
-                        &endpoint, &client, &client_id, &scopes,
+                        &endpoint,
+                        &client,
+                        &client_id,
+                        &scopes,
+                        &discovery_overrides,
                     )
                     .await?;
                     (
@@ -3184,6 +3228,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                         &scopes,
                         &redirect_uri,
                         authorization_code.clone(),
+                        &discovery_overrides,
                     )
                     .await?;
                     (
@@ -3210,6 +3255,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                         &client_id,
                         &client_secret,
                         &scopes,
+                        &discovery_overrides,
                     )
                     .await?;
                     (

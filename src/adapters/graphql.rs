@@ -10,18 +10,22 @@ use super::{
     Adapter, ExecutionMetadata, ExecutionResult, Operation, OperationDetail, Parameter,
     ProtocolType,
 };
-use crate::auth::Profile;
+use crate::auth::{oauth, AuthType, Profile};
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 pub struct GraphQLAdapter {
     client: reqwest::Client,
     cache: Option<Arc<dyn crate::cache::Cache>>,
     auth_profile: Option<Profile>,
+    runtime_auth_profile: Arc<Mutex<Option<Profile>>>,
+    oauth_refresh_lock: Arc<Mutex<()>>,
     force_refresh_schema: bool,
 }
 
@@ -35,6 +39,8 @@ impl GraphQLAdapter {
             client: reqwest::Client::new(),
             cache: None,
             auth_profile: None,
+            runtime_auth_profile: Arc::new(Mutex::new(None)),
+            oauth_refresh_lock: Arc::new(Mutex::new(())),
             force_refresh_schema: false,
         }
     }
@@ -52,6 +58,87 @@ impl GraphQLAdapter {
     pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
         self.force_refresh_schema = refresh;
         self
+    }
+
+    async fn effective_auth_profile(&self) -> Option<Profile> {
+        self.runtime_auth_profile
+            .lock()
+            .await
+            .clone()
+            .or_else(|| self.auth_profile.clone())
+    }
+
+    async fn set_effective_auth_profile(&self, profile: Profile) {
+        *self.runtime_auth_profile.lock().await = Some(profile);
+    }
+
+    fn apply_auth_profile(
+        mut req: reqwest::RequestBuilder,
+        profile: Option<&Profile>,
+    ) -> Result<reqwest::RequestBuilder> {
+        if let Some(profile) = profile {
+            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
+        }
+        Ok(req)
+    }
+
+    async fn refresh_effective_oauth_profile(&self, force: bool) -> Result<Option<Profile>> {
+        let _refresh_guard = self.oauth_refresh_lock.lock().await;
+        let mut profile = self.effective_auth_profile().await;
+        if let Some(active) = profile.as_mut() {
+            if active.auth_type == AuthType::OAuth {
+                let refreshed = if force {
+                    oauth::refresh_oauth_profile(active, &self.client).await?;
+                    true
+                } else {
+                    oauth::maybe_refresh_oauth_profile(active, &self.client, 60).await?
+                };
+                if refreshed {
+                    crate::auth::persist_profile_if_named(active)?;
+                    self.set_effective_auth_profile(active.clone()).await;
+                }
+            }
+        }
+        Ok(profile)
+    }
+
+    async fn send_graphql_request(
+        &self,
+        url: &str,
+        payload: &Value,
+        timeout: Option<Duration>,
+    ) -> Result<reqwest::Response> {
+        let mut profile = self.refresh_effective_oauth_profile(false).await?;
+
+        let mut req = self
+            .client
+            .post(url)
+            .header("Content-Type", "application/json");
+        if let Some(timeout) = timeout {
+            req = req.timeout(timeout);
+        }
+        req = Self::apply_auth_profile(req, profile.as_ref())?;
+
+        let mut resp = req.json(payload).send().await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && profile
+                .as_ref()
+                .is_some_and(|active| active.auth_type == AuthType::OAuth)
+        {
+            profile = self.refresh_effective_oauth_profile(true).await?;
+
+            let mut retry_req = self
+                .client
+                .post(url)
+                .header("Content-Type", "application/json");
+            if let Some(timeout) = timeout {
+                retry_req = retry_req.timeout(timeout);
+            }
+            retry_req = Self::apply_auth_profile(retry_req, profile.as_ref())?;
+            resp = retry_req.json(payload).send().await?;
+        }
+
+        Ok(resp)
     }
 
     /// Execute a GraphQL query/mutation with optional variables
@@ -74,17 +161,7 @@ impl GraphQLAdapter {
             payload["operationName"] = serde_json::json!(op_name);
         }
 
-        let mut req = self
-            .client
-            .post(url)
-            .header("Content-Type", "application/json");
-
-        // Apply authentication if profile is set
-        if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
-        }
-
-        let resp = req.json(&payload).send().await?;
+        let resp = self.send_graphql_request(url, &payload, None).await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -863,20 +940,9 @@ impl Adapter for GraphQLAdapter {
             }
         "#;
 
-        let mut req = self
-            .client
-            .post(url)
-            .timeout(std::time::Duration::from_secs(2))
-            .header("Content-Type", "application/json");
-
-        // Apply authentication if profile is set
-        if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
-        }
-
-        let resp = match req
-            .json(&serde_json::json!({ "query": query }))
-            .send()
+        let payload = serde_json::json!({ "query": query });
+        let resp = match self
+            .send_graphql_request(url, &payload, Some(std::time::Duration::from_secs(2)))
             .await
         {
             Ok(r) => r,
@@ -924,20 +990,8 @@ impl Adapter for GraphQLAdapter {
         // Fetch from remote
         let introspection_query = Self::get_introspection_query();
 
-        let mut req = self
-            .client
-            .post(url)
-            .header("Content-Type", "application/json");
-
-        // Apply authentication if profile is set
-        if let Some(profile) = &self.auth_profile {
-            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
-        }
-
-        let resp = req
-            .json(&serde_json::json!({ "query": introspection_query }))
-            .send()
-            .await?;
+        let payload = serde_json::json!({ "query": introspection_query });
+        let resp = self.send_graphql_request(url, &payload, None).await?;
 
         if !resp.status().is_success() {
             bail!("Failed to fetch GraphQL schema: HTTP {}", resp.status());
@@ -1319,5 +1373,76 @@ mod tests {
             "array"
         );
         assert_eq!(input_schema["required"][0], "id");
+    }
+
+    #[tokio::test]
+    async fn fetch_schema_with_oauth_refreshes_before_request() {
+        let mut server = mockito::Server::new_async().await;
+        let token_endpoint = format!("{}/token", server.url());
+
+        let _refresh = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::Regex(
+                "grant_type=refresh_token".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "access_token":"new-token",
+                    "token_type":"Bearer",
+                    "expires_in":3600,
+                    "refresh_token":"refresh-2"
+                }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _schema = server
+            .mock("POST", "/")
+            .match_header("authorization", "Bearer new-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "data": {
+                        "__schema": {
+                            "queryType": {"name":"Query","fields":[]},
+                            "mutationType": null,
+                            "subscriptionType": null,
+                            "types": []
+                        }
+                    }
+                }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut profile =
+            crate::auth::Profile::new("old-token".to_string(), crate::auth::AuthType::OAuth);
+        profile.oauth = Some(crate::auth::OAuthProfile {
+            token_endpoint: Some(token_endpoint),
+            refresh_token: Some("refresh-1".to_string()),
+            access_token: Some("old-token".to_string()),
+            token_type: Some("Bearer".to_string()),
+            expires_at: Some(i64::MAX - 1),
+            oauth_flow: Some(crate::auth::OAuthFlow::AuthorizationCode),
+            ..Default::default()
+        });
+        if let Some(oauth) = profile.oauth.as_mut() {
+            oauth.expires_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64
+                    + 30,
+            );
+        }
+
+        let adapter = GraphQLAdapter::new().with_auth(profile);
+        let schema = adapter.fetch_schema(&server.url()).await.unwrap();
+        assert!(schema.get("data").is_some());
     }
 }

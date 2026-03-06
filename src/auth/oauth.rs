@@ -24,6 +24,39 @@ pub struct OAuthProviderMetadata {
     pub device_authorization_endpoint: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct OAuthDiscoveryOverrides {
+    pub issuer: Option<String>,
+    pub authorization_endpoint: Option<String>,
+    pub token_endpoint: Option<String>,
+    pub device_authorization_endpoint: Option<String>,
+    pub registration_endpoint: Option<String>,
+    pub resource_metadata_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OAuthDiscoveryRequirements {
+    pub require_authorization_endpoint: bool,
+    pub require_device_authorization_endpoint: bool,
+    pub require_registration_endpoint: bool,
+}
+
+impl OAuthDiscoveryRequirements {
+    fn is_satisfied(
+        &self,
+        token_endpoint: &Option<String>,
+        authorization_endpoint: &Option<String>,
+        device_authorization_endpoint: &Option<String>,
+        registration_endpoint: &Option<String>,
+    ) -> bool {
+        token_endpoint.is_some()
+            && (!self.require_authorization_endpoint || authorization_endpoint.is_some())
+            && (!self.require_device_authorization_endpoint
+                || device_authorization_endpoint.is_some())
+            && (!self.require_registration_endpoint || registration_endpoint.is_some())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct OAuthTokenResponse {
     pub access_token: String,
@@ -116,6 +149,27 @@ pub fn should_refresh_token(oauth: &OAuthProfile, skew_seconds: i64) -> bool {
     }
 }
 
+pub async fn maybe_refresh_oauth_profile(
+    profile: &mut Profile,
+    client: &Client,
+    skew_seconds: i64,
+) -> Result<bool> {
+    if profile.auth_type != crate::auth::AuthType::OAuth {
+        return Ok(false);
+    }
+
+    let should_refresh = profile
+        .oauth
+        .as_ref()
+        .is_some_and(|oauth| should_refresh_token(oauth, skew_seconds));
+    if !should_refresh {
+        return Ok(false);
+    }
+
+    refresh_oauth_profile(profile, client).await?;
+    Ok(true)
+}
+
 pub fn apply_token_to_profile(
     profile: &mut Profile,
     flow: OAuthFlow,
@@ -160,86 +214,188 @@ pub async fn discover_provider_metadata(
     endpoint: &str,
     client: &Client,
 ) -> Result<OAuthProviderMetadata> {
-    let resource_metadata_url = discover_resource_metadata_url(endpoint, client).await?;
+    discover_provider_metadata_with_overrides(endpoint, client, &OAuthDiscoveryOverrides::default())
+        .await
+}
 
-    let mut authorization_server = if let Some(resource_url) = &resource_metadata_url {
-        let resource_doc = client
-            .get(resource_url)
-            .send()
-            .await
-            .context("Failed to fetch resource metadata")?
-            .error_for_status()
-            .context("Resource metadata request failed")?
-            .json::<ResourceMetadataDocument>()
-            .await
-            .context("Failed to decode resource metadata")?;
+pub async fn discover_provider_metadata_with_overrides(
+    endpoint: &str,
+    client: &Client,
+    overrides: &OAuthDiscoveryOverrides,
+) -> Result<OAuthProviderMetadata> {
+    discover_provider_metadata_with_requirements(
+        endpoint,
+        client,
+        overrides,
+        &OAuthDiscoveryRequirements::default(),
+    )
+    .await
+}
 
-        resource_doc
-            .authorization_server
-            .or_else(|| resource_doc.authorization_servers.first().cloned())
+pub async fn discover_provider_metadata_with_requirements(
+    endpoint: &str,
+    client: &Client,
+    overrides: &OAuthDiscoveryOverrides,
+    requirements: &OAuthDiscoveryRequirements,
+) -> Result<OAuthProviderMetadata> {
+    let mut authorization_endpoint = overrides.authorization_endpoint.clone();
+    let mut registration_endpoint = overrides.registration_endpoint.clone();
+    let mut token_endpoint = overrides.token_endpoint.clone();
+    let mut device_authorization_endpoint = overrides.device_authorization_endpoint.clone();
+    let mut provider_issuer = overrides.issuer.clone();
+    let mut authorization_server = overrides.issuer.clone();
+
+    // If explicit overrides already satisfy caller requirements, skip provider discovery.
+    if requirements.is_satisfied(
+        &token_endpoint,
+        &authorization_endpoint,
+        &device_authorization_endpoint,
+        &registration_endpoint,
+    ) {
+        if authorization_server.is_none() {
+            authorization_server = endpoint_origin(endpoint);
+        }
+        return Ok(OAuthProviderMetadata {
+            provider_issuer,
+            resource_metadata_url: overrides.resource_metadata_url.clone(),
+            authorization_server,
+            authorization_endpoint,
+            registration_endpoint,
+            token_endpoint: token_endpoint
+                .expect("token endpoint is validated by requirements.is_satisfied"),
+            device_authorization_endpoint,
+        });
+    }
+
+    let resource_metadata_url = if overrides.resource_metadata_url.is_some() {
+        overrides.resource_metadata_url.clone()
+    } else if overrides.issuer.is_none() && overrides.token_endpoint.is_none() {
+        discover_resource_metadata_url(endpoint, client).await?
     } else {
         None
     };
 
     if authorization_server.is_none() {
+        authorization_server = if let Some(resource_url) = &resource_metadata_url {
+            let resource_doc = client
+                .get(resource_url)
+                .send()
+                .await
+                .context("Failed to fetch resource metadata")?
+                .error_for_status()
+                .context("Resource metadata request failed")?
+                .json::<ResourceMetadataDocument>()
+                .await
+                .context("Failed to decode resource metadata")?;
+
+            resource_doc
+                .authorization_server
+                .or_else(|| resource_doc.authorization_servers.first().cloned())
+        } else {
+            None
+        };
+    }
+
+    if authorization_server.is_none() {
         authorization_server = endpoint_origin(endpoint);
     }
 
-    let issuer = authorization_server.clone().ok_or_else(|| {
-        UxcError::OAuthDiscoveryFailed(
-            "Could not determine OAuth authorization server from MCP endpoint".to_string(),
-        )
-    })?;
+    let mut metadata_fetch_errors: Vec<String> = Vec::new();
 
-    let authorization_server_metadata = fetch_authorization_server_metadata(&issuer, client)
-        .await
-        .ok();
-    let openid = fetch_openid_configuration(&issuer, client).await.ok();
+    if let Some(issuer) = authorization_server.clone() {
+        let should_fetch_provider_metadata = !requirements.is_satisfied(
+            &token_endpoint,
+            &authorization_endpoint,
+            &device_authorization_endpoint,
+            &registration_endpoint,
+        );
+        let (authorization_server_metadata, openid) = if should_fetch_provider_metadata {
+            let authorization_server_metadata =
+                match fetch_authorization_server_metadata(&issuer, client).await {
+                    Ok(meta) => Some(meta),
+                    Err(err) => {
+                        metadata_fetch_errors.push(format!(
+                            "authorization-server metadata lookup failed: {}",
+                            err
+                        ));
+                        None
+                    }
+                };
+            let openid = match fetch_openid_configuration(&issuer, client).await {
+                Ok(config) => Some(config),
+                Err(err) => {
+                    metadata_fetch_errors
+                        .push(format!("openid-configuration lookup failed: {}", err));
+                    None
+                }
+            };
+            (authorization_server_metadata, openid)
+        } else {
+            (None, None)
+        };
 
-    let token_endpoint = authorization_server_metadata
-        .as_ref()
-        .map(|meta| meta.token_endpoint.clone())
-        .or_else(|| openid.as_ref().map(|config| config.token_endpoint.clone()))
-        .ok_or_else(|| {
-            UxcError::OAuthDiscoveryFailed(
-                "Could not determine token_endpoint from provider metadata".to_string(),
+        if token_endpoint.is_none() {
+            token_endpoint = authorization_server_metadata
+                .as_ref()
+                .map(|meta| meta.token_endpoint.clone())
+                .or_else(|| openid.as_ref().map(|config| config.token_endpoint.clone()));
+        }
+        if authorization_endpoint.is_none() {
+            authorization_endpoint = authorization_server_metadata
+                .as_ref()
+                .and_then(|meta| meta.authorization_endpoint.clone())
+                .or_else(|| {
+                    openid
+                        .as_ref()
+                        .and_then(|config| config.authorization_endpoint.clone())
+                });
+        }
+        if registration_endpoint.is_none() {
+            registration_endpoint = authorization_server_metadata
+                .as_ref()
+                .and_then(|meta| meta.registration_endpoint.clone())
+                .or_else(|| {
+                    openid
+                        .as_ref()
+                        .and_then(|config| config.registration_endpoint.clone())
+                });
+        }
+        if device_authorization_endpoint.is_none() {
+            device_authorization_endpoint = infer_device_authorization_endpoint(
+                &issuer,
+                authorization_server_metadata.as_ref(),
             )
-        })?;
-
-    let authorization_endpoint = authorization_server_metadata
-        .as_ref()
-        .and_then(|meta| meta.authorization_endpoint.clone())
-        .or_else(|| {
-            openid
-                .as_ref()
-                .and_then(|config| config.authorization_endpoint.clone())
-        });
-    let registration_endpoint = authorization_server_metadata
-        .as_ref()
-        .and_then(|meta| meta.registration_endpoint.clone())
-        .or_else(|| {
-            openid
-                .as_ref()
-                .and_then(|config| config.registration_endpoint.clone())
-        });
-
-    let provider_issuer = authorization_server_metadata
-        .as_ref()
-        .and_then(|meta| meta.issuer.clone())
-        .or_else(|| openid.as_ref().and_then(|config| config.issuer.clone()))
-        .or(Some(issuer.clone()));
-    let device_authorization_endpoint =
-        infer_device_authorization_endpoint(&issuer, authorization_server_metadata.as_ref())
             .or_else(|| {
                 openid
                     .as_ref()
                     .and_then(|config| config.device_authorization_endpoint.clone())
             });
+        }
+        if provider_issuer.is_none() {
+            provider_issuer = authorization_server_metadata
+                .as_ref()
+                .and_then(|meta| meta.issuer.clone())
+                .or_else(|| openid.as_ref().and_then(|config| config.issuer.clone()))
+                .or(Some(issuer.clone()));
+        }
+    }
+
+    let token_endpoint = token_endpoint.ok_or_else(|| {
+        let mut message =
+            "Could not determine token_endpoint from provider metadata. Provide --token-endpoint."
+                .to_string();
+        if !metadata_fetch_errors.is_empty() {
+            message.push(' ');
+            message.push_str("Metadata lookup errors: ");
+            message.push_str(&metadata_fetch_errors.join("; "));
+        }
+        UxcError::OAuthDiscoveryFailed(message)
+    })?;
 
     Ok(OAuthProviderMetadata {
         provider_issuer,
         resource_metadata_url,
-        authorization_server: Some(issuer),
+        authorization_server,
         authorization_endpoint,
         registration_endpoint,
         token_endpoint,
@@ -247,6 +403,7 @@ pub async fn discover_provider_metadata(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn login_with_authorization_code(
     endpoint: &str,
     client: &Client,
@@ -255,8 +412,19 @@ pub async fn login_with_authorization_code(
     scopes: &[String],
     redirect_uri: &str,
     authorization_code: Option<String>,
+    overrides: &OAuthDiscoveryOverrides,
 ) -> Result<AuthorizationCodeLoginResult> {
-    let metadata = discover_provider_metadata(endpoint, client).await?;
+    let metadata = discover_provider_metadata_with_requirements(
+        endpoint,
+        client,
+        overrides,
+        &OAuthDiscoveryRequirements {
+            require_authorization_endpoint: true,
+            require_device_authorization_endpoint: false,
+            require_registration_endpoint: client_id.is_none(),
+        },
+    )
+    .await?;
     let authorization_endpoint = metadata.authorization_endpoint.clone().ok_or_else(|| {
         UxcError::OAuthDiscoveryFailed(
             "OAuth provider does not expose authorization_endpoint".to_string(),
@@ -424,8 +592,15 @@ pub async fn login_with_client_credentials(
     client_id: &str,
     client_secret: &str,
     scopes: &[String],
+    overrides: &OAuthDiscoveryOverrides,
 ) -> Result<OAuthLoginResult> {
-    let metadata = discover_provider_metadata(endpoint, client).await?;
+    let metadata = discover_provider_metadata_with_requirements(
+        endpoint,
+        client,
+        overrides,
+        &OAuthDiscoveryRequirements::default(),
+    )
+    .await?;
 
     let mut form: HashMap<&str, String> = HashMap::new();
     form.insert("grant_type", "client_credentials".to_string());
@@ -447,8 +622,19 @@ pub async fn login_with_device_code(
     client: &Client,
     client_id: &str,
     scopes: &[String],
+    overrides: &OAuthDiscoveryOverrides,
 ) -> Result<OAuthLoginResult> {
-    let metadata = discover_provider_metadata(endpoint, client).await?;
+    let metadata = discover_provider_metadata_with_requirements(
+        endpoint,
+        client,
+        overrides,
+        &OAuthDiscoveryRequirements {
+            require_authorization_endpoint: false,
+            require_device_authorization_endpoint: true,
+            require_registration_endpoint: false,
+        },
+    )
+    .await?;
     let device_endpoint = metadata
         .device_authorization_endpoint
         .clone()
@@ -1225,5 +1411,46 @@ mod tests {
             }
             TokenEndpointResponse::Token(_) => panic!("expected OAuth error payload"),
         }
+    }
+
+    #[tokio::test]
+    async fn discovery_overrides_allow_explicit_token_endpoint_without_mcp_discovery() {
+        let client = Client::new();
+        let overrides = OAuthDiscoveryOverrides {
+            token_endpoint: Some("https://auth.example.com/oauth/token".to_string()),
+            authorization_endpoint: Some("https://auth.example.com/oauth/authorize".to_string()),
+            ..Default::default()
+        };
+
+        let metadata =
+            discover_provider_metadata_with_overrides("not-a-url", &client, &overrides).await;
+        let metadata = metadata.expect("explicit token endpoint should bypass MCP discovery");
+        assert_eq!(
+            metadata.token_endpoint,
+            "https://auth.example.com/oauth/token"
+        );
+        assert_eq!(
+            metadata.authorization_endpoint.as_deref(),
+            Some("https://auth.example.com/oauth/authorize")
+        );
+        assert!(metadata.authorization_server.is_none());
+        assert!(metadata.resource_metadata_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn discovery_overrides_require_token_endpoint_when_unresolvable() {
+        let client = Client::new();
+        let overrides = OAuthDiscoveryOverrides {
+            issuer: Some("https://127.0.0.1:9".to_string()),
+            ..Default::default()
+        };
+
+        let err =
+            discover_provider_metadata_with_overrides("https://127.0.0.1:9", &client, &overrides)
+                .await
+                .expect_err("missing token endpoint should fail");
+        assert!(err
+            .to_string()
+            .contains("Could not determine token_endpoint"));
     }
 }

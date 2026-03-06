@@ -233,26 +233,43 @@ impl ProtocolDetector {
         }
 
         // Try GraphQL (introspection is reliable)
-        let graphql_adapter = graphql::GraphQLAdapter::new();
+        let graphql_adapter = if let Some(profile) = options.auth_profile.clone() {
+            graphql::GraphQLAdapter::new().with_auth(profile)
+        } else {
+            graphql::GraphQLAdapter::new()
+        };
         if graphql_adapter.can_handle(url).await? {
             return Ok(AdapterEnum::GraphQL(graphql_adapter));
         }
 
         // Try OpenAPI
-        let openapi_adapter =
-            openapi::OpenAPIAdapter::new().with_schema_url_override(options.schema_url.clone());
+        let openapi_adapter = if let Some(profile) = options.auth_profile.clone() {
+            openapi::OpenAPIAdapter::new()
+                .with_schema_url_override(options.schema_url.clone())
+                .with_auth(profile)
+        } else {
+            openapi::OpenAPIAdapter::new().with_schema_url_override(options.schema_url.clone())
+        };
         if openapi_adapter.can_handle(url).await? {
             return Ok(AdapterEnum::OpenAPI(openapi_adapter));
         }
 
         // Try JSON-RPC (OpenRPC discovery)
-        let jsonrpc_adapter = jsonrpc::JsonRpcAdapter::new();
+        let jsonrpc_adapter = if let Some(profile) = options.auth_profile.clone() {
+            jsonrpc::JsonRpcAdapter::new().with_auth(profile)
+        } else {
+            jsonrpc::JsonRpcAdapter::new()
+        };
         if jsonrpc_adapter.can_handle(url).await? {
             return Ok(AdapterEnum::JsonRpc(jsonrpc_adapter));
         }
 
         // Try gRPC (less reliable detection, try last)
-        let grpc_adapter = grpc::GrpcAdapter::new();
+        let grpc_adapter = if let Some(profile) = options.auth_profile.clone() {
+            grpc::GrpcAdapter::new().with_auth(profile)
+        } else {
+            grpc::GrpcAdapter::new()
+        };
         if grpc_adapter.can_handle(url).await? {
             return Ok(AdapterEnum::GRpc(grpc_adapter));
         }
@@ -418,5 +435,167 @@ mod tests {
             .find_map(|cause| cause.downcast_ref::<UxcError>());
 
         assert!(matches!(oauth_err, Some(UxcError::OAuthRefreshFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn detector_uses_auth_profile_for_graphql_probe() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = format!("{}/graphql", server.url());
+
+        let _mcp_root = server
+            .mock("POST", "/graphql")
+            .match_body(mockito::Matcher::Regex(
+                "\"method\":\"initialize\"".to_string(),
+            ))
+            .with_status(404)
+            .create_async()
+            .await;
+        let _mcp_well_known = server
+            .mock("POST", "/.well-known/mcp")
+            .with_status(404)
+            .create_async()
+            .await;
+        let _mcp_path = server
+            .mock("POST", "/mcp")
+            .with_status(404)
+            .create_async()
+            .await;
+        let _graphql = server
+            .mock("POST", "/graphql")
+            .match_header("authorization", "Bearer graph-token")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{"__schema":{"queryType":{"name":"Query"}}}}"#)
+            .create_async()
+            .await;
+
+        let detector = ProtocolDetector::new();
+        let options = DetectionOptions {
+            schema_url: None,
+            auth_profile: Some(Profile::new("graph-token".to_string(), AuthType::Bearer)),
+        };
+
+        let adapter = detector
+            .detect_adapter_with_options(&endpoint, &options)
+            .await
+            .unwrap();
+        assert!(matches!(adapter, AdapterEnum::GraphQL(_)));
+    }
+
+    #[tokio::test]
+    async fn detector_uses_auth_profile_for_openapi_probe() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = format!("{}/openapi", server.url());
+
+        let _mcp_root = server
+            .mock("POST", "/openapi")
+            .match_body(mockito::Matcher::Regex(
+                "\"method\":\"initialize\"".to_string(),
+            ))
+            .with_status(404)
+            .create_async()
+            .await;
+        let _mcp_well_known = server
+            .mock("POST", "/.well-known/mcp")
+            .with_status(404)
+            .create_async()
+            .await;
+        let _mcp_path = server
+            .mock("POST", "/mcp")
+            .with_status(404)
+            .create_async()
+            .await;
+        let _graphql = server
+            .mock("POST", "/openapi")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(404)
+            .create_async()
+            .await;
+        let _schema = server
+            .mock("GET", "/openapi/openapi.json")
+            .match_header("authorization", "Bearer openapi-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{}}"#)
+            .create_async()
+            .await;
+
+        let detector = ProtocolDetector::new();
+        let options = DetectionOptions {
+            schema_url: None,
+            auth_profile: Some(Profile::new("openapi-token".to_string(), AuthType::Bearer)),
+        };
+
+        let adapter = detector
+            .detect_adapter_with_options(&endpoint, &options)
+            .await
+            .unwrap();
+        assert!(matches!(adapter, AdapterEnum::OpenAPI(_)));
+    }
+
+    #[tokio::test]
+    async fn detector_uses_auth_profile_for_jsonrpc_probe() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = format!("{}/rpc", server.url());
+
+        let _mcp_root = server
+            .mock("POST", "/rpc")
+            .match_body(mockito::Matcher::Regex(
+                "\"method\":\"initialize\"".to_string(),
+            ))
+            .with_status(404)
+            .create_async()
+            .await;
+        let _mcp_well_known = server
+            .mock("POST", "/.well-known/mcp")
+            .with_status(404)
+            .create_async()
+            .await;
+        let _mcp_path = server
+            .mock("POST", "/mcp")
+            .with_status(404)
+            .create_async()
+            .await;
+        let _graphql = server
+            .mock("POST", "/rpc")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(404)
+            .create_async()
+            .await;
+        let _openapi = server
+            .mock("GET", "/rpc/openapi.json")
+            .with_status(404)
+            .create_async()
+            .await;
+        let _jsonrpc = server
+            .mock("POST", "/rpc")
+            .match_header("authorization", "Bearer jsonrpc-token")
+            .match_body(mockito::Matcher::Regex(
+                "\"method\":\"rpc.discover\"".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                  "jsonrpc":"2.0",
+                  "id":1,
+                  "result":{"openrpc":"1.3.2","methods":[]}
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let detector = ProtocolDetector::new();
+        let options = DetectionOptions {
+            schema_url: None,
+            auth_profile: Some(Profile::new("jsonrpc-token".to_string(), AuthType::Bearer)),
+        };
+
+        let adapter = detector
+            .detect_adapter_with_options(&endpoint, &options)
+            .await
+            .unwrap();
+        assert!(matches!(adapter, AdapterEnum::JsonRpc(_)));
     }
 }

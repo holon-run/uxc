@@ -871,6 +871,26 @@ pub fn resolve_auth_for_endpoint(
     Ok(Some(profile))
 }
 
+pub fn persist_profile_if_named(profile: &Profile) -> Result<()> {
+    let Some(name) = profile
+        .name
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let mut profiles = Profiles::load_profiles()?;
+    if !profiles.has_profile(name) {
+        return Ok(());
+    }
+
+    profiles.set_profile(name.to_string(), profile.clone())?;
+    profiles.save_profiles()?;
+    Ok(())
+}
+
 fn validate_ready(profile: &Profile) -> Result<()> {
     match profile.auth_type {
         AuthType::OAuth => {
