@@ -139,6 +139,19 @@ fn introspection_schema() -> serde_json::Value {
                   }
                 ],
                 "type": {"kind": "OBJECT", "name": "User", "ofType": null}
+              },
+              {
+                "name": "issueCreate",
+                "description": "Create issue",
+                "args": [
+                  {
+                    "name": "input",
+                    "description": "Issue creation payload",
+                    "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "INPUT_OBJECT", "name": "IssueCreateInput", "ofType": null}},
+                    "defaultValue": null
+                  }
+                ],
+                "type": {"kind": "OBJECT", "name": "Issue", "ofType": null}
               }
             ]
           },
@@ -194,6 +207,19 @@ fn introspection_schema() -> serde_json::Value {
                     }
                   ],
                   "type": {"kind": "OBJECT", "name": "User", "ofType": null}
+                },
+                {
+                  "name": "issueCreate",
+                  "description": "Create issue",
+                  "args": [
+                    {
+                      "name": "input",
+                      "description": "Issue creation payload",
+                      "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "INPUT_OBJECT", "name": "IssueCreateInput", "ofType": null}},
+                      "defaultValue": null
+                    }
+                  ],
+                  "type": {"kind": "OBJECT", "name": "Issue", "ofType": null}
                 }
               ]
             },
@@ -209,6 +235,30 @@ fn introspection_schema() -> serde_json::Value {
               "name": "HealthResult",
               "fields": [
                 {"name": "status", "type": {"name": "String", "kind": "SCALAR"}}
+              ]
+            },
+            {
+              "name": "Issue",
+              "fields": [
+                {"name": "id", "type": {"name": "ID", "kind": "SCALAR"}},
+                {"name": "teamId", "type": {"name": "ID", "kind": "SCALAR"}},
+                {"name": "title", "type": {"name": "String", "kind": "SCALAR"}}
+              ]
+            },
+            {
+              "name": "IssueCreateInput",
+              "kind": "INPUT_OBJECT",
+              "inputFields": [
+                {
+                  "name": "teamId",
+                  "description": "Team identifier",
+                  "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "SCALAR", "name": "ID", "ofType": null}}
+                },
+                {
+                  "name": "title",
+                  "description": "Issue title",
+                  "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "SCALAR", "name": "String", "ofType": null}}
+                }
               ]
             }
           ]
@@ -285,6 +335,31 @@ async fn execute_query(
                 return Ok(GraphQLResponse {
                     data: Some(json!({
                         "createUser": {"id": "3", "name": name, "email": email}
+                    })),
+                    errors: None,
+                });
+            }
+
+            // Create issue mutation
+            if query.contains("issueCreate") {
+                let input = req.variables.get("input").and_then(|v| v.as_object());
+                let team_id = input
+                    .and_then(|v| v.get("teamId"))
+                    .and_then(|v| {
+                        v.as_str()
+                            .map(ToString::to_string)
+                            .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    })
+                    .unwrap_or_else(|| "TEAM-1".to_string());
+                let title = input
+                    .and_then(|v| v.get("title"))
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "Untitled issue".to_string());
+
+                return Ok(GraphQLResponse {
+                    data: Some(json!({
+                        "issueCreate": {"id": "I-1", "teamId": team_id, "title": title}
                     })),
                     errors: None,
                 });

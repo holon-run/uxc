@@ -27,6 +27,8 @@ pub struct GraphQLAdapter {
 
 impl GraphQLAdapter {
     const MAX_INPUT_SCHEMA_DEPTH: usize = 8;
+    const MAX_SELECTION_DEPTH: usize = 3;
+    const MAX_SELECTION_FIELDS_PER_OBJECT: usize = 12;
 
     pub fn new() -> Self {
         Self {
@@ -188,6 +190,7 @@ impl GraphQLAdapter {
                 args {
                     name
                     description
+                    defaultValue
                     type {
                         ...TypeRef
                     }
@@ -643,6 +646,147 @@ impl GraphQLAdapter {
         Some(Value::Object(input))
     }
 
+    fn is_scalar_or_enum(type_info: &Value) -> bool {
+        let kind = type_info.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        match kind {
+            "SCALAR" | "ENUM" => true,
+            "NON_NULL" | "LIST" => type_info
+                .get("ofType")
+                .map(Self::is_scalar_or_enum)
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    fn named_type_name(type_info: &Value) -> Option<String> {
+        let kind = type_info.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        match kind {
+            "NON_NULL" | "LIST" => type_info.get("ofType").and_then(Self::named_type_name),
+            _ => type_info
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string()),
+        }
+    }
+
+    fn field_priority(name: &str, is_leaf: bool) -> i32 {
+        if name == "nodes" {
+            return 0;
+        }
+        if is_leaf
+            && matches!(
+                name,
+                "id" | "identifier"
+                    | "key"
+                    | "name"
+                    | "title"
+                    | "url"
+                    | "state"
+                    | "status"
+                    | "createdAt"
+                    | "updatedAt"
+            )
+        {
+            return 1;
+        }
+        if is_leaf {
+            return 2;
+        }
+        if matches!(name, "state" | "assignee" | "team" | "project" | "pageInfo") {
+            return 3;
+        }
+        4
+    }
+
+    fn build_selection_set_for_type(
+        type_info: &Value,
+        type_index: &HashMap<String, &Value>,
+        visiting: &mut HashSet<String>,
+        depth: usize,
+    ) -> Option<String> {
+        if depth == 0 {
+            return Some("__typename".to_string());
+        }
+
+        let Some(type_name) = Self::named_type_name(type_info) else {
+            return Some("__typename".to_string());
+        };
+        let Some(type_def) = type_index.get(&type_name).copied() else {
+            return Some("__typename".to_string());
+        };
+        let fields = type_def.get("fields").and_then(|f| f.as_array())?;
+
+        if !visiting.insert(type_name.clone()) {
+            return Some("__typename".to_string());
+        }
+
+        let mut ranked: Vec<(usize, i32)> = fields
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, field)| {
+                let name = field.get("name").and_then(|n| n.as_str())?;
+                let field_type = field.get("type")?;
+                let is_leaf = Self::is_scalar_or_enum(field_type);
+                Some((idx, Self::field_priority(name, is_leaf)))
+            })
+            .collect();
+        ranked.sort_by_key(|(idx, priority)| (*priority, *idx));
+
+        let mut selections = Vec::new();
+        for (idx, _) in ranked {
+            if selections.len() >= Self::MAX_SELECTION_FIELDS_PER_OBJECT {
+                break;
+            }
+            let field = &fields[idx];
+            let Some(name) = field.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let Some(field_type) = field.get("type") else {
+                continue;
+            };
+
+            if Self::is_scalar_or_enum(field_type) {
+                selections.push(name.to_string());
+                continue;
+            }
+
+            let child = Self::build_selection_set_for_type(
+                field_type,
+                type_index,
+                visiting,
+                depth.saturating_sub(1),
+            );
+            if let Some(child_selection) = child {
+                selections.push(format!("{} {{ {} }}", name, child_selection));
+            }
+        }
+
+        visiting.remove(&type_name);
+
+        if selections.is_empty() {
+            Some("__typename".to_string())
+        } else {
+            Some(selections.join(" "))
+        }
+    }
+
+    fn default_selection_set(schema: &Value, operation: &str) -> String {
+        let Some(field) = Self::find_operation_field(schema, operation) else {
+            return "__typename".to_string();
+        };
+        let Some(return_type) = field.get("type") else {
+            return "__typename".to_string();
+        };
+        let type_index = Self::build_type_index(schema);
+        Self::build_selection_set_for_type(
+            return_type,
+            &type_index,
+            &mut HashSet::new(),
+            Self::MAX_SELECTION_DEPTH,
+        )
+        .unwrap_or_else(|| "__typename".to_string())
+    }
+
     /// Find operation details from parsed operations
     fn find_operation(schema: &Value, operation: &str) -> Option<Operation> {
         let operations = Self::parse_schema_to_operations(schema).ok()?;
@@ -850,94 +994,143 @@ impl Adapter for GraphQLAdapter {
         args: HashMap<String, Value>,
     ) -> Result<ExecutionResult> {
         let start = std::time::Instant::now();
+        let mut args = args;
 
         // Parse operation name to determine type
         let (op_type, field_name) = Self::parse_operation_name(operation)?;
+        let selection_override = args.remove("_select");
+        let selection_override = match selection_override {
+            Some(Value::String(s)) => Some(s),
+            Some(other) => {
+                bail!(
+                    "GraphQL reserved argument '_select' must be a string, got {}",
+                    other
+                );
+            }
+            None => None,
+        };
 
-        // Build query arguments string
-        let args_str = if !args.is_empty() {
-            let args_parts: Vec<String> = args
-                .iter()
-                .map(|(k, v)| {
-                    let value_str = match v {
-                        Value::String(s) => format!("\"{}\"", s),
-                        Value::Bool(b) => b.to_string(),
-                        Value::Number(n) => n.to_string(),
-                        Value::Null => "null".to_string(),
-                        Value::Array(arr) => {
-                            let items: Vec<String> = arr
-                                .iter()
-                                .map(|item| match item {
-                                    Value::String(s) => format!("\"{}\"", s),
-                                    _ => item.to_string(),
-                                })
-                                .collect();
-                            format!("[{}]", items.join(", "))
-                        }
-                        Value::Object(_obj) => {
-                            // For nested objects, use variable syntax
-                            format!("${}", k)
-                        }
-                    };
-                    format!("{}: {}", k, value_str)
-                })
-                .collect();
-            format!("({})", args_parts.join(", "))
-        } else {
+        let schema = self.fetch_schema(url).await?;
+        let field = Self::find_operation_field(&schema, operation)
+            .ok_or_else(|| anyhow!("Operation '{}' not found", operation))?;
+
+        let declared_args = field
+            .get("args")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let known_arg_names: HashSet<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                arg.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.to_string())
+            })
+            .collect();
+        let unknown_args: Vec<String> = args
+            .keys()
+            .filter(|k| !known_arg_names.contains(*k))
+            .cloned()
+            .collect();
+        if !unknown_args.is_empty() {
+            bail!(
+                "Unknown argument(s) for GraphQL operation '{}': {}",
+                operation,
+                unknown_args.join(", ")
+            );
+        }
+
+        let missing_required: Vec<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                let name = arg.get("name").and_then(|n| n.as_str())?;
+                let is_non_null = arg
+                    .get("type")
+                    .and_then(|t| t.get("kind"))
+                    .and_then(|k| k.as_str())
+                    == Some("NON_NULL");
+                let required = if !is_non_null {
+                    false
+                } else {
+                    match arg.get("defaultValue") {
+                        // defaultValue explicitly null => no default => required
+                        Some(v) => v.is_null(),
+                        // defaultValue missing from schema => avoid false positives
+                        None => false,
+                    }
+                };
+                if required && !args.contains_key(name) {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !missing_required.is_empty() {
+            bail!(
+                "Missing required GraphQL argument(s) for '{}': {}",
+                operation,
+                missing_required.join(", ")
+            );
+        }
+
+        let var_defs: Vec<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                let name = arg.get("name").and_then(|n| n.as_str())?;
+                if !args.contains_key(name) {
+                    return None;
+                }
+                let type_info = arg.get("type")?;
+                let type_name = Self::type_to_string(type_info);
+                Some(format!("${}: {}", name, type_name))
+            })
+            .collect();
+
+        let arg_bindings: Vec<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                let name = arg.get("name").and_then(|n| n.as_str())?;
+                if args.contains_key(name) {
+                    Some(format!("{}: ${}", name, name))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let var_defs_str = if var_defs.is_empty() {
             String::new()
-        };
-
-        // For GraphQL, we need to introspect to get the return type fields
-        // For now, use a default selection set that requests common fields
-        // This is a pragmatic approach since we can't know the schema without introspection
-        let selection_set = match field_name.as_str() {
-            "country" => "name code native capital emoji currency languages { name code native }",
-            "countries" => "name code",
-            "continent" => "name code",
-            "continents" => "name code",
-            "language" => "name code native",
-            "languages" => "name code native",
-            _ => "__typename",
-        };
-
-        // Check if we have complex nested objects that need variables
-        let has_complex_objects = args.values().any(|v| matches!(v, Value::Object(_)));
-
-        let (query_string, variables) = if has_complex_objects {
-            // Use variables for complex types
-            let var_names: Vec<String> = args
-                .keys()
-                .map(|k| format!("${}: String", k)) // Simplified type
-                .collect();
-
-            let query = format!(
-                "{} {}{} {{ {} {{ {} }} }}",
-                match op_type {
-                    OperationType::Query => "query",
-                    OperationType::Mutation => "mutation",
-                    OperationType::Subscription => "subscription",
-                },
-                field_name,
-                var_names.join(", "),
-                field_name,
-                selection_set
-            );
-
-            (query, Some(Value::Object(args.into_iter().collect())))
         } else {
-            let query = format!(
-                "{} {{ {}{} {{ {} }} }}",
-                match op_type {
-                    OperationType::Query => "query",
-                    OperationType::Mutation => "mutation",
-                    OperationType::Subscription => "subscription",
-                },
-                field_name,
-                args_str,
-                selection_set
-            );
+            format!(" ({})", var_defs.join(", "))
+        };
+        let args_str = if arg_bindings.is_empty() {
+            String::new()
+        } else {
+            format!("({})", arg_bindings.join(", "))
+        };
 
-            (query, None)
+        let selection_set =
+            selection_override.unwrap_or_else(|| Self::default_selection_set(&schema, operation));
+
+        let query_string = format!(
+            "{}{} {{ {}{} {{ {} }} }}",
+            match op_type {
+                OperationType::Query => "query",
+                OperationType::Mutation => "mutation",
+                OperationType::Subscription => "subscription",
+            },
+            var_defs_str,
+            field_name,
+            args_str,
+            selection_set
+        );
+
+        let variables = if args.is_empty() {
+            None
+        } else {
+            Some(Value::Object(args.into_iter().collect()))
         };
 
         let result = self

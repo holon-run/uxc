@@ -126,6 +126,8 @@ Default output is JSON. Do not use `--text` in agent automation paths.
   - `references/protocol-cheatsheet.md`
 - Public endpoint examples and availability notes:
   - `references/public-endpoints.md`
+- Authentication configuration (API keys, headers, secret sources):
+  - `references/auth-configuration.md`
 - OAuth and credential/binding lifecycle:
   - `references/oauth-and-binding.md`
 - Failure handling and retry strategy:

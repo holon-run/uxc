@@ -22,14 +22,41 @@ Linear supports two authentication methods:
 ### Option 1: Personal API Key (Recommended for development)
 
 1. Get your API key from Linear: https://linear.app/settings/api
-2. Set credentials:
+
+2. Set credential with custom Authorization header:
    ```bash
-   uxc auth credential set linear-mcp --auth-type bearer --secret-env LINEAR_API_KEY
+   uxc auth credential set linear-mcp \
+     --auth-type api_key \
+     --header "Authorization:{{secret}}" \
+     --secret "lin_api_XXX"
    ```
+
+   Or use environment variable:
+   ```bash
+   export LINEAR_API_KEY="lin_api_XXX"
+   uxc auth credential set linear-mcp \
+     --auth-type api_key \
+     --header "Authorization:{{secret}}" \
+     --secret-env LINEAR_API_KEY
+   ```
+
+3. Bind endpoint:
+   ```bash
+   uxc auth binding add \
+     --id linear-mcp \
+     --host api.linear.app \
+     --path-prefix /graphql \
+     --scheme https \
+     --credential linear-mcp \
+     --priority 100
+   ```
+
+**Important:** Linear API requires `Authorization: lin_api_XXX` format (no "Bearer " prefix). The `--header "Authorization:{{secret}}"` configuration is required. See `uxc` skill's `references/auth-configuration.md` for detailed authentication patterns.
 
 ### Option 2: OAuth 2.0 (For production/user-delegated access)
 
 1. Create an OAuth app in Linear: https://linear.app/settings/api
+
 2. Start OAuth login:
    ```bash
    uxc auth oauth login linear-mcp \
@@ -39,6 +66,7 @@ Linear supports two authentication methods:
      --scope read \
      --scope write
    ```
+
 3. Bind endpoint:
    ```bash
    uxc auth binding add \
@@ -69,15 +97,18 @@ Linear supports two authentication methods:
 
 4. Execute queries:
    ```bash
-   # Query issues
-   linear-mcp-cli query/issues first=10
+   # Query issues (simple)
+   linear-mcp-cli query/issues '{"first":10}'
+
+   # Query issues with explicit selection set for useful fields
+   linear-mcp-cli query/issues '{"first":10,"_select":"nodes { identifier title url state { name } assignee { name } }"}'
 
    # Query teams
-   linear-mcp-cli query/teams first=10
+   linear-mcp-cli query/teams '{"first":10}'
 
    # Create issue (requires write scope)
    linear-mcp-cli mutation/issueCreate '{
-     "issueCreateInput": {
+     "input": {
        "teamId": "TEAM_ID",
        "title": "New Issue Title",
        "description": "Issue description"
@@ -105,7 +136,7 @@ Linear supports two authentication methods:
 
 ### List recent issues
 ```bash
-linear-mcp-cli query/issues first=20
+linear-mcp-cli query/issues '{"first":20,"_select":"nodes { identifier title url state { name } assignee { name } }"}'
 ```
 
 ### Get issue by ID
@@ -120,13 +151,46 @@ linear-mcp-cli query/teams
 
 ### Create issue
 ```bash
-linear-mcp-cli mutation/issueCreate '{"issueCreateInput":{"teamId":"YOUR_TEAM_ID","title":"Fix bug"}}'
+linear-mcp-cli mutation/issueCreate '{"input":{"teamId":"YOUR_TEAM_ID","title":"Fix bug"}}'
 ```
+
+## Troubleshooting
+
+### Authentication Errors
+
+**Error: "Bearer token" prefix rejected**
+- Linear API does not accept `Authorization: Bearer lin_api_XXX`
+- Ensure credential uses `--auth-type api_key --header "Authorization:{{secret}}"`
+- Do not use `--auth-type bearer`
+
+**Error: "Credential not found"**
+- Check credential exists: `uxc auth credential list`
+- Verify binding: `uxc auth binding list`
+- Create binding if missing (see Authentication section)
+
+**Error: "No binding matched"**
+- Check binding exists: `uxc auth binding match api.linear.app/graphql`
+- If missing, create binding with `uxc auth binding add` (see Authentication section)
+
+For detailed authentication troubleshooting, see `uxc` skill's `references/auth-configuration.md`.
+
+### Common Issues
+
+**Daemon issues after credential changes**
+- Restart daemon: `uxc daemon restart`
+- Check status: `uxc daemon status`
+
+**Environment variable not found**
+- Ensure variable is exported in daemon's environment
+- Or use `--secret` for literal values (less secure)
+- Or use `--secret-op` for 1Password (most secure)
 
 ## Guardrails
 
 - Keep automation on JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `data`, `error`.
+- Prefer positional JSON for non-string and typed arguments (for example: `linear-mcp-cli query/issues '{"first":10}'` and `linear-mcp-cli mutation/issueCreate '{"input":{"teamId":"TEAM_ID","title":"Test"}}'`).
+- Use reserved GraphQL argument `_select` (string) when you need explicit return fields, e.g. `{"_select":"nodes { identifier title }"}`.
 - Use `linear-mcp-cli` as the default command path.
 - `linear-mcp-cli <operation> ...` is equivalent to `uxc https://api.linear.app/graphql <operation> ...`.
 - Prefer read operations first (query/*), then write operations (mutation/*).

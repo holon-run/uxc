@@ -45,7 +45,12 @@ linear-mcp-cli -h
 
 ### List Issues
 ```bash
-linear-mcp-cli query/issues first=20
+linear-mcp-cli query/issues '{"first":20}'
+```
+
+### List Issues With Explicit Fields
+```bash
+linear-mcp-cli query/issues '{"first":20,"_select":"nodes { identifier title url state { name } assignee { name } }"}'
 ```
 
 ### Filter Issues by Team
@@ -65,7 +70,7 @@ linear-mcp-cli query/teams
 
 ### List Projects
 ```bash
-linear-mcp-cli query/projects first=10
+linear-mcp-cli query/projects '{"first":10}'
 ```
 
 ## Mutation Examples
@@ -73,7 +78,7 @@ linear-mcp-cli query/projects first=10
 ### Create Issue
 ```bash
 linear-mcp-cli mutation/issueCreate '{
-  "issueCreateInput": {
+  "input": {
     "teamId": "TEAM_ID",
     "title": "New Feature Request",
     "description": "Description here",
@@ -101,7 +106,7 @@ linear-mcp-cli mutation/issueArchive id=ISSUE_ID
 ### Add Comment
 ```bash
 linear-mcp-cli mutation/commentCreate '{
-  "commentCreateInput": {
+  "input": {
     "issueId": "ISSUE_ID",
     "body": "Comment body"
   }

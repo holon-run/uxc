@@ -6,6 +6,7 @@
 //!
 //! Reference: https://spec.graphql.org/
 
+use std::collections::HashMap;
 use uxc::adapters::graphql::GraphQLAdapter;
 use uxc::adapters::Adapter;
 
@@ -258,6 +259,381 @@ fn test_graphql_parses_mutation_fields() {
         assert_eq!(operations[0].parameters.len(), 2);
         assert!(operations[0].parameters[0].required);
         assert!(!operations[0].parameters[1].required);
+    });
+}
+
+#[test]
+fn test_graphql_execute_mutation_with_input_object_uses_typed_variables() {
+    run_async(|mut server| {
+        let introspection_response = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": { "name": "Query", "fields": [] },
+                    "mutationType": {
+                        "name": "Mutation",
+                        "fields": [
+                            {
+                                "name": "issueCreate",
+                                "args": [
+                                    {
+                                        "name": "input",
+                                        "type": {
+                                            "kind": "NON_NULL",
+                                            "ofType": { "kind": "INPUT_OBJECT", "name": "IssueCreateInput" }
+                                        }
+                                    }
+                                ],
+                                "type": { "kind": "OBJECT", "name": "IssuePayload" }
+                            }
+                        ]
+                    },
+                    "subscriptionType": null
+                }
+            }
+        });
+        let call_response = serde_json::json!({
+            "data": {
+                "issueCreate": {
+                    "__typename": "IssuePayload"
+                }
+            }
+        });
+
+        let _introspection = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&introspection_response.to_string())
+            .create();
+
+        let _execute = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "query": "mutation ($input: IssueCreateInput!) { issueCreate(input: $input) { __typename } }",
+                "variables": {
+                    "input": {
+                        "teamId": "TEAM-1",
+                        "title": "Test issue"
+                    }
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&call_response.to_string())
+            .create();
+
+        let mut args = HashMap::new();
+        args.insert(
+            "input".to_string(),
+            serde_json::json!({
+                "teamId": "TEAM-1",
+                "title": "Test issue"
+            }),
+        );
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = GraphQLAdapter::new();
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "mutation/issueCreate", args)
+                    .await
+            })
+            .unwrap();
+
+        assert_eq!(result.data["issueCreate"]["__typename"], "IssuePayload");
+    });
+}
+
+#[test]
+fn test_graphql_execute_rejects_unknown_arguments_before_request() {
+    run_async(|mut server| {
+        let introspection_response = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": { "name": "Query", "fields": [] },
+                    "mutationType": {
+                        "name": "Mutation",
+                        "fields": [
+                            {
+                                "name": "issueCreate",
+                                "args": [
+                                    {
+                                        "name": "input",
+                                        "type": {
+                                            "kind": "NON_NULL",
+                                            "ofType": { "kind": "INPUT_OBJECT", "name": "IssueCreateInput" }
+                                        }
+                                    }
+                                ],
+                                "type": { "kind": "OBJECT", "name": "IssuePayload" }
+                            }
+                        ]
+                    },
+                    "subscriptionType": null
+                }
+            }
+        });
+
+        let _introspection = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&introspection_response.to_string())
+            .create();
+
+        let mut args = HashMap::new();
+        args.insert("unknown".to_string(), serde_json::json!("x"));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = GraphQLAdapter::new();
+        let err = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "mutation/issueCreate", args)
+                    .await
+            })
+            .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("Unknown argument(s)"));
+        assert!(message.contains("unknown"));
+    });
+}
+
+#[test]
+fn test_graphql_execute_honors_select_override() {
+    run_async(|mut server| {
+        let introspection_response = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": {
+                        "name": "Query",
+                        "fields": [
+                            {
+                                "name": "issues",
+                                "args": [
+                                    {
+                                        "name": "first",
+                                        "type": { "kind": "SCALAR", "name": "Int" }
+                                    }
+                                ],
+                                "type": { "kind": "OBJECT", "name": "IssueConnection" }
+                            }
+                        ]
+                    },
+                    "mutationType": null,
+                    "subscriptionType": null,
+                    "types": [
+                        {
+                            "name": "IssueConnection",
+                            "kind": "OBJECT",
+                            "fields": [
+                                {
+                                    "name": "nodes",
+                                    "type": {
+                                        "kind": "LIST",
+                                        "ofType": { "kind": "OBJECT", "name": "Issue" }
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Issue",
+                            "kind": "OBJECT",
+                            "fields": [
+                                { "name": "identifier", "type": { "kind": "SCALAR", "name": "String" } },
+                                { "name": "title", "type": { "kind": "SCALAR", "name": "String" } }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let call_response = serde_json::json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        { "identifier": "JOL-5", "title": "Test from UXC" }
+                    ]
+                }
+            }
+        });
+
+        let _introspection = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&introspection_response.to_string())
+            .create();
+
+        let _execute = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "query": "query ($first: Int) { issues(first: $first) { nodes { identifier title } } }",
+                "variables": {
+                    "first": 1
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&call_response.to_string())
+            .create();
+
+        let mut args = HashMap::new();
+        args.insert("first".to_string(), serde_json::json!(1));
+        args.insert(
+            "_select".to_string(),
+            serde_json::json!("nodes { identifier title }"),
+        );
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = GraphQLAdapter::new();
+        let result = rt
+            .block_on(async { adapter.execute(&server.url(), "query/issues", args).await })
+            .unwrap();
+
+        assert_eq!(result.data["issues"]["nodes"][0]["identifier"], "JOL-5");
+    });
+}
+
+#[test]
+fn test_graphql_execute_rejects_non_string_select_override() {
+    run_async(|mut server| {
+        let introspection_response = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": {
+                        "name": "Query",
+                        "fields": [
+                            {
+                                "name": "issues",
+                                "args": [],
+                                "type": { "kind": "OBJECT", "name": "IssueConnection" }
+                            }
+                        ]
+                    },
+                    "mutationType": null,
+                    "subscriptionType": null
+                }
+            }
+        });
+        let _introspection = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&introspection_response.to_string())
+            .create();
+
+        let mut args = HashMap::new();
+        args.insert("_select".to_string(), serde_json::json!({"nodes": true}));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = GraphQLAdapter::new();
+        let err = rt
+            .block_on(async { adapter.execute(&server.url(), "query/issues", args).await })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("must be a string"));
+    });
+}
+
+#[test]
+fn test_graphql_execute_non_null_with_default_value_is_not_required() {
+    run_async(|mut server| {
+        let introspection_response = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": {
+                        "name": "Query",
+                        "fields": [
+                            {
+                                "name": "issues",
+                                "args": [
+                                    {
+                                        "name": "first",
+                                        "defaultValue": "20",
+                                        "type": {
+                                            "kind": "NON_NULL",
+                                            "ofType": { "kind": "SCALAR", "name": "Int" }
+                                        }
+                                    }
+                                ],
+                                "type": { "kind": "OBJECT", "name": "IssueConnection" }
+                            }
+                        ]
+                    },
+                    "mutationType": null,
+                    "subscriptionType": null,
+                    "types": [
+                        {
+                            "name": "IssueConnection",
+                            "kind": "OBJECT",
+                            "fields": [
+                                { "name": "nodes", "type": { "kind": "LIST", "ofType": { "kind": "OBJECT", "name": "Issue" } } }
+                            ]
+                        },
+                        {
+                            "name": "Issue",
+                            "kind": "OBJECT",
+                            "fields": [
+                                { "name": "id", "type": { "kind": "SCALAR", "name": "ID" } }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let call_response = serde_json::json!({
+            "data": {
+                "issues": {
+                    "nodes": []
+                }
+            }
+        });
+
+        let _introspection = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&introspection_response.to_string())
+            .create();
+
+        let _execute = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "query": "query { issues { nodes { id } } }"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&call_response.to_string())
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = GraphQLAdapter::new();
+        let result = rt.block_on(async {
+            adapter
+                .execute(&server.url(), "query/issues", HashMap::new())
+                .await
+        });
+
+        assert!(
+            result.is_ok(),
+            "NON_NULL argument with defaultValue should not be treated as missing required"
+        );
     });
 }
 
