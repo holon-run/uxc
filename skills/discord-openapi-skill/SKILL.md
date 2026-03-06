@@ -1,6 +1,6 @@
 ---
 name: discord-openapi-skill
-description: Operate Discord HTTP API through UXC with Discord OpenAPI schema mapping (`--schema-url`) and bot-token authentication. Use when tasks need read/write Discord REST operations such as guild/channel lookup and message creation.
+description: Operate Discord HTTP API through UXC with Discord OpenAPI schema. Supports both bot token and OAuth2 user authentication. Use for guild/channel lookup, user info, messages, and Discord REST operations.
 ---
 
 # Discord API Skill
@@ -15,14 +15,16 @@ Reuse the `uxc` skill for shared execution, auth, and error-handling guidance.
 - Network access to `https://discord.com/api/v10`.
 - Access to Discord OpenAPI spec URL:
   - `https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json`
-- Discord bot token (for most read/write operations).
+- Discord credentials (bot token or OAuth2 user authentication).
 
 ## Authentication
+
+### Option 1: Bot Token (Recommended for bot operations)
 
 1. Configure bot credential:
 
 ```bash
-uxc auth credential set discord-openapi \
+uxc auth credential set discord-bot \
   --auth-type api_key \
   --header "Authorization:Bot {{secret}}" \
   --secret-env DISCORD_BOT_TOKEN
@@ -32,19 +34,63 @@ uxc auth credential set discord-openapi \
 
 ```bash
 uxc auth binding add \
-  --id discord-openapi \
+  --id discord-bot \
   --host discord.com \
   --path-prefix /api/v10 \
   --scheme https \
-  --credential discord-openapi \
+  --credential discord-bot \
   --priority 100
 ```
 
-3. Confirm binding:
+### Option 2: OAuth2 User Authentication (For user-specific operations)
+
+**Configuration:**
+- Client ID: `1479302369723285736`
+- Redirect URI: `http://127.0.0.1:11111/callback`
+
+**Two-Stage OAuth Flow (Agent-Friendly):**
+
+1. Start OAuth flow:
+```bash
+uxc auth oauth start discord-user \
+  --endpoint https://discord.com/api/v10/oauth2/token \
+  --client-id 1479302369723285736 \
+  --redirect-uri http://127.0.0.1:11111/callback \
+  --scope "identify email guilds guilds.join guilds.members.read connections messages.read"
+```
+
+2. Open the displayed authorization URL in browser, complete authorization, then copy the callback URL from browser address bar.
+
+3. Complete OAuth flow:
+```bash
+uxc auth oauth complete discord-user \
+  --session-id <session_id_from_step_1> \
+  --callback-url "<callback_url_from_browser>"
+```
+
+4. Bind credential:
+```bash
+uxc auth binding add \
+  --id discord-user \
+  --host discord.com \
+  --path-prefix /api/v10 \
+  --scheme https \
+  --credential discord-user \
+  --priority 100
+```
+
+**Interactive Alternative (Local Terminal Only):**
 
 ```bash
-uxc auth binding match https://discord.com/api/v10
+uxc auth oauth login discord-user \
+  --endpoint https://discord.com/api/v10/oauth2/token \
+  --flow authorization_code \
+  --client-id 1479302369723285736 \
+  --redirect-uri http://127.0.0.1:11111/callback \
+  --scope "identify email guilds guilds.join guilds.members.read connections messages.read"
 ```
+
+Then paste the callback URL when prompted.
 
 ## Core Workflow
 
