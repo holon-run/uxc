@@ -97,6 +97,7 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     /// Manage schema cache
@@ -315,6 +316,7 @@ enum AuthBindingCommands {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum AuthOauthCommands {
     /// List OAuth credentials

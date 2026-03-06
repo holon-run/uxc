@@ -19,6 +19,7 @@ pub struct OpenAPIAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,
     auth_profile: Option<Profile>,
     runtime_auth_profile: Arc<Mutex<Option<Profile>>>,
+    oauth_refresh_lock: Arc<Mutex<()>>,
     discovered_schema_urls: Arc<RwLock<HashMap<String, String>>>,
     schema_url_override: Option<String>,
     force_refresh_schema: bool,
@@ -45,6 +46,7 @@ impl OpenAPIAdapter {
             cache: None,
             auth_profile: None,
             runtime_auth_profile: Arc::new(Mutex::new(None)),
+            oauth_refresh_lock: Arc::new(Mutex::new(())),
             discovered_schema_urls: Arc::new(RwLock::new(HashMap::new())),
             schema_url_override: None,
             force_refresh_schema: false,
@@ -93,35 +95,31 @@ impl OpenAPIAdapter {
         Ok(req)
     }
 
-    async fn maybe_refresh_profile(&self, profile: &mut Profile) -> Result<()> {
-        if profile.auth_type != AuthType::OAuth {
-            return Ok(());
+    async fn refresh_effective_oauth_profile(&self, force: bool) -> Result<Option<Profile>> {
+        let _refresh_guard = self.oauth_refresh_lock.lock().await;
+        let mut profile = self.effective_auth_profile().await;
+        if let Some(active) = profile.as_mut() {
+            if active.auth_type == AuthType::OAuth {
+                let refreshed = if force {
+                    oauth::refresh_oauth_profile(active, &self.client).await?;
+                    true
+                } else {
+                    oauth::maybe_refresh_oauth_profile(active, &self.client, 60).await?
+                };
+                if refreshed {
+                    crate::auth::persist_profile_if_named(active)?;
+                    self.set_effective_auth_profile(active.clone()).await;
+                }
+            }
         }
-        if oauth::maybe_refresh_oauth_profile(profile, &self.client, 60).await? {
-            crate::auth::persist_profile_if_named(profile)?;
-            self.set_effective_auth_profile(profile.clone()).await;
-        }
-        Ok(())
-    }
-
-    async fn force_refresh_profile(&self, profile: &mut Profile) -> Result<()> {
-        if profile.auth_type != AuthType::OAuth {
-            return Ok(());
-        }
-        oauth::refresh_oauth_profile(profile, &self.client).await?;
-        crate::auth::persist_profile_if_named(profile)?;
-        self.set_effective_auth_profile(profile.clone()).await;
-        Ok(())
+        Ok(profile)
     }
 
     async fn send_with_oauth_retry<F>(&self, build_request: F) -> Result<reqwest::Response>
     where
         F: Fn(Option<&Profile>) -> Result<reqwest::RequestBuilder>,
     {
-        let mut profile = self.effective_auth_profile().await;
-        if let Some(active) = profile.as_mut() {
-            self.maybe_refresh_profile(active).await?;
-        }
+        let mut profile = self.refresh_effective_oauth_profile(false).await?;
 
         let mut response = build_request(profile.as_ref())?.send().await?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
@@ -129,9 +127,7 @@ impl OpenAPIAdapter {
                 .as_ref()
                 .is_some_and(|active| active.auth_type == AuthType::OAuth)
         {
-            if let Some(active) = profile.as_mut() {
-                self.force_refresh_profile(active).await?;
-            }
+            profile = self.refresh_effective_oauth_profile(true).await?;
             response = build_request(profile.as_ref())?.send().await?;
         }
 
