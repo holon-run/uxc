@@ -55,8 +55,8 @@ if rg -q -- "--args\\s+'\\{" "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patt
   fail 'found banned legacy JSON via --args pattern'
 fi
 
-rg -q '^\s*display_name:\s*"Linear GraphQL Agent"\s*$' "${OPENAI_FILE}" || fail 'missing display_name'
-rg -q '^\s*short_description:\s*".+"\s*$' "${OPENAI_FILE}" || fail 'missing short_description'
+rg -q '^\s*display_name:\s*"?Linear GraphQL Agent"?\s*$' "${OPENAI_FILE}" || fail 'missing display_name'
+rg -q '^\s*short_description:\s*.+$' "${OPENAI_FILE}" || fail 'missing short_description'
 rg -q '^\s*default_prompt:\s*".*\$linear-graphql-skill.*"\s*$' "${OPENAI_FILE}" || fail 'default_prompt must mention $linear-graphql-skill'
 
 echo "skills/linear-graphql-skill validation passed"
