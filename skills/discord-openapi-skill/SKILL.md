@@ -1,6 +1,6 @@
 ---
 name: discord-openapi-skill
-description: Operate Discord HTTP API through UXC with Discord OpenAPI schema. Supports both bot token and OAuth2 user authentication. Use for guild/channel lookup, user info, messages, and Discord REST operations.
+description: Operate Discord HTTP API through UXC with Discord OpenAPI schema. Bot token recommended for full API access including messages and server management. OAuth2 user authentication available for limited profile operations only.
 ---
 
 # Discord API Skill
@@ -15,22 +15,26 @@ Reuse the `uxc` skill for shared execution, auth, and error-handling guidance.
 - Network access to `https://discord.com/api/v10`.
 - Access to Discord OpenAPI spec URL:
   - `https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json`
-- Discord credentials (bot token or OAuth2 user authentication).
+- Discord bot token (recommended) or OAuth2 user authentication (limited functionality).
 
 ## Authentication
 
-### Option 1: Bot Token (Recommended for bot operations)
+### Option 1: Bot Token (Recommended)
 
-1. Configure bot credential:
+Bot token provides full access to Discord API including reading messages, managing servers, sending messages, and all administrative operations. This is the recommended method for most use cases.
+
+1. Create a bot application at https://discord.com/developers/applications
+2. Generate a bot token from the Bot section
+3. Configure bot credential:
 
 ```bash
 uxc auth credential set discord-bot \
   --auth-type api_key \
-  --header "Authorization:Bot {{secret}}" \
-  --secret-env DISCORD_BOT_TOKEN
+  --header "Authorization=Bot {{secret}}" \
+  --secret "YOUR_BOT_TOKEN_HERE"
 ```
 
-2. Bind credential to Discord API endpoint:
+4. Bind credential to Discord API endpoint:
 
 ```bash
 uxc auth binding add \
@@ -42,7 +46,17 @@ uxc auth binding add \
   --priority 100
 ```
 
-### Option 2: OAuth2 User Authentication (For user-specific operations)
+### Option 2: OAuth2 User Authentication (Limited Use Cases)
+
+**Important:** User OAuth2 has significant limitations and is **not recommended** for most operations:
+- ❌ Cannot read channel messages via HTTP API (local RPC only)
+- ❌ Cannot send messages or manage servers
+- ✅ Can read user profile, email, connections
+- ✅ Can list user's servers
+
+Only use OAuth2 if you specifically need to access user profile information as the user. For all other operations, use Bot Token.
+
+If you still need OAuth2 for user profile operations:
 
 **Configuration:**
 - Client ID: `1479302369723285736`
@@ -72,10 +86,10 @@ Discord user OAuth2 supports **read-only operations**. It cannot send messages o
 | `guilds` | User's server list | ❌ Read |
 | `guilds.join` | Join user to servers (requires the same application's bot to already be in that guild) | ✅ **Write** |
 | `guilds.members.read` | User's member info in servers | ❌ Read |
-| `messages.read` | Read messages (local RPC only) | ❌ Read |
+| `messages.read` | Read messages (local RPC only, **not** HTTP API) | ❌ Read |
 | `openid` | OpenID Connect support | ❌ Read |
 
-**Note:** User OAuth2 **cannot** send messages or manage servers as the user. Use Bot Token for write operations. `guilds.join` is a special user OAuth write capability that depends on the same application's bot already being in the target guild, so it is not part of the default read-only flow. See [Discord OAuth2 documentation](https://docs.discord.com/developers/topics/oauth2) for complete scope list.
+**Note:** User OAuth2 **cannot** send messages or manage servers as the user. Use Bot Token for write operations. `guilds.join` is a special user OAuth write capability that depends on the same application's bot already being in the target guild, so it is not part of the default read-only flow. See [Discord OAuth2 documentation](https://discord.com/developers/topics/oauth2) for complete scope list.
 
 **Two-Stage OAuth Flow (Agent-Friendly):**
 
@@ -143,24 +157,21 @@ Then paste the callback URL when prompted.
 
 ## Authentication Methods Comparison
 
-| Feature | User OAuth2 | Bot Token |
-|---------|-------------|-----------|
-| **Read user info** | ✅ As the user | ❌ Not available |
-| **List user's servers** | ✅ User's servers | ✅ Servers bot is in |
-| **Send messages** | ❌ Not supported | ✅ As the bot |
-| **Manage channels/roles** | ❌ Not supported | ✅ Bot permissions |
-| **Moderation actions** | ❌ Not supported | ✅ Bot permissions |
-| **Message appearance** | N/A | Bot badge "BOT" |
+| Feature | Bot Token | User OAuth2 |
+|---------|-----------|-------------|
+| **Read channel messages** | ✅ Full access | ❌ Not via HTTP API |
+| **Send messages** | ✅ As the bot | ❌ Not supported |
+| **Manage channels/roles** | ✅ Bot permissions | ❌ Not supported |
+| **Moderation actions** | ✅ Bot permissions | ❌ Not supported |
+| **List servers** | ✅ Servers bot is in | ✅ User's servers |
+| **Read user info** | ❌ Not available | ✅ As the user |
+| **Message appearance** | Bot badge "BOT" | N/A |
 
-**Key Limitation:** User OAuth2 **cannot** send messages or manage servers as the user. Discord intentionally restricts user OAuth2 to read-only operations for security. To perform write operations, you must use a Bot Token (which will display messages as coming from a bot).
-
-**Recommendation:**
-- Use **User OAuth2** for reading user data and identity verification
-- Use **Bot Token** for automated tasks, message sending, and server management
+**Key Recommendation:** Use **Bot Token** for almost all operations. User OAuth2 is only useful if you need to read user profile information as that specific user. For reading channel messages, managing servers, or sending messages, Bot Token is required.
 
 ## Guardrails
 
-- **OAuth2 Scope Limitation:** User OAuth2 tokens cannot send messages or manage servers. These operations require Bot Token authentication.
+- **OAuth2 Scope Limitation:** User OAuth2 tokens cannot read channel messages via HTTP API, send messages, or manage servers. These operations require Bot Token authentication.
 - Discord OpenAPI spec is persisted in the generated link via `uxc link --schema-url ...`; pass `--schema-url <other-url>` only when you need to override it temporarily.
 - Keep automation on JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
