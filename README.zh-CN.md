@@ -283,6 +283,7 @@ UXC 提供一个标准 skill（`uxc`）和若干官方场景化 wrapper skill。
 | `context7-mcp-skill` | 通过 MCP 查询最新库文档与示例 | [`skills/context7-mcp-skill/SKILL.md`](skills/context7-mcp-skill/SKILL.md) |
 | `okx-mcp-skill` | 通过 OKX MCP 执行 token、市场、钱包、换汇等流程 | [`skills/okx-mcp-skill/SKILL.md`](skills/okx-mcp-skill/SKILL.md) |
 | `notion-mcp-skill` | 提供带 OAuth 说明的 Notion MCP 流程指引 | [`skills/notion-mcp-skill/SKILL.md`](skills/notion-mcp-skill/SKILL.md) |
+| `discord-openapi-skill` | 通过 UXC + OpenAPI schema mapping 操作 Discord REST API | [`skills/discord-openapi-skill/SKILL.md`](skills/discord-openapi-skill/SKILL.md) |
 | `playwright-mcp-skill` | 通过 `uxc` 在 MCP stdio 上运行 `@playwright/mcp`（浏览器自动化） | [`skills/playwright-mcp-skill/SKILL.md`](skills/playwright-mcp-skill/SKILL.md) |
 
 ### Skill 安装方式
@@ -294,7 +295,7 @@ UXC 提供一个标准 skill（`uxc`）和若干官方场景化 wrapper skill。
 npx -y skills@latest add holon-run/uxc --skill uxc --agent codex -y
 
 # 按需安装场景化 wrapper
-npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill okx-mcp-skill --agent codex -y
+npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill okx-mcp-skill --skill discord-openapi-skill --agent codex -y
 ```
 
 使用 ClawHub 安装已发布的 skill：
@@ -304,6 +305,7 @@ npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill okx-
 clawhub --workdir ~/.openclaw --dir skills install uxc
 clawhub --workdir ~/.openclaw --dir skills install playwright-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install okx-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
 ```
 
 安装和维护规则见 [`docs/skills.md`](docs/skills.md)。

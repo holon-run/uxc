@@ -1,0 +1,4 @@
+interface:
+  display_name: "Discord API"
+  short_description: "Operate Discord REST API via UXC + OpenAPI schema mapping"
+  default_prompt: "Use $discord-openapi-skill to discover and execute Discord REST operations through UXC with --schema-url and bot-token auth guardrails."

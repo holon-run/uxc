@@ -1,20 +1,26 @@
-# Linear MCP Skill - Usage Patterns
+# Linear GraphQL Skill - Usage Patterns
 
 ## Authentication Setup
 
 ### Personal API Key (Recommended)
 ```bash
 # Set credential with environment variable
-uxc auth credential set linear-mcp --auth-type bearer --secret-env LINEAR_API_KEY
+uxc auth credential set linear-graphql \
+  --auth-type api_key \
+  --header "Authorization:{{secret}}" \
+  --secret-env LINEAR_API_KEY
 
 # Or with literal secret (not recommended for security)
-uxc auth credential set linear-mcp --auth-type bearer --secret lin_api_xxxx
+uxc auth credential set linear-graphql \
+  --auth-type api_key \
+  --header "Authorization:{{secret}}" \
+  --secret lin_api_xxxx
 ```
 
 ### OAuth Flow
 ```bash
 # Start OAuth login
-uxc auth oauth login linear-mcp \
+uxc auth oauth login linear-graphql \
   --endpoint https://api.linear.app/graphql \
   --flow authorization_code \
   --redirect-uri http://127.0.0.1:8788/callback \
@@ -24,60 +30,60 @@ uxc auth oauth login linear-mcp \
 # After user approves, paste callback URL
 # Then bind endpoint
 uxc auth binding add \
-  --id linear-mcp \
+  --id linear-graphql \
   --host api.linear.app \
   --path-prefix /graphql \
   --scheme https \
-  --credential linear-mcp \
+  --credential linear-graphql \
   --priority 100
 ```
 
 ## Link Setup
 ```bash
 # Create link command
-uxc link linear-mcp-cli https://api.linear.app/graphql
+uxc link linear-graphql-cli https://api.linear.app/graphql
 
 # Verify
-linear-mcp-cli -h
+linear-graphql-cli -h
 ```
 
 ## Query Examples
 
 ### List Issues
 ```bash
-linear-mcp-cli query/issues '{"first":20}'
+linear-graphql-cli query/issues '{"first":20}'
 ```
 
 ### List Issues With Explicit Fields
 ```bash
-linear-mcp-cli query/issues '{"first":20,"_select":"nodes { identifier title url state { name } assignee { name } }"}'
+linear-graphql-cli query/issues '{"first":20,"_select":"nodes { identifier title url state { name } assignee { name } }"}'
 ```
 
 ### Filter Issues by Team
 ```bash
-linear-mcp-cli query/issues filter='{"team":{"id":{"eq":"TEAM_ID"}}}'
+linear-graphql-cli query/issues filter='{"team":{"id":{"eq":"TEAM_ID"}}}'
 ```
 
 ### Get Single Issue
 ```bash
-linear-mcp-cli query/issue id=ISSUE_123
+linear-graphql-cli query/issue id=ISSUE_123
 ```
 
 ### List Teams
 ```bash
-linear-mcp-cli query/teams
+linear-graphql-cli query/teams
 ```
 
 ### List Projects
 ```bash
-linear-mcp-cli query/projects '{"first":10}'
+linear-graphql-cli query/projects '{"first":10}'
 ```
 
 ## Mutation Examples
 
 ### Create Issue
 ```bash
-linear-mcp-cli mutation/issueCreate '{
+linear-graphql-cli mutation/issueCreate '{
   "input": {
     "teamId": "TEAM_ID",
     "title": "New Feature Request",
@@ -89,7 +95,7 @@ linear-mcp-cli mutation/issueCreate '{
 
 ### Update Issue
 ```bash
-linear-mcp-cli mutation/issueUpdate '{
+linear-graphql-cli mutation/issueUpdate '{
   "id": "ISSUE_ID",
   "input": {
     "title": "Updated Title",
@@ -100,12 +106,12 @@ linear-mcp-cli mutation/issueUpdate '{
 
 ### Archive Issue
 ```bash
-linear-mcp-cli mutation/issueArchive id=ISSUE_ID
+linear-graphql-cli mutation/issueArchive id=ISSUE_ID
 ```
 
 ### Add Comment
 ```bash
-linear-mcp-cli mutation/commentCreate '{
+linear-graphql-cli mutation/commentCreate '{
   "input": {
     "issueId": "ISSUE_ID",
     "body": "Comment body"

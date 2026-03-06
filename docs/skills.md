@@ -15,7 +15,7 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Unified wrapper for OKX MCP workflows (token/market/wallet/swap).
 - `skills/notion-mcp-skill`
   - Wrapper for Notion MCP workflows with OAuth and guarded-write guidance.
-- `skills/discord-api-skill`
+- `skills/discord-openapi-skill`
   - Wrapper for Discord REST workflows via UXC + OpenAPI schema mapping (`--schema-url`).
 - `skills/uxc-skill-creator`
   - Creator skill for authoring new UXC-based wrapper skills with strict conventions.
@@ -45,7 +45,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/notion-mcp-skill`, or `skills/discord-api-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/notion-mcp-skill`, or `skills/discord-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -77,7 +77,7 @@ bash skills/notion-mcp-skill/scripts/validate.sh
 - Validate Discord wrapper docs when touched:
 
 ```bash
-bash skills/discord-api-skill/scripts/validate.sh
+bash skills/discord-openapi-skill/scripts/validate.sh
 ```
 
 ## Manual Publish Workflow (GitHub Actions)
