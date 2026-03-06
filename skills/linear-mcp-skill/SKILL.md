@@ -22,14 +22,41 @@ Linear supports two authentication methods:
 ### Option 1: Personal API Key (Recommended for development)
 
 1. Get your API key from Linear: https://linear.app/settings/api
-2. Set credentials:
+
+2. Set credential with custom Authorization header:
    ```bash
-   uxc auth credential set linear-mcp --auth-type bearer --secret-env LINEAR_API_KEY
+   uxc auth credential set linear-mcp \
+     --auth-type api_key \
+     --header "Authorization:{{secret}}" \
+     --secret "lin_api_XXX"
    ```
+
+   Or use environment variable:
+   ```bash
+   export LINEAR_API_KEY="lin_api_XXX"
+   uxc auth credential set linear-mcp \
+     --auth-type api_key \
+     --header "Authorization:{{secret}}" \
+     --secret-env LINEAR_API_KEY
+   ```
+
+3. Bind endpoint:
+   ```bash
+   uxc auth binding add \
+     --id linear-mcp \
+     --host api.linear.app \
+     --path-prefix /graphql \
+     --scheme https \
+     --credential linear-mcp \
+     --priority 100
+   ```
+
+**Important:** Linear API requires `Authorization: lin_api_XXX` format (no "Bearer " prefix). The `--header "Authorization:{{secret}}"` configuration is required. See `uxc` skill's `references/auth-configuration.md` for detailed authentication patterns.
 
 ### Option 2: OAuth 2.0 (For production/user-delegated access)
 
 1. Create an OAuth app in Linear: https://linear.app/settings/api
+
 2. Start OAuth login:
    ```bash
    uxc auth oauth login linear-mcp \
@@ -39,6 +66,7 @@ Linear supports two authentication methods:
      --scope read \
      --scope write
    ```
+
 3. Bind endpoint:
    ```bash
    uxc auth binding add \
@@ -125,6 +153,37 @@ linear-mcp-cli query/teams
 ```bash
 linear-mcp-cli mutation/issueCreate '{"input":{"teamId":"YOUR_TEAM_ID","title":"Fix bug"}}'
 ```
+
+## Troubleshooting
+
+### Authentication Errors
+
+**Error: "Bearer token" prefix rejected**
+- Linear API does not accept `Authorization: Bearer lin_api_XXX`
+- Ensure credential uses `--auth-type api_key --header "Authorization:{{secret}}"`
+- Do not use `--auth-type bearer`
+
+**Error: "Credential not found"**
+- Check credential exists: `uxc auth credential list`
+- Verify binding: `uxc auth binding list`
+- Create binding if missing (see Authentication section)
+
+**Error: "No binding matched"**
+- Check binding exists: `uxc auth binding match api.linear.app/graphql`
+- If missing, create binding with `uxc auth binding add` (see Authentication section)
+
+For detailed authentication troubleshooting, see `uxc` skill's `references/auth-configuration.md`.
+
+### Common Issues
+
+**Daemon issues after credential changes**
+- Restart daemon: `uxc daemon restart`
+- Check status: `uxc daemon status`
+
+**Environment variable not found**
+- Ensure variable is exported in daemon's environment
+- Or use `--secret` for literal values (less secure)
+- Or use `--secret-op` for 1Password (most secure)
 
 ## Guardrails
 
