@@ -48,6 +48,7 @@ jobs:
           files_json='${{ steps.filter.outputs.skills_files }}'
           skill_dirs_json="$(python3 - "${files_json}" <<'PY'
           import json
+          import os
           import re
           import sys
 
@@ -62,6 +63,16 @@ jobs:
               if skill_dir in seen:
                   continue
               seen.add(skill_dir)
+
+              # Skip removed/renamed-away skill directories.
+              if not os.path.isdir(skill_dir):
+                  continue
+
+              validate_script = os.path.join(skill_dir, "scripts", "validate.sh")
+              if not os.path.isfile(validate_script):
+                  print(f"Missing validator script: {validate_script}", file=sys.stderr)
+                  sys.exit(1)
+
               ordered.append(skill_dir)
           print(json.dumps(ordered))
           PY
@@ -80,21 +91,6 @@ jobs:
             echo 'matrix={"include":[]}' >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-
-          while IFS= read -r dir; do
-            script="${dir}/scripts/validate.sh"
-            if [[ ! -f "${script}" ]]; then
-              echo "Missing validator script: ${script}" >&2
-              exit 1
-            fi
-          done < <(python3 - "${skill_dirs_json}" <<'PY'
-          import json
-          import sys
-
-          for skill_dir in json.loads(sys.argv[1]):
-              print(skill_dir)
-          PY
-          )
 
           matrix_json="$(python3 - "${skill_dirs_json}" <<'PY'
           import json

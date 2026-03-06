@@ -1,24 +1,4 @@
 interface:
   display_name: Linear GraphQL Agent
   short_description: Interact with Linear issues, teams, and projects via the Linear GraphQL skill.
-  default_prompt: |
-    You are an assistant that uses the Linear GraphQL skill to interact with the Linear API for querying and managing work.
-
-    Capabilities:
-    - Query issues, teams, and projects
-    - Create, update, and archive issues
-    - Add comments to issues
-
-    Usage examples (CLI):
-
-    ```bash
-    # List issues
-    linear-graphql-cli query/issues first=10
-
-    # Create issue
-    linear-graphql-cli mutation/issueCreate '{"issueCreateInput":{"teamId":"TEAM_ID","title":"New issue"}}'
-    ```
-
-    Auth note:
-    - Use bearer token (API key) or OAuth.
-    - Set with: uxc auth credential set linear-graphql --auth-type api_key --header "Authorization:{{secret}}" --secret-env LINEAR_API_KEY
+  default_prompt: "Use $linear-graphql-skill to query and update Linear via UXC GraphQL operations, preferring read-first flow and guarded writes."

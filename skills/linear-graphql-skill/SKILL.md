@@ -51,7 +51,9 @@ Linear supports two authentication methods:
      --priority 100
    ```
 
-**Important:** Linear API requires `Authorization: lin_api_XXX` format (no "Bearer " prefix). The `--header "Authorization:{{secret}}"` configuration is required. See `uxc` skill's `references/auth-configuration.md` for detailed authentication patterns.
+**Important (Personal API Key only):** Linear API keys require `Authorization: lin_api_XXX` format (no `Bearer ` prefix). The `--header "Authorization:{{secret}}"` configuration above is required for API key auth. For OAuth access tokens, use standard `Authorization: Bearer <token>` semantics (handled by the OAuth credential flow in `uxc`).
+
+Credential/binding IDs in this skill use `linear-graphql` by convention; IDs are local aliases and can be changed if needed.
 
 ### Option 2: OAuth 2.0 (For production/user-delegated access)
 
