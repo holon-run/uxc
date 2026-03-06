@@ -149,6 +149,8 @@ enum DaemonCommands {
     Stop,
     /// Show daemon status
     Status,
+    /// Restart daemon process (stop if running, then start)
+    Restart,
     /// Internal daemon server entrypoint
     #[command(name = "_serve", hide = true)]
     Serve,
@@ -811,7 +813,7 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
         }
         "daemon" => {
             if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
-                if matches!(level1, "start" | "stop" | "status" | "_serve") {
+                if matches!(level1, "start" | "stop" | "status" | "restart" | "_serve") {
                     path.push(level1.to_string());
                 }
             }
@@ -897,6 +899,7 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             DaemonCommands::Start => Some(vec!["daemon", "start"]),
             DaemonCommands::Stop => Some(vec!["daemon", "stop"]),
             DaemonCommands::Status => Some(vec!["daemon", "status"]),
+            DaemonCommands::Restart => Some(vec!["daemon", "restart"]),
             DaemonCommands::Serve => Some(vec!["daemon", "_serve"]),
         },
         Some(Commands::External(_)) | None => None,
@@ -1187,11 +1190,12 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["daemon"] => HelpData {
             path: "uxc daemon".to_string(),
             about: "Manage local runtime daemon".to_string(),
-            usage: "uxc daemon <start|stop|status>".to_string(),
+            usage: "uxc daemon <start|stop|status|restart>".to_string(),
             commands: commands(&[
                 ("start", "Start daemon process"),
                 ("stop", "Stop daemon process"),
                 ("status", "Show daemon status"),
+                ("restart", "Restart daemon process"),
             ]),
             notes: vec![
                 "Endpoint invocations auto-start daemon when needed.".to_string(),
@@ -1201,6 +1205,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc daemon status".to_string(),
                 "uxc daemon start".to_string(),
                 "uxc daemon stop".to_string(),
+                "uxc daemon restart".to_string(),
             ],
         },
         ["daemon", "start"] => HelpData {
@@ -1226,6 +1231,14 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: vec![],
             notes: vec![],
             examples: vec!["uxc daemon status".to_string()],
+        },
+        ["daemon", "restart"] => HelpData {
+            path: "uxc daemon restart".to_string(),
+            about: "Restart daemon process".to_string(),
+            usage: "uxc daemon restart".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc daemon restart".to_string()],
         },
         ["cache"] => HelpData {
             path: "uxc cache".to_string(),
@@ -1612,6 +1625,23 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             }
             if let Some(requests) = data.get("request_count").and_then(Value::as_u64) {
                 println!("Requests: {}", requests);
+            }
+            Ok(())
+        }
+        Some("daemon_restart_result") => {
+            let data = envelope.data.clone().unwrap_or(Value::Null);
+            if data
+                .get("stopped")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                println!("Daemon stopped.");
+            } else {
+                println!("Daemon was not running.");
+            }
+            println!("Daemon started.");
+            if let Some(socket) = data.get("socket").and_then(Value::as_str) {
+                println!("Socket: {}", socket);
             }
             Ok(())
         }
@@ -2673,6 +2703,23 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
                 "uxc",
                 None,
                 status,
+                None,
+            ))
+        }
+        DaemonCommands::Restart => {
+            let stopped = daemon::daemon_stop_local().await?;
+            let started_now = daemon::daemon_start_local().await?;
+            let data = json!({
+                "stopped": stopped,
+                "started_now": started_now,
+                "socket": daemon::socket_path().display().to_string()
+            });
+            Ok(OutputEnvelope::success(
+                "daemon_restart_result",
+                "cli",
+                "uxc",
+                None,
+                data,
                 None,
             ))
         }

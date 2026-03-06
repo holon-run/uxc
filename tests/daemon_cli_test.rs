@@ -122,3 +122,124 @@ fn daemon_start_reports_started_now_and_already_running() {
 
     daemon_stop_best_effort();
 }
+
+#[test]
+#[serial]
+fn daemon_restart_when_running() {
+    daemon_stop_best_effort();
+
+    // Start daemon first
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    // Restart should stop and start
+    let restart = uxc_command()
+        .arg("daemon")
+        .arg("restart")
+        .output()
+        .expect("daemon restart should run");
+    assert!(restart.status.success());
+    let restart_json: serde_json::Value =
+        serde_json::from_slice(&restart.stdout).expect("valid json");
+    assert_eq!(restart_json["ok"], true);
+    assert_eq!(restart_json["kind"], "daemon_restart_result");
+    assert_eq!(restart_json["data"]["stopped"], true);
+    assert_eq!(restart_json["data"]["started_now"], true);
+    assert!(restart_json["data"]["socket"].as_str().is_some());
+
+    // Verify daemon is running after restart
+    let status = uxc_command()
+        .arg("daemon")
+        .arg("status")
+        .output()
+        .expect("daemon status should run");
+    assert!(status.status.success());
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("valid json");
+    assert_eq!(status_json["data"]["running"], true);
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
+fn daemon_restart_when_not_running() {
+    daemon_stop_best_effort();
+
+    // Restart when daemon is not running should just start it
+    let restart = uxc_command()
+        .arg("daemon")
+        .arg("restart")
+        .output()
+        .expect("daemon restart should run");
+    assert!(restart.status.success());
+    let restart_json: serde_json::Value =
+        serde_json::from_slice(&restart.stdout).expect("valid json");
+    assert_eq!(restart_json["ok"], true);
+    assert_eq!(restart_json["kind"], "daemon_restart_result");
+    assert_eq!(restart_json["data"]["stopped"], false);
+    assert_eq!(restart_json["data"]["started_now"], true);
+    assert!(restart_json["data"]["socket"].as_str().is_some());
+
+    // Verify daemon is running after restart
+    let status = uxc_command()
+        .arg("daemon")
+        .arg("status")
+        .output()
+        .expect("daemon status should run");
+    assert!(status.status.success());
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("valid json");
+    assert_eq!(status_json["data"]["running"], true);
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
+fn daemon_restart_help_shows_restart_subcommand_help() {
+    let help = uxc_command()
+        .arg("daemon")
+        .arg("restart")
+        .arg("-h")
+        .output()
+        .expect("daemon restart help should run");
+    assert!(help.status.success());
+
+    let help_json: serde_json::Value = serde_json::from_slice(&help.stdout).expect("valid json");
+    assert_eq!(help_json["ok"], true);
+    assert_eq!(help_json["kind"], "subcommand_help");
+    assert_eq!(help_json["data"]["path"], "uxc daemon restart");
+
+    // Check help content contains restart-specific information
+    let data = &help_json["data"];
+    assert!(data["about"].as_str().is_some());
+    assert!(data["usage"].as_str().is_some());
+    assert_eq!(data["usage"], "uxc daemon restart");
+}
+
+#[test]
+#[serial]
+fn daemon_restart_text_output_renders_correctly() {
+    daemon_stop_best_effort();
+
+    // Test restart when daemon is not running
+    let restart = uxc_command()
+        .arg("daemon")
+        .arg("restart")
+        .arg("--text")
+        .output()
+        .expect("daemon restart --text should run");
+    assert!(restart.status.success());
+
+    let stdout = String::from_utf8_lossy(&restart.stdout);
+    assert!(stdout.contains("Daemon was not running."));
+    assert!(stdout.contains("Daemon started."));
+    assert!(stdout.contains("Socket:"));
+
+    daemon_stop_best_effort();
+}
