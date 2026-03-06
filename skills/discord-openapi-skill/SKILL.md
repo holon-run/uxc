@@ -54,7 +54,7 @@ Discord user OAuth2 supports **read-only operations**. It cannot send messages o
 
 **Recommended Scopes (Full Functionality):**
 ```bash
---scope "identify email connections guilds guilds.join guilds.members.read messages.read openid"
+--scope "identify email connections guilds guilds.members.read messages.read openid"
 ```
 
 **Minimal Read-Only Scopes:**
@@ -70,22 +70,22 @@ Discord user OAuth2 supports **read-only operations**. It cannot send messages o
 | `email` | User's email address | ❌ Read |
 | `connections` | Linked third-party accounts (Twitch, YouTube, etc.) | ❌ Read |
 | `guilds` | User's server list | ❌ Read |
-| `guilds.join` | Join user to servers | ✅ **Write** |
+| `guilds.join` | Join user to servers (requires the same application's bot to already be in that guild) | ✅ **Write** |
 | `guilds.members.read` | User's member info in servers | ❌ Read |
 | `messages.read` | Read messages (local RPC only) | ❌ Read |
 | `openid` | OpenID Connect support | ❌ Read |
 
-**Note:** User OAuth2 **cannot** send messages or manage servers as the user. Use Bot Token for write operations. See [Discord OAuth2 documentation](https://docs.discord.com/developers/topics/oauth2) for complete scope list.
+**Note:** User OAuth2 **cannot** send messages or manage servers as the user. Use Bot Token for write operations. `guilds.join` is a special user OAuth write capability that depends on the same application's bot already being in the target guild, so it is not part of the default read-only flow. See [Discord OAuth2 documentation](https://docs.discord.com/developers/topics/oauth2) for complete scope list.
 
 **Two-Stage OAuth Flow (Agent-Friendly):**
 
 1. Start OAuth flow with desired scopes:
 ```bash
 uxc auth oauth start discord-user \
-  --endpoint https://discord.com/api/v10/oauth2/token \
+  --endpoint https://discord.com/api/oauth2/token \
   --client-id 1479302369723285736 \
   --redirect-uri http://127.0.0.1:11111/callback \
-  --scope "identify email connections guilds guilds.join guilds.members.read messages.read openid"
+  --scope "identify email connections guilds guilds.members.read messages.read openid"
 ```
 
 2. Open the displayed authorization URL in browser, complete authorization, then copy the callback URL from browser address bar.
@@ -112,11 +112,11 @@ uxc auth binding add \
 
 ```bash
 uxc auth oauth login discord-user \
-  --endpoint https://discord.com/api/v10/oauth2/token \
+  --endpoint https://discord.com/api/oauth2/token \
   --flow authorization_code \
   --client-id 1479302369723285736 \
   --redirect-uri http://127.0.0.1:11111/callback \
-  --scope "identify email connections guilds guilds.join guilds.members.read messages.read openid"
+  --scope "identify email connections guilds guilds.members.read messages.read openid"
 ```
 
 Then paste the callback URL when prompted.
