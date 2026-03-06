@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-03-06
+
+### Added
+- OAuth auth is now supported across OpenAPI, GraphQL, JSON-RPC, and gRPC in addition to MCP HTTP.
+- Added non-interactive OAuth authorization-code flow with `uxc auth oauth start` and `uxc auth oauth complete` for agent-friendly two-step login.
+- Added `uxc link --schema-url` so generated shortcuts can persist a default OpenAPI schema URL while still allowing runtime override.
+- Added `uxc daemon restart` to simplify daemon lifecycle management.
+- Added cache inspection and targeted invalidation with `uxc cache list` and `uxc cache clear --key`.
+- Added `linear-mcp-skill` and expanded published skill coverage/documentation, including bilingual README updates and install guidance for `npx` and ClawHub.
+
+### Changed
+- Standardized skill naming around protocol-oriented MCP skill names such as `context7-mcp-skill` and `deepwiki-mcp-skill`.
+- Discord/OpenAPI skill guidance now prefers Bot Token for primary auth and documents schema-persisted link usage.
+
+### Fixed
+- Repaired GraphQL mutation input object handling for nested mutation inputs.
+- Stabilized MCP HTTP auth-required coverage flow in tests.
+
+### CI
+- Added skills validation and manual skill publish workflows.
+
 ## [0.7.1] - 2026-03-04
 
 ### Fixed
@@ -212,7 +233,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/holon-run/uxc/releases/tag/v0.8.0
 [0.7.1]: https://github.com/holon-run/uxc/releases/tag/v0.7.1
 [0.7.0]: https://github.com/holon-run/uxc/releases/tag/v0.7.0
 [0.6.0]: https://github.com/holon-run/uxc/releases/tag/v0.6.0
