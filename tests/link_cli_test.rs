@@ -550,3 +550,44 @@ fn link_create_force_overwrite_updates_schema_url() {
     assert!(script.contains(second_schema));
     assert!(!script.contains(first_schema));
 }
+
+#[test]
+fn link_force_overwrite_managed_script_with_daemon_exclusive_still_succeeds() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+    let script_path = link_script_path(&link_dir, "discord-openapi-cli");
+
+    let first = uxc_command()
+        .arg("--daemon-exclusive")
+        .arg("~/.uxc/discord-profile")
+        .arg("link")
+        .arg("discord-openapi-cli")
+        .arg("https://discord.com/api/v10")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--schema-url")
+        .arg("https://example.com/one.json")
+        .output()
+        .expect("initial create should run");
+    assert!(first.status.success(), "initial create should succeed");
+
+    let second = uxc_command()
+        .arg("--daemon-exclusive")
+        .arg("~/.uxc/discord-profile")
+        .arg("link")
+        .arg("discord-openapi-cli")
+        .arg("https://discord.com/api/v10")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--schema-url")
+        .arg("https://example.com/two.json")
+        .arg("--force")
+        .output()
+        .expect("overwrite create should run");
+    assert!(second.status.success(), "overwrite create should succeed");
+
+    let script = fs::read_to_string(&script_path).expect("script should be readable");
+    #[cfg(unix)]
+    assert!(script.contains("UXC_DAEMON_EXCLUSIVE="));
+    assert!(script.contains("https://example.com/two.json"));
+}

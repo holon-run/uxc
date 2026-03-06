@@ -2362,7 +2362,7 @@ fn build_link_launcher(
             .map(|url| {
                 let escaped_url = url.replace('"', "\"\"");
                 format!(
-                    "set \"UXC_HAS_SCHEMA_URL=\"\r\nfor %%A in (%*) do (\r\n  if /I \"%%~A\"==\"--schema-url\" set \"UXC_HAS_SCHEMA_URL=1\"\r\n  echo %%~A | findstr /B /C:\"--schema-url=\" >nul && set \"UXC_HAS_SCHEMA_URL=1\"\r\n)\r\nif defined UXC_HAS_SCHEMA_URL (\r\n  uxc \"{}\" %*\r\n) else (\r\n  uxc \"{}\" --schema-url \"{}\" %*\r\n)\r\n",
+                    "set \"UXC_HAS_SCHEMA_URL=\"\r\nfor %%A in (%*) do (\r\n  if /I \"%%~A\"==\"--schema-url\" set \"UXC_HAS_SCHEMA_URL=1\"\r\n  for /F \"tokens=1 delims==\" %%B in (\"%%~A\") do if /I \"%%~B\"==\"--schema-url\" set \"UXC_HAS_SCHEMA_URL=1\"\r\n)\r\nif defined UXC_HAS_SCHEMA_URL (\r\n  uxc \"{}\" %*\r\n) else (\r\n  uxc \"{}\" --schema-url \"{}\" %*\r\n)\r\n",
                     escaped, escaped, escaped_url
                 )
             })
@@ -2534,7 +2534,7 @@ fn looks_like_uxc_link_launcher(content: &[u8]) -> bool {
     let unix_has_link_name = text
         .lines()
         .take(30)
-        .any(|line| line.trim_start().starts_with("UXC_LINK_NAME='"));
+        .any(|line| line.contains("UXC_LINK_NAME='"));
     let unix_has_exec = text.lines().take(40).any(|line| line.contains("exec uxc "));
     let unix_like = unix_has_link_name && unix_has_exec;
 
