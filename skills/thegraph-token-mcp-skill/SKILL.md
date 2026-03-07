@@ -20,9 +20,9 @@ Reuse the `uxc` skill for generic protocol discovery, envelope parsing, and erro
 1. Verify endpoint and protocol with help-first probing:
    - `uxc https://token-api.mcp.thegraph.com/ -h`
    - Confirm protocol is MCP (`protocol == "mcp"` in envelope).
-2. Configure credential and auth binding:
-   - `uxc auth credential set thegraph-token --auth-type api_key --header "Authorization=Bearer {{secret}}" --secret-env THEGRAPH_TOKEN_API_KEY`
-   - `uxc auth binding add --id thegraph-token-mcp --host token-api.mcp.thegraph.com --scheme https --credential thegraph-token --priority 100`
+2. Reuse the existing The Graph credential and add a Token API binding:
+   - `uxc auth credential set thegraph --secret-env THEGRAPH_API_KEY`
+   - `uxc auth binding add --id thegraph-token-mcp --host token-api.mcp.thegraph.com --scheme https --credential thegraph --priority 100`
 3. Use fixed link command by default:
    - `command -v thegraph-token-mcp-cli`
    - If missing, create it:
@@ -73,8 +73,8 @@ Always inspect host help and operation help in the current endpoint version befo
 - Use direct `uxc "<endpoint>" ...` only as temporary fallback when link setup is unavailable.
 - Prefer `key=value` for simple arguments and positional JSON for nested objects.
 - If auth fails:
-  - confirm `uxc auth credential info thegraph-token` succeeds
-  - confirm `uxc auth binding match https://token-api.mcp.thegraph.com/` resolves to `thegraph-token`
+  - confirm `uxc auth credential info thegraph` succeeds
+  - confirm `uxc auth binding match https://token-api.mcp.thegraph.com/` resolves to `thegraph`
   - rerun `thegraph-token-mcp-cli -h`
 
 ## Tested Real Scenario
@@ -89,6 +89,13 @@ The endpoint was verified through `uxc` host discovery and returned a live MCP t
 - `getV1EvmBalances`
 
 This confirms the skill target is a real MCP surface rather than a direct OpenAPI host.
+
+The same The Graph API key was validated against both:
+
+- `https://subgraphs.mcp.thegraph.com/sse`
+- `https://token-api.mcp.thegraph.com/`
+
+This skill therefore defaults to reusing the existing `thegraph` credential instead of requiring a second credential ID.
 
 ## References
 
