@@ -30,7 +30,8 @@ Endpoint candidate inputs before finalizing:
    - Run host help or a minimal read call and inspect envelope.
    - This endpoint requires a The Graph Gateway API key sent as `Authorization: Bearer <key>`.
 3. Register credential and use fixed link command by default:
-   - `uxc auth credential set thegraph --secret-env THEGRAPH_API_KEY`
+   - `uxc auth credential set thegraph --secret "$THEGRAPH_API_KEY"`
+   - If the runtime already injects `THEGRAPH_API_KEY` into the `uxc` daemon environment, `uxc auth credential set thegraph --secret-env THEGRAPH_API_KEY` also works.
    - `uxc auth binding add --id thegraph-sse --host subgraphs.mcp.thegraph.com --path-prefix /sse --scheme https --credential thegraph --priority 100`
    - `command -v thegraph-mcp-cli`
    - If missing, create it:

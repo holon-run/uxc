@@ -56,7 +56,7 @@ if ! rg -q 'uxc link thegraph-mcp-cli' "${SKILL_FILE}"; then
   fail "SKILL.md must include fixed link creation command"
 fi
 
-if ! rg -q 'uxc auth credential set thegraph --secret-env THEGRAPH_API_KEY' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+if ! rg -q 'uxc auth credential set thegraph --secret "\$THEGRAPH_API_KEY"' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail "docs must register a credential for The Graph auth"
 fi
 

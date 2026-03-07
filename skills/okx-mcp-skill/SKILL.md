@@ -32,8 +32,9 @@ Use your own key for regular usage, stability, and production workflows.
 1. Confirm endpoint and protocol with help-first probing:
    - `uxc https://web3.okx.com/api/v1/onchainos-mcp -h`
 2. Configure credential/binding for repeatable auth:
-   - `uxc auth credential set okx-mcp --auth-type api_key --api-key-header OK-ACCESS-KEY --secret-env OKX_ACCESS_KEY`
+   - `uxc auth credential set okx-mcp --auth-type api_key --api-key-header OK-ACCESS-KEY --secret "$OKX_ACCESS_KEY"`
    - `uxc auth credential set okx-mcp --auth-type api_key --api-key-header OK-ACCESS-KEY --secret-op op://Engineering/okx/OK-ACCESS-KEY`
+   - If the runtime already injects `OKX_ACCESS_KEY` into the `uxc` daemon environment, `uxc auth credential set okx-mcp --auth-type api_key --api-key-header OK-ACCESS-KEY --secret-env OKX_ACCESS_KEY` also works.
    - `uxc auth binding add --id okx-mcp --host web3.okx.com --path-prefix /api/v1/onchainos-mcp --scheme https --credential okx-mcp --priority 100`
 3. Use fixed link command by default:
    - `command -v okx-mcp-cli`
@@ -93,7 +94,7 @@ Always prefer runtime discovery (`dex-okx-market-price-chains` / `dex-okx-dex-ag
 - `okx-mcp-cli <operation> ...` is equivalent to `uxc https://web3.okx.com/api/v1/onchainos-mcp <operation> ...`.
 - If call result contains `Request header OK-ACCESS-KEY can not be empty`:
   - confirm auth binding matches endpoint with `uxc auth binding match https://web3.okx.com/api/v1/onchainos-mcp`
-  - update credential with explicit header: `uxc auth credential set okx-mcp --auth-type api_key --api-key-header OK-ACCESS-KEY --secret-env OKX_ACCESS_KEY`
+  - update credential with explicit header: `uxc auth credential set okx-mcp --auth-type api_key --api-key-header OK-ACCESS-KEY --secret "$OKX_ACCESS_KEY"`
   - confirm credential has a secret source (`--secret-env`, `--secret-op`, or literal `--secret`)
 - For high-impact operations require explicit user confirmation:
   - `dex-okx-dex-approve-transaction`

@@ -2,6 +2,18 @@
 
 Complete guide for configuring credentials and auth bindings for different API authentication patterns.
 
+## Agent-First Default
+
+Skills in this repository are executed primarily by agents, not by humans copying commands into a long-lived shell.
+
+For non-OAuth credentials, prefer this default in skill docs:
+
+```bash
+uxc auth credential set <credential_id> --secret "$API_TOKEN"
+```
+
+Use `--secret-env VAR_NAME` only when the runtime already injects that environment variable into the `uxc` daemon environment and you want the credential to resolve it lazily.
+
 ## Credential Types
 
 UXC supports three non-OAuth credential types:
@@ -22,7 +34,7 @@ uxc auth credential set <credential_id> \
   --auth-type api_key \
   --header "X-API-Key:{{secret}}" \
   --header "X-API-Secret:{{env:API_SECRET}}" \
-  --secret-env API_KEY
+  --secret "$API_KEY"
 
 # Using 1Password
 uxc auth credential set <credential_id> \
@@ -41,12 +53,12 @@ uxc auth credential set <credential_id> \
 Use when API accepts standard `Authorization: Bearer <token>` format:
 
 ```bash
-# With literal secret
+# Agent-friendly default
 uxc auth credential set <credential_id> \
   --auth-type bearer \
-  --secret "bearer_token_value"
+  --secret "$BEARER_TOKEN"
 
-# From environment variable
+# If the runtime already injects the env var into the daemon environment
 uxc auth credential set <credential_id> \
   --auth-type bearer \
   --secret-env BEARER_TOKEN
@@ -73,7 +85,7 @@ All credential types support three secret source kinds:
 
 #### Environment Variable
 ```bash
---secret-env CREDENTIAL_NAME
+--secret "$CREDENTIAL_NAME"
 ```
 - Secret resolved from environment variable at runtime
 - More secure than literal
@@ -141,7 +153,7 @@ APIs that accept `Authorization: Bearer <token>`:
 ```bash
 uxc auth credential set myapi \
   --auth-type bearer \
-  --secret-env MYAPI_TOKEN
+  --secret "$MYAPI_TOKEN"
 ```
 
 ### Pattern 3: Custom API Key Header
@@ -152,7 +164,7 @@ APIs that use non-standard header names:
 uxc auth credential set custom-api \
   --auth-type api_key \
   --header "X-API-Key:{{secret}}" \
-  --secret-env CUSTOM_API_KEY
+  --secret "$CUSTOM_API_KEY"
 ```
 
 ### Pattern 4: Multiple Headers
@@ -164,7 +176,7 @@ uxc auth credential set complex-api \
   --auth-type api_key \
   --header "X-API-Key:{{secret}}" \
   --header "X-API-Secret:{{env:API_SECRET}}" \
-  --secret-env API_KEY
+  --secret "$API_KEY"
 ```
 
 ## Troubleshooting
@@ -228,9 +240,9 @@ uxc auth binding add \
    uxc daemon restart
    ```
 
-2. Or switch to literal secret (less secure):
+2. Or switch to direct secret input when the caller already has the value:
    ```bash
-   uxc auth credential set mycred --secret "actual_value"
+   uxc auth credential set mycred --secret "$MY_API_KEY"
    ```
 
 3. Or switch to 1Password (most secure):

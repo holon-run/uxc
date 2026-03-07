@@ -20,8 +20,9 @@ Reuse the `uxc` skill for shared protocol discovery, output parsing, and generic
 1. Confirm endpoint and protocol with help-first probing:
    - `uxc https://api.dune.com/mcp/v1 -h`
 2. Configure credential/binding for repeatable auth:
-   - `uxc auth credential set dune-mcp --auth-type api_key --header "x-dune-api-key={{secret}}" --secret-env DUNE_API_KEY`
+   - `uxc auth credential set dune-mcp --auth-type api_key --header "x-dune-api-key={{secret}}" --secret "$DUNE_API_KEY"`
    - `uxc auth credential set dune-mcp --auth-type api_key --header "x-dune-api-key={{secret}}" --secret-op op://Engineering/dune/api-key`
+   - If the runtime already injects `DUNE_API_KEY` into the `uxc` daemon environment, `uxc auth credential set dune-mcp --auth-type api_key --header "x-dune-api-key={{secret}}" --secret-env DUNE_API_KEY` also works.
    - `uxc auth binding add --id dune-mcp --host api.dune.com --path-prefix /mcp/v1 --scheme https --credential dune-mcp --priority 100`
 3. Use fixed link command by default:
    - `command -v dune-mcp-cli`

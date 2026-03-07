@@ -4,17 +4,18 @@
 
 ### Personal API Key (Recommended)
 ```bash
-# Set credential with environment variable
+# Agent-friendly default when the runtime already has the token value
+uxc auth credential set linear-graphql \
+  --auth-type api_key \
+  --header "Authorization:{{secret}}" \
+  --secret "$LINEAR_API_KEY"
+
+# Or resolve it from daemon environment if that env var is already injected
 uxc auth credential set linear-graphql \
   --auth-type api_key \
   --header "Authorization:{{secret}}" \
   --secret-env LINEAR_API_KEY
 
-# Or with literal secret (not recommended for security)
-uxc auth credential set linear-graphql \
-  --auth-type api_key \
-  --header "Authorization:{{secret}}" \
-  --secret lin_api_xxxx
 ```
 
 ### OAuth Flow

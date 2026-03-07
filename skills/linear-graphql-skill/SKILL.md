@@ -28,12 +28,11 @@ Linear supports two authentication methods:
    uxc auth credential set linear-graphql \
      --auth-type api_key \
      --header "Authorization:{{secret}}" \
-     --secret "lin_api_XXX"
+     --secret "$LINEAR_API_KEY"
    ```
 
-   Or use environment variable:
+   If the runtime already injects the env var into the daemon environment:
    ```bash
-   export LINEAR_API_KEY="lin_api_XXX"
    uxc auth credential set linear-graphql \
      --auth-type api_key \
      --header "Authorization:{{secret}}" \
@@ -194,7 +193,7 @@ For detailed authentication troubleshooting, see `uxc` skill's `references/auth-
 
 **Environment variable not found**
 - Ensure variable is exported in daemon's environment
-- Or use `--secret` for literal values (less secure)
+- Or use `--secret "$LINEAR_API_KEY"` when the caller already has the token value
 - Or use `--secret-op` for 1Password (most secure)
 
 ## Guardrails

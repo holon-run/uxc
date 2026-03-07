@@ -40,6 +40,7 @@ Optional files are allowed only when they add real reusable value.
    - provider endpoint (`<host>`)
    - fixed link command name (`<provider>-<protocol>-cli`)
    - auth mode (none, api key, oauth)
+   - for non-OAuth credentials in skills, default to agent-friendly examples with `--secret "$PROVIDER_TOKEN"`; mention `--secret-env VAR_NAME` only as an optional alternative when the runtime already injects that env var
 5. Write `SKILL.md` as a thin execution policy:
    - link-first command flow
    - help-first discovery flow

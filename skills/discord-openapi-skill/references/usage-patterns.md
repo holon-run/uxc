@@ -15,7 +15,7 @@ discord-openapi-cli -h
 uxc auth credential set discord-openapi \
   --auth-type api_key \
   --header "Authorization:Bot {{secret}}" \
-  --secret-env DISCORD_BOT_TOKEN
+  --secret "$DISCORD_BOT_TOKEN"
 
 uxc auth binding add \
   --id discord-openapi \
@@ -25,6 +25,8 @@ uxc auth binding add \
   --credential discord-openapi \
   --priority 100
 ```
+
+If the runtime already injects `DISCORD_BOT_TOKEN` into the daemon environment, `--secret-env DISCORD_BOT_TOKEN` is an equivalent alternative.
 
 ## Read Examples
 

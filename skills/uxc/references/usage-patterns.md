@@ -49,7 +49,7 @@ uxc link <provider>-openapi-cli <host> --schema-url <schema_url>
 For stdio hosts that expect credentials in child-process env vars, persist credential selection and env injection on the link:
 
 ```bash
-uxc auth credential set <credential_id> --secret-env <ENV_NAME>
+uxc auth credential set <credential_id> --secret "$<ENV_NAME>"
 uxc link <provider>-mcp-cli <stdio_command> --credential <credential_id> --inject-env <ENV_NAME>={{secret}}
 <provider>-mcp-cli -h
 ```

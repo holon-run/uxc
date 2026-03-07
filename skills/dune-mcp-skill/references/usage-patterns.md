@@ -13,7 +13,7 @@ dune-mcp-cli -h
 Auth setup:
 
 ```bash
-uxc auth credential set dune-mcp --auth-type api_key --header "x-dune-api-key={{secret}}" --secret-env DUNE_API_KEY
+uxc auth credential set dune-mcp --auth-type api_key --header "x-dune-api-key={{secret}}" --secret "$DUNE_API_KEY"
 uxc auth binding add --id dune-mcp --host api.dune.com --path-prefix /mcp/v1 --scheme https --credential dune-mcp --priority 100
 ```
 
@@ -22,6 +22,8 @@ Optional secret manager source:
 ```bash
 uxc auth credential set dune-mcp --auth-type api_key --header "x-dune-api-key={{secret}}" --secret-op op://Engineering/dune/api-key
 ```
+
+If the runtime already injects `DUNE_API_KEY` into the daemon environment, `--secret-env DUNE_API_KEY` is an equivalent alternative.
 
 ## Help-First Discovery
 

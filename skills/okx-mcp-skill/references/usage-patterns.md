@@ -20,9 +20,11 @@ uxc auth binding add --id okx-mcp --host web3.okx.com --path-prefix /api/v1/onch
 For long-term usage, replace with your own key and keep explicit header config:
 
 ```bash
-uxc auth credential set okx-mcp --auth-type api_key --api-key-header OK-ACCESS-KEY --secret-env OKX_ACCESS_KEY
+uxc auth credential set okx-mcp --auth-type api_key --api-key-header OK-ACCESS-KEY --secret "$OKX_ACCESS_KEY"
 uxc auth binding add --id okx-mcp --host web3.okx.com --path-prefix /api/v1/onchainos-mcp --scheme https --credential okx-mcp --priority 100
 ```
+
+If the runtime already injects `OKX_ACCESS_KEY` into the daemon environment, `--secret-env OKX_ACCESS_KEY` is an equivalent alternative.
 
 ## Help-First Discovery
 
@@ -81,7 +83,7 @@ uxc auth credential info okx-mcp
 If needed, reset credential with explicit header:
 
 ```bash
-uxc auth credential set okx-mcp --auth-type api_key --api-key-header OK-ACCESS-KEY --secret-env OKX_ACCESS_KEY
+uxc auth credential set okx-mcp --auth-type api_key --api-key-header OK-ACCESS-KEY --secret "$OKX_ACCESS_KEY"
 ```
 
 ## Fallback Equivalence
