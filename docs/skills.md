@@ -175,3 +175,29 @@ clawhub publish skills/deepwiki-mcp-skill --slug deepwiki-mcp-skill --name "Deep
   - `okx-mcp-skill`
   - reason: auth setup docs now require `--api-key-header OK-ACCESS-KEY` in initial credential command.
   - command: `clawhub publish skills/okx-mcp-skill --slug okx-mcp-skill --name "OKX MCP Skill" --version 1.0.1`
+
+## ClawHub Publish Log (2026-03-07)
+
+- Command used:
+
+```bash
+clawhub sync --dry-run
+clawhub sync --all --bump patch
+```
+
+- `sync --dry-run` reported:
+  - `dune-mcp-skill  NEW  (4 files)`
+  - `etherscan-mcp-skill  NEW  (4 files)`
+  - `thegraph-mcp-skill  NEW  (4 files)`
+  - `thegraph-token-mcp-skill  NEW  (4 files)`
+  - `uxc  UPDATE 1.0.1 → 1.0.2  (9 files)`
+- Published:
+  - `dune-mcp-skill@1.0.0`
+  - `etherscan-mcp-skill@1.0.0`
+  - `thegraph-mcp-skill@1.0.0`
+  - `thegraph-token-mcp-skill@1.0.0`
+  - `uxc@1.0.2`
+- Notes:
+  - `clawhub sync` compares current local skill fingerprints with registry state, not git history.
+  - `uxc (9 files)` refers to the total file count in the skill package, not the number of changed files.
+  - Immediately after publish, `clawhub inspect uxc` may return `Skill is hidden while security scan is pending`; `clawhub sync --dry-run` still reports `Already synced`, which confirms the upload succeeded.
