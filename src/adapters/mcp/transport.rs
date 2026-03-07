@@ -689,7 +689,14 @@ mod tests {
     #[tokio::test]
     async fn parse_command_handles_zsh_command_form() {
         let parts = parse_command("/bin/zsh -lc 'npx -y mcp-remote https://mcp.deepwiki.com/mcp'");
-        assert_eq!(parts, vec!["/bin/zsh", "-lc", "npx -y mcp-remote https://mcp.deepwiki.com/mcp"]);
+        assert_eq!(
+            parts,
+            vec![
+                "/bin/zsh",
+                "-lc",
+                "npx -y mcp-remote https://mcp.deepwiki.com/mcp"
+            ]
+        );
     }
 
     #[tokio::test]
