@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
+#[cfg(test)]
+pub use transport::MockStdioExecutor;
 
 pub struct McpAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,

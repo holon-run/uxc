@@ -238,8 +238,13 @@ impl McpStdioTransport {
         args: &[String],
         options: StdioSpawnOptions,
     ) -> Result<Self> {
-        Self::connect_with_executor(command, args, options, Arc::new(DefaultStdioProcessExecutor))
-            .await
+        Self::connect_with_executor(
+            command,
+            args,
+            options,
+            Arc::new(DefaultStdioProcessExecutor),
+        )
+        .await
     }
 
     /// Create a new transport with a custom executor (for testing)
@@ -1132,7 +1137,11 @@ mod tests {
         let executor = DefaultStdioProcessExecutor;
         // Test that we can call spawn (it will fail for invalid command, but that's ok)
         let result = executor
-            .spawn("nonexistent_test_command_xyz", &[], &StdioSpawnOptions::default())
+            .spawn(
+                "nonexistent_test_command_xyz",
+                &[],
+                &StdioSpawnOptions::default(),
+            )
             .await;
         assert!(result.is_err());
     }

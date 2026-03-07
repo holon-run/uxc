@@ -29,8 +29,13 @@ impl McpStdioClient {
         args: &[String],
         options: StdioSpawnOptions,
     ) -> Result<Self> {
-        Self::connect_with_executor(command, args, options, Arc::new(DefaultStdioProcessExecutor))
-            .await
+        Self::connect_with_executor(
+            command,
+            args,
+            options,
+            Arc::new(DefaultStdioProcessExecutor),
+        )
+        .await
     }
 
     /// Create a new client with a custom executor (for testing)

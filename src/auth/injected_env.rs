@@ -50,7 +50,10 @@ impl InjectEnvSpec {
 }
 
 pub fn parse_inject_env_specs(raw_specs: &[String]) -> Result<Vec<InjectEnvSpec>> {
-    raw_specs.iter().map(|spec| InjectEnvSpec::parse(spec)).collect()
+    raw_specs
+        .iter()
+        .map(|spec| InjectEnvSpec::parse(spec))
+        .collect()
 }
 
 pub fn normalize_inject_env_specs(specs: &[InjectEnvSpec]) -> Vec<InjectEnvSpec> {

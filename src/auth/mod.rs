@@ -12,9 +12,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod injected_env;
 pub mod oauth;
 pub mod oauth_sessions;
-pub mod injected_env;
 
 /// Default auth directory relative to home directory.
 pub const DEFAULT_AUTH_DIR: &str = ".uxc";

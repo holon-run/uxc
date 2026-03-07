@@ -830,7 +830,11 @@ fn is_global_bool_arg(arg: &str) -> bool {
 fn is_global_kv_arg(arg: &str) -> bool {
     matches!(
         arg,
-        "--format" | "--auth" | "--cache-ttl" | "--schema-url" | "--daemon-exclusive"
+        "--format"
+            | "--auth"
+            | "--cache-ttl"
+            | "--schema-url"
+            | "--daemon-exclusive"
             | "--inject-env"
     )
 }
