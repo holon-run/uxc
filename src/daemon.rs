@@ -438,25 +438,26 @@ impl McpSessionManager {
                     // With env fingerprint, we need to handle: "stdio:endpoint:auth_fp:env_fp"
                     // Without env fingerprint: "stdio:endpoint:auth_fp"
                     // Split from the end twice to handle both cases.
-                    let (owner_endpoint, owner_auth_fp, owner_env_fp) =
-                        match owner_session_key.strip_prefix("stdio:") {
-                            Some(rest) => {
-                                // Try splitting twice for env fingerprint format
-                                if let Some((before_env, _env_fp)) = rest.rsplit_once(':') {
-                                    if let Some((before_auth, auth_fp)) = before_env.rsplit_once(':') {
-                                        // Has both auth and env fingerprints
-                                        (Some(before_auth), Some(auth_fp), Some(_env_fp))
-                                    } else {
-                                        // Only has auth fingerprint, env_fp was actually endpoint
-                                        (Some(before_env), Some(_env_fp), None)
-                                    }
+                    let (owner_endpoint, owner_auth_fp, owner_env_fp) = match owner_session_key
+                        .strip_prefix("stdio:")
+                    {
+                        Some(rest) => {
+                            // Try splitting twice for env fingerprint format
+                            if let Some((before_env, _env_fp)) = rest.rsplit_once(':') {
+                                if let Some((before_auth, auth_fp)) = before_env.rsplit_once(':') {
+                                    // Has both auth and env fingerprints
+                                    (Some(before_auth), Some(auth_fp), Some(_env_fp))
                                 } else {
-                                    // No fingerprint at all
-                                    (Some(rest), None, None)
+                                    // Only has auth fingerprint, env_fp was actually endpoint
+                                    (Some(before_env), Some(_env_fp), None)
                                 }
+                            } else {
+                                // No fingerprint at all
+                                (Some(rest), None, None)
                             }
-                            None => (None, None, None),
-                        };
+                        }
+                        None => (None, None, None),
+                    };
                     let owner_endpoint = owner_endpoint
                         .map(redact_endpoint)
                         .map(|s| redact_sensitive(&s));
@@ -737,12 +738,7 @@ impl DaemonRuntime {
             // Clone the pre-computed stdio_spawn_options to avoid duplicate secret resolution
             let stdio_options = stdio_spawn_options.clone();
             let (kind, operation, data, reused) = self
-                .invoke_mcp_execute(
-                    &request,
-                    prepared_args,
-                    auth_profile.clone(),
-                    stdio_options,
-                )
+                .invoke_mcp_execute(&request, prepared_args, auth_profile.clone(), stdio_options)
                 .await?;
             meta.daemon_session_reused = Some(reused);
 
@@ -930,8 +926,10 @@ impl DaemonRuntime {
             // otherwise compute them now. This avoids duplicate secret resolution.
             let spawn_options = match precomputed_stdio_spawn_options {
                 Some(options) => options,
-                None => build_stdio_spawn_options(endpoint, &request.options, auth_profile.as_ref())?
-                    .unwrap_or_default(),
+                None => {
+                    build_stdio_spawn_options(endpoint, &request.options, auth_profile.as_ref())?
+                        .unwrap_or_default()
+                }
             };
             let key = format!(
                 "stdio:{}:{}:{}",
