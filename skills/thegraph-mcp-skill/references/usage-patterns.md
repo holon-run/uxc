@@ -16,7 +16,7 @@ thegraph-mcp-cli -h
 
 Notes:
 
-- This skill now uses native SSE support in `uxc`; `mcp-remote` is no longer needed.
+- This skill now uses native SSE support in `uxc`.
 - Auth is handled through standard `uxc auth credential` + `binding`.
 - Check the active binding with `uxc auth binding match https://subgraphs.mcp.thegraph.com/sse`.
 
