@@ -30,7 +30,7 @@ Bot token provides full access to Discord API including reading messages, managi
 ```bash
 uxc auth credential set discord-bot \
   --auth-type api_key \
-  --header "Authorization=Bot {{secret}}" \
+  --header "Authorization:Bot {{secret}}" \
   --secret "$DISCORD_BOT_TOKEN"
 ```
 
