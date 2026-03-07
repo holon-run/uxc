@@ -433,25 +433,41 @@ impl McpSessionManager {
                     }
                     let key = conflicting.unwrap_or_else(|| "<unknown>".to_string());
 
-                    // session_key format: "stdio:{endpoint}:{auth_fingerprint}"
+                    // session_key format: "stdio:{endpoint}:{auth_fingerprint}[:{env_fingerprint}]"
                     // endpoint can contain ":", so parse from the last ":".
-                    let (owner_endpoint, owner_fp) = match owner_session_key.strip_prefix("stdio:")
-                    {
-                        Some(rest) => match rest.rsplit_once(':') {
-                            Some((endpoint, fp)) => (Some(endpoint), Some(fp)),
-                            None => (Some(rest), None),
-                        },
-                        None => (None, None),
-                    };
+                    // With env fingerprint, we need to handle: "stdio:endpoint:auth_fp:env_fp"
+                    // Without env fingerprint: "stdio:endpoint:auth_fp"
+                    // Split from the end twice to handle both cases.
+                    let (owner_endpoint, owner_auth_fp, owner_env_fp) =
+                        match owner_session_key.strip_prefix("stdio:") {
+                            Some(rest) => {
+                                // Try splitting twice for env fingerprint format
+                                if let Some((before_env, _env_fp)) = rest.rsplit_once(':') {
+                                    if let Some((before_auth, auth_fp)) = before_env.rsplit_once(':') {
+                                        // Has both auth and env fingerprints
+                                        (Some(before_auth), Some(auth_fp), Some(_env_fp))
+                                    } else {
+                                        // Only has auth fingerprint, env_fp was actually endpoint
+                                        (Some(before_env), Some(_env_fp), None)
+                                    }
+                                } else {
+                                    // No fingerprint at all
+                                    (Some(rest), None, None)
+                                }
+                            }
+                            None => (None, None, None),
+                        };
                     let owner_endpoint = owner_endpoint
                         .map(redact_endpoint)
                         .map(|s| redact_sensitive(&s));
-                    let owner_fp = owner_fp.map(|s| s.to_string());
+                    let owner_auth_fp = owner_auth_fp.map(|s| s.to_string());
+                    let owner_env_fp = owner_env_fp.map(|s| s.to_string());
                     bail!(
-                        "Another MCP stdio session is currently using daemon exclusive key {} (owner_endpoint={}, owner_fingerprint={}). Close it (or run `uxc daemon stop`) before switching.",
+                        "Another MCP stdio session is currently using daemon exclusive key {} (owner_endpoint={}, owner_auth_fingerprint={}, owner_env_fingerprint={}). Close it (or run `uxc daemon stop`) before switching.",
                         key,
                         owner_endpoint.unwrap_or_else(|| "<unknown>".to_string()),
-                        owner_fp.unwrap_or_else(|| "<unknown>".to_string()),
+                        owner_auth_fp.unwrap_or_else(|| "<unknown>".to_string()),
+                        owner_env_fp.unwrap_or_else(|| "<none>".to_string()),
                     );
                 }
             };

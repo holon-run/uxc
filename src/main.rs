@@ -2357,7 +2357,8 @@ async fn handle_link_command(
     }
     if !options.inject_env.is_empty() && persisted_credential.is_none() {
         return Err(UxcError::InvalidArguments(
-            "--inject-env on uxc link requires --credential <credential_id>".to_string(),
+            "--inject-env on uxc link requires either --credential <credential_id> or global --auth"
+                .to_string(),
         )
         .into());
     }
