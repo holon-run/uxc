@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 mod adapters;
+mod arg_coercion;
 mod auth;
 mod cache;
 pub mod cli;
@@ -1988,7 +1989,7 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
 /// Build a helpful error message for invalid operation arguments
 fn build_invalid_arg_error(arg: &str, operation_id: &str) -> String {
     format!(
-        "Unknown argument '{}' for operation '{}'.\n\nHint: Use key=value format (recommended):\n  uxc <host> {} key1=value1 key2=value2\n\nOr pass JSON as positional argument:\n  uxc <host> {} '{{\"key1\":\"value1\",\"key2\":\"value2\"}}'",
+        "Unknown argument '{}' for operation '{}'.\n\nHint: Use key=value format (recommended):\n  uxc <host> {} key1=value1 key2=value2\n\nOr pass a JSON object as a positional argument:\n  uxc <host> {} '{{\"key1\":\"value1\",\"key2\":\"value2\"}}'",
         arg, operation_id, operation_id, operation_id
     )
 }
@@ -2113,7 +2114,7 @@ fn normalize_operation_inputs(
 
         if serde_json::from_str::<Value>(arg).is_ok() {
             return Err(UxcError::InvalidArguments(format!(
-                "Invalid --args value '{}' for operation '{}'. Use key=value for --args, or pass JSON as positional payload / --input-json",
+                "Invalid --args value '{}' for operation '{}'. Use key=value for --args, or pass a JSON object as a positional argument",
                 arg, operation_id
             ))
             .into());

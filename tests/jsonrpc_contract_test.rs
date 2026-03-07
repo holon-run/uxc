@@ -765,7 +765,11 @@ fn test_jsonrpc_unknown_parameter() {
 
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("Unknown parameter"));
+        assert!(
+            !error_msg.contains("Unknown parameter"),
+            "unexpected local unknown-parameter rejection: {}",
+            error_msg
+        );
     });
 }
 

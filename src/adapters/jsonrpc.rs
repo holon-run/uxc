@@ -355,25 +355,11 @@ impl JsonRpcAdapter {
 
     fn build_params(method: &Value, args: &HashMap<String, Value>) -> Result<Option<Value>> {
         let ordered_specs = Self::ordered_parameter_specs(method);
-
-        if !ordered_specs.is_empty() {
-            let known: HashSet<&str> = ordered_specs
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect();
-            let unknown = args
-                .keys()
-                .filter(|key| !known.contains(key.as_str()))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !unknown.is_empty() {
-                return Err(UxcError::InvalidArguments(format!(
-                    "Unknown parameter(s): {}",
-                    unknown.join(", ")
-                ))
-                .into());
-            }
-        }
+        let known: HashSet<&str> = ordered_specs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let has_unknown = args.keys().any(|key| !known.contains(key.as_str()));
 
         if args.is_empty() {
             for (name, required) in &ordered_specs {
@@ -396,6 +382,9 @@ impl JsonRpcAdapter {
         match structure {
             "by-name" => Ok(Some(Value::Object(args.clone().into_iter().collect()))),
             "by-position" => {
+                if has_unknown {
+                    return Ok(Some(Value::Object(args.clone().into_iter().collect())));
+                }
                 if let Some(positional) = Self::build_positional_params(&ordered_specs, args)? {
                     Ok(Some(positional))
                 } else {
@@ -403,6 +392,9 @@ impl JsonRpcAdapter {
                 }
             }
             _ => {
+                if has_unknown {
+                    return Ok(Some(Value::Object(args.clone().into_iter().collect())));
+                }
                 if let Some(positional) = Self::build_positional_params(&ordered_specs, args)? {
                     return Ok(Some(positional));
                 }
@@ -863,6 +855,23 @@ mod tests {
 
         let params = JsonRpcAdapter::build_params(method, &args).unwrap();
         assert_eq!(params, Some(json!({"minuend": 42, "subtrahend": 23})));
+    }
+
+    #[test]
+    fn build_params_uses_object_when_unknown_fields_would_be_dropped() {
+        let schema = openrpc_schema_with_structure("either");
+        let method = JsonRpcAdapter::find_method(&schema, "subtract").unwrap();
+
+        let mut args = HashMap::new();
+        args.insert("minuend".to_string(), json!(42));
+        args.insert("subtrahend".to_string(), json!(23));
+        args.insert("trace_id".to_string(), json!("abc"));
+
+        let params = JsonRpcAdapter::build_params(method, &args).unwrap();
+        assert_eq!(
+            params,
+            Some(json!({"minuend": 42, "subtrahend": 23, "trace_id": "abc"}))
+        );
     }
 
     #[test]
