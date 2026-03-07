@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-03-07
+
+### Added
+- Added schema-aware argument coercion and validation across protocols so `key=value` and positional JSON inputs are converted and checked against operation schemas before execution.
+- Added legacy SSE MCP transport support.
+- Added stdio child-process credential injection with `--inject-env NAME={{secret}}` and `uxc link --credential <credential_id>`.
+- Added `thegraph-mcp-skill`, `thegraph-token-mcp-skill`, `dune-mcp-skill`, and `etherscan-mcp-skill`.
+
+### Changed
+- Stdio command parsing now supports single-quoted segments in command strings.
+- Skill credential guidance now emphasizes agent-first setup for stdio MCP usage.
+
 ## [0.8.0] - 2026-03-06
 
 ### Added
@@ -233,7 +245,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/holon-run/uxc/releases/tag/v0.9.0
 [0.8.0]: https://github.com/holon-run/uxc/releases/tag/v0.8.0
 [0.7.1]: https://github.com/holon-run/uxc/releases/tag/v0.7.1
 [0.7.0]: https://github.com/holon-run/uxc/releases/tag/v0.7.0
