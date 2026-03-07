@@ -13,7 +13,7 @@ etherscan-mcp-cli -h
 Auth setup:
 
 ```bash
-uxc auth credential set etherscan-mcp --auth-type bearer --secret "$ETHERSCAN_API_KEY"
+uxc auth credential set etherscan-mcp --auth-type bearer --secret-env ETHERSCAN_API_KEY
 uxc auth binding add --id etherscan-mcp --host mcp.etherscan.io --path-prefix /mcp --scheme https --credential etherscan-mcp --priority 100
 ```
 
@@ -22,8 +22,6 @@ Optional secret manager source:
 ```bash
 uxc auth credential set etherscan-mcp --auth-type bearer --secret-op op://Engineering/etherscan/api-key
 ```
-
-If the runtime already injects `ETHERSCAN_API_KEY` into the daemon environment, `--secret-env ETHERSCAN_API_KEY` is an equivalent alternative.
 
 ## Help-First Discovery
 
@@ -122,7 +120,7 @@ uxc auth credential info etherscan-mcp
 If needed, recreate the bearer credential:
 
 ```bash
-uxc auth credential set etherscan-mcp --auth-type bearer --secret "$ETHERSCAN_API_KEY"
+uxc auth credential set etherscan-mcp --auth-type bearer --secret-env ETHERSCAN_API_KEY
 ```
 
 ## Fallback Equivalence

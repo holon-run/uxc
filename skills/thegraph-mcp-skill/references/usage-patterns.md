@@ -8,7 +8,7 @@ Create it when missing:
 
 ```bash
 command -v thegraph-mcp-cli
-uxc auth credential set thegraph --secret "$THEGRAPH_API_KEY"
+uxc auth credential set thegraph --secret-env THEGRAPH_API_KEY
 uxc auth binding add --id thegraph-sse --host subgraphs.mcp.thegraph.com --path-prefix /sse --scheme https --credential thegraph --priority 100
 uxc link thegraph-mcp-cli https://subgraphs.mcp.thegraph.com/sse
 thegraph-mcp-cli -h
@@ -18,7 +18,6 @@ Notes:
 
 - This skill now uses native SSE support in `uxc`.
 - Auth is handled through standard `uxc auth credential` + `binding`.
-- If the runtime already injects `THEGRAPH_API_KEY` into the daemon environment, `--secret-env THEGRAPH_API_KEY` is an equivalent alternative.
 - Check the active binding with `uxc auth binding match https://subgraphs.mcp.thegraph.com/sse`.
 
 ## Discover And Inspect

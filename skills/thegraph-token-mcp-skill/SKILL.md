@@ -21,8 +21,7 @@ Reuse the `uxc` skill for generic protocol discovery, envelope parsing, and erro
    - `uxc https://token-api.mcp.thegraph.com/ -h`
    - Confirm protocol is MCP (`protocol == "mcp"` in envelope).
 2. Reuse the existing The Graph credential and add a Token API binding:
-   - `uxc auth credential set thegraph --secret "$THEGRAPH_API_KEY"`
-   - If the runtime already injects `THEGRAPH_API_KEY` into the `uxc` daemon environment, `uxc auth credential set thegraph --secret-env THEGRAPH_API_KEY` also works.
+   - `uxc auth credential set thegraph --secret-env THEGRAPH_API_KEY`
    - `uxc auth binding add --id thegraph-token-mcp --host token-api.mcp.thegraph.com --scheme https --credential thegraph --priority 100`
 3. Use fixed link command by default:
    - `command -v thegraph-token-mcp-cli`

@@ -145,14 +145,14 @@ Auth model uses:
 Example bearer setup:
 
 ```bash
-uxc auth credential set deepwiki --auth-type bearer --secret "$DEEPWIKI_TOKEN"
+uxc auth credential set deepwiki --auth-type bearer --secret-env DEEPWIKI_TOKEN
 uxc auth credential set deepwiki --secret-op op://Engineering/deepwiki/token
 uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mcp --scheme https --credential deepwiki --priority 100
 
 # api_key credentials can customize one or more auth headers
 uxc auth credential set okx-market \
   --auth-type api_key \
-  --secret "$OKX_ACCESS_KEY" \
+  --secret-env OKX_ACCESS_KEY \
   --api-key-header OK-ACCESS-KEY
 
 uxc auth credential set okx-advanced \

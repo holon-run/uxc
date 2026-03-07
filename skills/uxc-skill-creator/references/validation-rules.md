@@ -28,9 +28,6 @@
 8. Auth detection workflow is explicit:
    - include how auth requirement is determined from probe/first call errors
    - include binding verification when OAuth/binding is used
-9. Agent-first credential setup is explicit for non-OAuth skills:
-   - default examples should use `--secret "$VAR"` when the skill is executed by an agent
-   - `--secret-env VAR` may be documented as an alternative when the runtime already injects that env var
 
 ## Banned defaults
 

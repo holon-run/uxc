@@ -31,10 +31,8 @@ Bot token provides full access to Discord API including reading messages, managi
 uxc auth credential set discord-bot \
   --auth-type api_key \
   --header "Authorization=Bot {{secret}}" \
-  --secret "$DISCORD_BOT_TOKEN"
+  --secret "YOUR_BOT_TOKEN_HERE"
 ```
-
-If the runtime already injects `DISCORD_BOT_TOKEN` into the `uxc` daemon environment, `--secret-env DISCORD_BOT_TOKEN` is an equivalent alternative.
 
 4. Bind credential to Discord API endpoint:
 

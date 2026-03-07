@@ -21,9 +21,8 @@ Reuse the `uxc` skill for shared protocol discovery, output parsing, and generic
    - `uxc https://mcp.etherscan.io/mcp -h`
    - expected unauthenticated behavior today: `401 Unauthorized`
 2. Configure credential/binding for repeatable auth:
-   - `uxc auth credential set etherscan-mcp --auth-type bearer --secret "$ETHERSCAN_API_KEY"`
+   - `uxc auth credential set etherscan-mcp --auth-type bearer --secret-env ETHERSCAN_API_KEY`
    - `uxc auth credential set etherscan-mcp --auth-type bearer --secret-op op://Engineering/etherscan/api-key`
-   - If the runtime already injects `ETHERSCAN_API_KEY` into the `uxc` daemon environment, `uxc auth credential set etherscan-mcp --auth-type bearer --secret-env ETHERSCAN_API_KEY` also works.
    - `uxc auth binding add --id etherscan-mcp --host mcp.etherscan.io --path-prefix /mcp --scheme https --credential etherscan-mcp --priority 100`
 3. Use fixed link command by default:
    - `command -v etherscan-mcp-cli`
@@ -86,7 +85,7 @@ Inspect `etherscan-mcp-cli -h` after auth setup for the current full tool list. 
 - If unauthenticated probe or runtime call returns `401 Unauthorized`:
   - confirm auth binding matches endpoint with `uxc auth binding match https://mcp.etherscan.io/mcp`
   - confirm credential shape with `uxc auth credential info etherscan-mcp`
-  - reset credential as bearer if needed: `uxc auth credential set etherscan-mcp --auth-type bearer --secret "$ETHERSCAN_API_KEY"`
+  - reset credential as bearer if needed: `uxc auth credential set etherscan-mcp --auth-type bearer --secret-env ETHERSCAN_API_KEY`
 - Use `key=value` only for simple scalar inputs.
 - Prefer positional JSON when an operation accepts nested objects, arrays, or optional flags that may evolve.
 - Do not assume tool argument names from memory; inspect `<operation> -h` first because Etherscan may revise MCP schemas independently of this skill.

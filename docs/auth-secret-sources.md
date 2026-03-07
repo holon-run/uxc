@@ -6,8 +6,6 @@ UXC supports three secret source kinds for non-OAuth credentials:
 - `env`: secret is resolved from environment variable via `--secret-env`
 - `op`: secret is resolved from 1Password CLI reference via `--secret-op`
 
-For agent-executed skills, prefer `--secret "$TOKEN_VAR"` as the default setup path because the agent usually receives a secret value directly. Use `--secret-env VAR_NAME` only when the runtime already injects that environment variable into the `uxc` daemon environment.
-
 For `api_key` credentials, you can also configure custom auth headers with templates:
 
 - `{{secret}}`: resolved from the credential secret source

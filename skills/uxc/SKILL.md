@@ -63,7 +63,6 @@ For more options, see the [Installation](https://github.com/holon-run/uxc#instal
    - `uxc <host> <operation> -h`
 6. For auth-protected endpoints, follow the OAuth and binding workflow:
    - see `references/oauth-and-binding.md`
-   - for non-OAuth skills executed by agents, prefer `uxc auth credential set <id> --secret "$TOKEN_VAR"`; use `--secret-env VAR_NAME` only when the runtime already provides that environment variable to the daemon
 
 ## Link-First Workflow For Wrapper Skills
 
