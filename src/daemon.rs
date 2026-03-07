@@ -1,6 +1,7 @@
 use crate::adapters::{
     self, Adapter, AdapterEnum, DetectionOptions, Operation, ProtocolDetector, ProtocolType,
 };
+use crate::arg_coercion::prepare_execute_args;
 use crate::auth::{self, Profile};
 use crate::cache::{self, Cache, CacheConfig};
 use crate::daemon_log::{redact_endpoint, redact_sensitive};
@@ -701,27 +702,28 @@ impl DaemonRuntime {
             meta.schema_involved = Some(true);
         }
 
-        let mut result: Result<(String, Option<String>, Value)> =
-            if protocol == "mcp" && matches!(request.action, RuntimeAction::Execute) {
-                validate_execute_preflight(&resolved.adapter, &request).await?;
-                let (kind, operation, data, reused) = self
-                    .invoke_mcp_execute(&request, auth_profile.clone())
-                    .await?;
-                meta.daemon_session_reused = Some(reused);
+        let mut result: Result<(String, Option<String>, Value)> = if protocol == "mcp"
+            && matches!(request.action, RuntimeAction::Execute)
+        {
+            let prepared_args = prepare_runtime_execute_args(&resolved.adapter, &request).await?;
+            let (kind, operation, data, reused) = self
+                .invoke_mcp_execute(&request, prepared_args, auth_profile.clone())
+                .await?;
+            meta.daemon_session_reused = Some(reused);
 
-                if reused {
-                    self.log(
-                        DaemonLogEntry::new(DaemonEventType::DaemonSessionReused)
-                            .with_request_id(request.request_id.clone())
-                            .with_endpoint(request.endpoint.clone()),
-                    )
-                    .await;
-                }
+            if reused {
+                self.log(
+                    DaemonLogEntry::new(DaemonEventType::DaemonSessionReused)
+                        .with_request_id(request.request_id.clone())
+                        .with_endpoint(request.endpoint.clone()),
+                )
+                .await;
+            }
 
-                Ok((kind, operation, data))
-            } else {
-                invoke_with_adapter(&resolved.adapter, &request).await
-            };
+            Ok((kind, operation, data))
+        } else {
+            invoke_with_adapter(&resolved.adapter, &request).await
+        };
 
         // If invocation failed, attempt a stale-cache fallback even when protocol detection
         // succeeded without network access. This keeps `-h` flows resilient when the cached
@@ -759,9 +761,10 @@ impl DaemonRuntime {
                         result = if protocol == "mcp"
                             && matches!(request.action, RuntimeAction::Execute)
                         {
-                            validate_execute_preflight(&adapter, &request).await?;
+                            let prepared_args =
+                                prepare_runtime_execute_args(&adapter, &request).await?;
                             let (kind, operation, data, reused) = self
-                                .invoke_mcp_execute(&request, auth_profile.clone())
+                                .invoke_mcp_execute(&request, prepared_args, auth_profile.clone())
                                 .await?;
                             meta.daemon_session_reused = Some(reused);
                             Ok((kind, operation, data))
@@ -864,6 +867,7 @@ impl DaemonRuntime {
     async fn invoke_mcp_execute(
         &self,
         request: &RuntimeInvokeRequest,
+        args: HashMap<String, Value>,
         auth_profile: Option<Profile>,
     ) -> Result<(String, Option<String>, Value, bool)> {
         let endpoint = &request.endpoint;
@@ -871,7 +875,6 @@ impl DaemonRuntime {
             .operation_id
             .as_ref()
             .ok_or_else(|| anyhow!("operation_id is required"))?;
-        let args = request.args.clone().unwrap_or_default();
         let arguments = if args.is_empty() {
             None
         } else {
@@ -1657,11 +1660,33 @@ async fn invoke_with_adapter(
                 .operation_id
                 .as_ref()
                 .ok_or_else(|| anyhow!("operation_id is required"))?;
-            let args = request.args.clone().unwrap_or_default();
+            let args = prepare_runtime_execute_args(adapter, request).await?;
             let result = adapter.execute(&request.endpoint, op, args).await?;
             Ok(("call_result".to_string(), Some(op.clone()), result.data))
         }
     }
+}
+
+async fn prepare_runtime_execute_args(
+    adapter: &AdapterEnum,
+    request: &RuntimeInvokeRequest,
+) -> Result<HashMap<String, Value>> {
+    if !matches!(request.action, RuntimeAction::Execute) {
+        return Ok(request.args.clone().unwrap_or_default());
+    }
+
+    let op = request
+        .operation_id
+        .as_ref()
+        .ok_or_else(|| anyhow!("operation_id is required"))?;
+
+    prepare_execute_args(
+        adapter,
+        &request.endpoint,
+        op,
+        request.args.clone().unwrap_or_default(),
+    )
+    .await
 }
 
 async fn host_help_service_summary(
@@ -1687,61 +1712,6 @@ async fn host_help_service_summary(
         return Ok(None);
     }
     Ok(Some(ServiceSummary { name, description }))
-}
-
-async fn validate_execute_preflight(
-    adapter: &AdapterEnum,
-    request: &RuntimeInvokeRequest,
-) -> Result<()> {
-    if !matches!(request.action, RuntimeAction::Execute) {
-        return Ok(());
-    }
-    if !matches!(adapter.protocol_type(), ProtocolType::Mcp) {
-        return Ok(());
-    }
-
-    let op = request
-        .operation_id
-        .as_ref()
-        .ok_or_else(|| anyhow!("operation_id is required"))?;
-    let detail = match adapter.describe_operation(&request.endpoint, op).await {
-        Ok(detail) => detail,
-        Err(err) => {
-            tracing::debug!(
-                "Skip MCP execute preflight validation for {} due to operation schema lookup error: {}",
-                op,
-                err
-            );
-            return Ok(());
-        }
-    };
-    let args = request.args.as_ref();
-    let required = detail
-        .input_schema
-        .as_ref()
-        .and_then(|schema| schema.get("required"))
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let missing = required
-        .into_iter()
-        .filter(|key| !args.is_some_and(|provided| provided.contains_key(key)))
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        return Ok(());
-    }
-
-    Err(UxcError::InvalidArguments(format!(
-        "Missing required arguments for MCP tool '{}': {}",
-        op,
-        missing.join(", ")
-    ))
-    .into())
 }
 
 fn to_operation_summary(protocol: &str, op: &Operation) -> OperationSummary {
