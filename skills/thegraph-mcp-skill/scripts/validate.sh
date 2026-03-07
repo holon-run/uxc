@@ -21,6 +21,7 @@ required_files=(
   "${SKILL_FILE}"
   "${OPENAI_FILE}"
   "${SKILL_DIR}/references/usage-patterns.md"
+  "${SKILL_DIR}/scripts/validate.sh"
 )
 
 for file in "${required_files[@]}"; do
@@ -63,7 +64,7 @@ if ! rg -q 'uxc auth binding add --id thegraph-sse --host subgraphs\.mcp\.thegra
   fail "docs must include auth binding setup for native The Graph SSE endpoint"
 fi
 
-if rg -q 'mcp-remote|inject-env|\\\$\\{THEGRAPH_API_KEY\\}' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+if rg -q 'mcp-remote|inject-env|\$\{THEGRAPH_API_KEY\}' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail "docs must not rely on old mcp-remote/env-injection guidance"
 fi
 

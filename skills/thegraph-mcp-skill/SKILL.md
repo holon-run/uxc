@@ -1,6 +1,6 @@
 ---
 name: thegraph-mcp-skill
-description: Use The Graph Subgraph MCP through UXC via a fixed stdio bridge command for subgraph discovery, schema retrieval, deployment selection, and GraphQL query execution with help-first inspection and explicit auth handling.
+description: Use The Graph Subgraph MCP through UXC via native SSE with a fixed linked command for subgraph discovery, schema retrieval, deployment selection, and GraphQL query execution with help-first inspection and explicit auth handling.
 ---
 
 # The Graph MCP Skill
@@ -77,6 +77,32 @@ Endpoint candidate inputs before finalizing:
   - confirm `uxc auth credential info thegraph` succeeds
   - confirm `uxc auth binding match https://subgraphs.mcp.thegraph.com/sse` resolves to `thegraph`
   - rerun `thegraph-mcp-cli -h`
+
+## Tested Real Scenario
+
+The following flow was exercised successfully through `uxc` against the live endpoint:
+
+- search `uniswap` subgraphs
+- compare candidates with `get_deployment_30day_query_counts`
+- select the highest-volume candidate
+- fetch schema for the chosen subgraph
+- execute a minimal `_meta` GraphQL query
+
+The selected candidate in that run was:
+
+- subgraph ID: `5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV`
+- deployment IPFS hash: `QmTZ8ejXJxRo7vDBS4uwqBeGoxLSWbhaA7oXa1RvxunLy7`
+
+The minimal verified query shape was:
+
+```graphql
+{
+  _meta {
+    deployment
+    hasIndexingErrors
+  }
+}
+```
 
 ## References
 
