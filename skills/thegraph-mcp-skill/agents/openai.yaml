@@ -1,0 +1,4 @@
+interface:
+  display_name: "The Graph MCP"
+  short_description: "Discover subgraphs, inspect schemas, and run GraphQL via The Graph MCP"
+  default_prompt: "Use $thegraph-mcp-skill to discover The Graph subgraphs, inspect schemas, choose deployments, and execute GraphQL queries through The Graph Subgraph MCP with help-first inspection and explicit API-key auth."
