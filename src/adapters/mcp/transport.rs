@@ -500,21 +500,67 @@ fn expand_tilde_token(token: &str, home: &str) -> Option<String> {
 }
 
 /// Parse a command string into parts (handles quoted strings)
+///
+/// Supports both single quotes (') and double quotes (") as delimiters.
+/// Backslash escaping works within double quotes, but single quotes
+/// are treated literally (shell-like behavior).
+///
+/// Note: This is a simple parser, not a full shell parser. It does not
+/// support all shell features like variable expansion, command substitution,
+/// or complex quoting rules. For simple stdio MCP commands, this is sufficient.
 pub fn parse_command(cmd: &str) -> Vec<String> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum QuoteState {
+        None,
+        Single,
+        Double,
+    }
+
     let mut parts = Vec::new();
     let mut current = String::new();
-    let mut in_quotes = false;
+    let mut quote_state = QuoteState::None;
     let mut escape_next = false;
 
     for ch in cmd.chars() {
         if escape_next {
-            current.push(ch);
+            // Only process escapes in double quotes or outside quotes
+            if quote_state != QuoteState::Single {
+                current.push(ch);
+            } else {
+                // Inside single quotes, backslash is literal
+                current.push('\\');
+                current.push(ch);
+            }
             escape_next = false;
-        } else if ch == '\\' {
+        } else if ch == '\\' && quote_state != QuoteState::Single {
+            // Backslash only triggers escape mode outside single quotes
             escape_next = true;
-        } else if ch == '"' {
-            in_quotes = !in_quotes;
-        } else if ch.is_whitespace() && !in_quotes {
+        } else if ch == '"' && quote_state != QuoteState::Single {
+            // Toggle double quote state (ignored inside single quotes)
+            // When closing a quote, always push the token even if empty
+            if quote_state == QuoteState::Double {
+                // Closing double quote - end the token
+                parts.push(current.clone());
+                current.clear();
+                quote_state = QuoteState::None;
+            } else {
+                // Opening double quote
+                quote_state = QuoteState::Double;
+            }
+        } else if ch == '\'' && quote_state != QuoteState::Double {
+            // Toggle single quote state (ignored inside double quotes)
+            // When closing a quote, always push the token even if empty
+            if quote_state == QuoteState::Single {
+                // Closing single quote - end the token
+                parts.push(current.clone());
+                current.clear();
+                quote_state = QuoteState::None;
+            } else {
+                // Opening single quote
+                quote_state = QuoteState::Single;
+            }
+        } else if ch.is_whitespace() && quote_state == QuoteState::None {
+            // When not in quotes, whitespace ends the current token
             if !current.is_empty() {
                 parts.push(current.clone());
                 current.clear();
@@ -524,6 +570,7 @@ pub fn parse_command(cmd: &str) -> Vec<String> {
         }
     }
 
+    // Handle any remaining content
     if !current.is_empty() {
         parts.push(current);
     }
@@ -613,6 +660,83 @@ mod tests {
     async fn parse_command_handles_escaped_quotes() {
         let parts = parse_command("node \"my \\\"server\\\".js\"");
         assert_eq!(parts, vec!["node", "my \"server\".js"]);
+    }
+
+    #[tokio::test]
+    async fn parse_command_handles_single_quotes() {
+        let parts = parse_command("node 'my server.js'");
+        assert_eq!(parts, vec!["node", "my server.js"]);
+    }
+
+    #[tokio::test]
+    async fn parse_command_preserves_single_quotes_literal_content() {
+        let parts = parse_command("sh -lc 'echo \"hello\"'");
+        assert_eq!(parts, vec!["sh", "-lc", "echo \"hello\""]);
+    }
+
+    #[tokio::test]
+    async fn parse_command_handles_backslash_in_single_quotes() {
+        let parts = parse_command("sh -lc 'echo \\\"hello\\\"'");
+        assert_eq!(parts, vec!["sh", "-lc", "echo \\\"hello\\\""]);
+    }
+
+    #[tokio::test]
+    async fn parse_command_handles_mixed_quotes() {
+        let parts = parse_command("echo \"hello\" 'world'");
+        assert_eq!(parts, vec!["echo", "hello", "world"]);
+    }
+
+    #[tokio::test]
+    async fn parse_command_handles_zsh_command_form() {
+        let parts = parse_command("/bin/zsh -lc 'npx -y mcp-remote https://mcp.deepwiki.com/mcp'");
+        assert_eq!(
+            parts,
+            vec![
+                "/bin/zsh",
+                "-lc",
+                "npx -y mcp-remote https://mcp.deepwiki.com/mcp"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_command_handles_embedded_single_quotes_in_double_quotes() {
+        let parts = parse_command("echo \"it's a test\"");
+        assert_eq!(parts, vec!["echo", "it's a test"]);
+    }
+
+    #[tokio::test]
+    async fn parse_command_handles_embedded_double_quotes_in_single_quotes() {
+        let parts = parse_command("echo 'say \"hello\"'");
+        assert_eq!(parts, vec!["echo", "say \"hello\""]);
+    }
+
+    #[tokio::test]
+    async fn parse_command_handles_empty_single_quoted_string() {
+        let parts = parse_command("echo ''");
+        // Empty single quotes create an empty token
+        assert_eq!(parts, vec!["echo", ""]);
+    }
+
+    #[tokio::test]
+    async fn parse_command_handles_empty_double_quoted_string() {
+        let parts = parse_command("echo \"\"");
+        // Empty double quotes create an empty token
+        assert_eq!(parts, vec!["echo", ""]);
+    }
+
+    #[tokio::test]
+    async fn parse_command_handles_unclosed_single_quote() {
+        // Unclosed single quote - the content is still added as a token
+        let parts = parse_command("echo 'hello");
+        assert_eq!(parts, vec!["echo", "hello"]);
+    }
+
+    #[tokio::test]
+    async fn parse_command_handles_unclosed_double_quote() {
+        // Unclosed double quote - the content is still added as a token
+        let parts = parse_command("echo \"hello");
+        assert_eq!(parts, vec!["echo", "hello"]);
     }
 
     #[tokio::test]
