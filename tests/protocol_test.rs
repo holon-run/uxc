@@ -397,6 +397,7 @@ fn test_protocol_router_get_adapter_with_schema_url_override() {
         let options = DetectionOptions {
             schema_url: Some(schema_url),
             auth_profile: None,
+            stdio_spawn_options: None,
         };
         router
             .get_adapter_for_url_with_options(&base_url, &options)
@@ -723,6 +724,7 @@ fn test_detection_options_schema_url_none() {
         let options = DetectionOptions {
             schema_url: None,
             auth_profile: None,
+            stdio_spawn_options: None,
         };
         detector.detect_adapter_with_options(&url, &options).await
     });
@@ -772,6 +774,7 @@ fn test_detection_options_schema_url_some() {
         let options = DetectionOptions {
             schema_url: Some(schema_url),
             auth_profile: None,
+            stdio_spawn_options: None,
         };
         detector
             .detect_adapter_with_options(&base_url, &options)

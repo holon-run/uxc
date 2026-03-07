@@ -139,6 +139,64 @@ fn link_create_with_schema_url_writes_script_and_json() {
 }
 
 #[test]
+fn link_create_with_credential_and_inject_env_writes_script_and_json() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+    let script_path = link_script_path(&link_dir, "thegraph-mcp-cli");
+    let host = "/bin/zsh -lc 'npx -y mcp-remote --header \"Authorization: Bearer ${THEGRAPH_API_KEY}\" https://subgraphs.mcp.thegraph.com/sse'";
+
+    let output = uxc_command()
+        .arg("link")
+        .arg("thegraph-mcp-cli")
+        .arg(host)
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--credential")
+        .arg("thegraph")
+        .arg("--inject-env")
+        .arg("THEGRAPH_API_KEY={{secret}}")
+        .output()
+        .expect("uxc link should run");
+    assert!(output.status.success(), "command should succeed");
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["data"]["credential"], "thegraph");
+    assert_eq!(json["data"]["inject_env"][0], "THEGRAPH_API_KEY={{secret}}");
+
+    let script = fs::read_to_string(&script_path).expect("script should be readable");
+    assert!(script.contains("--auth 'thegraph'") || script.contains("--auth \"thegraph\""));
+    assert!(
+        script.contains("--inject-env 'THEGRAPH_API_KEY={{secret}}'")
+            || script.contains("--inject-env \"THEGRAPH_API_KEY={{secret}}\"")
+    );
+}
+
+#[test]
+fn link_create_rejects_inject_env_for_non_stdio_host() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+
+    let output = uxc_command()
+        .arg("link")
+        .arg("petcli")
+        .arg("petstore3.swagger.io/api/v3")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--credential")
+        .arg("demo")
+        .arg("--inject-env")
+        .arg("TOKEN={{secret}}")
+        .output()
+        .expect("uxc link should run");
+
+    assert!(!output.status.success(), "command should fail");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+}
+
+#[test]
 fn link_create_refuses_overwrite_without_force() {
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
     let link_dir = temp_dir.path().join("bin");

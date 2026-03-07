@@ -2,6 +2,7 @@ use crate::adapters::{
     self, Adapter, AdapterEnum, DetectionOptions, Operation, ProtocolDetector, ProtocolType,
 };
 use crate::arg_coercion::prepare_execute_args;
+use crate::auth::injected_env::{fingerprint_injected_env, render_injected_env, InjectEnvSpec};
 use crate::auth::{self, Profile};
 use crate::cache::{self, Cache, CacheConfig};
 use crate::daemon_log::{redact_endpoint, redact_sensitive};
@@ -70,6 +71,8 @@ pub struct RuntimeInvokeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeInvokeOptions {
     pub auth: Option<String>,
+    #[serde(default)]
+    pub inject_env: Vec<InjectEnvSpec>,
     pub no_cache: bool,
     pub cache_ttl: Option<u64>,
     pub refresh_schema: bool,
@@ -264,6 +267,7 @@ impl McpSessionManager {
         session_key: &str,
         command: &str,
         args: &[String],
+        spawn_options: &adapters::mcp::StdioSpawnOptions,
         exclusive_keys: &[String],
     ) -> Result<(Arc<Mutex<McpStdioSession>>, bool)> {
         let exclusive_keys = normalize_exclusive_keys(exclusive_keys);
@@ -320,7 +324,12 @@ impl McpSessionManager {
             }
         }
 
-        let client = adapters::mcp::McpStdioClient::connect(command, args).await?;
+        let client = adapters::mcp::McpStdioClient::connect_with_options(
+            command,
+            args,
+            spawn_options.clone(),
+        )
+        .await?;
         let session = Arc::new(Mutex::new(McpStdioSession {
             client,
             last_used: Instant::now(),
@@ -424,25 +433,41 @@ impl McpSessionManager {
                     }
                     let key = conflicting.unwrap_or_else(|| "<unknown>".to_string());
 
-                    // session_key format: "stdio:{endpoint}:{auth_fingerprint}"
+                    // session_key format: "stdio:{endpoint}:{auth_fingerprint}[:{env_fingerprint}]"
                     // endpoint can contain ":", so parse from the last ":".
-                    let (owner_endpoint, owner_fp) = match owner_session_key.strip_prefix("stdio:")
-                    {
-                        Some(rest) => match rest.rsplit_once(':') {
-                            Some((endpoint, fp)) => (Some(endpoint), Some(fp)),
-                            None => (Some(rest), None),
-                        },
-                        None => (None, None),
-                    };
+                    // With env fingerprint, we need to handle: "stdio:endpoint:auth_fp:env_fp"
+                    // Without env fingerprint: "stdio:endpoint:auth_fp"
+                    // Split from the end twice to handle both cases.
+                    let (owner_endpoint, owner_auth_fp, owner_env_fp) =
+                        match owner_session_key.strip_prefix("stdio:") {
+                            Some(rest) => {
+                                // Try splitting twice for env fingerprint format
+                                if let Some((before_env, _env_fp)) = rest.rsplit_once(':') {
+                                    if let Some((before_auth, auth_fp)) = before_env.rsplit_once(':') {
+                                        // Has both auth and env fingerprints
+                                        (Some(before_auth), Some(auth_fp), Some(_env_fp))
+                                    } else {
+                                        // Only has auth fingerprint, env_fp was actually endpoint
+                                        (Some(before_env), Some(_env_fp), None)
+                                    }
+                                } else {
+                                    // No fingerprint at all
+                                    (Some(rest), None, None)
+                                }
+                            }
+                            None => (None, None, None),
+                        };
                     let owner_endpoint = owner_endpoint
                         .map(redact_endpoint)
                         .map(|s| redact_sensitive(&s));
-                    let owner_fp = owner_fp.map(|s| s.to_string());
+                    let owner_auth_fp = owner_auth_fp.map(|s| s.to_string());
+                    let owner_env_fp = owner_env_fp.map(|s| s.to_string());
                     bail!(
-                        "Another MCP stdio session is currently using daemon exclusive key {} (owner_endpoint={}, owner_fingerprint={}). Close it (or run `uxc daemon stop`) before switching.",
+                        "Another MCP stdio session is currently using daemon exclusive key {} (owner_endpoint={}, owner_auth_fingerprint={}, owner_env_fingerprint={}). Close it (or run `uxc daemon stop`) before switching.",
                         key,
                         owner_endpoint.unwrap_or_else(|| "<unknown>".to_string()),
-                        owner_fp.unwrap_or_else(|| "<unknown>".to_string()),
+                        owner_auth_fp.unwrap_or_else(|| "<unknown>".to_string()),
+                        owner_env_fp.unwrap_or_else(|| "<none>".to_string()),
                     );
                 }
             };
@@ -625,10 +650,13 @@ impl DaemonRuntime {
         let cache_for_fallback = cache.clone();
         let auth_profile =
             auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+        let stdio_spawn_options =
+            build_stdio_spawn_options(&request.endpoint, &request.options, auth_profile.as_ref())?;
 
         let detection_options = DetectionOptions {
             schema_url: request.options.schema_url.clone(),
             auth_profile: auth_profile.clone(),
+            stdio_spawn_options: stdio_spawn_options.clone(),
         };
 
         let resolved = resolve_adapter_with_schema_cache(
@@ -706,8 +734,15 @@ impl DaemonRuntime {
             && matches!(request.action, RuntimeAction::Execute)
         {
             let prepared_args = prepare_runtime_execute_args(&resolved.adapter, &request).await?;
+            // Clone the pre-computed stdio_spawn_options to avoid duplicate secret resolution
+            let stdio_options = stdio_spawn_options.clone();
             let (kind, operation, data, reused) = self
-                .invoke_mcp_execute(&request, prepared_args, auth_profile.clone())
+                .invoke_mcp_execute(
+                    &request,
+                    prepared_args,
+                    auth_profile.clone(),
+                    stdio_options,
+                )
                 .await?;
             meta.daemon_session_reused = Some(reused);
 
@@ -763,8 +798,15 @@ impl DaemonRuntime {
                         {
                             let prepared_args =
                                 prepare_runtime_execute_args(&adapter, &request).await?;
+                            // For cache fallback, recompute stdio_spawn_options since we don't have
+                            // the original detection_options available
                             let (kind, operation, data, reused) = self
-                                .invoke_mcp_execute(&request, prepared_args, auth_profile.clone())
+                                .invoke_mcp_execute(
+                                    &request,
+                                    prepared_args,
+                                    auth_profile.clone(),
+                                    None,
+                                )
                                 .await?;
                             meta.daemon_session_reused = Some(reused);
                             Ok((kind, operation, data))
@@ -869,6 +911,7 @@ impl DaemonRuntime {
         request: &RuntimeInvokeRequest,
         args: HashMap<String, Value>,
         auth_profile: Option<Profile>,
+        precomputed_stdio_spawn_options: Option<adapters::mcp::StdioSpawnOptions>,
     ) -> Result<(String, Option<String>, Value, bool)> {
         let endpoint = &request.endpoint;
         let op = request
@@ -883,14 +926,28 @@ impl DaemonRuntime {
 
         if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
             let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;
+            // Use pre-computed spawn options if available (from detection phase),
+            // otherwise compute them now. This avoids duplicate secret resolution.
+            let spawn_options = match precomputed_stdio_spawn_options {
+                Some(options) => options,
+                None => build_stdio_spawn_options(endpoint, &request.options, auth_profile.as_ref())?
+                    .unwrap_or_default(),
+            };
             let key = format!(
-                "stdio:{}:{}",
+                "stdio:{}:{}:{}",
                 endpoint,
-                auth_fingerprint(auth_profile.as_ref())
+                auth_fingerprint(auth_profile.as_ref()),
+                stdio_env_fingerprint(&request.options.inject_env, auth_profile.as_ref())?
             );
             let (session, reused) = self
                 .mcp
-                .get_or_create_stdio(&key, &cmd, &cmd_args, &request.options.daemon_exclusive)
+                .get_or_create_stdio(
+                    &key,
+                    &cmd,
+                    &cmd_args,
+                    &spawn_options,
+                    &request.options.daemon_exclusive,
+                )
                 .await?;
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
@@ -1381,6 +1438,41 @@ fn auth_fingerprint(profile: Option<&Profile>) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn stdio_env_fingerprint(specs: &[InjectEnvSpec], profile: Option<&Profile>) -> Result<String> {
+    if specs.is_empty() {
+        return Ok("none".to_string());
+    }
+    let profile = profile.ok_or_else(|| {
+        UxcError::InvalidArguments(
+            "--inject-env requires a credential. Use --auth <credential_id> for direct stdio calls, or --credential <credential_id> when creating a link.".to_string(),
+        )
+    })?;
+    fingerprint_injected_env(specs, profile)
+}
+
+fn build_stdio_spawn_options(
+    endpoint: &str,
+    options: &RuntimeInvokeOptions,
+    profile: Option<&Profile>,
+) -> Result<Option<adapters::mcp::StdioSpawnOptions>> {
+    if options.inject_env.is_empty() {
+        return Ok(None);
+    }
+    if !adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
+        return Err(UxcError::InvalidArguments(
+            "--inject-env is only supported for stdio endpoints".to_string(),
+        )
+        .into());
+    }
+    let profile = profile.ok_or_else(|| {
+        UxcError::InvalidArguments(
+            "--inject-env requires a credential. Use --auth <credential_id> for direct stdio calls, or --credential <credential_id> when creating a link.".to_string(),
+        )
+    })?;
+    let env_overrides = render_injected_env(&options.inject_env, profile)?;
+    Ok(Some(adapters::mcp::StdioSpawnOptions { env_overrides }))
+}
+
 fn normalize_exclusive_keys(keys: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for k in keys {
@@ -1487,7 +1579,13 @@ fn adapter_from_protocol(protocol: ProtocolType, options: &DetectionOptions) -> 
         ),
         ProtocolType::GRpc => AdapterEnum::GRpc(adapters::grpc::GrpcAdapter::new()),
         ProtocolType::JsonRpc => AdapterEnum::JsonRpc(adapters::jsonrpc::JsonRpcAdapter::new()),
-        ProtocolType::Mcp => AdapterEnum::Mcp(adapters::mcp::McpAdapter::new()),
+        ProtocolType::Mcp => {
+            let mut adapter = adapters::mcp::McpAdapter::new();
+            if let Some(spawn_options) = options.stdio_spawn_options.clone() {
+                adapter = adapter.with_stdio_spawn_options(spawn_options);
+            }
+            AdapterEnum::Mcp(adapter)
+        }
         ProtocolType::GraphQL => AdapterEnum::GraphQL(adapters::graphql::GraphQLAdapter::new()),
     }
 }

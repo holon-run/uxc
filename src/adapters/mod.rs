@@ -202,6 +202,7 @@ pub struct ProtocolDetector;
 pub struct DetectionOptions {
     pub schema_url: Option<String>,
     pub auth_profile: Option<crate::auth::Profile>,
+    pub stdio_spawn_options: Option<mcp::StdioSpawnOptions>,
 }
 
 impl ProtocolDetector {
@@ -223,11 +224,13 @@ impl ProtocolDetector {
         options: &DetectionOptions,
     ) -> Result<AdapterEnum> {
         // Try MCP first (stdio commands are distinct)
-        let mcp_adapter = if let Some(profile) = options.auth_profile.clone() {
-            mcp::McpAdapter::new().with_auth(profile)
-        } else {
-            mcp::McpAdapter::new()
-        };
+        let mut mcp_adapter = mcp::McpAdapter::new();
+        if let Some(profile) = options.auth_profile.clone() {
+            mcp_adapter = mcp_adapter.with_auth(profile);
+        }
+        if let Some(spawn_options) = options.stdio_spawn_options.clone() {
+            mcp_adapter = mcp_adapter.with_stdio_spawn_options(spawn_options);
+        }
         if mcp_adapter.can_handle(url).await? {
             return Ok(AdapterEnum::Mcp(mcp_adapter));
         }
@@ -331,6 +334,7 @@ mod tests {
         let options = DetectionOptions {
             schema_url: None,
             auth_profile: Some(Profile::new("test-token".to_string(), AuthType::Bearer)),
+            stdio_spawn_options: None,
         };
 
         let adapter = detector
@@ -376,6 +380,7 @@ mod tests {
         let options = DetectionOptions {
             schema_url: None,
             auth_profile: None,
+            stdio_spawn_options: None,
         };
 
         let result = detector
@@ -423,6 +428,7 @@ mod tests {
         let options = DetectionOptions {
             schema_url: None,
             auth_profile: Some(profile),
+            stdio_spawn_options: None,
         };
 
         let result = detector
@@ -474,6 +480,7 @@ mod tests {
         let options = DetectionOptions {
             schema_url: None,
             auth_profile: Some(Profile::new("graph-token".to_string(), AuthType::Bearer)),
+            stdio_spawn_options: None,
         };
 
         let adapter = detector
@@ -525,6 +532,7 @@ mod tests {
         let options = DetectionOptions {
             schema_url: None,
             auth_profile: Some(Profile::new("openapi-token".to_string(), AuthType::Bearer)),
+            stdio_spawn_options: None,
         };
 
         let adapter = detector
@@ -590,6 +598,7 @@ mod tests {
         let options = DetectionOptions {
             schema_url: None,
             auth_profile: Some(Profile::new("jsonrpc-token".to_string(), AuthType::Bearer)),
+            stdio_spawn_options: None,
         };
 
         let adapter = detector

@@ -19,12 +19,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
+#[cfg(test)]
+pub use transport::MockStdioExecutor;
+pub use transport::StdioSpawnOptions;
 
 pub struct McpAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,
     auth_profile: Option<Profile>,
     force_refresh_schema: bool,
     discovered_http_endpoints: Arc<RwLock<HashMap<String, ResolvedMcpHttpTransport>>>,
+    stdio_spawn_options: transport::StdioSpawnOptions,
     last_probe_diagnostics: Arc<RwLock<Option<String>>>,
 }
 
@@ -34,6 +38,7 @@ impl McpAdapter {
             cache: None,
             auth_profile: None,
             force_refresh_schema: false,
+            stdio_spawn_options: transport::StdioSpawnOptions::default(),
             discovered_http_endpoints: Arc::new(RwLock::new(HashMap::new())),
             last_probe_diagnostics: Arc::new(RwLock::new(None)),
         }
@@ -51,6 +56,11 @@ impl McpAdapter {
 
     pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
         self.force_refresh_schema = refresh;
+        self
+    }
+
+    pub fn with_stdio_spawn_options(mut self, options: transport::StdioSpawnOptions) -> Self {
+        self.stdio_spawn_options = options;
         self
     }
 
@@ -285,7 +295,9 @@ impl McpAdapter {
         // If it's a stdio command, connect and get server info
         if Self::is_stdio_command(url) {
             let (cmd, args) = Self::parse_stdio_command(url)?;
-            let mut client = McpStdioClient::connect(&cmd, &args).await?;
+            let mut client =
+                McpStdioClient::connect_with_options(&cmd, &args, self.stdio_spawn_options.clone())
+                    .await?;
             let server_info = client.server_info().cloned();
             let instructions = client.instructions().map(ToString::to_string);
             let tools = match client.list_tools().await {
@@ -463,7 +475,12 @@ impl Adapter for McpAdapter {
 
         if Self::is_stdio_command(url) {
             let (cmd, args_list) = Self::parse_stdio_command(url)?;
-            let mut client = McpStdioClient::connect(&cmd, &args_list).await?;
+            let mut client = McpStdioClient::connect_with_options(
+                &cmd,
+                &args_list,
+                self.stdio_spawn_options.clone(),
+            )
+            .await?;
 
             // Build arguments JSON
             let arguments = if args.is_empty() {
