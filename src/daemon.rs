@@ -179,7 +179,7 @@ struct McpStdioSession {
 }
 
 struct McpHttpSession {
-    transport: adapters::mcp::McpHttpTransport,
+    transport: adapters::mcp::McpRemoteTransport,
     last_used: Arc<Mutex<Instant>>,
 }
 
@@ -493,7 +493,7 @@ impl McpSessionManager {
     async fn get_or_create_http(
         &self,
         key: &str,
-        endpoint: &str,
+        resolved: &adapters::mcp::ResolvedMcpHttpTransport,
         auth_profile: Option<Profile>,
     ) -> Result<(Arc<McpHttpSession>, bool)> {
         {
@@ -506,7 +506,7 @@ impl McpSessionManager {
         }
 
         let transport =
-            adapters::mcp::McpHttpTransport::with_auth(endpoint.to_string(), auth_profile)?;
+            adapters::mcp::McpRemoteTransport::with_auth(resolved.clone(), auth_profile)?;
         transport.initialize().await?;
         let session = Arc::new(McpHttpSession {
             transport,
@@ -902,16 +902,17 @@ impl DaemonRuntime {
                 reused,
             ))
         } else {
-            let resolved_endpoint =
+            let resolved_transport =
                 resolve_mcp_http_endpoint(endpoint, auth_profile.clone()).await?;
             let key = format!(
-                "http:{}:{}",
-                resolved_endpoint,
+                "http:{:?}:{}:{}",
+                resolved_transport.mode,
+                resolved_transport.connect_url,
                 auth_fingerprint(auth_profile.as_ref())
             );
             let (session, reused) = self
                 .mcp
-                .get_or_create_http(&key, &resolved_endpoint, auth_profile)
+                .get_or_create_http(&key, &resolved_transport, auth_profile)
                 .await?;
             *session.last_used.lock().await = Instant::now();
             let result = session.transport.call_tool(op, arguments).await?;
@@ -1829,7 +1830,10 @@ fn http_endpoint_candidates(url: &str) -> Vec<String> {
     candidates
 }
 
-async fn resolve_mcp_http_endpoint(url: &str, auth_profile: Option<Profile>) -> Result<String> {
+async fn resolve_mcp_http_endpoint(
+    url: &str,
+    auth_profile: Option<Profile>,
+) -> Result<adapters::mcp::ResolvedMcpHttpTransport> {
     for candidate in http_endpoint_candidates(url) {
         match adapters::mcp::http_transport::McpHttpTransport::probe_initialize_with_reason(
             &candidate,
@@ -1837,8 +1841,10 @@ async fn resolve_mcp_http_endpoint(url: &str, auth_profile: Option<Profile>) -> 
         )
         .await
         {
-            Ok(adapters::mcp::http_transport::ProbeInitializeOutcome::Success) => {
-                return Ok(candidate);
+            Ok(adapters::mcp::http_transport::ProbeInitializeOutcome::Success(mode)) => {
+                return Ok(adapters::mcp::ResolvedMcpHttpTransport::new(
+                    mode, candidate,
+                ));
             }
             Ok(adapters::mcp::http_transport::ProbeInitializeOutcome::AuthFailed(failure)) => {
                 let detail = format!(
