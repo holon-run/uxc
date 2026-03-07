@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dune MCP"
+  short_description: "Blockchain table discovery, SQL, results, and charts via Dune MCP"
+  default_prompt: "Use $dune-mcp-skill to run Dune MCP workflows for blockchain table discovery, SQL query creation/execution, result retrieval, and visualization with help-first schema inspection and safe auth handling."
