@@ -45,7 +45,7 @@ rg -q 'linear-graphql-cli query/issues -h' "${SKILL_FILE}" || fail 'missing oper
 
 rg -q 'positional JSON' "${SKILL_FILE}" || fail 'missing positional JSON guidance'
 rg -q '_select' "${SKILL_FILE}" || fail 'missing _select guidance'
-rg -Fq 'Authorization:{{secret}}' "${SKILL_FILE}" || fail 'missing api_key auth header guidance'
+rg -Fq 'Authorization={{secret}}' "${SKILL_FILE}" || fail 'missing api_key auth header guidance'
 
 if rg -q -- '--input-json' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail 'found banned --input-json pattern'
