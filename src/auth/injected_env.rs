@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+/// Placeholder used in stdio child env templates so secrets stay out of argv.
 const SECRET_PLACEHOLDER: &str = "{{secret}}";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,10 +37,9 @@ impl InjectEnvSpec {
 
     pub fn render_with_profile(&self, profile: &Profile) -> Result<String> {
         let secret = profile.resolve_secret()?.ok_or_else(|| {
-            UxcError::InvalidArguments(format!(
-                "Credential '{}' does not have a usable secret for --inject-env",
-                profile.name.as_deref().unwrap_or("unknown")
-            ))
+            UxcError::InvalidArguments(
+                "Credential does not have a usable secret for --inject-env".to_string(),
+            )
         })?;
         Ok(self.template.replace(SECRET_PLACEHOLDER, &secret))
     }
@@ -120,22 +120,28 @@ pub fn validate_env_name(name: &str) -> Result<String> {
 }
 
 pub fn validate_template(template: &str) -> Result<()> {
-    if !template.contains(SECRET_PLACEHOLDER) {
+    let occurrences = template.matches(SECRET_PLACEHOLDER).count();
+    if occurrences == 0 {
         return Err(UxcError::InvalidArguments(format!(
             "Invalid --inject-env template '{}': must contain {}",
             template, SECRET_PLACEHOLDER
         ))
         .into());
     }
-    if template.contains("{{") || template.contains("}}") {
-        let replaced = template.replace(SECRET_PLACEHOLDER, "");
-        if replaced.contains("{{") || replaced.contains("}}") {
-            return Err(UxcError::InvalidArguments(format!(
-                "Invalid --inject-env template '{}': only {} is supported",
-                template, SECRET_PLACEHOLDER
-            ))
-            .into());
-        }
+    if occurrences > 1 {
+        return Err(UxcError::InvalidArguments(format!(
+            "Invalid --inject-env template '{}': only one {} placeholder is supported",
+            template, SECRET_PLACEHOLDER
+        ))
+        .into());
+    }
+    let replaced = template.replace(SECRET_PLACEHOLDER, "");
+    if replaced.contains('{') || replaced.contains('}') {
+        return Err(UxcError::InvalidArguments(format!(
+            "Invalid --inject-env template '{}': only {} is supported",
+            template, SECRET_PLACEHOLDER
+        ))
+        .into());
     }
     Ok(())
 }
@@ -160,6 +166,16 @@ mod tests {
     #[test]
     fn parse_spec_rejects_missing_placeholder() {
         assert!(InjectEnvSpec::parse("TOKEN=plain").is_err());
+    }
+
+    #[test]
+    fn parse_spec_rejects_multiple_placeholders() {
+        assert!(InjectEnvSpec::parse("TOKEN={{secret}}:{{secret}}").is_err());
+    }
+
+    #[test]
+    fn parse_spec_rejects_other_braces() {
+        assert!(InjectEnvSpec::parse("TOKEN=prefix_{{secret}}_{bad}").is_err());
     }
 
     #[test]

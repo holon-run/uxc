@@ -2347,6 +2347,10 @@ async fn handle_link_command(
         .into());
     }
     let persisted_credential = credential.or(options.explicit_auth);
+    if let Some(id) = persisted_credential {
+        auth::Profiles::validate_profile_name(id)
+            .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+    }
     if !options.inject_env.is_empty() && persisted_credential.is_none() {
         return Err(UxcError::InvalidArguments(
             "--inject-env on uxc link requires --credential <credential_id>".to_string(),
@@ -2433,9 +2437,9 @@ fn build_link_launcher(
 
     #[cfg(windows)]
     {
-        let escaped_name = name.replace('"', "\"\"");
-        let escaped = host.replace('"', "\"\"");
-        let escaped_exclusive = exclusive.replace('"', "\"\"");
+        let escaped_name = windows_batch_escape(name);
+        let escaped = windows_batch_escape(host);
+        let escaped_exclusive = windows_batch_escape(&exclusive);
         let exclusive_line = if escaped_exclusive.is_empty() {
             "REM UXC_DAEMON_EXCLUSIVE is empty".to_string()
         } else {
@@ -2443,17 +2447,17 @@ fn build_link_launcher(
         };
         let mut base_command = format!("uxc \"{}\"", escaped);
         if let Some(credential) = credential {
-            base_command.push_str(&format!(" --auth \"{}\"", credential.replace('"', "\"\"")));
+            base_command.push_str(&format!(" --auth \"{}\"", windows_batch_escape(credential)));
         }
         for spec in inject_env {
             base_command.push_str(&format!(
                 " --inject-env \"{}\"",
-                spec.as_cli_arg().replace('"', "\"\"")
+                windows_batch_escape(&spec.as_cli_arg())
             ));
         }
         let schema_logic = schema_url
             .map(|url| {
-                let escaped_url = url.replace('"', "\"\"");
+                let escaped_url = windows_batch_escape(url);
                 format!(
                     "set \"UXC_HAS_SCHEMA_URL=\"\r\nfor %%A in (%*) do (\r\n  if /I \"%%~A\"==\"--schema-url\" set \"UXC_HAS_SCHEMA_URL=1\"\r\n  for /F \"tokens=1 delims==\" %%B in (\"%%~A\") do if /I \"%%~B\"==\"--schema-url\" set \"UXC_HAS_SCHEMA_URL=1\"\r\n)\r\nif defined UXC_HAS_SCHEMA_URL (\r\n  {} %*\r\n) else (\r\n  {} --schema-url \"{}\" %*\r\n)\r\n",
                     base_command, base_command, escaped_url
@@ -2502,6 +2506,25 @@ fn build_link_launcher(
             )
         }
     }
+}
+
+#[cfg(windows)]
+fn windows_batch_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '"' => out.push_str("\"\""),
+            '%' => out.push_str("%%"),
+            '^' => out.push_str("^^"),
+            '&' => out.push_str("^&"),
+            '|' => out.push_str("^|"),
+            '<' => out.push_str("^<"),
+            '>' => out.push_str("^>"),
+            '\r' | '\n' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn collect_daemon_exclusive_keys(cli: &Cli) -> Result<Vec<String>> {

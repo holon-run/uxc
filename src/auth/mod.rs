@@ -584,7 +584,7 @@ impl Profiles {
     }
 
     /// Validate a credential ID.
-    fn validate_profile_name(name: &str) -> Result<()> {
+    pub fn validate_profile_name(name: &str) -> Result<()> {
         if name.is_empty() {
             anyhow::bail!("Credential ID cannot be empty");
         }
