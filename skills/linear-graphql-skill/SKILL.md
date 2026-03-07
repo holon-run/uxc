@@ -27,7 +27,7 @@ Linear supports two authentication methods:
    ```bash
    uxc auth credential set linear-graphql \
      --auth-type api_key \
-     --header "Authorization:{{secret}}" \
+     --header "Authorization={{secret}}" \
      --secret "$LINEAR_API_KEY"
    ```
 
@@ -35,7 +35,7 @@ Linear supports two authentication methods:
    ```bash
    uxc auth credential set linear-graphql \
      --auth-type api_key \
-     --header "Authorization:{{secret}}" \
+     --header "Authorization={{secret}}" \
      --secret-env LINEAR_API_KEY
    ```
 
@@ -50,7 +50,7 @@ Linear supports two authentication methods:
      --priority 100
    ```
 
-**Important (Personal API Key only):** Linear API keys require `Authorization: lin_api_XXX` format (no `Bearer ` prefix). The `--header "Authorization:{{secret}}"` configuration above is required for API key auth. For OAuth access tokens, use standard `Authorization: Bearer <token>` semantics (handled by the OAuth credential flow in `uxc`).
+**Important (Personal API Key only):** Linear API keys require `Authorization: lin_api_XXX` format (no `Bearer ` prefix). The `--header "Authorization={{secret}}"` configuration above is required for API key auth. For OAuth access tokens, use standard `Authorization: Bearer <token>` semantics (handled by the OAuth credential flow in `uxc`).
 
 Credential/binding IDs in this skill use `linear-graphql` by convention; IDs are local aliases and can be changed if needed.
 
@@ -167,7 +167,7 @@ linear-graphql-cli mutation/issueCreate '{"input":{"teamId":"YOUR_TEAM_ID","titl
 
 **Error: "Bearer token" prefix rejected**
 - Linear API does not accept `Authorization: Bearer lin_api_XXX`
-- Ensure credential uses `--auth-type api_key --header "Authorization:{{secret}}"`
+- Ensure credential uses `--auth-type api_key --header "Authorization={{secret}}"`
 - Do not use `--auth-type bearer`
 
 **Error: "Credential not found"**

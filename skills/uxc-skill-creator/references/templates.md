@@ -37,7 +37,7 @@ Use this skill to run <provider> operations through `uxc`.
 When the provider needs a non-OAuth credential, default to an agent-friendly command that accepts the secret value directly:
 
 ```bash
-uxc auth credential set <credential_id> --secret "$<PROVIDER_SECRET_ENV>"
+uxc auth credential set <credential_id> --secret "$PROVIDER_TOKEN"
 ```
 
 If the runtime already exports the secret to the daemon environment, document the environment-bound alternative after the default command:
@@ -72,7 +72,7 @@ Link naming convention to apply in templates:
 
 ```bash
 command -v <link_name>
-uxc auth credential set <credential_id> --secret "$<PROVIDER_SECRET_ENV>"
+uxc auth credential set <credential_id> --secret "$PROVIDER_TOKEN"
 uxc link <link_name> <host>
 <link_name> -h
 ```

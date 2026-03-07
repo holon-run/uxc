@@ -12,7 +12,9 @@ For non-OAuth credentials, prefer this default in skill docs:
 uxc auth credential set <credential_id> --secret "$API_TOKEN"
 ```
 
-Use `--secret-env VAR_NAME` only when the runtime already injects that environment variable into the `uxc` daemon environment and you want the credential to resolve it lazily.
+Note: `--secret` stores the expanded value of `$API_TOKEN` as a literal secret in the credential store, and passing it on the command line may expose it via process arguments or shell history. If you do not want the raw token value persisted in plaintext, use `--secret-op` or `--secret-env VAR_NAME` instead.
+
+Use `--secret-env VAR_NAME` only when the runtime already injects that environment variable into the `uxc` daemon environment.
 
 ## Credential Types
 
@@ -26,20 +28,20 @@ Use when the API requires specific header names or formats:
 # Single header with secret
 uxc auth credential set <credential_id> \
   --auth-type api_key \
-  --header "Authorization:{{secret}}" \
+  --header "Authorization={{secret}}" \
   --secret "api_key_value"
 
 # Multiple headers
 uxc auth credential set <credential_id> \
   --auth-type api_key \
-  --header "X-API-Key:{{secret}}" \
-  --header "X-API-Secret:{{env:API_SECRET}}" \
+  --header "X-API-Key={{secret}}" \
+  --header "X-API-Secret={{env:API_SECRET}}" \
   --secret "$API_KEY"
 
 # Using 1Password
 uxc auth credential set <credential_id> \
   --auth-type api_key \
-  --header "Authorization:Bearer {{secret}}" \
+  --header "Authorization=Bearer {{secret}}" \
   --secret-op "op://Engineering/api/token"
 ```
 
@@ -85,7 +87,7 @@ All credential types support three secret source kinds:
 
 #### Environment Variable
 ```bash
---secret "$CREDENTIAL_NAME"
+--secret-env CREDENTIAL_NAME
 ```
 - Secret resolved from environment variable at runtime
 - More secure than literal
@@ -132,7 +134,7 @@ Linear expects `Authorization: lin_api_XXX` (no prefix):
 ```bash
 uxc auth credential set linear-mcp \
   --auth-type api_key \
-  --header "Authorization:{{secret}}" \
+  --header "Authorization={{secret}}" \
   --secret "lin_api_XXX"
 
 uxc auth binding add \
@@ -163,7 +165,7 @@ APIs that use non-standard header names:
 ```bash
 uxc auth credential set custom-api \
   --auth-type api_key \
-  --header "X-API-Key:{{secret}}" \
+  --header "X-API-Key={{secret}}" \
   --secret "$CUSTOM_API_KEY"
 ```
 
@@ -174,8 +176,8 @@ APIs requiring multiple authentication headers:
 ```bash
 uxc auth credential set complex-api \
   --auth-type api_key \
-  --header "X-API-Key:{{secret}}" \
-  --header "X-API-Secret:{{env:API_SECRET}}" \
+  --header "X-API-Key={{secret}}" \
+  --header "X-API-Secret={{env:API_SECRET}}" \
   --secret "$API_KEY"
 ```
 
@@ -195,7 +197,7 @@ uxc auth credential set myapi --auth-type bearer --secret "token"
 # Correct
 uxc auth credential set myapi \
   --auth-type api_key \
-  --header "Authorization:{{secret}}" \
+  --header "Authorization={{secret}}" \
   --secret "token"
 ```
 

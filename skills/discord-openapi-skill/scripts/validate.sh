@@ -35,7 +35,7 @@ rg -q 'uxc link discord-openapi-cli https://discord.com/api/v10 --schema-url ' "
 rg -q 'discord-openapi-cli -h' "${SKILL_FILE}" || fail 'missing help-first host discovery example'
 rg -q 'discord-openapi-cli get:/users/@me -h' "${SKILL_FILE}" || fail 'missing operation-level help example'
 
-rg -q 'Authorization:Bot \{\{secret\}\}' "${SKILL_FILE}" || fail 'missing Discord bot auth header format'
+rg -q 'Authorization=Bot \{\{secret\}\}' "${SKILL_FILE}" || fail 'missing Discord bot auth header format'
 rg -q 'uxc auth binding match https://discord.com/api/v10' "${SKILL_FILE}" || fail 'missing binding match check'
 rg -q 'positional JSON' "${SKILL_FILE}" || fail 'missing positional JSON guidance'
 

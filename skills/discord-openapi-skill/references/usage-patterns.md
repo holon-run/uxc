@@ -12,17 +12,17 @@ discord-openapi-cli -h
 ## Auth Setup (Bot Token)
 
 ```bash
-uxc auth credential set discord-openapi \
+uxc auth credential set discord-bot \
   --auth-type api_key \
-  --header "Authorization:Bot {{secret}}" \
+  --header "Authorization=Bot {{secret}}" \
   --secret "$DISCORD_BOT_TOKEN"
 
 uxc auth binding add \
-  --id discord-openapi \
+  --id discord-bot \
   --host discord.com \
   --path-prefix /api/v10 \
   --scheme https \
-  --credential discord-openapi \
+  --credential discord-bot \
   --priority 100
 ```
 
