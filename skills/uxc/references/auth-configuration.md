@@ -84,6 +84,7 @@ All credential types support three secret source kinds:
 - Stored in plaintext in credentials.json
 - **Only for development/testing**
 - Avoid for production credentials
+- **Note:** `--secret` stores the expanded value as a literal secret in the credential store, and passing it on the command line may expose it via process arguments or shell history. If you do not want the raw token value persisted in plaintext, use `--secret-op` (for 1Password or other secret backends) or `--secret-env VAR_NAME` instead.
 
 #### Environment Variable
 ```bash
