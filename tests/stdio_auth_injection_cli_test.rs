@@ -6,6 +6,7 @@ use tempfile::TempDir;
 
 struct AuthFiles {
     temp_dir: TempDir,
+    runtime_dir: PathBuf,
     credentials_file: PathBuf,
     bindings_file: PathBuf,
 }
@@ -13,9 +14,12 @@ struct AuthFiles {
 impl AuthFiles {
     fn new() -> Self {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let runtime_dir = temp_dir.path().join("runtime");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
         Self {
             credentials_file: temp_dir.path().join("credentials.json"),
             bindings_file: temp_dir.path().join("auth_bindings.json"),
+            runtime_dir,
             temp_dir,
         }
     }
@@ -27,6 +31,7 @@ fn uxc_command(files: &AuthFiles) -> Command {
     cmd.env("UXC_AUTH_BINDINGS_FILE", &files.bindings_file);
     cmd.env("HOME", files.temp_dir.path());
     cmd.env("USERPROFILE", files.temp_dir.path());
+    cmd.env("XDG_RUNTIME_DIR", &files.runtime_dir);
     cmd
 }
 

@@ -14,7 +14,6 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 pub use client::McpStdioClient;
 pub use http_transport::{McpHttpTransport, McpRemoteTransport, ResolvedMcpHttpTransport};
-pub use transport::StdioSpawnOptions;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,6 +21,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 #[cfg(test)]
 pub use transport::MockStdioExecutor;
+pub use transport::StdioSpawnOptions;
 
 pub struct McpAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,
