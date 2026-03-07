@@ -9,15 +9,35 @@ use crate::http_client::build_resilient_http_client;
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 const PROBE_TIMEOUT_SECS: u64 = 10;
 const MAX_STREAM_BODY_BYTES: usize = 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpHttpMode {
+    StreamableHttp,
+    LegacySse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedMcpHttpTransport {
+    pub mode: McpHttpMode,
+    pub connect_url: String,
+}
+
+impl ResolvedMcpHttpTransport {
+    pub fn new(mode: McpHttpMode, connect_url: String) -> Self {
+        Self { mode, connect_url }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeInitializeOutcome {
-    Success,
+    Success(McpHttpMode),
     NotMcp(String),
     AuthFailed(ProbeAuthFailure),
 }
@@ -49,6 +69,36 @@ pub struct McpHttpTransport {
     auth_profile: Arc<Mutex<Option<Profile>>>,
     /// Lock for OAuth refresh operations
     oauth_refresh_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Debug)]
+pub struct LegacySseTransport {
+    client: Client,
+    connect_url: String,
+    next_id: Arc<Mutex<i64>>,
+    auth_profile: Arc<Mutex<Option<Profile>>>,
+    oauth_refresh_lock: Arc<Mutex<()>>,
+    connect_lock: Arc<Mutex<()>>,
+    session: Arc<Mutex<Option<LegacySseSession>>>,
+}
+
+#[derive(Debug)]
+struct LegacySseSession {
+    messages_url: String,
+    pending: Arc<Mutex<HashMap<RequestId, tokio::sync::oneshot::Sender<Result<JsonValue, String>>>>>,
+    reader_task: JoinHandle<()>,
+}
+
+#[derive(Debug)]
+pub enum McpRemoteTransport {
+    Streamable(McpHttpTransport),
+    Legacy(LegacySseTransport),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SseEvent {
+    event_type: String,
+    data: String,
 }
 
 impl McpHttpTransport {
@@ -234,13 +284,13 @@ impl McpHttpTransport {
         }
 
         oauth::refresh_oauth_profile(&mut profile, &self.client).await?;
-        self.persist_profile_update(&profile).await?;
+        Self::persist_profile_update(&profile).await?;
         *self.auth_profile.lock().await = Some(profile);
 
         Ok(())
     }
 
-    async fn persist_profile_update(&self, profile: &Profile) -> Result<()> {
+    async fn persist_profile_update(profile: &Profile) -> Result<()> {
         let Some(profile_name) = profile.name.clone() else {
             return Ok(());
         };
@@ -419,7 +469,10 @@ impl McpHttpTransport {
         let mut auth_profile = auth_profile;
 
         match Self::probe_initialize_once(url, &client, &request, auth_profile.as_ref()).await {
-            ProbeAttemptResult::Success => Ok(ProbeInitializeOutcome::Success),
+            ProbeAttemptResult::Success(mode) => Ok(ProbeInitializeOutcome::Success(mode)),
+            ProbeAttemptResult::LegacyBootstrapRequired(reason) => {
+                Self::probe_legacy_sse_with_oauth_retry(url, &client, &mut auth_profile, reason).await
+            }
             ProbeAttemptResult::Unauthorized(reason) => {
                 let is_oauth = auth_profile
                     .as_ref()
@@ -447,7 +500,16 @@ impl McpHttpTransport {
                 }
 
                 match Self::probe_initialize_once(url, &client, &request, Some(profile)).await {
-                    ProbeAttemptResult::Success => Ok(ProbeInitializeOutcome::Success),
+                    ProbeAttemptResult::Success(mode) => Ok(ProbeInitializeOutcome::Success(mode)),
+                    ProbeAttemptResult::LegacyBootstrapRequired(reason) => {
+                        Self::probe_legacy_sse_with_oauth_retry(
+                            url,
+                            &client,
+                            &mut auth_profile,
+                            reason,
+                        )
+                        .await
+                    }
                     ProbeAttemptResult::Unauthorized(retry_reason) => {
                         Ok(ProbeInitializeOutcome::AuthFailed(ProbeAuthFailure {
                             code: ProbeAuthFailureCode::OAuthRequired,
@@ -463,6 +525,69 @@ impl McpHttpTransport {
                 }
             }
             ProbeAttemptResult::NotMcp(reason) => Ok(ProbeInitializeOutcome::NotMcp(reason)),
+        }
+    }
+
+    async fn probe_legacy_sse_with_oauth_retry(
+        url: &str,
+        client: &Client,
+        auth_profile: &mut Option<Profile>,
+        probe_reason: String,
+    ) -> Result<ProbeInitializeOutcome> {
+        match Self::probe_legacy_sse_once(url, client, auth_profile.as_ref()).await {
+            ProbeAttemptResult::Success(mode) => Ok(ProbeInitializeOutcome::Success(mode)),
+            ProbeAttemptResult::Unauthorized(reason) => {
+                let is_oauth = auth_profile
+                    .as_ref()
+                    .map(|profile| profile.auth_type == AuthType::OAuth)
+                    .unwrap_or(false);
+
+                if !is_oauth {
+                    return Ok(ProbeInitializeOutcome::NotMcp(format!(
+                        "{}; {}",
+                        probe_reason, reason
+                    )));
+                }
+
+                let profile = auth_profile
+                    .as_mut()
+                    .expect("oauth probe path requires auth profile");
+
+                if let Err(err) = oauth::refresh_oauth_profile(profile, client).await {
+                    return Ok(Self::probe_auth_failure_from_refresh_error(err));
+                }
+
+                if let Err(err) = Self::persist_probe_refresh(profile).await {
+                    return Ok(ProbeInitializeOutcome::AuthFailed(ProbeAuthFailure {
+                        code: ProbeAuthFailureCode::OAuthRefreshFailed,
+                        message: format!("Failed to persist refreshed OAuth profile: {}", err),
+                    }));
+                }
+
+                match Self::probe_legacy_sse_once(url, client, Some(profile)).await {
+                    ProbeAttemptResult::Success(mode) => Ok(ProbeInitializeOutcome::Success(mode)),
+                    ProbeAttemptResult::Unauthorized(retry_reason) => {
+                        Ok(ProbeInitializeOutcome::AuthFailed(ProbeAuthFailure {
+                            code: ProbeAuthFailureCode::OAuthRequired,
+                            message: format!(
+                                "OAuth token rejected after refresh during MCP probe: {}",
+                                retry_reason
+                            ),
+                        }))
+                    }
+                    ProbeAttemptResult::LegacyBootstrapRequired(legacy_reason)
+                    | ProbeAttemptResult::NotMcp(legacy_reason) => {
+                        Ok(ProbeInitializeOutcome::NotMcp(format!(
+                            "{}; {}",
+                            probe_reason, legacy_reason
+                        )))
+                    }
+                }
+            }
+            ProbeAttemptResult::LegacyBootstrapRequired(legacy_reason)
+            | ProbeAttemptResult::NotMcp(legacy_reason) => Ok(ProbeInitializeOutcome::NotMcp(
+                format!("{}; {}", probe_reason, legacy_reason),
+            )),
         }
     }
 
@@ -507,11 +632,12 @@ impl McpHttpTransport {
         }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return ProbeAttemptResult::NotMcp(format!(
-                "HTTP {}: {}",
-                status,
-                Self::summarize_body(&body)
-            ));
+            let reason = format!("HTTP {}: {}", status, Self::summarize_body(&body));
+            return if status.is_client_error() {
+                ProbeAttemptResult::LegacyBootstrapRequired(reason)
+            } else {
+                ProbeAttemptResult::NotMcp(reason)
+            };
         }
 
         let content_type = response
@@ -548,9 +674,98 @@ impl McpHttpTransport {
         };
 
         match serde_json::from_value::<InitializeResult>(result) {
-            Ok(_) => ProbeAttemptResult::Success,
+            Ok(_) => ProbeAttemptResult::Success(McpHttpMode::StreamableHttp),
             Err(err) => ProbeAttemptResult::NotMcp(format!("invalid initialize result: {}", err)),
         }
+    }
+
+    async fn probe_legacy_sse_once(
+        url: &str,
+        client: &Client,
+        auth_profile: Option<&Profile>,
+    ) -> ProbeAttemptResult {
+        let mut req = client.get(url).header("Accept", "text/event-stream");
+
+        if let Some(profile) = auth_profile {
+            req = match Self::apply_profile_auth(req, profile) {
+                Ok(req) => req,
+                Err(err) => {
+                    return ProbeAttemptResult::NotMcp(format!(
+                        "failed to apply auth profile: {}",
+                        err
+                    ));
+                }
+            };
+        }
+
+        let mut response = match req.send().await {
+            Ok(response) => response,
+            Err(err) => return ProbeAttemptResult::NotMcp(format!("request failed: {}", err)),
+        };
+
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let body = response.text().await.unwrap_or_default();
+            return ProbeAttemptResult::Unauthorized(format!(
+                "HTTP {}: {}",
+                status,
+                Self::summarize_body(&body)
+            ));
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return ProbeAttemptResult::NotMcp(format!(
+                "HTTP {}: {}",
+                status,
+                Self::summarize_body(&body)
+            ));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !content_type.contains("text/event-stream") {
+            return ProbeAttemptResult::NotMcp(format!(
+                "unexpected content-type for legacy SSE bootstrap: {}",
+                content_type
+            ));
+        }
+
+        let mut body = String::new();
+        while body.len() < MAX_STREAM_BODY_BYTES {
+            match response.chunk().await {
+                Ok(Some(chunk)) => body.push_str(&String::from_utf8_lossy(&chunk)),
+                Ok(None) => break,
+                Err(err) => {
+                    return ProbeAttemptResult::NotMcp(format!(
+                        "failed to read legacy SSE bootstrap: {}",
+                        err
+                    ));
+                }
+            }
+
+            let mut buffer = body.clone();
+            match LegacySseTransport::drain_sse_events(&mut buffer) {
+                Ok(events) => {
+                    if events.iter().any(|event| event.event_type == "endpoint") {
+                        return ProbeAttemptResult::Success(McpHttpMode::LegacySse);
+                    }
+                }
+                Err(err) => {
+                    return ProbeAttemptResult::NotMcp(format!(
+                        "invalid legacy SSE event stream: {}",
+                        err
+                    ));
+                }
+            }
+        }
+
+        ProbeAttemptResult::NotMcp(
+            "legacy SSE bootstrap stream did not emit endpoint event".to_string(),
+        )
     }
 
     fn probe_auth_failure_from_refresh_error(err: anyhow::Error) -> ProbeInitializeOutcome {
@@ -594,7 +809,7 @@ impl McpHttpTransport {
     pub async fn probe_initialize(url: &str, auth_profile: Option<Profile>) -> Result<bool> {
         Ok(matches!(
             Self::probe_initialize_with_reason(url, auth_profile).await?,
-            ProbeInitializeOutcome::Success
+            ProbeInitializeOutcome::Success(_)
         ))
     }
 
@@ -699,8 +914,494 @@ impl McpHttpTransport {
     }
 }
 
+impl LegacySseTransport {
+    pub fn with_auth(url: String, auth_profile: Option<Profile>) -> Result<Self> {
+        let parsed = url::Url::parse(&url).context("Invalid MCP server URL")?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            bail!(
+                "Legacy MCP SSE transport only supports http:// and https:// URLs, got: {}",
+                parsed.scheme()
+            );
+        }
+
+        let client =
+            build_resilient_http_client(std::time::Duration::from_secs(30), "Legacy MCP SSE")?;
+
+        Ok(Self {
+            client,
+            connect_url: url,
+            next_id: Arc::new(Mutex::new(1i64)),
+            auth_profile: Arc::new(Mutex::new(auth_profile)),
+            oauth_refresh_lock: Arc::new(Mutex::new(())),
+            connect_lock: Arc::new(Mutex::new(())),
+            session: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    async fn ensure_connected(&self) -> Result<()> {
+        if self.session.lock().await.is_some() {
+            return Ok(());
+        }
+
+        let _connect_guard = self.connect_lock.lock().await;
+        if self.session.lock().await.is_some() {
+            return Ok(());
+        }
+
+        self.maybe_refresh_oauth_token().await?;
+
+        let mut response = self.send_bootstrap_request().await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.is_oauth_profile().await {
+            self.force_refresh_oauth_token().await?;
+            response = self.send_bootstrap_request().await?;
+        }
+
+        let status = response.status();
+        let www_authenticate = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return McpHttpTransport::map_http_error(status, &body, www_authenticate.as_deref())
+                .map(|_| ());
+        }
+
+        if !content_type
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("text/event-stream")
+        {
+            let body = response.text().await.unwrap_or_default();
+            bail!("Legacy SSE bootstrap did not return text/event-stream: {}", body);
+        }
+
+        let mut buffer = String::new();
+        let mut messages_url = None;
+
+        while messages_url.is_none() && buffer.len() < MAX_STREAM_BODY_BYTES {
+            let chunk = response
+                .chunk()
+                .await
+                .context("Failed to read legacy SSE bootstrap chunk")?;
+            let Some(chunk) = chunk else {
+                break;
+            };
+
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            for event in Self::drain_sse_events(&mut buffer)? {
+                if event.event_type == "endpoint" {
+                    let resolved = url::Url::parse(&self.connect_url)
+                        .context("Invalid legacy SSE bootstrap URL")?
+                        .join(event.data.trim())
+                        .context("Failed to resolve legacy SSE messages endpoint")?;
+                    let origin = url::Url::parse(&self.connect_url)
+                        .context("Invalid legacy SSE bootstrap URL")?
+                        .origin()
+                        .ascii_serialization();
+                    if resolved.origin().ascii_serialization() != origin {
+                        bail!("Legacy SSE endpoint origin does not match bootstrap URL");
+                    }
+                    messages_url = Some(resolved.to_string());
+                    break;
+                }
+            }
+        }
+
+        let messages_url =
+            messages_url.context("Legacy SSE bootstrap stream did not emit endpoint event")?;
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let reader_task = tokio::spawn(Self::run_sse_reader(
+            response,
+            buffer,
+            pending.clone(),
+        ));
+
+        *self.session.lock().await = Some(LegacySseSession {
+            messages_url,
+            pending,
+            reader_task,
+        });
+
+        Ok(())
+    }
+
+    async fn send_bootstrap_request(&self) -> Result<reqwest::Response> {
+        let profile = self.auth_profile.lock().await.clone();
+        let mut req = self
+            .client
+            .get(&self.connect_url)
+            .header("Accept", "text/event-stream");
+
+        if let Some(profile) = profile {
+            req = McpHttpTransport::apply_profile_auth(req, &profile)?;
+        }
+
+        req.send().await.map_err(Into::into)
+    }
+
+    async fn send_request(&self, method: &str, params: Option<JsonValue>) -> Result<JsonValue> {
+        self.ensure_connected().await?;
+        self.maybe_refresh_oauth_token().await?;
+
+        let id = {
+            let mut next_id = self.next_id.lock().await;
+            let id = *next_id;
+            *next_id += 1;
+            id
+        };
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params,
+            id: RequestId::Number(id),
+        };
+
+        let (messages_url, pending) = {
+            let session = self.session.lock().await;
+            let session = session
+                .as_ref()
+                .context("Legacy SSE transport not connected after bootstrap")?;
+            (session.messages_url.clone(), session.pending.clone())
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        pending
+            .lock()
+            .await
+            .insert(request.id.clone(), tx);
+
+        let mut response = self
+            .send_messages_request(&messages_url, &request)
+            .await
+            .context("Failed to send legacy SSE HTTP request")?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.is_oauth_profile().await {
+            self.force_refresh_oauth_token().await?;
+            response = self
+                .send_messages_request(&messages_url, &request)
+                .await
+                .context("Failed to send legacy SSE HTTP retry request")?;
+        }
+
+        let status = response.status();
+        let www_authenticate = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            pending.lock().await.remove(&request.id);
+            return McpHttpTransport::map_http_error(status, &body, www_authenticate.as_deref());
+        }
+
+        let result = rx
+            .await
+            .context("Legacy SSE reader closed before delivering a response")?
+            .map_err(anyhow::Error::msg)?;
+
+        Ok(result)
+    }
+
+    async fn send_messages_request(
+        &self,
+        messages_url: &str,
+        request: &JsonRpcRequest,
+    ) -> Result<reqwest::Response> {
+        let profile = self.auth_profile.lock().await.clone();
+        let mut req = self
+            .client
+            .post(messages_url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+
+        if let Some(profile) = profile {
+            req = McpHttpTransport::apply_profile_auth(req, &profile)?;
+        }
+
+        req.json(request).send().await.map_err(Into::into)
+    }
+
+    async fn maybe_refresh_oauth_token(&self) -> Result<()> {
+        let should_refresh = {
+            let guard = self.auth_profile.lock().await;
+            if let Some(profile) = guard.as_ref() {
+                if profile.auth_type == AuthType::OAuth {
+                    if let Some(oauth_profile) = &profile.oauth {
+                        oauth::should_refresh_token(oauth_profile, 60)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if should_refresh {
+            self.force_refresh_oauth_token().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn is_oauth_profile(&self) -> bool {
+        self.auth_profile
+            .lock()
+            .await
+            .as_ref()
+            .map(|profile| profile.auth_type == AuthType::OAuth)
+            .unwrap_or(false)
+    }
+
+    async fn force_refresh_oauth_token(&self) -> Result<()> {
+        let _refresh_guard = self.oauth_refresh_lock.lock().await;
+        let mut profile = self.auth_profile.lock().await.clone().ok_or_else(|| {
+            UxcError::OAuthRequired("No authentication profile available".to_string())
+        })?;
+
+        if profile.auth_type != AuthType::OAuth {
+            return Ok(());
+        }
+
+        oauth::refresh_oauth_profile(&mut profile, &self.client).await?;
+        McpHttpTransport::persist_profile_update(&profile).await?;
+        *self.auth_profile.lock().await = Some(profile);
+        Ok(())
+    }
+
+    async fn initialize(&self) -> Result<InitializeResult> {
+        let params = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "roots": {
+                    "listChanged": true
+                }
+            },
+            "clientInfo": {
+                "name": "uxc",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        });
+
+        let result = self.send_request("initialize", Some(params)).await?;
+        serde_json::from_value(result).context("Failed to parse initialize result")
+    }
+
+    async fn list_tools(&self) -> Result<Vec<Tool>> {
+        let result = self.send_request("tools/list", None).await?;
+        let response: ToolsListResponse =
+            serde_json::from_value(result).context("Failed to parse tools/list response")?;
+        Ok(response.tools)
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Option<JsonValue>,
+    ) -> Result<ToolCallResult> {
+        let params = match arguments {
+            Some(arguments) => serde_json::json!({
+                "name": name,
+                "arguments": arguments
+            }),
+            None => serde_json::json!({
+                "name": name,
+                "arguments": {}
+            }),
+        };
+
+        let result = self.send_request("tools/call", Some(params)).await?;
+        serde_json::from_value(result).context("Failed to parse tools/call result")
+    }
+
+    async fn run_sse_reader(
+        mut response: reqwest::Response,
+        mut buffer: String,
+        pending: Arc<Mutex<HashMap<RequestId, tokio::sync::oneshot::Sender<Result<JsonValue, String>>>>>,
+    ) {
+        loop {
+            match Self::drain_sse_events(&mut buffer) {
+                Ok(events) => {
+                    for event in events {
+                        if event.event_type != "message" {
+                            continue;
+                        }
+
+                        match serde_json::from_str::<JsonRpcResponse>(&event.data) {
+                            Ok(message) => {
+                                let payload = if let Some(error) = message.error {
+                                    Err(format!(
+                                        "MCP server returned error: {} - {}",
+                                        error.code, error.message
+                                    ))
+                                } else {
+                                    message
+                                        .result
+                                        .context("MCP server response missing result field")
+                                        .map_err(|err| err.to_string())
+                                };
+
+                                if let Some(sender) = pending.lock().await.remove(&message.id) {
+                                    let _ = sender.send(payload);
+                                }
+                            }
+                            Err(err) => {
+                                tracing::debug!("Ignoring malformed legacy SSE message event: {}", err);
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    Self::fail_pending(&pending, format!("Failed to parse legacy SSE event stream: {}", err))
+                        .await;
+                    return;
+                }
+            }
+
+            match response.chunk().await {
+                Ok(Some(chunk)) => buffer.push_str(&String::from_utf8_lossy(&chunk)),
+                Ok(None) => {
+                    Self::fail_pending(&pending, "Legacy SSE stream closed".to_string()).await;
+                    return;
+                }
+                Err(err) => {
+                    Self::fail_pending(
+                        &pending,
+                        format!("Failed to read legacy SSE stream chunk: {}", err),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn fail_pending(
+        pending: &Arc<Mutex<HashMap<RequestId, tokio::sync::oneshot::Sender<Result<JsonValue, String>>>>>,
+        message: String,
+    ) {
+        let senders = {
+            let mut guard = pending.lock().await;
+            std::mem::take(&mut *guard)
+        };
+
+        for (_, sender) in senders {
+            let _ = sender.send(Err(message.clone()));
+        }
+    }
+
+    fn drain_sse_events(buffer: &mut String) -> Result<Vec<SseEvent>> {
+        let mut events = Vec::new();
+        let mut consumed = 0usize;
+
+        while let Some(delim_len) = Self::find_sse_event_delimiter(&buffer[consumed..]) {
+            let event_block = &buffer[consumed..consumed + delim_len];
+            consumed += delim_len;
+            consumed += if buffer[consumed..].starts_with("\r\n\r\n") { 4 } else { 2 };
+
+            let mut event_type = None;
+            let mut data_lines = Vec::new();
+
+            for line in event_block.lines() {
+                let line = line.trim_end_matches('\r');
+                if let Some(value) = line.strip_prefix("event:") {
+                    event_type = Some(value.trim().to_string());
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    data_lines.push(value.trim_start().to_string());
+                }
+            }
+
+            if !data_lines.is_empty() {
+                events.push(SseEvent {
+                    event_type: event_type.unwrap_or_else(|| "message".to_string()),
+                    data: data_lines.join("\n"),
+                });
+            }
+        }
+
+        if consumed > 0 {
+            buffer.drain(..consumed);
+        }
+
+        Ok(events)
+    }
+
+    fn find_sse_event_delimiter(input: &str) -> Option<usize> {
+        input
+            .find("\r\n\r\n")
+            .or_else(|| input.find("\n\n"))
+    }
+}
+
+impl Drop for LegacySseTransport {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.session.try_lock() {
+            if let Some(session) = guard.take() {
+                session.reader_task.abort();
+            }
+        }
+    }
+}
+
+impl McpRemoteTransport {
+    pub fn with_auth(
+        resolved: ResolvedMcpHttpTransport,
+        auth_profile: Option<Profile>,
+    ) -> Result<Self> {
+        match resolved.mode {
+            McpHttpMode::StreamableHttp => Ok(Self::Streamable(McpHttpTransport::with_auth(
+                resolved.connect_url,
+                auth_profile,
+            )?)),
+            McpHttpMode::LegacySse => Ok(Self::Legacy(LegacySseTransport::with_auth(
+                resolved.connect_url,
+                auth_profile,
+            )?)),
+        }
+    }
+
+    pub async fn initialize(&self) -> Result<InitializeResult> {
+        match self {
+            Self::Streamable(transport) => transport.initialize().await,
+            Self::Legacy(transport) => transport.initialize().await,
+        }
+    }
+
+    pub async fn list_tools(&self) -> Result<Vec<Tool>> {
+        match self {
+            Self::Streamable(transport) => transport.list_tools().await,
+            Self::Legacy(transport) => transport.list_tools().await,
+        }
+    }
+
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Option<JsonValue>,
+    ) -> Result<ToolCallResult> {
+        match self {
+            Self::Streamable(transport) => transport.call_tool(name, arguments).await,
+            Self::Legacy(transport) => transport.call_tool(name, arguments).await,
+        }
+    }
+}
+
 enum ProbeAttemptResult {
-    Success,
+    Success(McpHttpMode),
+    LegacyBootstrapRequired(String),
     Unauthorized(String),
     NotMcp(String),
 }
@@ -709,8 +1410,14 @@ enum ProbeAttemptResult {
 mod tests {
     use super::*;
     use crate::auth::{AuthType, OAuthFlow, OAuthProfile, Profile, Profiles};
+    use hyper::service::{make_service_fn, service_fn};
+    use hyper::{Body, Method, Request, Response, Server, StatusCode};
+    use std::convert::Infallible;
+    use std::net::TcpListener;
     use std::sync::{Mutex as StdMutex, MutexGuard, OnceLock};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tokio::sync::{mpsc, oneshot};
+    use tokio_stream::wrappers::UnboundedReceiverStream;
     use tempfile::TempDir;
 
     fn home_env_lock() -> &'static StdMutex<()> {
@@ -753,6 +1460,149 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_secs() as i64
+    }
+
+    #[derive(Clone, Default)]
+    struct LegacySseTestState {
+        sender: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Result<hyper::body::Bytes, Infallible>>>>>,
+    }
+
+    struct LegacySseTestServer {
+        base_url: String,
+        shutdown: Option<oneshot::Sender<()>>,
+        task: JoinHandle<()>,
+    }
+
+    impl Drop for LegacySseTestServer {
+        fn drop(&mut self) {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            self.task.abort();
+        }
+    }
+
+    async fn spawn_legacy_sse_test_server() -> LegacySseTestServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind legacy SSE test server");
+        let addr = listener.local_addr().expect("legacy SSE test addr");
+        let state = LegacySseTestState::default();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let make_svc = make_service_fn(move |_| {
+            let state = state.clone();
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req| {
+                    let state = state.clone();
+                    async move { Ok::<_, Infallible>(legacy_sse_test_response(req, state).await) }
+                }))
+            }
+        });
+
+        let server = Server::from_tcp(listener)
+            .expect("legacy SSE test server from tcp")
+            .serve(make_svc)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            });
+
+        let task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+
+        LegacySseTestServer {
+            base_url: format!("http://{}", addr),
+            shutdown: Some(shutdown_tx),
+            task,
+        }
+    }
+
+    async fn legacy_sse_test_response(
+        req: Request<Body>,
+        state: LegacySseTestState,
+    ) -> Response<Body> {
+        let path = req.uri().path().to_string();
+        let query = req.uri().query().unwrap_or_default().to_string();
+
+        match (req.method(), path.as_str()) {
+            (&Method::POST, "/sse") => Response::builder()
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .header("allow", "GET,HEAD")
+                .body(Body::empty())
+                .expect("method not allowed response"),
+            (&Method::GET, "/sse") => {
+                let (tx, rx) = mpsc::unbounded_channel();
+                *state.sender.lock().await = Some(tx.clone());
+                tx.send(Ok(hyper::body::Bytes::from(
+                    "event: endpoint\ndata: /messages?sessionId=test-session\n\n",
+                )))
+                .expect("bootstrap event");
+
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::wrap_stream(UnboundedReceiverStream::new(rx)))
+                    .expect("legacy sse response")
+            }
+            (&Method::POST, "/messages") if query == "sessionId=test-session" => {
+                let body = hyper::body::to_bytes(req.into_body())
+                    .await
+                    .expect("legacy message body");
+                let request: JsonRpcRequest =
+                    serde_json::from_slice(&body).expect("legacy JSON-RPC request");
+
+                let response_payload = match request.method.as_str() {
+                    "initialize" => serde_json::json!({
+                        "jsonrpc":"2.0",
+                        "id": request.id,
+                        "result": {
+                            "protocolVersion":"2024-11-05",
+                            "capabilities":{"tools":{"listChanged":false}},
+                            "serverInfo":{"name":"legacy-test","version":"1.0"}
+                        }
+                    }),
+                    "tools/list" => serde_json::json!({
+                        "jsonrpc":"2.0",
+                        "id": request.id,
+                        "result": {
+                            "tools": [{
+                                "name":"legacy_tool",
+                                "description":"Legacy test tool",
+                                "inputSchema":{"type":"object"}
+                            }]
+                        }
+                    }),
+                    "tools/call" => serde_json::json!({
+                        "jsonrpc":"2.0",
+                        "id": request.id,
+                        "result": {
+                            "content": [{"type":"text","text":"legacy-ok"}]
+                        }
+                    }),
+                    other => serde_json::json!({
+                        "jsonrpc":"2.0",
+                        "id": request.id,
+                        "error": {"code": -32601, "message": format!("unknown method: {}", other)}
+                    }),
+                };
+
+                let sender = state.sender.lock().await.clone().expect("active SSE sender");
+                sender
+                    .send(Ok(hyper::body::Bytes::from(format!(
+                        "event: message\ndata: {}\n\n",
+                        response_payload
+                    ))))
+                    .expect("legacy message event");
+
+                Response::builder()
+                    .status(StatusCode::ACCEPTED)
+                    .body(Body::empty())
+                    .expect("legacy accepted response")
+            }
+            _ => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .expect("not found response"),
+        }
     }
 
     // ===== URL Validation Tests =====
@@ -1800,6 +2650,42 @@ data: invalid json
         assert_eq!(result.unwrap(), true);
     }
 
+    #[tokio::test]
+    async fn probe_initialize_with_legacy_sse_bootstrap_returns_legacy_mode() {
+        let server = spawn_legacy_sse_test_server().await;
+
+        let result =
+            McpHttpTransport::probe_initialize_with_reason(&format!("{}/sse", server.base_url), None)
+                .await
+                .unwrap();
+
+        assert_eq!(result, ProbeInitializeOutcome::Success(McpHttpMode::LegacySse));
+    }
+
+    #[tokio::test]
+    async fn legacy_sse_transport_supports_initialize_list_and_call() {
+        let server = spawn_legacy_sse_test_server().await;
+        let transport =
+            LegacySseTransport::with_auth(format!("{}/sse", server.base_url), None).unwrap();
+
+        let init = transport.initialize().await.unwrap();
+        assert_eq!(
+            init.serverInfo.as_ref().map(|info| info.name.as_str()),
+            Some("legacy-test")
+        );
+
+        let tools = transport.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "legacy_tool");
+
+        let result = transport.call_tool("legacy_tool", None).await.unwrap();
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            ToolContent::Text { text } => assert_eq!(text, "legacy-ok"),
+            other => panic!("expected text tool content, got {:?}", other),
+        }
+    }
+
     // ===== Authentication Tests =====
 
     #[tokio::test]
@@ -2087,7 +2973,10 @@ data: invalid json
         });
 
         let result = McpHttpTransport::probe_initialize_with_reason(&endpoint, Some(profile)).await;
-        assert!(matches!(result.unwrap(), ProbeInitializeOutcome::Success));
+        assert!(matches!(
+            result.unwrap(),
+            ProbeInitializeOutcome::Success(McpHttpMode::StreamableHttp)
+        ));
     }
 
     #[tokio::test]

@@ -1837,7 +1837,7 @@ async fn resolve_mcp_http_endpoint(url: &str, auth_profile: Option<Profile>) -> 
         )
         .await
         {
-            Ok(adapters::mcp::http_transport::ProbeInitializeOutcome::Success) => {
+            Ok(adapters::mcp::http_transport::ProbeInitializeOutcome::Success(_)) => {
                 return Ok(candidate);
             }
             Ok(adapters::mcp::http_transport::ProbeInitializeOutcome::AuthFailed(failure)) => {

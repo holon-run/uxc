@@ -13,20 +13,18 @@ use crate::error::UxcError;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 pub use client::McpStdioClient;
-pub use http_transport::McpHttpTransport;
+pub use http_transport::{McpHttpTransport, McpRemoteTransport, ResolvedMcpHttpTransport};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
-#[cfg(test)]
-pub use transport::MockStdioExecutor;
 
 pub struct McpAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,
     auth_profile: Option<Profile>,
     force_refresh_schema: bool,
-    discovered_http_endpoints: Arc<RwLock<HashMap<String, String>>>,
+    discovered_http_endpoints: Arc<RwLock<HashMap<String, ResolvedMcpHttpTransport>>>,
     last_probe_diagnostics: Arc<RwLock<Option<String>>>,
 }
 
@@ -125,7 +123,7 @@ impl McpAdapter {
         candidates
     }
 
-    async fn resolve_http_endpoint(&self, url: &str) -> Result<Option<String>> {
+    async fn resolve_http_transport(&self, url: &str) -> Result<Option<ResolvedMcpHttpTransport>> {
         let normalized = Self::normalize_http_url(url);
         {
             let mut diag = self.last_probe_diagnostics.write().await;
@@ -146,10 +144,11 @@ impl McpAdapter {
             )
             .await
             {
-                Ok(http_transport::ProbeInitializeOutcome::Success) => {
+                Ok(http_transport::ProbeInitializeOutcome::Success(mode)) => {
+                    let resolved = ResolvedMcpHttpTransport::new(mode, candidate.clone());
                     let mut cache = self.discovered_http_endpoints.write().await;
-                    cache.insert(normalized, candidate.clone());
-                    return Ok(Some(candidate));
+                    cache.insert(normalized, resolved.clone());
+                    return Ok(Some(resolved));
                 }
                 Ok(http_transport::ProbeInitializeOutcome::AuthFailed(failure)) => {
                     let detail = format!(
@@ -329,10 +328,10 @@ impl McpAdapter {
 
         // For HTTP-based MCP, connect and get server info
         if Self::is_http_url(url) {
-            let endpoint = self.resolve_http_endpoint(url).await?.ok_or_else(|| {
+            let resolved = self.resolve_http_transport(url).await?.ok_or_else(|| {
                 anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
             })?;
-            let transport = McpHttpTransport::with_auth(endpoint, self.auth_profile.clone())?;
+            let transport = McpRemoteTransport::with_auth(resolved, self.auth_profile.clone())?;
             let init_result = transport.initialize().await?;
             let tools = match transport.list_tools().await {
                 Ok(tools) => Some(tools),
@@ -396,7 +395,7 @@ impl Adapter for McpAdapter {
         }
 
         if Self::is_http_url(url) {
-            return Ok(self.resolve_http_endpoint(url).await?.is_some());
+            return Ok(self.resolve_http_transport(url).await?.is_some());
         }
 
         Ok(false)
@@ -488,10 +487,10 @@ impl Adapter for McpAdapter {
 
         // For HTTP-based MCP
         if Self::is_http_url(url) {
-            let endpoint = self.resolve_http_endpoint(url).await?.ok_or_else(|| {
+            let resolved = self.resolve_http_transport(url).await?.ok_or_else(|| {
                 anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
             })?;
-            let transport = McpHttpTransport::with_auth(endpoint, self.auth_profile.clone())?;
+            let transport = McpRemoteTransport::with_auth(resolved, self.auth_profile.clone())?;
             transport.initialize().await?;
 
             // Build arguments JSON
@@ -682,11 +681,11 @@ mod tests {
         assert!(adapter.can_handle(&server.url()).await.unwrap());
 
         let resolved = adapter
-            .resolve_http_endpoint(&server.url())
+            .resolve_http_transport(&server.url())
             .await
             .unwrap()
             .unwrap();
-        assert!(resolved.ends_with("/mcp"));
+        assert!(resolved.connect_url.ends_with("/mcp"));
     }
 
     #[test]
