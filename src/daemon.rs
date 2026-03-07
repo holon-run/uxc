@@ -718,8 +718,15 @@ impl DaemonRuntime {
             && matches!(request.action, RuntimeAction::Execute)
         {
             let prepared_args = prepare_runtime_execute_args(&resolved.adapter, &request).await?;
+            // Clone the pre-computed stdio_spawn_options to avoid duplicate secret resolution
+            let stdio_options = stdio_spawn_options.clone();
             let (kind, operation, data, reused) = self
-                .invoke_mcp_execute(&request, prepared_args, auth_profile.clone())
+                .invoke_mcp_execute(
+                    &request,
+                    prepared_args,
+                    auth_profile.clone(),
+                    stdio_options,
+                )
                 .await?;
             meta.daemon_session_reused = Some(reused);
 
@@ -775,8 +782,15 @@ impl DaemonRuntime {
                         {
                             let prepared_args =
                                 prepare_runtime_execute_args(&adapter, &request).await?;
+                            // For cache fallback, recompute stdio_spawn_options since we don't have
+                            // the original detection_options available
                             let (kind, operation, data, reused) = self
-                                .invoke_mcp_execute(&request, prepared_args, auth_profile.clone())
+                                .invoke_mcp_execute(
+                                    &request,
+                                    prepared_args,
+                                    auth_profile.clone(),
+                                    None,
+                                )
                                 .await?;
                             meta.daemon_session_reused = Some(reused);
                             Ok((kind, operation, data))
@@ -881,6 +895,7 @@ impl DaemonRuntime {
         request: &RuntimeInvokeRequest,
         args: HashMap<String, Value>,
         auth_profile: Option<Profile>,
+        precomputed_stdio_spawn_options: Option<adapters::mcp::StdioSpawnOptions>,
     ) -> Result<(String, Option<String>, Value, bool)> {
         let endpoint = &request.endpoint;
         let op = request
@@ -895,9 +910,13 @@ impl DaemonRuntime {
 
         if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
             let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;
-            let spawn_options =
-                build_stdio_spawn_options(endpoint, &request.options, auth_profile.as_ref())?
-                    .unwrap_or_default();
+            // Use pre-computed spawn options if available (from detection phase),
+            // otherwise compute them now. This avoids duplicate secret resolution.
+            let spawn_options = match precomputed_stdio_spawn_options {
+                Some(options) => options,
+                None => build_stdio_spawn_options(endpoint, &request.options, auth_profile.as_ref())?
+                    .unwrap_or_default(),
+            };
             let key = format!(
                 "stdio:{}:{}:{}",
                 endpoint,
