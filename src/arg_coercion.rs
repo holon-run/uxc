@@ -8,6 +8,7 @@ use std::collections::HashMap;
 struct NormalizedSchema {
     root: Value,
     strict_unknown_fields: bool,
+    enforce_required_fields: bool,
 }
 
 pub async fn prepare_execute_args(
@@ -16,7 +17,10 @@ pub async fn prepare_execute_args(
     operation_id: &str,
     raw_args: HashMap<String, Value>,
 ) -> Result<HashMap<String, Value>> {
-    let detail = adapter.describe_operation(endpoint, operation_id).await?;
+    let detail = match adapter.describe_operation(endpoint, operation_id).await {
+        Ok(detail) => detail,
+        Err(_) => return Ok(raw_args),
+    };
     let Some(schema) = normalize_operation_schema(adapter.protocol_type(), &detail) else {
         return Ok(raw_args);
     };
@@ -26,6 +30,7 @@ pub async fn prepare_execute_args(
         &schema.root,
         "$",
         schema.strict_unknown_fields,
+        schema.enforce_required_fields,
     )?;
 
     match value {
@@ -45,11 +50,13 @@ fn normalize_operation_schema(
     match protocol {
         ProtocolType::GraphQL => detail.input_schema.as_ref().map(|schema| NormalizedSchema {
             root: schema.clone(),
-            strict_unknown_fields: true,
+            strict_unknown_fields: false,
+            enforce_required_fields: false,
         }),
         ProtocolType::Mcp => detail.input_schema.as_ref().map(|schema| NormalizedSchema {
             root: schema.clone(),
             strict_unknown_fields: false,
+            enforce_required_fields: true,
         }),
         ProtocolType::GRpc => detail
             .input_schema
@@ -59,6 +66,7 @@ fn normalize_operation_schema(
             .map(|schema| NormalizedSchema {
                 root: schema,
                 strict_unknown_fields: false,
+                enforce_required_fields: true,
             }),
         ProtocolType::JsonRpc => normalize_jsonrpc_schema(detail),
         ProtocolType::OpenAPI => normalize_openapi_schema(detail),
@@ -96,6 +104,7 @@ fn normalize_jsonrpc_schema(detail: &OperationDetail) -> Option<NormalizedSchema
             ("required".to_string(), Value::Array(required)),
         ])),
         strict_unknown_fields: false,
+        enforce_required_fields: true,
     })
 }
 
@@ -109,6 +118,7 @@ fn normalize_openapi_schema(detail: &OperationDetail) -> Option<NormalizedSchema
                 return Some(NormalizedSchema {
                     root: json_schema.clone(),
                     strict_unknown_fields: false,
+                    enforce_required_fields: true,
                 });
             }
         }
@@ -140,6 +150,7 @@ fn normalize_openapi_schema(detail: &OperationDetail) -> Option<NormalizedSchema
             ("required".to_string(), Value::Array(required)),
         ])),
         strict_unknown_fields: false,
+        enforce_required_fields: true,
     })
 }
 
@@ -148,18 +159,45 @@ fn coerce_value(
     schema: &Value,
     path: &str,
     strict_unknown_fields: bool,
+    enforce_required_fields: bool,
 ) -> Result<Value> {
     if let Some(branches) = schema.get("oneOf").and_then(Value::as_array) {
-        return coerce_union(value, branches, path, strict_unknown_fields, "oneOf");
+        return coerce_union(
+            value,
+            branches,
+            path,
+            strict_unknown_fields,
+            enforce_required_fields,
+            "oneOf",
+        );
     }
     if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
-        return coerce_union(value, branches, path, strict_unknown_fields, "anyOf");
+        return coerce_union(
+            value,
+            branches,
+            path,
+            strict_unknown_fields,
+            enforce_required_fields,
+            "anyOf",
+        );
     }
 
     let inferred_type = schema_type(schema);
     let coerced = match inferred_type.as_deref() {
-        Some("object") => coerce_object(value, schema, path, strict_unknown_fields)?,
-        Some("array") => coerce_array(value, schema, path, strict_unknown_fields)?,
+        Some("object") => coerce_object(
+            value,
+            schema,
+            path,
+            strict_unknown_fields,
+            enforce_required_fields,
+        )?,
+        Some("array") => coerce_array(
+            value,
+            schema,
+            path,
+            strict_unknown_fields,
+            enforce_required_fields,
+        )?,
         Some("integer") => coerce_integer(value, path)?,
         Some("number") => coerce_number(value, path)?,
         Some("boolean") => coerce_boolean(value, path)?,
@@ -177,11 +215,18 @@ fn coerce_union(
     branches: &[Value],
     path: &str,
     strict_unknown_fields: bool,
+    enforce_required_fields: bool,
     label: &str,
 ) -> Result<Value> {
     let mut errors = Vec::new();
     for branch in branches {
-        match coerce_value(value, branch, path, strict_unknown_fields) {
+        match coerce_value(
+            value,
+            branch,
+            path,
+            strict_unknown_fields,
+            enforce_required_fields,
+        ) {
             Ok(v) => return Ok(v),
             Err(err) => errors.push(err.to_string()),
         }
@@ -201,6 +246,7 @@ fn coerce_object(
     schema: &Value,
     path: &str,
     strict_unknown_fields: bool,
+    enforce_required_fields: bool,
 ) -> Result<Value> {
     let value = match value {
         Value::Object(map) => Value::Object(map.clone()),
@@ -239,17 +285,17 @@ fn coerce_object(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let additional_properties = schema.get("additionalProperties");
-
     let mut output = Map::new();
 
-    for key in required.iter().filter_map(Value::as_str) {
-        if !obj.contains_key(key) {
-            return Err(UxcError::InvalidArguments(format!(
-                "Invalid value at {}.{}: missing required field",
-                path, key
-            ))
-            .into());
+    if enforce_required_fields {
+        for key in required.iter().filter_map(Value::as_str) {
+            if !obj.contains_key(key) {
+                return Err(UxcError::InvalidArguments(format!(
+                    "Invalid value at {}.{}: missing required field",
+                    path, key
+                ))
+                .into());
+            }
         }
     }
 
@@ -258,28 +304,23 @@ fn coerce_object(
             let child_path = format!("{}.{}", path, key);
             output.insert(
                 key.clone(),
-                coerce_value(raw, prop_schema, &child_path, strict_unknown_fields)?,
+                coerce_value(
+                    raw,
+                    prop_schema,
+                    &child_path,
+                    strict_unknown_fields,
+                    enforce_required_fields,
+                )?,
             );
             continue;
         }
 
-        if strict_unknown_fields || matches!(additional_properties, Some(Value::Bool(false))) {
+        if strict_unknown_fields {
             return Err(UxcError::InvalidArguments(format!(
                 "Invalid value at {}.{}: unknown field",
                 path, key
             ))
             .into());
-        }
-
-        if let Some(extra_schema) = additional_properties {
-            if extra_schema.is_object() {
-                let child_path = format!("{}.{}", path, key);
-                output.insert(
-                    key.clone(),
-                    coerce_value(raw, extra_schema, &child_path, strict_unknown_fields)?,
-                );
-                continue;
-            }
         }
 
         output.insert(key.clone(), raw.clone());
@@ -293,6 +334,7 @@ fn coerce_array(
     schema: &Value,
     path: &str,
     strict_unknown_fields: bool,
+    enforce_required_fields: bool,
 ) -> Result<Value> {
     let value = match value {
         Value::Array(items) => Value::Array(items.clone()),
@@ -326,9 +368,13 @@ fn coerce_array(
     for (idx, item) in items.iter().enumerate() {
         let child_path = format!("{}[{}]", path, idx);
         let coerced = match item_schema {
-            Some(child_schema) => {
-                coerce_value(item, child_schema, &child_path, strict_unknown_fields)?
-            }
+            Some(child_schema) => coerce_value(
+                item,
+                child_schema,
+                &child_path,
+                strict_unknown_fields,
+                enforce_required_fields,
+            )?,
             None => item.clone(),
         };
         coerced_items.push(coerced);
@@ -569,7 +615,8 @@ mod tests {
     #[test]
     fn normalize_graphql_schema_marks_unknown_fields_strict() {
         let schema = normalize_operation_schema(ProtocolType::GraphQL, &graphql_detail()).unwrap();
-        assert!(schema.strict_unknown_fields);
+        assert!(!schema.strict_unknown_fields);
+        assert!(!schema.enforce_required_fields);
     }
 
     #[test]
@@ -589,7 +636,7 @@ mod tests {
             "name": 7
         });
 
-        let value = coerce_value(&input, &schema, "$", false).unwrap();
+        let value = coerce_value(&input, &schema, "$", false, true).unwrap();
         assert_eq!(value["count"], 42);
         assert_eq!(value["enabled"], true);
         assert_eq!(value["name"], "7");
@@ -613,7 +660,7 @@ mod tests {
             "filter": "{\"limit\":\"2\"}"
         });
 
-        let value = coerce_value(&input, &schema, "$", false).unwrap();
+        let value = coerce_value(&input, &schema, "$", false, true).unwrap();
         assert_eq!(value["tags"], serde_json::json!(["a", "b"]));
         assert_eq!(value["filter"]["limit"], 2);
     }
@@ -625,9 +672,24 @@ mod tests {
             &graphql_detail().input_schema.unwrap(),
             "$",
             true,
+            true,
         )
         .unwrap_err();
         assert!(err.to_string().contains("$.extra"));
+    }
+
+    #[test]
+    fn graphql_schema_allows_unknown_and_missing_fields_for_adapter_validation() {
+        let schema = normalize_operation_schema(ProtocolType::GraphQL, &graphql_detail()).unwrap();
+        let value = coerce_value(
+            &serde_json::json!({"extra":"2"}),
+            &schema.root,
+            "$",
+            schema.strict_unknown_fields,
+            schema.enforce_required_fields,
+        )
+        .unwrap();
+        assert_eq!(value["extra"], "2");
     }
 
     #[test]

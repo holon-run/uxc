@@ -658,6 +658,9 @@ impl GraphQLAdapter {
                 (Value::Object(object_schema), false)
             }
             _ => {
+                if let Some(type_name) = type_info.get("name").and_then(|n| n.as_str()) {
+                    return (Self::scalar_schema(Some(type_name)), false);
+                }
                 let mut fallback = Map::new();
                 fallback.insert("type".to_string(), Value::String("object".to_string()));
                 if let Some(type_name) = type_info.get("name").and_then(|n| n.as_str()) {
