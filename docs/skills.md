@@ -17,6 +17,8 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Unified wrapper for Dune MCP workflows (table discovery, SQL query lifecycle, results, visualization).
 - `skills/thegraph-mcp-skill`
   - Unified wrapper for The Graph Subgraph MCP workflows via stdio bridge (discovery, schema retrieval, deployment selection, GraphQL query execution, credential-driven env injection).
+- `skills/thegraph-token-mcp-skill`
+  - Unified wrapper for The Graph Token API MCP workflows (token metadata, wallet balances, transfers, holders, pools, market data).
 - `skills/etherscan-mcp-skill`
   - Unified wrapper for Etherscan MCP workflows (address portfolio, token holders, contract lookup).
 - `skills/notion-mcp-skill`
@@ -51,7 +53,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, or `skills/discord-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, or `skills/discord-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -96,6 +98,12 @@ bash skills/dune-mcp-skill/scripts/validate.sh
 
 ```bash
 bash skills/thegraph-mcp-skill/scripts/validate.sh
+```
+
+- Validate The Graph Token wrapper docs when touched:
+
+```bash
+bash skills/thegraph-token-mcp-skill/scripts/validate.sh
 ```
 
 - Validate Discord wrapper docs when touched:

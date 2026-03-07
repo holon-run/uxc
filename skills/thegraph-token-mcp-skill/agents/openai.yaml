@@ -1,0 +1,4 @@
+interface:
+  display_name: "The Graph Token MCP"
+  short_description: "Token, wallet, transfer, and market data via The Graph Token API MCP"
+  default_prompt: "Use $thegraph-token-mcp-skill to query The Graph Token API MCP for token metadata, wallet balances, transfers, holders, pools, and market data with help-first inspection and standard auth binding."
