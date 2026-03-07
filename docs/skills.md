@@ -13,6 +13,10 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Wrapper for Context7 MCP library documentation workflows.
 - `skills/okx-mcp-skill`
   - Unified wrapper for OKX MCP workflows (token/market/wallet/swap).
+- `skills/dune-mcp-skill`
+  - Unified wrapper for Dune MCP workflows (table discovery, SQL query lifecycle, results, visualization).
+- `skills/etherscan-mcp-skill`
+  - Unified wrapper for Etherscan MCP workflows (address portfolio, token holders, contract lookup).
 - `skills/notion-mcp-skill`
   - Wrapper for Notion MCP workflows with OAuth two-step login guidance and guarded-write guidance.
 - `skills/discord-openapi-skill`
@@ -45,7 +49,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/notion-mcp-skill`, or `skills/discord-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, or `skills/discord-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -72,6 +76,18 @@ bash skills/uxc-skill-creator/scripts/validate.sh
 
 ```bash
 bash skills/notion-mcp-skill/scripts/validate.sh
+```
+
+- Validate Etherscan wrapper docs when touched:
+
+```bash
+bash skills/etherscan-mcp-skill/scripts/validate.sh
+```
+
+- Validate Dune wrapper docs when touched:
+
+```bash
+bash skills/dune-mcp-skill/scripts/validate.sh
 ```
 
 - Validate Discord wrapper docs when touched:

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Etherscan MCP"
+  short_description: "Onchain reads and contract lookup via Etherscan MCP"
+  default_prompt: "Use $etherscan-mcp-skill to run Etherscan MCP workflows for address portfolio, token holder, and contract lookup tasks with help-first schema inspection and safe auth handling."
