@@ -26,6 +26,7 @@ mod output;
 mod schema_mapping;
 
 use adapters::OperationDetail;
+use auth::injected_env::{parse_inject_env_specs, InjectEnvSpec};
 use auth::{AuthBindingRule, AuthBindings, AuthHeader, AuthType, OAuthFlow, Profile, Profiles};
 use cache::CacheConfig;
 use error::UxcError;
@@ -65,6 +66,10 @@ struct Cli {
     /// Explicit credential ID for this request (overrides endpoint binding auto-match)
     #[arg(long, global = true)]
     auth: Option<String>,
+
+    /// Inject resolved credential secret into stdio child env using NAME={{secret}}
+    #[arg(long = "inject-env", global = true, value_name = "NAME={{secret}}")]
+    inject_env: Vec<String>,
 
     /// Disable cache for this operation
     #[arg(long, global = true)]
@@ -130,6 +135,10 @@ enum Commands {
         /// Default OpenAPI schema URL persisted in the generated shortcut
         #[arg(long)]
         schema_url: Option<String>,
+
+        /// Credential ID persisted into the generated shortcut as --auth <credential_id>
+        #[arg(long = "credential")]
+        credential: Option<String>,
 
         /// Overwrite existing shortcut file
         #[arg(long)]
@@ -633,6 +642,18 @@ struct LinkCreateData {
     overwritten: bool,
     dir_in_path: bool,
     schema_url: Option<String>,
+    credential: Option<String>,
+    inject_env: Vec<String>,
+}
+
+struct LinkCommandOptions<'a> {
+    dir: Option<&'a str>,
+    schema_url: Option<&'a str>,
+    credential: Option<&'a str>,
+    explicit_auth: Option<&'a str>,
+    inject_env: &'a [InjectEnvSpec],
+    force: bool,
+    daemon_exclusive: &'a [String],
 }
 
 #[tokio::main]
@@ -755,13 +776,19 @@ fn normalize_global_args(raw_args: Vec<String>) -> Vec<String> {
         let is_global_bool = matches!(arg.as_str(), "--text" | "--no-cache" | "--refresh-schema");
         let is_global_kv = matches!(
             arg.as_str(),
-            "--format" | "--auth" | "--cache-ttl" | "--schema-url" | "--daemon-exclusive"
+            "--format"
+                | "--auth"
+                | "--cache-ttl"
+                | "--schema-url"
+                | "--daemon-exclusive"
+                | "--inject-env"
         );
         let is_global_inline = arg.starts_with("--format=")
             || arg.starts_with("--auth=")
             || arg.starts_with("--cache-ttl=")
             || arg.starts_with("--schema-url=")
-            || arg.starts_with("--daemon-exclusive=");
+            || arg.starts_with("--daemon-exclusive=")
+            || arg.starts_with("--inject-env=");
 
         if is_global_bool || is_global_inline {
             global_args.push(arg.clone());
@@ -804,6 +831,7 @@ fn is_global_kv_arg(arg: &str) -> bool {
     matches!(
         arg,
         "--format" | "--auth" | "--cache-ttl" | "--schema-url" | "--daemon-exclusive"
+            | "--inject-env"
     )
 }
 
@@ -813,6 +841,7 @@ fn is_global_inline_arg(arg: &str) -> bool {
         || arg.starts_with("--cache-ttl=")
         || arg.starts_with("--schema-url=")
         || arg.starts_with("--daemon-exclusive=")
+        || arg.starts_with("--inject-env=")
 }
 
 fn non_global_tokens(raw_args: &[String]) -> Vec<String> {
@@ -1119,19 +1148,22 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
         host,
         dir,
         schema_url,
+        credential,
         force,
     }) = &cli.command
     {
         let exclusive = collect_daemon_exclusive_keys(cli)?;
-        return handle_link_command(
-            name,
-            host,
-            dir.as_deref(),
-            schema_url.as_deref(),
-            *force,
-            &exclusive,
-        )
-        .await;
+        let inject_env = collect_inject_env_specs(cli)?;
+        let options = LinkCommandOptions {
+            dir: dir.as_deref(),
+            schema_url: schema_url.as_deref(),
+            credential: credential.as_deref(),
+            explicit_auth: cli.auth.as_deref(),
+            inject_env: &inject_env,
+            force: *force,
+            daemon_exclusive: &exclusive,
+        };
+        return handle_link_command(name, host, options).await;
     }
 
     if let Some(Commands::Daemon { daemon_command }) = &cli.command {
@@ -1194,6 +1226,7 @@ async fn execute_endpoint_via_daemon(
         args: args_map,
         options: daemon::RuntimeInvokeOptions {
             auth: cli.auth.clone(),
+            inject_env: collect_inject_env_specs(cli)?,
             no_cache: cli.no_cache,
             cache_ttl: cli.cache_ttl,
             refresh_schema: cli.refresh_schema,
@@ -1282,23 +1315,27 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             notes: vec![
                 "Default output is JSON. Use --text for human-readable output.".to_string(),
                 "For endpoints, use: uxc <host> -h, uxc <host> <operation_id> -h, and uxc <host> <operation_id> ...".to_string(),
+                "--inject-env NAME={{secret}} is available for stdio endpoints when a credential is supplied.".to_string(),
             ],
             examples: vec![
                 "uxc -h".to_string(),
                 "uxc <host> -h".to_string(),
                 "uxc <host> <operation_id> -h".to_string(),
                 "uxc <host> <operation_id> key=value".to_string(),
+                "uxc --auth thegraph --inject-env THEGRAPH_API_KEY={{secret}} \"npx -y mcp-remote --header \\\"Authorization: Bearer ${THEGRAPH_API_KEY}\\\" https://subgraphs.mcp.thegraph.com/sse\" -h".to_string(),
             ],
         },
         ["link"] => HelpData {
             path: "uxc link".to_string(),
             about: "Create a host-bound shortcut command".to_string(),
             usage:
-                "uxc link <name> <host> [--dir <dir>] [--schema-url <url>] [--daemon-exclusive <key> ...] [--force]"
+                "uxc link <name> <host> [--dir <dir>] [--schema-url <url>] [--credential <credential_id>] [--inject-env NAME={{secret}} ...] [--daemon-exclusive <key> ...] [--force]"
                     .to_string(),
             commands: vec![],
             notes: vec![
                 "Use --schema-url to persist a default OpenAPI schema URL in the shortcut; callers can still override it by passing --schema-url explicitly."
+                    .to_string(),
+                "Use --credential and --inject-env for stdio shortcuts that need child-process env auth injection."
                     .to_string(),
                 "Use --daemon-exclusive to declare shared state keys that should be exclusive across MCP stdio sessions."
                     .to_string(),
@@ -1306,6 +1343,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             examples: vec![
                 "uxc link petcli petstore3.swagger.io/api/v3".to_string(),
                 "uxc link discord-openapi-cli https://discord.com/api/v10 --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json".to_string(),
+                "uxc link thegraph-mcp-cli \"/bin/zsh -lc 'npx -y mcp-remote --header \\\"Authorization: Bearer ${THEGRAPH_API_KEY}\\\" https://subgraphs.mcp.thegraph.com/sse'\" --credential thegraph --inject-env THEGRAPH_API_KEY={{secret}}".to_string(),
                 "uxc link --daemon-exclusive ~/.uxc/playwright-profile playwright-mcp-ui \"npx -y @playwright/mcp@latest --user-data-dir ~/.uxc/playwright-profile\"".to_string(),
                 "petcli -h".to_string(),
             ],
@@ -1947,6 +1985,12 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             if let Some(schema_url) = data.schema_url {
                 println!("Schema URL: {}", schema_url);
             }
+            if let Some(credential) = data.credential {
+                println!("Credential: {}", credential);
+            }
+            if !data.inject_env.is_empty() {
+                println!("Injected Env: {}", data.inject_env.join(", "));
+            }
             if !data.dir_in_path {
                 println!(
                     "Note: shortcut directory is not in PATH. Add it before invoking '{}'.",
@@ -2274,10 +2318,7 @@ fn print_detail_text(protocol: &str, endpoint: &str, detail: &OperationDetail) {
 async fn handle_link_command(
     name: &str,
     host: &str,
-    dir: Option<&str>,
-    schema_url: Option<&str>,
-    force: bool,
-    daemon_exclusive: &[String],
+    options: LinkCommandOptions<'_>,
 ) -> Result<OutputEnvelope> {
     validate_link_name(name)?;
 
@@ -2285,7 +2326,7 @@ async fn handle_link_command(
     if host.is_empty() {
         return Err(UxcError::InvalidArguments("Host cannot be empty".to_string()).into());
     }
-    let schema_url = match schema_url {
+    let schema_url = match options.schema_url {
         Some(value) if value.trim().is_empty() => {
             return Err(
                 UxcError::InvalidArguments("Schema URL cannot be empty".to_string()).into(),
@@ -2294,14 +2335,47 @@ async fn handle_link_command(
         Some(value) => Some(value.trim()),
         None => None,
     };
+    let credential = options
+        .credential
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if options.explicit_auth.is_some() && credential.is_some() {
+        return Err(UxcError::InvalidArguments(
+            "uxc link does not allow both global --auth and --credential; use --credential only"
+                .to_string(),
+        )
+        .into());
+    }
+    let persisted_credential = credential.or(options.explicit_auth);
+    if !options.inject_env.is_empty() && persisted_credential.is_none() {
+        return Err(UxcError::InvalidArguments(
+            "--inject-env on uxc link requires --credential <credential_id>".to_string(),
+        )
+        .into());
+    }
+    if (!options.inject_env.is_empty() || persisted_credential.is_some())
+        && !adapters::mcp::McpAdapter::is_stdio_command(host)
+    {
+        return Err(UxcError::InvalidArguments(
+            "--credential and --inject-env are only supported for stdio link targets".to_string(),
+        )
+        .into());
+    }
 
-    let target_dir = resolve_link_dir(dir)?;
+    let target_dir = resolve_link_dir(options.dir)?;
     fs::create_dir_all(&target_dir)?;
 
     let target_path = link_target_path(&target_dir, name);
-    let launcher = build_link_launcher(name, host, schema_url, daemon_exclusive);
+    let launcher = build_link_launcher(
+        name,
+        host,
+        schema_url,
+        persisted_credential,
+        options.inject_env,
+        options.daemon_exclusive,
+    );
     let target_exists_before = target_path.exists();
-    write_link_file(&target_path, launcher.as_bytes(), force)?;
+    write_link_file(&target_path, launcher.as_bytes(), options.force)?;
     set_executable_if_unix(&target_path)?;
 
     let data = serde_json::to_value(LinkCreateData {
@@ -2311,6 +2385,12 @@ async fn handle_link_command(
         overwritten: target_exists_before,
         dir_in_path: is_dir_in_path(&target_dir),
         schema_url: schema_url.map(ToOwned::to_owned),
+        credential: persisted_credential.map(ToOwned::to_owned),
+        inject_env: options
+            .inject_env
+            .iter()
+            .map(InjectEnvSpec::as_cli_arg)
+            .collect(),
     })?;
 
     Ok(OutputEnvelope::success(
@@ -2343,6 +2423,8 @@ fn build_link_launcher(
     name: &str,
     host: &str,
     schema_url: Option<&str>,
+    credential: Option<&str>,
+    inject_env: &[InjectEnvSpec],
     daemon_exclusive: &[String],
 ) -> String {
     const LINK_SENTINEL: &str = "# Generated by uxc link; do not edit by hand";
@@ -2359,15 +2441,25 @@ fn build_link_launcher(
         } else {
             format!("set \"UXC_DAEMON_EXCLUSIVE={}\"", escaped_exclusive)
         };
+        let mut base_command = format!("uxc \"{}\"", escaped);
+        if let Some(credential) = credential {
+            base_command.push_str(&format!(" --auth \"{}\"", credential.replace('"', "\"\"")));
+        }
+        for spec in inject_env {
+            base_command.push_str(&format!(
+                " --inject-env \"{}\"",
+                spec.as_cli_arg().replace('"', "\"\"")
+            ));
+        }
         let schema_logic = schema_url
             .map(|url| {
                 let escaped_url = url.replace('"', "\"\"");
                 format!(
-                    "set \"UXC_HAS_SCHEMA_URL=\"\r\nfor %%A in (%*) do (\r\n  if /I \"%%~A\"==\"--schema-url\" set \"UXC_HAS_SCHEMA_URL=1\"\r\n  for /F \"tokens=1 delims==\" %%B in (\"%%~A\") do if /I \"%%~B\"==\"--schema-url\" set \"UXC_HAS_SCHEMA_URL=1\"\r\n)\r\nif defined UXC_HAS_SCHEMA_URL (\r\n  uxc \"{}\" %*\r\n) else (\r\n  uxc \"{}\" --schema-url \"{}\" %*\r\n)\r\n",
-                    escaped, escaped, escaped_url
+                    "set \"UXC_HAS_SCHEMA_URL=\"\r\nfor %%A in (%*) do (\r\n  if /I \"%%~A\"==\"--schema-url\" set \"UXC_HAS_SCHEMA_URL=1\"\r\n  for /F \"tokens=1 delims==\" %%B in (\"%%~A\") do if /I \"%%~B\"==\"--schema-url\" set \"UXC_HAS_SCHEMA_URL=1\"\r\n)\r\nif defined UXC_HAS_SCHEMA_URL (\r\n  {} %*\r\n) else (\r\n  {} --schema-url \"{}\" %*\r\n)\r\n",
+                    base_command, base_command, escaped_url
                 )
             })
-            .unwrap_or_else(|| format!("uxc \"{}\" %*\r\n", escaped));
+            .unwrap_or_else(|| format!("{} %*\r\n", base_command));
         return format!(
             "@echo off\r\nREM {}\r\nset \"UXC_LINK_NAME={}\"\r\n{}\r\n{}",
             LINK_SENTINEL, escaped_name, exclusive_line, schema_logic
@@ -2380,12 +2472,21 @@ fn build_link_launcher(
         } else {
             format!("UXC_DAEMON_EXCLUSIVE={} ", shell_single_quote(&exclusive))
         };
-        let exec_prefix = format!(
+        let mut exec_prefix = format!(
             "{}UXC_LINK_NAME={} exec uxc {}",
             exclusive_line,
             shell_single_quote(name),
             shell_single_quote(host)
         );
+        if let Some(credential) = credential {
+            exec_prefix.push_str(&format!(" --auth {}", shell_single_quote(credential)));
+        }
+        for spec in inject_env {
+            exec_prefix.push_str(&format!(
+                " --inject-env {}",
+                shell_single_quote(&spec.as_cli_arg())
+            ));
+        }
         if let Some(schema_url) = schema_url {
             format!(
                 "#!/usr/bin/env sh\n{}\nhas_schema_url=false\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --schema-url|--schema-url=*)\n      has_schema_url=true\n      break\n      ;;\n  esac\ndone\n\nif [ \"$has_schema_url\" = true ]; then\n  {} \"$@\"\nelse\n  {} --schema-url {} \"$@\"\nfi\n",
@@ -2441,6 +2542,10 @@ fn collect_daemon_exclusive_keys(cli: &Cli) -> Result<Vec<String>> {
     keys.sort();
     keys.dedup();
     Ok(keys)
+}
+
+fn collect_inject_env_specs(cli: &Cli) -> Result<Vec<InjectEnvSpec>> {
+    parse_inject_env_specs(&cli.inject_env)
 }
 
 fn expand_tilde_key(key: &str) -> Result<String> {

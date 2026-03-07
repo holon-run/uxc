@@ -1,6 +1,8 @@
 //! MCP stdio client implementation
 
-use super::transport::{DefaultStdioProcessExecutor, McpStdioTransport, StdioProcessExecutor};
+use super::transport::{
+    DefaultStdioProcessExecutor, McpStdioTransport, StdioProcessExecutor, StdioSpawnOptions,
+};
 use super::types::*;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value as JsonValue};
@@ -17,18 +19,29 @@ pub struct McpStdioClient {
 
 impl McpStdioClient {
     /// Create a new MCP stdio client by spawning a server process
+    #[allow(dead_code)]
     pub async fn connect(command: &str, args: &[String]) -> Result<Self> {
-        Self::connect_with_executor(command, args, Arc::new(DefaultStdioProcessExecutor)).await
+        Self::connect_with_options(command, args, StdioSpawnOptions::default()).await
+    }
+
+    pub async fn connect_with_options(
+        command: &str,
+        args: &[String],
+        options: StdioSpawnOptions,
+    ) -> Result<Self> {
+        Self::connect_with_executor(command, args, options, Arc::new(DefaultStdioProcessExecutor))
+            .await
     }
 
     /// Create a new client with a custom executor (for testing)
     pub async fn connect_with_executor(
         command: &str,
         args: &[String],
+        options: StdioSpawnOptions,
         executor: Arc<dyn StdioProcessExecutor>,
     ) -> Result<Self> {
         let mut transport =
-            McpStdioTransport::connect_with_executor(command, args, executor).await?;
+            McpStdioTransport::connect_with_executor(command, args, options, executor).await?;
 
         // Initialize the session
         let client_info = ClientInfo {

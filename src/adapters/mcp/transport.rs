@@ -18,7 +18,17 @@ const DEFAULT_STDIO_REQUEST_TIMEOUT_MS: u64 = 30_000;
 #[async_trait]
 pub trait StdioProcessExecutor: Send + Sync {
     /// Spawn a new process with the given command and arguments
-    async fn spawn(&self, command: &str, args: &[String]) -> Result<SpawnedProcess>;
+    async fn spawn(
+        &self,
+        command: &str,
+        args: &[String],
+        options: &StdioSpawnOptions,
+    ) -> Result<SpawnedProcess>;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StdioSpawnOptions {
+    pub env_overrides: Vec<(String, String)>,
 }
 
 /// Result of spawning a process
@@ -36,7 +46,12 @@ pub struct DefaultStdioProcessExecutor;
 
 #[async_trait]
 impl StdioProcessExecutor for DefaultStdioProcessExecutor {
-    async fn spawn(&self, command: &str, args: &[String]) -> Result<SpawnedProcess> {
+    async fn spawn(
+        &self,
+        command: &str,
+        args: &[String],
+        options: &StdioSpawnOptions,
+    ) -> Result<SpawnedProcess> {
         // Parse the command (handle quoted strings, etc.)
         let parts = parse_command(command);
         let (cmd, cmd_args) = parts.split_first().context("Empty command")?;
@@ -53,10 +68,19 @@ impl StdioProcessExecutor for DefaultStdioProcessExecutor {
         expand_tilde_args(&mut full_args);
 
         tracing::info!("Spawning MCP server: {} {:?}", cmd, full_args);
+        if !options.env_overrides.is_empty() {
+            let env_names = options
+                .env_overrides
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
+            tracing::debug!("Injecting child env vars for MCP stdio: {:?}", env_names);
+        }
 
         // Spawn the process
         let mut child = Command::new(cmd)
             .args(&full_args)
+            .envs(options.env_overrides.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -84,6 +108,8 @@ pub struct MockStdioExecutor {
     pub should_fail_spawn: bool,
     /// Whether to fail immediately after spawn
     pub should_fail_after_spawn: bool,
+    /// Captured env overrides passed to spawn.
+    pub captured_env_overrides: Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
 
 #[cfg(test)]
@@ -93,6 +119,7 @@ impl MockStdioExecutor {
             responses: Arc::new(std::sync::Mutex::new(Vec::new())),
             should_fail_spawn: false,
             should_fail_after_spawn: false,
+            captured_env_overrides: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -101,6 +128,7 @@ impl MockStdioExecutor {
             responses: Arc::new(std::sync::Mutex::new(responses)),
             should_fail_spawn: false,
             should_fail_after_spawn: false,
+            captured_env_overrides: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -109,6 +137,7 @@ impl MockStdioExecutor {
             responses: Arc::new(std::sync::Mutex::new(Vec::new())),
             should_fail_spawn: true,
             should_fail_after_spawn: false,
+            captured_env_overrides: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -117,6 +146,7 @@ impl MockStdioExecutor {
             responses: Arc::new(std::sync::Mutex::new(Vec::new())),
             should_fail_spawn: false,
             should_fail_after_spawn: true,
+            captured_env_overrides: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 }
@@ -131,10 +161,17 @@ impl Default for MockStdioExecutor {
 #[cfg(test)]
 #[async_trait]
 impl StdioProcessExecutor for MockStdioExecutor {
-    async fn spawn(&self, _command: &str, _args: &[String]) -> Result<SpawnedProcess> {
+    async fn spawn(
+        &self,
+        _command: &str,
+        _args: &[String],
+        options: &StdioSpawnOptions,
+    ) -> Result<SpawnedProcess> {
         if self.should_fail_spawn {
             bail!("Mock executor: failed to spawn process");
         }
+
+        *self.captured_env_overrides.lock().unwrap() = options.env_overrides.clone();
 
         // Create a mock child process
         let mut child = tokio::process::Command::new("echo")
@@ -193,20 +230,30 @@ impl McpStdioTransport {
     /// Spawn a new MCP server process and create a transport
     #[allow(dead_code)]
     pub async fn connect(command: &str, args: &[String]) -> Result<Self> {
-        Self::connect_with_executor(command, args, Arc::new(DefaultStdioProcessExecutor)).await
+        Self::connect_with_options(command, args, StdioSpawnOptions::default()).await
+    }
+
+    pub async fn connect_with_options(
+        command: &str,
+        args: &[String],
+        options: StdioSpawnOptions,
+    ) -> Result<Self> {
+        Self::connect_with_executor(command, args, options, Arc::new(DefaultStdioProcessExecutor))
+            .await
     }
 
     /// Create a new transport with a custom executor (for testing)
     pub async fn connect_with_executor(
         command: &str,
         args: &[String],
+        options: StdioSpawnOptions,
         executor: Arc<dyn StdioProcessExecutor>,
     ) -> Result<Self> {
         let SpawnedProcess {
             child,
             stdin,
             stdout,
-        } = executor.spawn(command, args).await?;
+        } = executor.spawn(command, args, &options).await?;
 
         // Create channels for sending requests
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutboundMessage>();
@@ -956,7 +1003,13 @@ mod tests {
     #[tokio::test]
     async fn connect_with_mock_executor_succeeds() {
         let mock = Arc::new(MockStdioExecutor::new());
-        let result = McpStdioTransport::connect_with_executor("test", &[], mock).await;
+        let result = McpStdioTransport::connect_with_executor(
+            "test",
+            &[],
+            StdioSpawnOptions::default(),
+            mock,
+        )
+        .await;
         // The mock will spawn a real echo process, so this should succeed
         // but may fail on initialization - that's ok for this test
         // We're just testing that the executor is being used
@@ -966,9 +1019,26 @@ mod tests {
     #[tokio::test]
     async fn connect_with_failing_mock_executor_fails() {
         let mock = Arc::new(MockStdioExecutor::with_spawn_failure());
-        let result = McpStdioTransport::connect_with_executor("test", &[], mock).await;
+        let result = McpStdioTransport::connect_with_executor(
+            "test",
+            &[],
+            StdioSpawnOptions::default(),
+            mock,
+        )
+        .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("failed to spawn"));
+    }
+
+    #[tokio::test]
+    async fn connect_with_mock_executor_passes_env_overrides() {
+        let mock = Arc::new(MockStdioExecutor::new());
+        let options = StdioSpawnOptions {
+            env_overrides: vec![("TOKEN".to_string(), "secret".to_string())],
+        };
+        let _ = McpStdioTransport::connect_with_executor("test", &[], options, mock.clone()).await;
+        let captured = mock.captured_env_overrides.lock().unwrap().clone();
+        assert_eq!(captured, vec![("TOKEN".to_string(), "secret".to_string())]);
     }
 
     #[tokio::test]
@@ -1061,7 +1131,9 @@ mod tests {
     async fn default_executor_implements_trait() {
         let executor = DefaultStdioProcessExecutor;
         // Test that we can call spawn (it will fail for invalid command, but that's ok)
-        let result = executor.spawn("nonexistent_test_command_xyz", &[]).await;
+        let result = executor
+            .spawn("nonexistent_test_command_xyz", &[], &StdioSpawnOptions::default())
+            .await;
         assert!(result.is_err());
     }
 

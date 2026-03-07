@@ -647,6 +647,14 @@ fn link_help_flag_outputs_subcommand_help_json() {
     assert_eq!(link_json["ok"], true);
     assert_eq!(link_json["kind"], "subcommand_help");
     assert_eq!(link_json["data"]["path"], "uxc link");
+    assert!(link_json["data"]["usage"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("--credential <credential_id>"));
+    assert!(link_json["data"]["usage"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("--inject-env NAME={{secret}}"));
 }
 
 #[test]
