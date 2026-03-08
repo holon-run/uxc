@@ -95,6 +95,13 @@ impl OpenAPIAdapter {
         Ok(req)
     }
 
+    fn apply_auth_profile_to_url(url: &str, profile: Option<&Profile>) -> Result<String> {
+        match profile {
+            Some(profile) => crate::auth::apply_profile_auth_to_url(url, profile),
+            None => Ok(url.to_string()),
+        }
+    }
+
     async fn refresh_effective_oauth_profile(&self, force: bool) -> Result<Option<Profile>> {
         let _refresh_guard = self.oauth_refresh_lock.lock().await;
         let mut profile = self.effective_auth_profile().await;
@@ -168,9 +175,10 @@ impl OpenAPIAdapter {
     async fn check_schema_url(&self, schema_url: &str) -> Result<bool> {
         let response = self
             .send_with_oauth_retry(|profile| {
+                let schema_url = Self::apply_auth_profile_to_url(schema_url, profile)?;
                 let req = self
                     .client
-                    .get(schema_url)
+                    .get(&schema_url)
                     .timeout(std::time::Duration::from_secs(10))
                     .header("Accept", "application/json");
                 Self::apply_auth_profile(req, profile)
@@ -281,6 +289,7 @@ impl OpenAPIAdapter {
         for full_url in Self::schema_candidates(&normalized) {
             let resp = match self
                 .send_with_oauth_retry(|profile| {
+                    let full_url = Self::apply_auth_profile_to_url(&full_url, profile)?;
                     let req = self
                         .client
                         .get(&full_url)
@@ -611,6 +620,7 @@ impl Adapter for OpenAPIAdapter {
         // Fetch from remote
         let resp = self
             .send_with_oauth_retry(|profile| {
+                let schema_url = Self::apply_auth_profile_to_url(&schema_url, profile)?;
                 let req = self.client.get(&schema_url);
                 Self::apply_auth_profile(req, profile)
             })
@@ -720,6 +730,7 @@ impl Adapter for OpenAPIAdapter {
 
         let resp = self
             .send_with_oauth_retry(|profile| {
+                let full_url = Self::apply_auth_profile_to_url(&full_url, profile)?;
                 let req = match method.as_str() {
                     "get" => self.client.get(&full_url),
                     "post" => self.client.post(&full_url),

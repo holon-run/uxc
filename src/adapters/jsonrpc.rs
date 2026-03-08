@@ -89,6 +89,13 @@ impl JsonRpcAdapter {
         Ok(req)
     }
 
+    fn apply_auth_profile_to_url(url: &str, profile: Option<&Profile>) -> Result<String> {
+        match profile {
+            Some(profile) => crate::auth::apply_profile_auth_to_url(url, profile),
+            None => Ok(url.to_string()),
+        }
+    }
+
     async fn refresh_effective_oauth_profile(&self, force: bool) -> Result<Option<Profile>> {
         let _refresh_guard = self.oauth_refresh_lock.lock().await;
         let mut profile = self.effective_auth_profile().await;
@@ -478,9 +485,10 @@ impl JsonRpcAdapter {
 
         let response = match self
             .send_with_oauth_retry(|profile| {
+                let url = Self::apply_auth_profile_to_url(url, profile)?;
                 let req = self
                     .client
-                    .post(url)
+                    .post(&url)
                     .timeout(std::time::Duration::from_secs(3))
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
@@ -520,6 +528,7 @@ impl JsonRpcAdapter {
         for schema_url in Self::schema_candidates(url) {
             let response = match self
                 .send_with_oauth_retry(|profile| {
+                    let schema_url = Self::apply_auth_profile_to_url(&schema_url, profile)?;
                     let req = self
                         .client
                         .get(&schema_url)
@@ -628,9 +637,10 @@ impl JsonRpcAdapter {
 
         let response = self
             .send_with_oauth_retry(|profile| {
+                let rpc_url = Self::apply_auth_profile_to_url(rpc_url, profile)?;
                 let req = self
                     .client
-                    .post(rpc_url)
+                    .post(&rpc_url)
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .json(&request);

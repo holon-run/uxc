@@ -36,6 +36,27 @@ uxc auth credential set <credential_id> \
 - `{{env:VAR_NAME}}` - Resolved from environment variable
 - `{{op://path/to/secret}}` - Resolved through 1Password CLI
 
+### 1b. API Key in URL Query Params
+
+Use when the provider expects the API key as part of the endpoint query string, for example `?apiKey=...`:
+
+```bash
+uxc auth credential set flipside \
+  --auth-type api_key \
+  --query-param "apiKey={{secret}}" \
+  --secret-env FLIPSIDE_API_KEY
+
+uxc auth binding add \
+  --id flipside-mcp \
+  --host mcp.flipsidecrypto.xyz \
+  --path-prefix /mcp \
+  --scheme https \
+  --credential flipside \
+  --priority 100
+```
+
+Prefer this over embedding the secret directly in the endpoint URL.
+
 ### 2. Bearer Token (Standard OAuth2 Format)
 
 Use when API accepts standard `Authorization: Bearer <token>` format:

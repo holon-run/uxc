@@ -212,7 +212,42 @@ impl AuthHeader {
     }
 
     pub fn render_value(&self, profile: &Profile) -> Result<String> {
-        render_header_template(&self.template, profile)
+        render_template(&self.template, profile, "auth header")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthQueryParam {
+    pub name: String,
+    pub template: String,
+}
+
+impl AuthQueryParam {
+    pub fn parse(spec: &str) -> Result<Self> {
+        let Some((name, template)) = spec.split_once('=') else {
+            anyhow::bail!(
+                "Invalid --query-param '{}'. Expected format: <query-param-name>=<template>",
+                spec
+            );
+        };
+        Self::new(name, template)
+    }
+
+    pub fn new(name: &str, template: &str) -> Result<Self> {
+        let normalized_name = validate_query_param_name(name)?;
+        validate_template(template)?;
+        Ok(Self {
+            name: normalized_name,
+            template: template.to_string(),
+        })
+    }
+
+    pub fn requires_primary_secret(&self) -> bool {
+        template_has_secret(&self.template)
+    }
+
+    pub fn render_value(&self, profile: &Profile) -> Result<String> {
+        render_template(&self.template, profile, "auth query param")
     }
 }
 
@@ -245,6 +280,10 @@ pub struct Profile {
     /// Optional custom auth headers used by api_key auth type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_headers: Option<Vec<AuthHeader>>,
+
+    /// Optional custom auth query params used by api_key auth type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_query_params: Option<Vec<AuthQueryParam>>,
 }
 
 impl Profile {
@@ -266,6 +305,7 @@ impl Profile {
             name: None,
             secret_source,
             auth_headers: None,
+            auth_query_params: None,
         }
     }
 
@@ -370,11 +410,21 @@ impl Profile {
                 .is_some_and(|headers| !headers.is_empty())
     }
 
-    pub fn api_key_headers_require_secret(&self) -> bool {
+    pub fn has_custom_api_key_query_params(&self) -> bool {
         self.auth_type == AuthType::ApiKey
-            && self.auth_headers.as_ref().is_some_and(|headers| {
+            && self
+                .auth_query_params
+                .as_ref()
+                .is_some_and(|params| !params.is_empty())
+    }
+
+    pub fn api_key_injections_require_secret(&self) -> bool {
+        self.auth_type == AuthType::ApiKey
+            && (self.auth_headers.as_ref().is_some_and(|headers| {
                 !headers.is_empty() && headers.iter().any(AuthHeader::requires_primary_secret)
-            })
+            }) || self.auth_query_params.as_ref().is_some_and(|params| {
+                !params.is_empty() && params.iter().any(AuthQueryParam::requires_primary_secret)
+            }))
     }
 
     pub fn resolved_api_key_headers(&self) -> Result<Vec<(String, String)>> {
@@ -392,7 +442,29 @@ impl Profile {
             }
         }
 
+        if self.has_custom_api_key_query_params() {
+            return Ok(Vec::new());
+        }
+
         Ok(vec![("x-api-key".to_string(), self.api_key.clone())])
+    }
+
+    pub fn resolved_api_key_query_params(&self) -> Result<Vec<(String, String)>> {
+        if self.auth_type != AuthType::ApiKey {
+            return Ok(Vec::new());
+        }
+
+        if let Some(params) = &self.auth_query_params {
+            if !params.is_empty() {
+                let mut values = Vec::with_capacity(params.len());
+                for param in params {
+                    values.push((param.name.clone(), param.render_value(self)?));
+                }
+                return Ok(values);
+            }
+        }
+
+        Ok(Vec::new())
     }
 }
 
@@ -423,6 +495,8 @@ struct StoredCredential {
     // auth_headers persistence is handled by serde derives on AuthHeader.
     #[serde(skip_serializing_if = "Option::is_none")]
     auth_headers: Option<Vec<AuthHeader>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_query_params: Option<Vec<AuthQueryParam>>,
 }
 
 impl StoredCredential {
@@ -453,6 +527,7 @@ impl StoredCredential {
             secret_source,
             api_key,
             auth_headers: profile.auth_headers.clone(),
+            auth_query_params: profile.auth_query_params.clone(),
         }
     }
 
@@ -475,6 +550,7 @@ impl StoredCredential {
             name: Some(name.to_string()),
             secret_source,
             auth_headers: self.auth_headers.clone(),
+            auth_query_params: self.auth_query_params.clone(),
         };
 
         if profile.auth_type == AuthType::OAuth {
@@ -904,7 +980,9 @@ fn validate_ready(profile: &Profile) -> Result<()> {
             }
         }
         _ => {
-            if profile.has_custom_api_key_headers() && !profile.api_key_headers_require_secret() {
+            if (profile.has_custom_api_key_headers() || profile.has_custom_api_key_query_params())
+                && !profile.api_key_injections_require_secret()
+            {
                 return Ok(());
             }
             if profile.api_key.is_empty() {
@@ -936,6 +1014,22 @@ pub fn validate_auth_headers(headers: &[AuthHeader]) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_auth_query_params(params: &[AuthQueryParam]) -> Result<()> {
+    if params.is_empty() {
+        anyhow::bail!("Custom auth query params cannot be empty");
+    }
+
+    let mut seen = HashSet::new();
+    for param in params {
+        validate_query_param_name(&param.name)?;
+        validate_template(&param.template)?;
+        if !seen.insert(param.name.clone()) {
+            anyhow::bail!("Duplicate auth query param '{}'", param.name);
+        }
+    }
+    Ok(())
+}
+
 fn validate_header_name(name: &str) -> Result<String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -947,8 +1041,23 @@ fn validate_header_name(name: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-fn validate_header_template(template: &str) -> Result<()> {
+fn validate_template(template: &str) -> Result<()> {
     parse_template_tokens(template).map(|_| ())
+}
+
+fn validate_header_template(template: &str) -> Result<()> {
+    validate_template(template)
+}
+
+fn validate_query_param_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Query param name cannot be empty");
+    }
+    if trimmed.contains('=') {
+        anyhow::bail!("Invalid query param name '{}'", trimmed);
+    }
+    Ok(trimmed.to_string())
 }
 
 fn template_has_secret(template: &str) -> bool {
@@ -1001,7 +1110,7 @@ fn parse_template_tokens(template: &str) -> Result<Vec<TemplateToken>> {
     Ok(tokens)
 }
 
-fn render_header_template(template: &str, profile: &Profile) -> Result<String> {
+fn render_template(template: &str, profile: &Profile, target: &str) -> Result<String> {
     let _ = parse_template_tokens(template)?;
 
     let mut rendered = String::new();
@@ -1019,8 +1128,9 @@ fn render_header_template(template: &str, profile: &Profile) -> Result<String> {
         if raw == "secret" {
             if profile.api_key.is_empty() {
                 anyhow::bail!(
-                    "Credential '{}' requires a secret for '{{{{secret}}}}' template",
-                    profile.name.as_deref().unwrap_or("unknown")
+                    "Credential '{}' requires a secret for '{{{{secret}}}}' {} template",
+                    profile.name.as_deref().unwrap_or("unknown"),
+                    target
                 );
             }
             rendered.push_str(&profile.api_key);
@@ -1028,9 +1138,10 @@ fn render_header_template(template: &str, profile: &Profile) -> Result<String> {
             let env_key = env_key.trim();
             let value = std::env::var(env_key).map_err(|_| {
                 anyhow::anyhow!(
-                    "Credential '{}' expects env var '{}' for auth header template but it is not set",
+                    "Credential '{}' expects env var '{}' for {} template but it is not set",
                     profile.name.as_deref().unwrap_or("unknown"),
-                    env_key
+                    env_key,
+                    target
                 )
             })?;
             rendered.push_str(&value);
@@ -1264,6 +1375,29 @@ pub fn apply_profile_auth_to_request(
         }
         AuthType::OAuth => Ok(request_builder.bearer_auth(&profile.api_key)),
     }
+}
+
+pub fn apply_profile_auth_to_url(url: &str, profile: &Profile) -> Result<String> {
+    if profile.auth_type != AuthType::ApiKey || !profile.has_custom_api_key_query_params() {
+        return Ok(url.to_string());
+    }
+
+    let mut parsed = url::Url::parse(url)
+        .with_context(|| format!("Invalid endpoint URL for auth query params: {}", url))?;
+    let rendered = profile.resolved_api_key_query_params()?;
+    if rendered.is_empty() {
+        return Ok(url.to_string());
+    }
+
+    let mut pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    pairs.retain(|(key, _)| !rendered.iter().any(|(name, _)| name == key));
+    pairs.extend(rendered);
+
+    parsed.query_pairs_mut().clear().extend_pairs(pairs);
+    Ok(parsed.to_string())
 }
 
 pub fn auth_profile_to_metadata(
@@ -1517,5 +1651,44 @@ mod tests {
     fn auth_header_invalid_template_token() {
         let err = AuthHeader::parse("x-test={{unknown}}").unwrap_err();
         assert!(err.to_string().contains("Unsupported template token"));
+    }
+
+    #[test]
+    fn auth_query_param_parse_and_render_secret_template() {
+        let param = AuthQueryParam::parse("apiKey={{secret}}").unwrap();
+        let profile = Profile::new("secret-value".to_string(), AuthType::ApiKey);
+        assert_eq!(param.name, "apiKey");
+        assert_eq!(param.render_value(&profile).unwrap(), "secret-value");
+    }
+
+    #[test]
+    fn auth_query_param_render_env_template() {
+        std::env::set_var("UXC_TEST_QUERY_ENV", "workspace-1");
+        let param = AuthQueryParam::parse("workspace={{env:UXC_TEST_QUERY_ENV}}").unwrap();
+        let profile = Profile::new("unused".to_string(), AuthType::ApiKey);
+        assert_eq!(param.render_value(&profile).unwrap(), "workspace-1");
+        std::env::remove_var("UXC_TEST_QUERY_ENV");
+    }
+
+    #[test]
+    fn apply_profile_auth_to_url_replaces_existing_query_param() {
+        let mut profile = Profile::new("secret-value".to_string(), AuthType::ApiKey);
+        profile.auth_query_params = Some(vec![AuthQueryParam::parse("apiKey={{secret}}").unwrap()]);
+
+        let url = apply_profile_auth_to_url(
+            "https://example.com/mcp?apiKey=old&network=ethereum",
+            &profile,
+        )
+        .unwrap();
+        assert!(url.contains("apiKey=secret-value"));
+        assert!(url.contains("network=ethereum"));
+        assert!(!url.contains("apiKey=old"));
+    }
+
+    #[test]
+    fn resolved_api_key_headers_skip_default_when_query_params_present() {
+        let mut profile = Profile::new("secret-value".to_string(), AuthType::ApiKey);
+        profile.auth_query_params = Some(vec![AuthQueryParam::parse("apiKey={{secret}}").unwrap()]);
+        assert!(profile.resolved_api_key_headers().unwrap().is_empty());
     }
 }

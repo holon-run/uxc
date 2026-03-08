@@ -159,6 +159,12 @@ uxc auth credential set okx-advanced \
   --auth-type api_key \
   --header "OK-ACCESS-KEY={{secret}}" \
   --header "OK-ACCESS-PASSPHRASE={{env:OKX_PASSPHRASE}}"
+
+# api_key credentials can also inject secret into URL query params
+uxc auth credential set flipside \
+  --auth-type api_key \
+  --query-param "apiKey={{secret}}" \
+  --secret-env FLIPSIDE_API_KEY
 ```
 
 For OAuth (MCP HTTP), see [`docs/oauth-mcp-http.md`](oauth-mcp-http.md).

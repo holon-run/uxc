@@ -205,6 +205,7 @@ mod tests {
                 value: "test-token".to_string(),
             }),
             auth_headers: None,
+            auth_query_params: None,
         };
         let rendered = InjectEnvSpec::parse("TOKEN=Bearer {{secret}}")
             .unwrap()

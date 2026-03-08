@@ -266,6 +266,11 @@ enum AuthCredentialCommands {
         #[arg(long, conflicts_with = "api_key_header")]
         header: Vec<String>,
 
+        /// Custom auth query param template (repeatable): <name>=<template>
+        /// Template supports {{secret}}, {{env:VAR}}, {{op://...}}
+        #[arg(long)]
+        query_param: Vec<String>,
+
         /// Credential description
         #[arg(long)]
         description: Option<String>,
@@ -558,6 +563,7 @@ struct AuthProfileView {
     api_key_masked: String,
     secret_source: Option<AuthSecretSourceView>,
     auth_headers: Option<Vec<AuthHeaderView>>,
+    auth_query_params: Option<Vec<AuthQueryParamView>>,
     description: Option<String>,
     oauth: Option<AuthOAuthView>,
 }
@@ -569,6 +575,12 @@ struct AuthSecretSourceView {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthHeaderView {
+    name: String,
+    value_masked: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthQueryParamView {
     name: String,
     value_masked: String,
 }
@@ -1510,13 +1522,14 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth", "credential", "set"] => HelpData {
             path: "uxc auth credential set".to_string(),
             about: "Set or update a credential".to_string(),
-            usage: "uxc auth credential set <credential_id> [--auth-type <type>] [--secret <value>|--secret-env <key>|--secret-op <op://...>] [--description <text>]".to_string(),
+            usage: "uxc auth credential set <credential_id> [--auth-type <type>] [--secret <value>|--secret-env <key>|--secret-op <op://...>] [--api-key-header <name>|--header <name>=<template>] [--query-param <name>=<template>] [--description <text>]".to_string(),
             commands: vec![],
             notes: vec![],
             examples: vec![
                 "uxc auth credential set deepwiki --secret-env DEEPWIKI_TOKEN".to_string(),
                 "uxc auth credential set deepwiki --secret-op op://Engineering/deepwiki/token"
                     .to_string(),
+                "uxc auth credential set flipside --auth-type api_key --query-param \"apiKey={{secret}}\" --secret-env FLIPSIDE_API_KEY".to_string(),
             ],
         },
         ["auth", "credential", "remove"] => HelpData {
@@ -1850,6 +1863,12 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
                         println!("    Auth Headers: {}", names.join(", "));
                     }
                 }
+                if let Some(params) = credential.auth_query_params {
+                    let names = params.into_iter().map(|p| p.name).collect::<Vec<_>>();
+                    if !names.is_empty() {
+                        println!("    Auth Query Params: {}", names.join(", "));
+                    }
+                }
                 if let Some(oauth) = credential.oauth {
                     println!(
                         "    OAuth Flow: {}",
@@ -1878,6 +1897,12 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
                 let names = headers.into_iter().map(|h| h.name).collect::<Vec<_>>();
                 if !names.is_empty() {
                     println!("  Auth Headers: {}", names.join(", "));
+                }
+            }
+            if let Some(params) = credential.auth_query_params {
+                let names = params.into_iter().map(|p| p.name).collect::<Vec<_>>();
+                if !names.is_empty() {
+                    println!("  Auth Query Params: {}", names.join(", "));
                 }
             }
             if let Some(oauth) = credential.oauth {
@@ -3123,6 +3148,7 @@ async fn handle_auth_credential_command(
             secret_op,
             api_key_header,
             header,
+            query_param,
             description,
         } => {
             let mut profiles = Profiles::load_profiles()?;
@@ -3159,10 +3185,10 @@ async fn handle_auth_credential_command(
             }
 
             if resolved_auth_type != AuthType::ApiKey
-                && (api_key_header.is_some() || !header.is_empty())
+                && (api_key_header.is_some() || !header.is_empty() || !query_param.is_empty())
             {
                 return Err(UxcError::InvalidArguments(
-                    "--api-key-header/--header can only be used with --auth-type api_key"
+                    "--api-key-header/--header/--query-param can only be used with --auth-type api_key"
                         .to_string(),
                 )
                 .into());
@@ -3171,8 +3197,8 @@ async fn handle_auth_credential_command(
             if resolved_auth_type != AuthType::OAuth
                 && previous_auth_type == Some(AuthType::OAuth)
                 && provided_secret_flags == 0
-                && !(resolved_auth_type == AuthType::ApiKey
-                    && (api_key_header.is_some() || !header.is_empty()))
+                && (resolved_auth_type != AuthType::ApiKey
+                    || (api_key_header.is_none() && header.is_empty() && query_param.is_empty()))
             {
                 return Err(UxcError::InvalidArguments(
                     "Switching credential from oauth to non-oauth requires an explicit secret source (--secret, --secret-env, or --secret-op).".to_string(),
@@ -3200,6 +3226,17 @@ async fn handle_auth_credential_command(
                     .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
                 profile_obj.auth_headers = Some(auth_headers);
             }
+            if !query_param.is_empty() {
+                let mut auth_query_params = Vec::with_capacity(query_param.len());
+                for spec in query_param {
+                    let parsed = crate::auth::AuthQueryParam::parse(spec)
+                        .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+                    auth_query_params.push(parsed);
+                }
+                crate::auth::validate_auth_query_params(&auth_query_params)
+                    .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+                profile_obj.auth_query_params = Some(auth_query_params);
+            }
 
             if resolved_auth_type != AuthType::OAuth {
                 let has_existing_secret = matches!(
@@ -3211,8 +3248,10 @@ async fn handle_auth_credential_command(
                     && !profile_obj.api_key.is_empty());
 
                 let requires_secret = if resolved_auth_type == AuthType::ApiKey {
-                    if profile_obj.has_custom_api_key_headers() {
-                        profile_obj.api_key_headers_require_secret()
+                    if profile_obj.has_custom_api_key_headers()
+                        || profile_obj.has_custom_api_key_query_params()
+                    {
+                        profile_obj.api_key_injections_require_secret()
                     } else {
                         true
                     }
@@ -3255,10 +3294,12 @@ async fn handle_auth_credential_command(
             if resolved_auth_type == AuthType::OAuth {
                 profile_obj.secret_source = None;
                 profile_obj.auth_headers = None;
+                profile_obj.auth_query_params = None;
             } else {
                 profile_obj.oauth = None;
                 if resolved_auth_type != AuthType::ApiKey {
                     profile_obj.auth_headers = None;
+                    profile_obj.auth_query_params = None;
                 } else if profile_obj
                     .auth_headers
                     .as_ref()
@@ -3266,6 +3307,19 @@ async fn handle_auth_credential_command(
                 {
                     crate::auth::validate_auth_headers(
                         profile_obj.auth_headers.as_ref().expect("checked is_some"),
+                    )
+                    .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+                }
+                if profile_obj
+                    .auth_query_params
+                    .as_ref()
+                    .is_some_and(|params| !params.is_empty())
+                {
+                    crate::auth::validate_auth_query_params(
+                        profile_obj
+                            .auth_query_params
+                            .as_ref()
+                            .expect("checked is_some"),
                     )
                     .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
                 }
@@ -3865,6 +3919,15 @@ fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
                 .iter()
                 .map(|header| AuthHeaderView {
                     name: header.name.clone(),
+                    value_masked: "***".to_string(),
+                })
+                .collect()
+        }),
+        auth_query_params: profile.auth_query_params.as_ref().map(|params| {
+            params
+                .iter()
+                .map(|param| AuthQueryParamView {
+                    name: param.name.clone(),
                     value_masked: "***".to_string(),
                 })
                 .collect()

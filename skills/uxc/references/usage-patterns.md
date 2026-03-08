@@ -54,6 +54,14 @@ uxc link <provider>-mcp-cli <stdio_command> --credential <credential_id> --injec
 <provider>-mcp-cli -h
 ```
 
+For MCP HTTP or other HTTP endpoints that require API keys in the URL query string, configure the credential with `--query-param` and keep the endpoint itself clean:
+
+```bash
+uxc auth credential set flipside --auth-type api_key --query-param "apiKey={{secret}}" --secret-env FLIPSIDE_API_KEY
+uxc auth binding add --id flipside-mcp --host mcp.flipsidecrypto.xyz --path-prefix /mcp --scheme https --credential flipside --priority 100
+uxc https://mcp.flipsidecrypto.xyz/mcp -h
+```
+
 Examples:
 
 ```bash
