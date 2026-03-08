@@ -280,44 +280,80 @@ uxc fullnode.mainnet.sui.io sui_getLatestCheckpointSequenceNumber
 UXC provides one canonical skill plus scenario-specific official wrappers.
 Use `uxc` skill as the shared execution layer, and add wrappers when they fit your workflow.
 
-| Skill | Purpose | Path |
-| --- | --- | --- |
-| `uxc` | Canonical schema discovery and multi-protocol execution layer | [`skills/uxc/SKILL.md`](skills/uxc/SKILL.md) |
-| `deepwiki-mcp-skill` | Query repository documentation and ask codebase questions | [`skills/deepwiki-mcp-skill/SKILL.md`](skills/deepwiki-mcp-skill/SKILL.md) |
-| `context7-mcp-skill` | Query up-to-date library documentation/examples over MCP | [`skills/context7-mcp-skill/SKILL.md`](skills/context7-mcp-skill/SKILL.md) |
-| `okx-mcp-skill` | Query OKX MCP for token, market, wallet, and swap workflows | [`skills/okx-mcp-skill/SKILL.md`](skills/okx-mcp-skill/SKILL.md) |
-| `dune-mcp-skill` | Discover blockchain tables, run SQL, fetch results, and build charts via Dune MCP | [`skills/dune-mcp-skill/SKILL.md`](skills/dune-mcp-skill/SKILL.md) |
-| `thegraph-mcp-skill` | Discover subgraphs, inspect schemas, and execute GraphQL via The Graph Subgraph MCP bridge | [`skills/thegraph-mcp-skill/SKILL.md`](skills/thegraph-mcp-skill/SKILL.md) |
-| `thegraph-token-mcp-skill` | Query token, wallet, transfer, holder, and market data via The Graph Token API MCP | [`skills/thegraph-token-mcp-skill/SKILL.md`](skills/thegraph-token-mcp-skill/SKILL.md) |
-| `etherscan-mcp-skill` | Investigate addresses, token holders, and contracts via Etherscan MCP | [`skills/etherscan-mcp-skill/SKILL.md`](skills/etherscan-mcp-skill/SKILL.md) |
-| `notion-mcp-skill` | Operate Notion MCP workflows with OAuth-aware guidance | [`skills/notion-mcp-skill/SKILL.md`](skills/notion-mcp-skill/SKILL.md) |
-| `discord-openapi-skill` | Operate Discord REST API via UXC + OpenAPI schema mapping | [`skills/discord-openapi-skill/SKILL.md`](skills/discord-openapi-skill/SKILL.md) |
-| `playwright-mcp-skill` | Run `@playwright/mcp` over MCP stdio through `uxc` (browser automation) | [`skills/playwright-mcp-skill/SKILL.md`](skills/playwright-mcp-skill/SKILL.md) |
+### Start Here
+
+- [`uxc`](skills/uxc/SKILL.md): canonical schema discovery and multi-protocol execution layer
+- [`playwright-mcp-skill`](skills/playwright-mcp-skill/SKILL.md): browser automation over MCP stdio through `uxc`
+- [`context7-mcp-skill`](skills/context7-mcp-skill/SKILL.md): current library documentation and examples over MCP
+
+### Core
+
+- [`uxc`](skills/uxc/SKILL.md): canonical schema discovery and multi-protocol execution layer
+- [`uxc-skill-creator`](skills/uxc-skill-creator/SKILL.md): templates and workflow guidance for building new UXC-based skills
+
+### Browser Automation
+
+- [`playwright-mcp-skill`](skills/playwright-mcp-skill/SKILL.md): run `@playwright/mcp` over MCP stdio through `uxc`
+
+### Knowledge and Docs
+
+- [`context7-mcp-skill`](skills/context7-mcp-skill/SKILL.md): query up-to-date library documentation and examples
+- [`deepwiki-mcp-skill`](skills/deepwiki-mcp-skill/SKILL.md): query repository documentation and ask codebase questions
+
+### Workspace and Collaboration
+
+- [`notion-mcp-skill`](skills/notion-mcp-skill/SKILL.md): operate Notion MCP workflows with OAuth-aware guidance
+- [`linear-graphql-skill`](skills/linear-graphql-skill/SKILL.md): operate Linear issues, projects, and teams through GraphQL
+- [`discord-openapi-skill`](skills/discord-openapi-skill/SKILL.md): operate Discord REST API via UXC and OpenAPI schema mapping
+
+### Crypto and Onchain Data
+
+- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md): query OKX MCP for token, market, wallet, and swap workflows
+- [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md): discover blockchain tables, run SQL, fetch results, and build charts via Dune MCP
+- [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md): discover subgraphs, inspect schemas, and execute GraphQL via The Graph Subgraph MCP bridge
+- [`thegraph-token-mcp-skill`](skills/thegraph-token-mcp-skill/SKILL.md): query token, wallet, transfer, holder, and market data via The Graph Token API MCP
+- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md): investigate addresses, token holders, and contracts via Etherscan MCP
 
 ### Install Skills
 
 Install from this repository using `npx skills`:
 
 ```bash
-# Install canonical base skill for Codex
+# Start with the shared execution layer
 npx -y skills@latest add holon-run/uxc --skill uxc --agent codex -y
 
-# Install wrappers as needed
-npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --skill discord-openapi-skill --agent codex -y
+# Add browser and knowledge skills
+npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill context7-mcp-skill --skill deepwiki-mcp-skill --agent codex -y
+
+# Add workspace skills
+npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill discord-openapi-skill --agent codex -y
+
+# Add crypto and onchain skills
+npx -y skills@latest add holon-run/uxc --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
 ```
 
 Install published skills from ClawHub:
 
 ```bash
-# Install into ~/.openclaw/skills/<slug>
+# Start with the shared execution layer
 clawhub --workdir ~/.openclaw --dir skills install uxc
+
+# Add browser and knowledge skills
 clawhub --workdir ~/.openclaw --dir skills install playwright-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install context7-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install deepwiki-mcp-skill
+
+# Add workspace skills
+clawhub --workdir ~/.openclaw --dir skills install notion-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install linear-graphql-skill
+clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
+
+# Add crypto and onchain skills
 clawhub --workdir ~/.openclaw --dir skills install okx-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install dune-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install thegraph-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install thegraph-token-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install etherscan-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
 ```
 
 See [`docs/skills.md`](docs/skills.md) for install methods and maintenance rules.

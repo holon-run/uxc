@@ -276,40 +276,80 @@ uxc fullnode.mainnet.sui.io sui_getLatestCheckpointSequenceNumber
 UXC 提供一个标准 skill（`uxc`）和若干官方场景化 wrapper skill。
 建议把 `uxc` 作为共享执行层，再按场景补充 wrapper。
 
-| Skill | 用途 | 路径 |
-| --- | --- | --- |
-| `uxc` | 标准的 schema 发现与多协议执行层 | [`skills/uxc/SKILL.md`](skills/uxc/SKILL.md) |
-| `deepwiki-mcp-skill` | 查询仓库文档并回答代码库问题 | [`skills/deepwiki-mcp-skill/SKILL.md`](skills/deepwiki-mcp-skill/SKILL.md) |
-| `context7-mcp-skill` | 通过 MCP 查询最新库文档与示例 | [`skills/context7-mcp-skill/SKILL.md`](skills/context7-mcp-skill/SKILL.md) |
-| `okx-mcp-skill` | 通过 OKX MCP 执行 token、市场、钱包、换汇等流程 | [`skills/okx-mcp-skill/SKILL.md`](skills/okx-mcp-skill/SKILL.md) |
-| `dune-mcp-skill` | 通过 Dune MCP 发现链上表、执行 SQL、获取结果并生成图表 | [`skills/dune-mcp-skill/SKILL.md`](skills/dune-mcp-skill/SKILL.md) |
-| `etherscan-mcp-skill` | 通过 Etherscan MCP 调查地址、持币人和合约信息 | [`skills/etherscan-mcp-skill/SKILL.md`](skills/etherscan-mcp-skill/SKILL.md) |
-| `notion-mcp-skill` | 提供带 OAuth 说明的 Notion MCP 流程指引 | [`skills/notion-mcp-skill/SKILL.md`](skills/notion-mcp-skill/SKILL.md) |
-| `discord-openapi-skill` | 通过 UXC + OpenAPI schema mapping 操作 Discord REST API | [`skills/discord-openapi-skill/SKILL.md`](skills/discord-openapi-skill/SKILL.md) |
-| `playwright-mcp-skill` | 通过 `uxc` 在 MCP stdio 上运行 `@playwright/mcp`（浏览器自动化） | [`skills/playwright-mcp-skill/SKILL.md`](skills/playwright-mcp-skill/SKILL.md) |
+### 从这里开始
+
+- [`uxc`](skills/uxc/SKILL.md)：标准的 schema 发现与多协议执行层
+- [`playwright-mcp-skill`](skills/playwright-mcp-skill/SKILL.md)：通过 `uxc` 在 MCP stdio 上做浏览器自动化
+- [`context7-mcp-skill`](skills/context7-mcp-skill/SKILL.md)：查询最新库文档与示例
+
+### 核心能力
+
+- [`uxc`](skills/uxc/SKILL.md)：标准的 schema 发现与多协议执行层
+- [`uxc-skill-creator`](skills/uxc-skill-creator/SKILL.md)：创建 UXC skill 的模板与工作流指南
+
+### 浏览器自动化
+
+- [`playwright-mcp-skill`](skills/playwright-mcp-skill/SKILL.md)：通过 `uxc` 在 MCP stdio 上运行 `@playwright/mcp`
+
+### 知识与文档
+
+- [`context7-mcp-skill`](skills/context7-mcp-skill/SKILL.md)：查询最新库文档与示例
+- [`deepwiki-mcp-skill`](skills/deepwiki-mcp-skill/SKILL.md)：查询仓库文档并回答代码库问题
+
+### 协作与工作流
+
+- [`notion-mcp-skill`](skills/notion-mcp-skill/SKILL.md)：提供带 OAuth 说明的 Notion MCP 流程指引
+- [`linear-graphql-skill`](skills/linear-graphql-skill/SKILL.md)：通过 GraphQL 操作 Linear 的 issue、project 和 team
+- [`discord-openapi-skill`](skills/discord-openapi-skill/SKILL.md)：通过 UXC + OpenAPI schema mapping 操作 Discord REST API
+
+### Crypto 与链上数据
+
+- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md)：通过 OKX MCP 执行 token、市场、钱包、换汇等流程
+- [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md)：通过 Dune MCP 发现链上表、执行 SQL、获取结果并生成图表
+- [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md)：通过 The Graph Subgraph MCP bridge 发现 subgraph、查看 schema 并执行 GraphQL
+- [`thegraph-token-mcp-skill`](skills/thegraph-token-mcp-skill/SKILL.md)：通过 The Graph Token API MCP 查询 token、钱包、转账、持仓人与市场数据
+- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md)：通过 Etherscan MCP 调查地址、持币人和合约信息
 
 ### Skill 安装方式
 
 使用 `npx skills` 从本仓库安装：
 
 ```bash
-# 给 Codex 安装基础能力 skill（推荐先装）
+# 先安装共享执行层
 npx -y skills@latest add holon-run/uxc --skill uxc --agent codex -y
 
-# 按需安装场景化 wrapper
-npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill etherscan-mcp-skill --skill discord-openapi-skill --agent codex -y
+# 安装浏览器和知识类 skill
+npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill context7-mcp-skill --skill deepwiki-mcp-skill --agent codex -y
+
+# 安装协作类 skill
+npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill discord-openapi-skill --agent codex -y
+
+# 安装 Crypto 与链上类 skill
+npx -y skills@latest add holon-run/uxc --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
 ```
 
 使用 ClawHub 安装已发布的 skill：
 
 ```bash
-# 安装到 ~/.openclaw/skills/<slug>
+# 先安装共享执行层
 clawhub --workdir ~/.openclaw --dir skills install uxc
+
+# 安装浏览器和知识类 skill
 clawhub --workdir ~/.openclaw --dir skills install playwright-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install context7-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install deepwiki-mcp-skill
+
+# 安装协作类 skill
+clawhub --workdir ~/.openclaw --dir skills install notion-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install linear-graphql-skill
+clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
+
+# 安装 Crypto 与链上类 skill
 clawhub --workdir ~/.openclaw --dir skills install okx-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install dune-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install thegraph-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install thegraph-token-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install etherscan-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
 ```
 
 安装和维护规则见 [`docs/skills.md`](docs/skills.md)。
