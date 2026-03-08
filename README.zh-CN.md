@@ -304,6 +304,7 @@ UXC 提供一个标准 skill（`uxc`）和若干官方场景化 wrapper skill。
 
 ### Crypto 与链上数据
 
+- [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md)：通过 Bitquery GraphQL 查询链上交易、转账、持币人、余额与市场结构，使用 OAuth client credentials 鉴权
 - [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md)：通过 OKX MCP 执行 token、市场、钱包、换汇等流程
 - [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md)：通过 Dune MCP 发现链上表、执行 SQL、获取结果并生成图表
 - [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md)：通过 The Graph Subgraph MCP bridge 发现 subgraph、查看 schema 并执行 GraphQL
@@ -325,7 +326,7 @@ npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill cont
 npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill discord-openapi-skill --agent codex -y
 
 # 安装 Crypto 与链上类 skill
-npx -y skills@latest add holon-run/uxc --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
+npx -y skills@latest add holon-run/uxc --skill bitquery-graphql-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
 ```
 
 使用 ClawHub 安装已发布的 skill：
