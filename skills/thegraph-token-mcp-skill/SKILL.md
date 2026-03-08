@@ -1,6 +1,6 @@
 ---
 name: thegraph-token-mcp-skill
-description: Use The Graph Token API MCP through UXC for token metadata, wallet balances, transfers, holders, pools, and market data with help-first inspection and standard auth binding.
+description: Use The Graph Token API MCP through UXC for token metadata, wallet balances, transfers, holders, pools, and market data with help-first inspection and Token API specific JWT bearer auth binding.
 ---
 
 # The Graph Token MCP Skill
@@ -13,16 +13,25 @@ Reuse the `uxc` skill for generic protocol discovery, envelope parsing, and erro
 
 - `uxc` is installed and available in `PATH`.
 - Network access to `https://token-api.mcp.thegraph.com/`.
-- The Graph Token API access token is available for authenticated calls.
+- A The Graph Token API `API TOKEN (JWT)` from `https://thegraph.market/dashboard` is available for authenticated calls.
+
+Important auth distinction:
+
+- Do not reuse the `thegraph-mcp-skill` API key directly.
+- `thegraph-token-mcp-skill` uses a separate credential sourced from The Graph Market Token API dashboard.
+- The value used with `Authorization: Bearer ...` must be the generated `API TOKEN (JWT)`, not the raw dashboard API key.
 
 ## Core Workflow
 
 1. Verify endpoint and protocol with help-first probing:
    - `uxc https://token-api.mcp.thegraph.com/ -h`
    - Confirm protocol is MCP (`protocol == "mcp"` in envelope).
-2. Reuse the existing The Graph credential and add a Token API binding:
-   - `uxc auth credential set thegraph --secret-env THEGRAPH_API_KEY`
-   - `uxc auth binding add --id thegraph-token-mcp --host token-api.mcp.thegraph.com --scheme https --credential thegraph --priority 100`
+2. Configure a dedicated Token API JWT credential and binding:
+   - Generate the `API TOKEN (JWT)` in `https://thegraph.market/dashboard`
+   - Store it separately from the subgraph credential, for example:
+     - `uxc auth credential set thegraph-token --secret-env THEGRAPH_TOKEN_API_JWT`
+   - Bind the Token API endpoint to that dedicated credential:
+     - `uxc auth binding add --id thegraph-token-mcp --host token-api.mcp.thegraph.com --scheme https --credential thegraph-token --priority 100`
 3. Use fixed link command by default:
    - `command -v thegraph-token-mcp-cli`
    - If missing, create it:
@@ -73,8 +82,9 @@ Always inspect host help and operation help in the current endpoint version befo
 - Use direct `uxc "<endpoint>" ...` only as temporary fallback when link setup is unavailable.
 - Prefer `key=value` for simple arguments and positional JSON for nested objects.
 - If auth fails:
-  - confirm `uxc auth credential info thegraph` succeeds
-  - confirm `uxc auth binding match https://token-api.mcp.thegraph.com/` resolves to `thegraph`
+  - confirm `uxc auth credential info thegraph-token` succeeds
+  - confirm `uxc auth binding match https://token-api.mcp.thegraph.com/` resolves to `thegraph-token`
+  - confirm the stored secret is the generated `API TOKEN (JWT)`, not the raw API key from The Graph Market dashboard
   - rerun `thegraph-token-mcp-cli -h`
 
 ## Tested Real Scenario
@@ -90,12 +100,13 @@ The endpoint was verified through `uxc` host discovery and returned a live MCP t
 
 This confirms the skill target is a real MCP surface rather than a direct OpenAPI host.
 
-The same The Graph API key was validated against both:
+The Token API requires its own bearer token workflow:
 
-- `https://subgraphs.mcp.thegraph.com/sse`
-- `https://token-api.mcp.thegraph.com/`
+- manage the token in `https://thegraph.market/dashboard`
+- generate `API TOKEN (JWT)` from the dashboard-managed Token API key
+- store that JWT separately from the subgraph MCP credential
 
-This skill therefore defaults to reusing the existing `thegraph` credential instead of requiring a second credential ID.
+Do not document or implement this skill as if it reused the same raw API key as `thegraph-mcp-skill`.
 
 ## References
 

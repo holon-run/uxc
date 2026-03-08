@@ -8,8 +8,8 @@ Create it when missing:
 
 ```bash
 command -v thegraph-token-mcp-cli
-uxc auth credential set thegraph --secret-env THEGRAPH_API_KEY
-uxc auth binding add --id thegraph-token-mcp --host token-api.mcp.thegraph.com --scheme https --credential thegraph --priority 100
+uxc auth credential set thegraph-token --secret-env THEGRAPH_TOKEN_API_JWT
+uxc auth binding add --id thegraph-token-mcp --host token-api.mcp.thegraph.com --scheme https --credential thegraph-token --priority 100
 uxc link thegraph-token-mcp-cli https://token-api.mcp.thegraph.com/
 thegraph-token-mcp-cli -h
 ```
@@ -17,7 +17,9 @@ thegraph-token-mcp-cli -h
 Notes:
 
 - Auth is handled through standard `uxc auth credential` + `binding`.
-- Reuse the existing `thegraph` credential because the same The Graph API key works for Subgraph MCP and Token API MCP.
+- The Token API credential is separate from `thegraph-mcp-skill`.
+- Manage the Token API key in `https://thegraph.market/dashboard`.
+- Use the generated `API TOKEN (JWT)` as the bearer secret, not the raw dashboard API key.
 - Check the active binding with `uxc auth binding match https://token-api.mcp.thegraph.com/`.
 
 ## Discover And Inspect
