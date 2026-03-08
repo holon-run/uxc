@@ -553,6 +553,206 @@ impl OpenAPIAdapter {
         body.insert("content".to_string(), Value::Object(content_map));
         Some(Value::Object(body))
     }
+
+    fn prepare_request(
+        base_url: &str,
+        path_template: &str,
+        path_item: &Value,
+        operation_spec: &Value,
+        root: &Value,
+        args: &HashMap<String, Value>,
+    ) -> Result<PreparedRequest> {
+        let mut remaining = args.clone();
+        let mut headers = Vec::new();
+        let mut query_pairs = Vec::new();
+        let mut resolved_path = path_template.to_string();
+        let mut seen = HashSet::new();
+
+        for source in [
+            path_item.get("parameters").and_then(|p| p.as_array()),
+            operation_spec.get("parameters").and_then(|p| p.as_array()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for parameter in source {
+                let resolved = Self::dereference_value(parameter, root);
+                let Some(name) = resolved.get("name").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                let location = resolved
+                    .get("in")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                let key = format!("{}:{}", location, name);
+                if !seen.insert(key) {
+                    continue;
+                }
+
+                let required = resolved
+                    .get("required")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let value = remaining.remove(name);
+                if required && value.is_none() {
+                    anyhow::bail!("Missing required parameter '{}'", name);
+                }
+                let Some(value) = value else {
+                    continue;
+                };
+                let rendered = Self::value_to_string(&value, name)?;
+
+                match location {
+                    "path" => {
+                        resolved_path = resolved_path.replace(&format!("{{{}}}", name), &rendered);
+                    }
+                    "query" => query_pairs.push((name.to_string(), rendered)),
+                    "header" => headers.push((name.to_string(), rendered)),
+                    _ => {}
+                }
+            }
+        }
+
+        let body_config = Self::request_body_kind(operation_spec, root)?;
+        let (json_body, form_body) = match body_config.as_deref() {
+            Some("application/x-www-form-urlencoded") => {
+                let form_pairs = Self::form_pairs_from_remaining(&mut remaining)?;
+                (None, Some(form_pairs))
+            }
+            Some("application/json") => {
+                let json_body = Self::json_body_from_remaining(&mut remaining)?;
+                (Some(json_body), None)
+            }
+            Some(other) => {
+                anyhow::bail!(
+                    "Unsupported OpenAPI request body content type '{}'. Supported: application/json, application/x-www-form-urlencoded",
+                    other
+                );
+            }
+            None => (None, None),
+        };
+
+        if body_config.is_none() {
+            query_pairs.extend(Self::query_pairs_from_remaining(&mut remaining)?);
+        } else if !remaining.is_empty() {
+            anyhow::bail!(
+                "Unexpected arguments for operation request body: {}",
+                remaining.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+
+        Ok(PreparedRequest {
+            url: format!("{}{}", base_url.trim_end_matches('/'), resolved_path),
+            headers,
+            query_pairs,
+            json_body,
+            form_body,
+        })
+    }
+
+    fn request_body_kind(operation_spec: &Value, root: &Value) -> Result<Option<String>> {
+        let Some(request_body_raw) = operation_spec.get("requestBody") else {
+            return Ok(None);
+        };
+        let request_body = Self::dereference_value(request_body_raw, root);
+        let Some(content) = request_body
+            .get("content")
+            .and_then(|value| value.as_object())
+        else {
+            return Ok(None);
+        };
+        if content.contains_key("application/json") {
+            return Ok(Some("application/json".to_string()));
+        }
+        if content.contains_key("application/x-www-form-urlencoded") {
+            return Ok(Some("application/x-www-form-urlencoded".to_string()));
+        }
+        if content.len() == 1 {
+            return Ok(content.keys().next().cloned());
+        }
+        Ok(None)
+    }
+
+    fn json_body_from_remaining(remaining: &mut HashMap<String, Value>) -> Result<Value> {
+        if let Some(body) = remaining.remove("body") {
+            if !remaining.is_empty() {
+                anyhow::bail!(
+                    "Cannot mix 'body' with other request body arguments: {}",
+                    remaining.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+            return Ok(body);
+        }
+
+        let mut object = Map::new();
+        for (name, value) in remaining.drain() {
+            object.insert(name, value);
+        }
+        Ok(Value::Object(object))
+    }
+
+    fn form_pairs_from_remaining(
+        remaining: &mut HashMap<String, Value>,
+    ) -> Result<Vec<(String, String)>> {
+        if let Some(body) = remaining.remove("body") {
+            if !remaining.is_empty() {
+                anyhow::bail!(
+                    "Cannot mix 'body' with other form body arguments: {}",
+                    remaining.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+            return Self::form_pairs_from_value(body);
+        }
+
+        Self::query_pairs_from_remaining(remaining)
+    }
+
+    fn form_pairs_from_value(value: Value) -> Result<Vec<(String, String)>> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("Form request body must be an object"))?;
+        let mut pairs = Vec::with_capacity(object.len());
+        for (name, value) in object {
+            pairs.push((name.clone(), Self::value_to_string(value, name)?));
+        }
+        Ok(pairs)
+    }
+
+    fn query_pairs_from_remaining(
+        remaining: &mut HashMap<String, Value>,
+    ) -> Result<Vec<(String, String)>> {
+        let mut keys = remaining.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        let mut pairs = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(value) = remaining.remove(&key) {
+                pairs.push((key.clone(), Self::value_to_string(&value, &key)?));
+            }
+        }
+        Ok(pairs)
+    }
+
+    fn value_to_string(value: &Value, field_name: &str) -> Result<String> {
+        match value {
+            Value::String(string) => Ok(string.clone()),
+            Value::Number(number) => Ok(number.to_string()),
+            Value::Bool(boolean) => Ok(boolean.to_string()),
+            Value::Null => Ok(String::new()),
+            _ => anyhow::bail!(
+                "Argument '{}' must be a string, number, bool, or null for non-JSON request placement",
+                field_name
+            ),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PreparedRequest {
+    url: String,
+    headers: Vec<(String, String)>,
+    query_pairs: Vec<(String, String)>,
+    json_body: Option<Value>,
+    form_body: Option<Vec<(String, String)>>,
 }
 
 impl Default for OpenAPIAdapter {
@@ -720,18 +920,42 @@ impl Adapter for OpenAPIAdapter {
     ) -> Result<ExecutionResult> {
         let start = std::time::Instant::now();
         let (method, path) = Self::parse_operation_id(operation)?;
-
-        let full_url = format!("{}{}", url.trim_end_matches('/'), path);
-
-        // Determine if the method supports request body
-        // GET, HEAD, OPTIONS, TRACE typically don't send request bodies
-        // DELETE can but rarely does; POST, PUT, PATCH commonly do
-        let has_body_support = matches!(method.as_str(), "post" | "put" | "patch");
+        let schema = self.fetch_schema(url).await?;
+        let paths = schema
+            .get("paths")
+            .and_then(|p| p.as_object())
+            .ok_or_else(|| {
+                UxcError::SchemaRetrievalFailed("OpenAPI schema missing paths".to_string())
+            })?;
+        let path_item = paths
+            .get(&path)
+            .ok_or_else(|| UxcError::OperationNotFound(operation.to_string()))?;
+        let operation_spec = path_item
+            .get(&method)
+            .ok_or_else(|| UxcError::OperationNotFound(operation.to_string()))?;
+        let prepared =
+            Self::prepare_request(url, &path, path_item, operation_spec, &schema, &args)?;
+        let prepared_url = prepared.url.clone();
+        let prepared_headers = prepared.headers.clone();
+        let prepared_query_pairs = prepared.query_pairs.clone();
+        let prepared_json_body = prepared.json_body.clone();
+        let prepared_form_body = prepared.form_body.clone();
 
         let resp = self
             .send_with_oauth_retry(|profile| {
-                let full_url = Self::apply_auth_profile_to_url(&full_url, profile)?;
-                let req = match method.as_str() {
+                let full_url = {
+                    let mut parsed = url::Url::parse(&prepared_url).with_context(|| {
+                        format!("Invalid prepared OpenAPI request URL '{}'", prepared_url)
+                    })?;
+                    if !prepared_query_pairs.is_empty() {
+                        parsed
+                            .query_pairs_mut()
+                            .extend_pairs(prepared_query_pairs.iter().map(|(k, v)| (&**k, &**v)));
+                    }
+                    let with_args = parsed.to_string();
+                    Self::apply_auth_profile_to_url(&with_args, profile)?
+                };
+                let mut req = match method.as_str() {
                     "get" => self.client.get(&full_url),
                     "post" => self.client.post(&full_url),
                     "put" => self.client.put(&full_url),
@@ -748,12 +972,15 @@ impl Adapter for OpenAPIAdapter {
                         .into())
                     }
                 };
-                let req = Self::apply_auth_profile(req, profile)?;
-                let req = if has_body_support {
-                    req.json(&args)
-                } else {
-                    req.query(&args)
-                };
+                for (name, value) in &prepared_headers {
+                    req = req.header(name, value);
+                }
+                let mut req = Self::apply_auth_profile(req, profile)?;
+                if let Some(body) = &prepared_json_body {
+                    req = req.json(body);
+                } else if let Some(body) = &prepared_form_body {
+                    req = req.form(body);
+                }
                 Ok(req)
             })
             .await?;
@@ -791,7 +1018,7 @@ impl Adapter for OpenAPIAdapter {
                     format!(
                         "error reading response body: HTTP {} from {}",
                         status.as_u16(),
-                        full_url
+                        prepared_url
                     )
                 })?;
 
@@ -802,7 +1029,7 @@ impl Adapter for OpenAPIAdapter {
                         format!(
                             "error decoding response body: HTTP {} from {}",
                             status.as_u16(),
-                            full_url
+                            prepared_url
                         )
                     })?
                 }

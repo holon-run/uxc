@@ -253,6 +253,68 @@ fn auth_binding_set_and_remove_have_text_output() {
     assert!(remove_stdout.contains("Removed binding 'txt-binding'."));
 }
 
+#[test]
+fn auth_binding_add_supports_signer_json() {
+    let files = AuthFiles::new();
+
+    let set_output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("binance")
+        .arg("--auth-type")
+        .arg("api_key")
+        .arg("--field")
+        .arg("api_key=env:BINANCE_API_KEY")
+        .arg("--field")
+        .arg("secret_key=env:BINANCE_SECRET_KEY")
+        .output()
+        .expect("credential set should run");
+    assert!(set_output.status.success(), "credential set should succeed");
+
+    let signer = r#"{"kind":"hmac_query_v1","algorithm":"hmac_sha256","signing_field":"secret_key","key_field":"api_key","key_placement":"header","key_name":"X-MBX-APIKEY","signature_param":"signature","signature_encoding":"hex","timestamp_param":"timestamp","timestamp_unit":"milliseconds","canonicalization":{"mode":"preserve_order"}}"#;
+    let add_output = uxc_command(&files)
+        .arg("auth")
+        .arg("binding")
+        .arg("add")
+        .arg("--id")
+        .arg("binance-account")
+        .arg("--host")
+        .arg("api.binance.com")
+        .arg("--path-prefix")
+        .arg("/api/v3")
+        .arg("--scheme")
+        .arg("https")
+        .arg("--credential")
+        .arg("binance")
+        .arg("--signer-json")
+        .arg(signer)
+        .output()
+        .expect("binding add should run");
+    assert!(add_output.status.success(), "binding add should succeed");
+
+    let add_json = parse_stdout_json(&add_output);
+    assert_eq!(add_json["data"]["signer"]["kind"], "hmac_query_v1");
+    assert_eq!(add_json["data"]["signer"]["signing_field"], "secret_key");
+
+    let match_output = uxc_command(&files)
+        .arg("auth")
+        .arg("binding")
+        .arg("match")
+        .arg("https://api.binance.com/api/v3/account")
+        .output()
+        .expect("binding match should run");
+    assert!(
+        match_output.status.success(),
+        "binding match should succeed"
+    );
+    let match_json = parse_stdout_json(&match_output);
+    assert_eq!(
+        match_json["data"]["binding"]["signer"]["kind"],
+        "hmac_query_v1"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn auth_bindings_file_permissions_are_0600() {
@@ -345,6 +407,44 @@ fn auth_credential_set_supports_secret_op_source() {
     let json = parse_stdout_json(&output);
     assert_eq!(json["ok"], true);
     assert_eq!(json["data"]["secret_source"]["kind"], "op");
+}
+
+#[test]
+fn auth_credential_set_supports_named_fields() {
+    let files = AuthFiles::new();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("binance")
+        .arg("--auth-type")
+        .arg("api_key")
+        .arg("--field")
+        .arg("api_key=env:BINANCE_API_KEY")
+        .arg("--field")
+        .arg("secret_key=op://Engineering/binance/secret")
+        .arg("--header")
+        .arg("X-API-Key={{field:api_key}}")
+        .output()
+        .expect("credential set should run");
+    assert!(output.status.success(), "credential set should succeed");
+
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], true);
+    let fields = json["data"]["fields"]
+        .as_array()
+        .expect("fields should be an array");
+    let api_key = fields
+        .iter()
+        .find(|field| field["name"] == "api_key")
+        .expect("api_key field should be present");
+    let secret_key = fields
+        .iter()
+        .find(|field| field["name"] == "secret_key")
+        .expect("secret_key field should be present");
+    assert_eq!(api_key["source_kind"], "env");
+    assert_eq!(secret_key["source_kind"], "op");
 }
 
 #[test]

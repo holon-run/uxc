@@ -1496,6 +1496,18 @@ fn auth_fingerprint(profile: Option<&Profile>) -> String {
         if let Some(name) = &p.name {
             hasher.update(name.as_bytes());
         }
+        for (field_name, source_kind) in p.field_source_kinds() {
+            hasher.update(field_name.as_bytes());
+            hasher.update(source_kind.as_bytes());
+        }
+        if let Some(source) = &p.secret_source {
+            hasher.update(source.kind().as_bytes());
+        }
+        if let Some(signer) = &p.signer {
+            if let Ok(serialized) = serde_json::to_vec(signer) {
+                hasher.update(&serialized);
+            }
+        }
     }
     format!("{:x}", hasher.finalize())
 }
