@@ -129,9 +129,13 @@ pub fn run_uxc(args: &[&str]) -> Result<String, String> {
 /// Useful when a single test intentionally needs shared cache/daemon state across calls.
 pub fn run_uxc_in_home(args: &[&str], test_home: &std::path::Path) -> Result<String, String> {
     let uxc = uxc_binary();
+    let runtime_dir = test_home.join("runtime");
+    fs::create_dir_all(&runtime_dir).expect("Failed to create test runtime dir");
     let output = Command::new(&uxc)
         .args(args)
         .env("HOME", test_home)
+        .env("USERPROFILE", test_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
         .output()
         .map_err(|e| format!("Failed to run uxc: {}", e))?;
 
