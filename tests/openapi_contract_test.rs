@@ -10,6 +10,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use uxc::adapters::openapi::OpenAPIAdapter;
 use uxc::adapters::Adapter;
+use uxc::auth::{AuthQueryParam, AuthType, Profile};
 
 /// Helper to run async code with a mock server
 fn run_async<F, R>(f: F) -> R
@@ -120,6 +121,40 @@ fn test_openapi_rejects_non_openapi_document() {
 
         assert!(result.is_ok());
         assert!(!result.unwrap(), "Should reject non-OpenAPI document");
+    });
+}
+
+#[test]
+fn test_openapi_discovery_supports_auth_query_param() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Sample API", "version": "1.0.0" },
+            "paths": {}
+        });
+
+        let _mock = server
+            .mock("GET", "/openapi.json")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "apiKey".into(),
+                "flip-secret".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut profile = Profile::new("flip-secret".to_string(), AuthType::ApiKey);
+        profile.auth_query_params = Some(vec![AuthQueryParam::parse("apiKey={{secret}}").unwrap()]);
+        let adapter = OpenAPIAdapter::new().with_auth(profile);
+        let result = rt.block_on(async { adapter.can_handle(&server.url()).await });
+
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap(),
+            "Should detect OpenAPI document with query auth"
+        );
     });
 }
 

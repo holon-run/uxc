@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use uxc::adapters::graphql::GraphQLAdapter;
 use uxc::adapters::Adapter;
+use uxc::auth::{AuthQueryParam, AuthType, Profile};
 
 /// Helper to run async code with a mock server
 fn run_async<F, R>(f: F) -> R
@@ -112,6 +113,45 @@ fn test_graphql_introspection_handles_errors_response() {
         assert!(
             result.unwrap(),
             "GraphQL errors in response still indicate GraphQL endpoint"
+        );
+    });
+}
+
+#[test]
+fn test_graphql_introspection_supports_auth_query_param() {
+    run_async(|mut server| {
+        let introspection_response = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": { "name": "Query", "fields": [] },
+                    "mutationType": null,
+                    "subscriptionType": null
+                }
+            }
+        });
+
+        let _mock = server
+            .mock("POST", "/")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "apiKey".into(),
+                "flip-secret".into(),
+            ))
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&introspection_response.to_string())
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut profile = Profile::new("flip-secret".to_string(), AuthType::ApiKey);
+        profile.auth_query_params = Some(vec![AuthQueryParam::parse("apiKey={{secret}}").unwrap()]);
+        let adapter = GraphQLAdapter::new().with_auth(profile);
+        let result = rt.block_on(async { adapter.can_handle(&server.url()).await });
+
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap(),
+            "Should detect GraphQL endpoint with query auth"
         );
     });
 }

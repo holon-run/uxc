@@ -274,12 +274,18 @@ fn rename_replace(src: &Path, dst: &Path) -> Result<()> {
 pub(crate) fn redact_endpoint(endpoint: &str) -> String {
     // Use regex for proper pattern matching with capture groups
     let api_key_re = regex::Regex::new(r"([?&]api_key=)[^&]*").unwrap();
+    let api_key_camel_re = regex::Regex::new(r"([?&]apiKey=)[^&]*").unwrap();
+    let apikey_re = regex::Regex::new(r"([?&]apikey=)[^&]*").unwrap();
     let token_re = regex::Regex::new(r"([?&](?:access_)?token=)[^&]*").unwrap();
     let bearer_re = regex::Regex::new(r"(/bearer/)[^/?&]*").unwrap();
     let basic_auth_re = regex::Regex::new(r"(://)[^:@]*:([^@]*)@").unwrap();
 
     let redacted = endpoint.to_string();
     let redacted = api_key_re.replace_all(&redacted, "${1}***").to_string();
+    let redacted = api_key_camel_re
+        .replace_all(&redacted, "${1}***")
+        .to_string();
+    let redacted = apikey_re.replace_all(&redacted, "${1}***").to_string();
     let redacted = token_re.replace_all(&redacted, "${1}***").to_string();
     let redacted = bearer_re.replace_all(&redacted, "${1}***").to_string();
     let redacted = basic_auth_re
@@ -410,6 +416,14 @@ mod tests {
         assert_eq!(
             redact_endpoint("https://api.example.com?api_key=secret123"),
             "https://api.example.com?api_key=***"
+        );
+        assert_eq!(
+            redact_endpoint("https://api.example.com?apiKey=secret123"),
+            "https://api.example.com?apiKey=***"
+        );
+        assert_eq!(
+            redact_endpoint("https://api.example.com?apikey=secret123"),
+            "https://api.example.com?apikey=***"
         );
 
         assert_eq!(

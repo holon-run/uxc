@@ -82,6 +82,13 @@ impl GraphQLAdapter {
         Ok(req)
     }
 
+    fn apply_auth_profile_to_url(url: &str, profile: Option<&Profile>) -> Result<String> {
+        match profile {
+            Some(profile) => crate::auth::apply_profile_auth_to_url(url, profile),
+            None => Ok(url.to_string()),
+        }
+    }
+
     async fn refresh_effective_oauth_profile(&self, force: bool) -> Result<Option<Profile>> {
         let _refresh_guard = self.oauth_refresh_lock.lock().await;
         let mut profile = self.effective_auth_profile().await;
@@ -109,10 +116,11 @@ impl GraphQLAdapter {
         timeout: Option<Duration>,
     ) -> Result<reqwest::Response> {
         let mut profile = self.refresh_effective_oauth_profile(false).await?;
+        let authed_url = Self::apply_auth_profile_to_url(url, profile.as_ref())?;
 
         let mut req = self
             .client
-            .post(url)
+            .post(&authed_url)
             .header("Content-Type", "application/json");
         if let Some(timeout) = timeout {
             req = req.timeout(timeout);
@@ -129,7 +137,7 @@ impl GraphQLAdapter {
 
             let mut retry_req = self
                 .client
-                .post(url)
+                .post(&authed_url)
                 .header("Content-Type", "application/json");
             if let Some(timeout) = timeout {
                 retry_req = retry_req.timeout(timeout);

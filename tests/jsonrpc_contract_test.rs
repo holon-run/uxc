@@ -9,6 +9,7 @@
 
 use uxc::adapters::jsonrpc::JsonRpcAdapter;
 use uxc::adapters::Adapter;
+use uxc::auth::{AuthQueryParam, AuthType, Profile};
 
 /// Helper to run async code with a mock server
 fn run_async<F, R>(f: F) -> R
@@ -130,6 +131,50 @@ fn test_jsonrpc_discovery_via_rpc_discover() {
 
         assert!(result.is_ok());
         assert!(result.unwrap(), "Should detect via rpc.discover");
+    });
+}
+
+#[test]
+fn test_jsonrpc_discovery_supports_auth_query_param() {
+    run_async(|mut server| {
+        let discover_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "openrpc": "1.2.6",
+                "info": { "title": "Discoverable API", "version": "1.0.0" },
+                "methods": []
+            }
+        });
+
+        let _mock = server
+            .mock("POST", "/")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "apiKey".into(),
+                "flip-secret".into(),
+            ))
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "rpc.discover",
+                "params": []
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&discover_response.to_string())
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut profile = Profile::new("flip-secret".to_string(), AuthType::ApiKey);
+        profile.auth_query_params = Some(vec![AuthQueryParam::parse("apiKey={{secret}}").unwrap()]);
+        let adapter = JsonRpcAdapter::new().with_auth(profile);
+        let result = rt.block_on(async { adapter.can_handle(&server.url()).await });
+
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap(),
+            "Should detect JSON-RPC endpoint with query auth"
+        );
     });
 }
 

@@ -428,6 +428,54 @@ fn auth_credential_set_rejects_header_for_non_api_key() {
 }
 
 #[test]
+fn auth_credential_set_supports_query_param_template() {
+    let files = AuthFiles::new();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("flipside")
+        .arg("--auth-type")
+        .arg("api_key")
+        .arg("--secret")
+        .arg("flip-secret")
+        .arg("--query-param")
+        .arg("apiKey={{secret}}")
+        .output()
+        .expect("credential set should run");
+    assert!(output.status.success(), "credential set should succeed");
+
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["auth_query_params"][0]["name"], "apiKey");
+}
+
+#[test]
+fn auth_credential_set_rejects_query_param_for_non_api_key() {
+    let files = AuthFiles::new();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("bad-query")
+        .arg("--auth-type")
+        .arg("bearer")
+        .arg("--secret")
+        .arg("token")
+        .arg("--query-param")
+        .arg("apiKey={{secret}}")
+        .output()
+        .expect("credential set should run");
+
+    assert!(!output.status.success(), "command should fail");
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+}
+
+#[test]
 fn auth_credential_switch_from_oauth_requires_explicit_secret() {
     let files = AuthFiles::new();
 
