@@ -56,12 +56,20 @@ if ! rg -q 'uxc link thegraph-token-mcp-cli https://token-api\.mcp\.thegraph\.co
   fail "docs must include fixed link creation command"
 fi
 
-if ! rg -q 'uxc auth credential set thegraph --secret-env THEGRAPH_API_KEY' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
-  fail "docs must reuse the existing The Graph credential"
+if ! rg -q 'uxc auth credential set thegraph-token --secret-env THEGRAPH_TOKEN_API_JWT' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "docs must configure a dedicated The Graph Token API JWT credential"
 fi
 
-if ! rg -q 'uxc auth binding add --id thegraph-token-mcp --host token-api\.mcp\.thegraph\.com --scheme https --credential thegraph --priority 100' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+if ! rg -q 'uxc auth binding add --id thegraph-token-mcp --host token-api\.mcp\.thegraph\.com --scheme https --credential thegraph-token --priority 100' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail "docs must include auth binding setup for The Graph Token MCP endpoint"
+fi
+
+if ! rg -q 'API TOKEN \(JWT\)' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "docs must explicitly require API TOKEN (JWT)"
+fi
+
+if ! rg -q 'thegraph\.market/dashboard' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "docs must reference The Graph Market dashboard for Token API key management"
 fi
 
 for op in getV1Networks getV1EvmTokens getV1EvmBalances; do

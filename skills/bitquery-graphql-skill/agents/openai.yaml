@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bitquery GraphQL"
+  short_description: "Trades, transfers, holders, and onchain market queries via Bitquery GraphQL"
+  default_prompt: "Use $bitquery-graphql-skill to query Bitquery GraphQL for onchain trades, transfers, token holder analysis, balances, and market structure using OAuth client_credentials auth and help-first schema inspection."
