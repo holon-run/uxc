@@ -83,6 +83,10 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_autostarted: Option<bool>,
 
+    /// Whether daemon was restarted due to CLI/daemon version mismatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_restarted_for_version_mismatch: Option<bool>,
+
     /// Whether daemon session was reused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_session_reused: Option<bool>,
@@ -116,6 +120,7 @@ impl OutputEnvelope {
                 cache_fallback: None,
                 daemon_used: None,
                 daemon_autostarted: None,
+                daemon_restarted_for_version_mismatch: None,
                 daemon_session_reused: None,
             },
         }
@@ -144,6 +149,7 @@ impl OutputEnvelope {
                 cache_fallback: None,
                 daemon_used: None,
                 daemon_autostarted: None,
+                daemon_restarted_for_version_mismatch: None,
                 daemon_session_reused: None,
             },
         }
@@ -170,10 +176,12 @@ impl OutputEnvelope {
         mut self,
         daemon_used: bool,
         daemon_autostarted: Option<bool>,
+        daemon_restarted_for_version_mismatch: Option<bool>,
         daemon_session_reused: Option<bool>,
     ) -> Self {
         self.meta.daemon_used = Some(daemon_used);
         self.meta.daemon_autostarted = daemon_autostarted;
+        self.meta.daemon_restarted_for_version_mismatch = daemon_restarted_for_version_mismatch;
         self.meta.daemon_session_reused = daemon_session_reused;
         self
     }

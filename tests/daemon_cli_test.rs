@@ -31,6 +31,9 @@ fn daemon_start_status_stop_lifecycle() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["kind"], "daemon_status");
     assert_eq!(json["data"]["running"], true);
+    assert_eq!(json["data"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(json["data"]["client_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(json["data"]["version_mismatch"], false);
 
     let stop = uxc_command()
         .arg("daemon")
@@ -86,6 +89,7 @@ fn endpoint_host_help_autostarts_daemon_and_sets_meta() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["meta"]["daemon_used"], true);
     assert_eq!(json["meta"]["daemon_autostarted"], true);
+    assert_eq!(json["meta"]["daemon_restarted_for_version_mismatch"], false);
 
     daemon_stop_best_effort();
 }
@@ -106,6 +110,8 @@ fn daemon_start_reports_started_now_and_already_running() {
     assert_eq!(first_json["kind"], "daemon_start_result");
     assert_eq!(first_json["data"]["started_now"], true);
     assert_eq!(first_json["data"]["already_running"], false);
+    assert_eq!(first_json["data"]["restarted_for_version_mismatch"], false);
+    assert_eq!(first_json["data"]["version"], env!("CARGO_PKG_VERSION"));
 
     let second = uxc_command()
         .arg("daemon")
@@ -119,6 +125,8 @@ fn daemon_start_reports_started_now_and_already_running() {
     assert_eq!(second_json["kind"], "daemon_start_result");
     assert_eq!(second_json["data"]["started_now"], false);
     assert_eq!(second_json["data"]["already_running"], true);
+    assert_eq!(second_json["data"]["restarted_for_version_mismatch"], false);
+    assert_eq!(second_json["data"]["version"], env!("CARGO_PKG_VERSION"));
 
     daemon_stop_best_effort();
 }

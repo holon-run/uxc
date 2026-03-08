@@ -109,6 +109,7 @@ pub struct DaemonStatus {
     pub running: bool,
     pub pid: Option<u32>,
     pub socket: String,
+    pub version: Option<String>,
     pub started_at_unix: Option<u64>,
     pub request_count: u64,
     pub mcp_stdio_sessions: usize,
@@ -140,6 +141,13 @@ struct JsonRpcResponse {
 struct JsonRpcError {
     code: i32,
     message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnsureDaemonOutcome {
+    pub started_now: bool,
+    pub restarted_for_version_mismatch: bool,
+    pub previous_version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -862,6 +870,7 @@ impl DaemonRuntime {
             running: true,
             pid: Some(std::process::id()),
             socket: socket_path().display().to_string(),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
             started_at_unix: Some(state.started_at_unix),
             request_count: state.request_count,
             mcp_stdio_sessions: stdio_sessions,
@@ -1020,11 +1029,7 @@ pub async fn runtime_invoke_client(
 }
 
 #[cfg(unix)]
-pub async fn ensure_daemon_running() -> Result<bool> {
-    if daemon_status_client().await.is_ok() {
-        return Ok(false);
-    }
-
+async fn start_daemon_process() -> Result<()> {
     let dir = daemon_dir();
     ensure_private_dir(&dir)?;
     let lock_path = dir.join("start.lock");
@@ -1049,7 +1054,7 @@ pub async fn ensure_daemon_running() -> Result<bool> {
     for _ in 0..START_POLL_TRIES {
         tokio::time::sleep(Duration::from_millis(START_POLL_INTERVAL_MS)).await;
         if daemon_status_client().await.is_ok() {
-            return Ok(true);
+            return Ok(());
         }
     }
 
@@ -1058,7 +1063,66 @@ pub async fn ensure_daemon_running() -> Result<bool> {
 }
 
 #[cfg(not(unix))]
-pub async fn ensure_daemon_running() -> Result<bool> {
+async fn start_daemon_process() -> Result<()> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+fn daemon_version_matches(status: &DaemonStatus) -> bool {
+    status.version.as_deref() == Some(env!("CARGO_PKG_VERSION"))
+}
+
+#[cfg(unix)]
+pub async fn ensure_compatible_daemon_running() -> Result<EnsureDaemonOutcome> {
+    match daemon_status_client().await {
+        Ok(status) => {
+            if daemon_version_matches(&status) {
+                return Ok(EnsureDaemonOutcome {
+                    started_now: false,
+                    restarted_for_version_mismatch: false,
+                    previous_version: None,
+                });
+            }
+
+            let previous_version = status.version.clone();
+            if let Err(err) = daemon_stop_local().await {
+                return Err(UxcError::DaemonVersionMismatch(format!(
+                    "Detected daemon version mismatch (daemon={}, cli={}) and failed to restart daemon automatically: {}. Run `uxc daemon restart`.",
+                    previous_version.as_deref().unwrap_or("unknown"),
+                    env!("CARGO_PKG_VERSION"),
+                    err
+                ))
+                .into());
+            }
+            if let Err(err) = start_daemon_process().await {
+                return Err(UxcError::DaemonVersionMismatch(format!(
+                    "Detected daemon version mismatch (daemon={}, cli={}) and failed to restart daemon automatically: {}. Run `uxc daemon restart`.",
+                    previous_version.as_deref().unwrap_or("unknown"),
+                    env!("CARGO_PKG_VERSION"),
+                    err
+                ))
+                .into());
+            }
+
+            Ok(EnsureDaemonOutcome {
+                started_now: true,
+                restarted_for_version_mismatch: true,
+                previous_version,
+            })
+        }
+        Err(_) => {
+            start_daemon_process().await?;
+            Ok(EnsureDaemonOutcome {
+                started_now: true,
+                restarted_for_version_mismatch: false,
+                previous_version: None,
+            })
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub async fn ensure_compatible_daemon_running() -> Result<EnsureDaemonOutcome> {
     bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
 }
 
@@ -1241,8 +1305,8 @@ pub async fn daemon_status_local() -> Result<DaemonStatus> {
     daemon_status_client().await
 }
 
-pub async fn daemon_start_local() -> Result<bool> {
-    ensure_daemon_running().await
+pub async fn daemon_start_local() -> Result<EnsureDaemonOutcome> {
+    ensure_compatible_daemon_running().await
 }
 
 pub async fn daemon_stop_local() -> Result<bool> {
