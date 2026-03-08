@@ -143,7 +143,7 @@ bash install-uxc.sh
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.9.0
+curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.10.0
 ```
 
 Windows 说明：不再支持原生 Windows，请通过 WSL 运行 UXC。

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-03-08
+
+### Added
+- Added API key query-parameter injection with `--query-param "<name>=<template>"` for HTTP-based protocols, enabling clean credential-based access to services such as Flipside MCP without embedding secrets in endpoint URLs.
+- Added `bitquery-graphql-skill`.
+
+### Changed
+- CLI now detects daemon/CLI version mismatches after upgrades and automatically restarts the local daemon before continuing daemon-backed requests.
+
+### Fixed
+- Prevent stale daemon behavior after CLI upgrades by surfacing version mismatches and replacing the running daemon automatically.
+
 ## [0.9.0] - 2026-03-07
 
 ### Added
@@ -245,7 +257,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/holon-run/uxc/releases/tag/v0.10.0
 [0.9.0]: https://github.com/holon-run/uxc/releases/tag/v0.9.0
 [0.8.0]: https://github.com/holon-run/uxc/releases/tag/v0.8.0
 [0.7.1]: https://github.com/holon-run/uxc/releases/tag/v0.7.1

@@ -147,7 +147,7 @@ bash install-uxc.sh
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.9.0
+curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.10.0
 ```
 
 Windows note: native Windows is no longer supported; run UXC through WSL.
