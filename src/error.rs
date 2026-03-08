@@ -50,6 +50,9 @@ pub enum UxcError {
     #[error("OAuth scope insufficient: {0}")]
     OAuthScopeInsufficient(String),
 
+    #[error("Daemon version mismatch: {0}")]
+    DaemonVersionMismatch(String),
+
     #[error("Network error: {0}")]
     NetworkError(#[from] reqwest::Error),
 

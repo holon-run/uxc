@@ -1204,11 +1204,17 @@ async fn execute_endpoint_via_daemon(
     info!("UXC v{} - connecting to {}", env!("CARGO_PKG_VERSION"), url);
 
     let daemon_used = daemon::daemon_supported();
-    let daemon_autostarted = if daemon_used {
-        Some(daemon::ensure_daemon_running().await?)
+    let daemon_ensure = if daemon_used {
+        Some(daemon::ensure_compatible_daemon_running().await?)
     } else {
         None
     };
+    let daemon_autostarted = daemon_ensure
+        .as_ref()
+        .map(|outcome| outcome.started_now && !outcome.restarted_for_version_mismatch);
+    let daemon_restarted_for_version_mismatch = daemon_ensure
+        .as_ref()
+        .map(|outcome| outcome.restarted_for_version_mismatch);
     let (action, operation_id, args_map) = match endpoint_command {
         EndpointCommand::HostHelp => (daemon::RuntimeAction::HostHelp, None, None),
         EndpointCommand::Describe { operation_id } => (
@@ -1265,6 +1271,7 @@ async fn execute_endpoint_via_daemon(
     .with_daemon_meta(
         daemon_used,
         daemon_autostarted,
+        daemon_restarted_for_version_mismatch,
         response.meta.daemon_session_reused,
     );
 
@@ -1773,6 +1780,19 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
         Some("daemon_start_result") => {
             let data = envelope.data.clone().unwrap_or(Value::Null);
             if data
+                .get("restarted_for_version_mismatch")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                println!("Daemon restarted due to version mismatch.");
+                if let Some(previous_version) = data.get("previous_version").and_then(Value::as_str)
+                {
+                    println!("Previous Version: {}", previous_version);
+                }
+                if let Some(version) = data.get("version").and_then(Value::as_str) {
+                    println!("Version: {}", version);
+                }
+            } else if data
                 .get("autostarted")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
@@ -1818,6 +1838,15 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             }
             if let Some(socket) = data.get("socket").and_then(Value::as_str) {
                 println!("Socket: {}", socket);
+            }
+            if let Some(version) = data.get("version").and_then(Value::as_str) {
+                println!("Daemon Version: {}", version);
+            }
+            if let Some(version) = data.get("client_version").and_then(Value::as_str) {
+                println!("CLI Version: {}", version);
+            }
+            if let Some(mismatch) = data.get("version_mismatch").and_then(Value::as_bool) {
+                println!("Version Mismatch: {}", mismatch);
             }
             if let Some(requests) = data.get("request_count").and_then(Value::as_u64) {
                 println!("Requests: {}", requests);
@@ -2887,6 +2916,7 @@ fn error_code(err: &anyhow::Error) -> &'static str {
                 UxcError::OAuthSessionExpired(_) => "OAUTH_SESSION_EXPIRED",
                 UxcError::OAuthRefreshFailed(_) => "OAUTH_REFRESH_FAILED",
                 UxcError::OAuthScopeInsufficient(_) => "OAUTH_SCOPE_INSUFFICIENT",
+                UxcError::DaemonVersionMismatch(_) => "DAEMON_VERSION_MISMATCH",
                 UxcError::ExecutionFailed(_)
                 | UxcError::SchemaRetrievalFailed(_)
                 | UxcError::NetworkError(_)
@@ -3003,12 +3033,15 @@ async fn handle_cache_command(
 async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelope> {
     match command {
         DaemonCommands::Start => {
-            let started_now = daemon::daemon_start_local().await?;
+            let outcome = daemon::daemon_start_local().await?;
             let data = json!({
-                "started": started_now,
-                "autostarted": started_now,
-                "started_now": started_now,
-                "already_running": !started_now,
+                "started": outcome.started_now,
+                "autostarted": outcome.started_now && !outcome.restarted_for_version_mismatch,
+                "started_now": outcome.started_now,
+                "already_running": !outcome.started_now,
+                "restarted_for_version_mismatch": outcome.restarted_for_version_mismatch,
+                "previous_version": outcome.previous_version,
+                "version": env!("CARGO_PKG_VERSION"),
                 "socket": daemon::socket_path().display().to_string()
             });
             Ok(OutputEnvelope::success(
@@ -3037,10 +3070,28 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
         }
         DaemonCommands::Status => {
             let status = match daemon::daemon_status_local().await {
-                Ok(status) => serde_json::to_value(status)?,
+                Ok(status) => {
+                    let running = status.running;
+                    let version_mismatch =
+                        running && status.version.as_deref() != Some(env!("CARGO_PKG_VERSION"));
+                    let mut value = serde_json::to_value(status)?;
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert(
+                            "client_version".to_string(),
+                            Value::String(env!("CARGO_PKG_VERSION").to_string()),
+                        );
+                        obj.insert(
+                            "version_mismatch".to_string(),
+                            Value::Bool(version_mismatch),
+                        );
+                    }
+                    value
+                }
                 Err(err) => json!({
                     "running": false,
                     "socket": daemon::socket_path().display().to_string(),
+                    "client_version": env!("CARGO_PKG_VERSION"),
+                    "version_mismatch": false,
                     "error": {
                         "code": "DAEMON_UNREACHABLE",
                         "message": err.to_string()
@@ -3058,10 +3109,13 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
         }
         DaemonCommands::Restart => {
             let stopped = daemon::daemon_stop_local().await?;
-            let started_now = daemon::daemon_start_local().await?;
+            let outcome = daemon::daemon_start_local().await?;
             let data = json!({
                 "stopped": stopped,
-                "started_now": started_now,
+                "started_now": outcome.started_now,
+                "restarted_for_version_mismatch": outcome.restarted_for_version_mismatch,
+                "previous_version": outcome.previous_version,
+                "version": env!("CARGO_PKG_VERSION"),
                 "socket": daemon::socket_path().display().to_string()
             });
             Ok(OutputEnvelope::success(
