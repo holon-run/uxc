@@ -15,7 +15,7 @@ use serde_json::json;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
 
 const DEFAULT_MAX_LOG_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
@@ -272,23 +272,28 @@ fn rename_replace(src: &Path, dst: &Path) -> Result<()> {
 
 /// Redact sensitive information from endpoint URLs
 pub(crate) fn redact_endpoint(endpoint: &str) -> String {
-    // Use regex for proper pattern matching with capture groups
-    let api_key_re = regex::Regex::new(r"([?&]api_key=)[^&]*").unwrap();
-    let api_key_camel_re = regex::Regex::new(r"([?&]apiKey=)[^&]*").unwrap();
-    let apikey_re = regex::Regex::new(r"([?&]apikey=)[^&]*").unwrap();
-    let token_re = regex::Regex::new(r"([?&](?:access_)?token=)[^&]*").unwrap();
-    let bearer_re = regex::Regex::new(r"(/bearer/)[^/?&]*").unwrap();
-    let basic_auth_re = regex::Regex::new(r"(://)[^:@]*:([^@]*)@").unwrap();
+    static API_KEY_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"([?&]api_key=)[^&]*").unwrap());
+    static API_KEY_CAMEL_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"([?&]apiKey=)[^&]*").unwrap());
+    static APIKEY_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"([?&]apikey=)[^&]*").unwrap());
+    static TOKEN_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"([?&](?:access_)?token=)[^&]*").unwrap());
+    static BEARER_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(/bearer/)[^/?&]*").unwrap());
+    static BASIC_AUTH_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(://)[^:@]*:([^@]*)@").unwrap());
 
     let redacted = endpoint.to_string();
-    let redacted = api_key_re.replace_all(&redacted, "${1}***").to_string();
-    let redacted = api_key_camel_re
+    let redacted = API_KEY_RE.replace_all(&redacted, "${1}***").to_string();
+    let redacted = API_KEY_CAMEL_RE
         .replace_all(&redacted, "${1}***")
         .to_string();
-    let redacted = apikey_re.replace_all(&redacted, "${1}***").to_string();
-    let redacted = token_re.replace_all(&redacted, "${1}***").to_string();
-    let redacted = bearer_re.replace_all(&redacted, "${1}***").to_string();
-    let redacted = basic_auth_re
+    let redacted = APIKEY_RE.replace_all(&redacted, "${1}***").to_string();
+    let redacted = TOKEN_RE.replace_all(&redacted, "${1}***").to_string();
+    let redacted = BEARER_RE.replace_all(&redacted, "${1}***").to_string();
+    let redacted = BASIC_AUTH_RE
         .replace_all(&redacted, "${1}***:***@")
         .to_string();
 
