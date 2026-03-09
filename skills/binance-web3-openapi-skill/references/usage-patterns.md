@@ -23,6 +23,11 @@ binance-web3-openapi-cli get:/bapi/defi/v1/public/wallet-direct/buw/wallet/dex/m
 # Get token market snapshot
 binance-web3-openapi-cli get:/bapi/defi/v4/public/wallet-direct/buw/wallet/market/token/dynamic/info \
   chainId=56 contractAddress=0x55d398326f99059ff775485246999027b3197955
+
+# List active positions for an address
+binance-web3-openapi-cli get:/bapi/defi/v3/public/wallet-direct/buw/wallet/address/pnl/active-position-list \
+  address=0x0000000000000000000000000000000000000001 chainId=56 offset=0 \
+  clienttype=web clientversion=1.2.0
 ```
 
 ## Ranking And Signal Examples

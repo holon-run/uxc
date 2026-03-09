@@ -1,6 +1,6 @@
 ---
 name: binance-web3-openapi-skill
-description: Operate Binance Web3 public market and research APIs through UXC with a curated OpenAPI schema. Use when tasks need token search, token metadata/market snapshots, rankings, token audit, or smart money signals on Binance Web3.
+description: Operate Binance Web3 public market and research APIs through UXC with a curated OpenAPI schema. Use when tasks need token search, token metadata/market snapshots, address holdings, rankings, token audit, or smart money signals on Binance Web3.
 ---
 
 # Binance Web3 API Skill
@@ -23,6 +23,7 @@ This skill covers the public `web3.binance.com` endpoints for:
 - token search
 - token metadata
 - token market snapshots
+- address holdings
 - token security audit
 - social hype leaderboard
 - unified token ranks
@@ -33,7 +34,6 @@ This skill does **not** cover:
 
 - Binance Spot / account trading APIs
 - Binance Square posting
-- Address holdings endpoint on `web3.binance.com`
 - K-line candles hosted on `https://dquery.sintral.io`
 
 ## Authentication
@@ -82,6 +82,8 @@ Most operations are public and do not require API credentials.
 
 ### Research
 
+- Address holdings:
+  - `get:/bapi/defi/v3/public/wallet-direct/buw/wallet/address/pnl/active-position-list`
 - Token audit:
   - `post:/bapi/defi/v1/public/wallet-direct/security/token/audit`
 
@@ -91,9 +93,9 @@ Most operations are public and do not require API credentials.
 - Parse stable envelope fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Binance Web3 responses usually wrap payloads as `code`, `message`, `success`, `data`; treat `code == "000000"` as success.
 - `audit` requires a UUID v4 `requestId`; generate one for every request instead of reusing old IDs.
+- Address holdings requires operation-level headers `clienttype=web` and `clientversion=1.2.0`; keep them scoped to that operation instead of injecting them host-wide.
 - For non-string objects, prefer positional JSON instead of flattening complex filters into many `key=value` args.
 - `binance-web3-openapi-cli <operation> ...` is equivalent to `uxc https://web3.binance.com --schema-url <binance_web3_openapi_schema> <operation> ...`.
-- `get:/bapi/defi/v3/public/wallet-direct/buw/wallet/address/pnl/active-position-list` is intentionally not included in v1 because its undocumented header contract is not stable under `uxc` yet.
 
 ## References
 

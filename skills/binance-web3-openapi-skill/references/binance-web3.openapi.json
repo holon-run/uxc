@@ -128,6 +128,67 @@
         }
       }
     },
+    "/bapi/defi/v3/public/wallet-direct/buw/wallet/address/pnl/active-position-list": {
+      "get": {
+        "summary": "List address active positions",
+        "description": "Fetch active token positions for a wallet address. This endpoint requires operation-level browser-style headers and should not be modeled as host-wide defaults.",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chainId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0
+            }
+          },
+          {
+            "name": "clienttype",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "clientversion",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Address active positions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddressPositionsEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/bapi/defi/v1/public/wallet-direct/security/token/audit": {
       "post": {
         "summary": "Audit token security",
@@ -625,6 +686,138 @@
             "properties": {
               "data": {
                 "$ref": "#/components/schemas/TokenMarketData"
+              }
+            }
+          }
+        ]
+      },
+      "AddressPositionItem": {
+        "type": "object",
+        "properties": {
+          "chainId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contractAddress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tokenId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "price": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "percentChange24h": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remainQty": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "costAmount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pnlAmount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pnlPercent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "AddressPositionsData": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "addressStatus": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "list": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AddressPositionItem"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "AddressPositionsEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EnvelopeBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/AddressPositionsData"
               }
             }
           }
