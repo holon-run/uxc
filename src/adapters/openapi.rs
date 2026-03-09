@@ -87,6 +87,10 @@ impl OpenAPIAdapter {
             .or_else(|| self.auth_profile.clone())
     }
 
+    fn schema_requests_apply_auth(&self) -> bool {
+        self.schema_url_override.is_none()
+    }
+
     async fn set_effective_auth_profile(&self, profile: Profile) {
         *self.runtime_auth_profile.lock().await = Some(profile);
     }
@@ -105,6 +109,30 @@ impl OpenAPIAdapter {
         match profile {
             Some(profile) => crate::auth::apply_profile_auth_to_url(url, profile),
             None => Ok(url.to_string()),
+        }
+    }
+
+    fn apply_schema_auth_profile(
+        &self,
+        req: reqwest::RequestBuilder,
+        profile: Option<&Profile>,
+    ) -> Result<reqwest::RequestBuilder> {
+        if self.schema_requests_apply_auth() {
+            Self::apply_auth_profile(req, profile)
+        } else {
+            Ok(req)
+        }
+    }
+
+    fn apply_schema_auth_profile_to_url(
+        &self,
+        url: &str,
+        profile: Option<&Profile>,
+    ) -> Result<String> {
+        if self.schema_requests_apply_auth() {
+            Self::apply_auth_profile_to_url(url, profile)
+        } else {
+            Ok(url.to_string())
         }
     }
 
@@ -181,13 +209,13 @@ impl OpenAPIAdapter {
     async fn check_schema_url(&self, schema_url: &str) -> Result<bool> {
         let response = self
             .send_with_oauth_retry(|profile| {
-                let schema_url = Self::apply_auth_profile_to_url(schema_url, profile)?;
+                let schema_url = self.apply_schema_auth_profile_to_url(schema_url, profile)?;
                 let req = self
                     .client
                     .get(&schema_url)
                     .timeout(std::time::Duration::from_secs(10))
                     .header("Accept", "application/json");
-                Self::apply_auth_profile(req, profile)
+                self.apply_schema_auth_profile(req, profile)
             })
             .await?;
 
@@ -295,13 +323,13 @@ impl OpenAPIAdapter {
         for full_url in Self::schema_candidates(&normalized) {
             let resp = match self
                 .send_with_oauth_retry(|profile| {
-                    let full_url = Self::apply_auth_profile_to_url(&full_url, profile)?;
+                    let full_url = self.apply_schema_auth_profile_to_url(&full_url, profile)?;
                     let req = self
                         .client
                         .get(&full_url)
                         .timeout(std::time::Duration::from_secs(2))
                         .header("Accept", "application/json");
-                    Self::apply_auth_profile(req, profile)
+                    self.apply_schema_auth_profile(req, profile)
                 })
                 .await
             {
@@ -854,9 +882,9 @@ impl Adapter for OpenAPIAdapter {
         // Fetch from remote
         let resp = self
             .send_with_oauth_retry(|profile| {
-                let schema_url = Self::apply_auth_profile_to_url(&schema_url, profile)?;
+                let schema_url = self.apply_schema_auth_profile_to_url(&schema_url, profile)?;
                 let req = self.client.get(&schema_url);
-                Self::apply_auth_profile(req, profile)
+                self.apply_schema_auth_profile(req, profile)
             })
             .await?;
         let schema: Value = resp.json().await?;
@@ -1300,7 +1328,6 @@ mod tests {
 
         let _schema = server
             .mock("GET", "/openapi.json")
-            .match_header("authorization", "Bearer old-token")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -1381,6 +1408,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn schema_url_override_does_not_apply_business_query_auth() {
+        let mut server = mockito::Server::new_async().await;
+        let schema_url = format!("{}/schema.json", server.url());
+
+        let _schema = server
+            .mock("GET", "/schema.json")
+            .match_query(mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(openapi_doc())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut profile = Profile::new("secret".to_string(), crate::auth::AuthType::ApiKey);
+        profile.auth_query_params = Some(vec![crate::auth::AuthQueryParam::parse(
+            "apiKey={{secret}}",
+        )
+        .unwrap()]);
+
+        let adapter = OpenAPIAdapter::new()
+            .with_auth(profile)
+            .with_schema_url_override(Some(schema_url));
+
+        assert!(adapter.can_handle(&server.url()).await.unwrap());
     }
 
     #[test]

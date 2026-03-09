@@ -696,14 +696,22 @@ impl DaemonRuntime {
         let cache = self.build_cache(&request.options)?;
         let cache_for_fallback = cache.clone();
         let cache_for_mcp = cache.clone();
-        let auth_profile =
+        let root_auth_profile =
             auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
-        let stdio_spawn_options =
-            build_stdio_spawn_options(&request.endpoint, &request.options, auth_profile.as_ref())?;
+        let detection_auth_profile = if request.options.schema_url.is_some() {
+            None
+        } else {
+            root_auth_profile.clone()
+        };
+        let stdio_spawn_options = build_stdio_spawn_options(
+            &request.endpoint,
+            &request.options,
+            root_auth_profile.as_ref(),
+        )?;
 
         let detection_options = DetectionOptions {
             schema_url: request.options.schema_url.clone(),
-            auth_profile: auth_profile.clone(),
+            auth_profile: detection_auth_profile.clone(),
             stdio_spawn_options: stdio_spawn_options.clone(),
         };
 
@@ -711,13 +719,13 @@ impl DaemonRuntime {
             &request.endpoint,
             &detection_options,
             cache,
-            auth_profile.clone(),
+            detection_auth_profile.clone(),
             request.options.no_cache,
             request.options.refresh_schema,
         )
         .await;
 
-        let resolved = match resolved {
+        let mut resolved = match resolved {
             Ok(r) => r,
             Err(e) => {
                 // Log protocol detection failure
@@ -740,6 +748,13 @@ impl DaemonRuntime {
         };
 
         let mut protocol = resolved.adapter.protocol_type().as_str().to_string();
+        let execution_auth_profile = effective_runtime_auth_profile(
+            &request,
+            resolved.adapter.protocol_type(),
+            root_auth_profile.clone(),
+        )?;
+        resolved.adapter =
+            inject_auth_if_supported(resolved.adapter, execution_auth_profile.clone());
         let mut meta = RuntimeMeta::default();
         if let Some(cache_meta) = resolved.cache_meta {
             meta.schema_involved = Some(true);
@@ -788,7 +803,7 @@ impl DaemonRuntime {
                 .invoke_mcp_execute(
                     &request,
                     prepared_args,
-                    auth_profile.clone(),
+                    execution_auth_profile.clone(),
                     stdio_options,
                     cache_for_mcp.clone(),
                 )
@@ -810,7 +825,7 @@ impl DaemonRuntime {
                 if let Some(live_result) = invoke_live_stdio_mcp_help(
                     self,
                     &request,
-                    auth_profile.as_ref(),
+                    execution_auth_profile.as_ref(),
                     cache_for_mcp.clone(),
                 )
                 .await?
@@ -838,7 +853,12 @@ impl DaemonRuntime {
                         let mut adapter =
                             adapter_from_protocol(fallback_protocol, &detection_options);
                         adapter = inject_cache_if_supported(adapter, cache_for_fallback.clone());
-                        adapter = inject_auth_if_supported(adapter, auth_profile.clone());
+                        let fallback_auth_profile = effective_runtime_auth_profile(
+                            &request,
+                            fallback_protocol,
+                            root_auth_profile.clone(),
+                        )?;
+                        adapter = inject_auth_if_supported(adapter, fallback_auth_profile.clone());
                         adapter =
                             inject_refresh_if_supported(adapter, request.options.refresh_schema);
 
@@ -868,7 +888,7 @@ impl DaemonRuntime {
                                 .invoke_mcp_execute(
                                     &request,
                                     prepared_args,
-                                    auth_profile.clone(),
+                                    fallback_auth_profile.clone(),
                                     None,
                                     cache_for_fallback.clone(),
                                 )
@@ -1796,6 +1816,38 @@ fn inject_refresh_if_supported(
     }
 }
 
+fn openapi_runtime_endpoint(request: &RuntimeInvokeRequest) -> Option<String> {
+    if !matches!(request.action, RuntimeAction::Execute) {
+        return None;
+    }
+
+    let operation_id = request.operation_id.as_deref()?;
+    let (_, path) = operation_id.split_once(':')?;
+    if !path.starts_with('/') {
+        return None;
+    }
+
+    Some(format!(
+        "{}{}",
+        request.endpoint.trim_end_matches('/'),
+        path
+    ))
+}
+
+fn effective_runtime_auth_profile(
+    request: &RuntimeInvokeRequest,
+    protocol: ProtocolType,
+    root_auth_profile: Option<Profile>,
+) -> Result<Option<Profile>> {
+    if protocol == ProtocolType::OpenAPI {
+        if let Some(endpoint) = openapi_runtime_endpoint(request) {
+            return auth::resolve_auth_for_endpoint(&endpoint, request.options.auth.clone());
+        }
+    }
+
+    Ok(root_auth_profile)
+}
+
 async fn resolve_adapter_with_schema_cache(
     url: &str,
     detection_options: &DetectionOptions,
@@ -2244,6 +2296,62 @@ fn map_runtime_error_code(err: &anyhow::Error) -> i32 {
 impl Default for DaemonRuntime {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openapi_runtime_endpoint_appends_operation_path_for_execute() {
+        let request = RuntimeInvokeRequest {
+            request_id: "req-1".to_string(),
+            endpoint: "https://testnet.binance.vision".to_string(),
+            action: RuntimeAction::Execute,
+            operation_id: Some("get:/api/v3/account".to_string()),
+            args: None,
+            options: RuntimeInvokeOptions {
+                auth: None,
+                inject_env: Vec::new(),
+                no_cache: false,
+                cache_ttl: None,
+                refresh_schema: false,
+                schema_url: Some("https://example.com/schema.json".to_string()),
+                link_name: None,
+                schema_mapping_file: None,
+                daemon_exclusive: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            openapi_runtime_endpoint(&request).as_deref(),
+            Some("https://testnet.binance.vision/api/v3/account")
+        );
+    }
+
+    #[test]
+    fn openapi_runtime_endpoint_ignores_non_execute_requests() {
+        let request = RuntimeInvokeRequest {
+            request_id: "req-1".to_string(),
+            endpoint: "https://api.binance.com".to_string(),
+            action: RuntimeAction::OperationHelp,
+            operation_id: Some("post:/api/v3/order".to_string()),
+            args: None,
+            options: RuntimeInvokeOptions {
+                auth: None,
+                inject_env: Vec::new(),
+                no_cache: false,
+                cache_ttl: None,
+                refresh_schema: false,
+                schema_url: Some("https://example.com/schema.json".to_string()),
+                link_name: None,
+                schema_mapping_file: None,
+                daemon_exclusive: Vec::new(),
+            },
+        };
+
+        assert!(openapi_runtime_endpoint(&request).is_none());
     }
 }
 
