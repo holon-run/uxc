@@ -204,8 +204,10 @@ mod tests {
             secret_source: Some(SecretSource::Literal {
                 value: "test-token".to_string(),
             }),
+            fields: std::collections::HashMap::new(),
             auth_headers: None,
             auth_query_params: None,
+            signer: None,
         };
         let rendered = InjectEnvSpec::parse("TOKEN=Bearer {{secret}}")
             .unwrap()

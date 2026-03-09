@@ -224,6 +224,7 @@ enum AuthCommands {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum AuthCredentialCommands {
     /// List all credentials
     List,
@@ -271,6 +272,11 @@ enum AuthCredentialCommands {
         #[arg(long)]
         query_param: Vec<String>,
 
+        /// Named auth field source (repeatable): <field-name>=<source>
+        /// Source supports literal:<value>, env:<VAR>, op://...
+        #[arg(long)]
+        field: Vec<String>,
+
         /// Credential description
         #[arg(long)]
         description: Option<String>,
@@ -310,6 +316,10 @@ enum AuthBindingCommands {
         /// Credential ID to bind
         #[arg(long)]
         credential: String,
+
+        /// Structured signer config JSON
+        #[arg(long)]
+        signer_json: Option<String>,
 
         /// Priority (higher wins)
         #[arg(long, default_value_t = 0)]
@@ -562,6 +572,7 @@ struct AuthProfileView {
     auth_type: String,
     api_key_masked: String,
     secret_source: Option<AuthSecretSourceView>,
+    fields: Option<Vec<AuthFieldView>>,
     auth_headers: Option<Vec<AuthHeaderView>>,
     auth_query_params: Option<Vec<AuthQueryParamView>>,
     description: Option<String>,
@@ -576,6 +587,13 @@ struct AuthSecretSourceView {
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthHeaderView {
     name: String,
+    value_masked: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthFieldView {
+    name: String,
+    source_kind: String,
     value_masked: String,
 }
 
@@ -637,6 +655,7 @@ struct AuthBindingSetData {
     host: String,
     path_prefix: Option<String>,
     scheme: Option<String>,
+    signer: Option<auth::AuthSignerConfig>,
     priority: i32,
     enabled: bool,
 }
@@ -1508,6 +1527,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc auth credential list".to_string(),
                 "uxc auth credential set demo --secret-env DEMO_TOKEN".to_string(),
                 "uxc auth credential set demo --secret-op op://Vault/Item/token".to_string(),
+                "uxc auth credential set binance --auth-type api_key --field api_key=env:BINANCE_API_KEY --field secret_key=env:BINANCE_SECRET_KEY".to_string(),
             ],
         },
         ["auth", "credential", "list"] => HelpData {
@@ -1529,14 +1549,18 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth", "credential", "set"] => HelpData {
             path: "uxc auth credential set".to_string(),
             about: "Set or update a credential".to_string(),
-            usage: "uxc auth credential set <credential_id> [--auth-type <type>] [--secret <value>|--secret-env <key>|--secret-op <op://...>] [--api-key-header <name>|--header <name>=<template>] [--query-param <name>=<template>] [--description <text>]".to_string(),
+            usage: "uxc auth credential set <credential_id> [--auth-type <type>] [--secret <value>|--secret-env <key>|--secret-op <op://...>] [--field <name>=<literal:...|env:...|op://...>]... [--api-key-header <name>|--header <name>=<template>] [--query-param <name>=<template>] [--description <text>]".to_string(),
             commands: vec![],
-            notes: vec![],
+            notes: vec![
+                "--field is repeatable and stores additional named auth fields on the credential.".to_string(),
+                "{{secret}} remains available and is equivalent to {{field:secret}} for compatible credentials.".to_string(),
+            ],
             examples: vec![
                 "uxc auth credential set deepwiki --secret-env DEEPWIKI_TOKEN".to_string(),
                 "uxc auth credential set deepwiki --secret-op op://Engineering/deepwiki/token"
                     .to_string(),
                 "uxc auth credential set flipside --auth-type api_key --query-param \"apiKey={{secret}}\" --secret-env FLIPSIDE_API_KEY".to_string(),
+                "uxc auth credential set binance --auth-type api_key --field api_key=env:BINANCE_API_KEY --field secret_key=env:BINANCE_SECRET_KEY --header \"X-API-Key={{field:api_key}}\"".to_string(),
             ],
         },
         ["auth", "credential", "remove"] => HelpData {
@@ -1574,10 +1598,15 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth", "binding", "add"] => HelpData {
             path: "uxc auth binding add".to_string(),
             about: "Add a binding rule".to_string(),
-            usage: "uxc auth binding add --id <id> --host <host> --credential <credential> [--path-prefix <path>] [--scheme <scheme>] [--priority <n>] [--disabled]".to_string(),
+            usage: "uxc auth binding add --id <id> --host <host> --credential <credential> [--path-prefix <path>] [--scheme <scheme>] [--signer-json <json>] [--priority <n>] [--disabled]".to_string(),
             commands: vec![],
-            notes: vec![],
-            examples: vec!["uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mcp --scheme https --credential deepwiki --priority 100".to_string()],
+            notes: vec![
+                "--signer-json attaches a typed signer config to this binding, for example kind=hmac_query_v1.".to_string(),
+            ],
+            examples: vec![
+                "uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mcp --scheme https --credential deepwiki --priority 100".to_string(),
+                "uxc auth binding add --id binance-account --host api.binance.com --path-prefix /api/v3 --scheme https --credential binance --signer-json '{\"kind\":\"hmac_query_v1\",\"algorithm\":\"hmac_sha256\",\"signing_field\":\"secret_key\",\"key_field\":\"api_key\",\"key_placement\":\"header\",\"key_name\":\"X-MBX-APIKEY\",\"signature_param\":\"signature\",\"signature_encoding\":\"hex\",\"timestamp_param\":\"timestamp\",\"timestamp_unit\":\"milliseconds\",\"canonicalization\":{\"mode\":\"preserve_order\"}}'".to_string(),
+            ],
         },
         ["auth", "binding", "remove"] => HelpData {
             path: "uxc auth binding remove".to_string(),
@@ -1875,6 +1904,9 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             if data.credentials.is_empty() {
                 println!("No credentials found.");
                 println!("\nCreate one with: uxc auth credential set <id> --secret <value>");
+                println!(
+                    "Or add named fields with: uxc auth credential set <id> --field api_key=env:API_KEY --field secret_key=env:SECRET_KEY"
+                );
                 return Ok(());
             }
 
@@ -1885,6 +1917,15 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
                 println!("    Secret: {}", credential.api_key_masked);
                 if let Some(source) = credential.secret_source {
                     println!("    Source: {}", source.kind);
+                }
+                if let Some(fields) = credential.fields {
+                    let names = fields
+                        .into_iter()
+                        .map(|field| field.name)
+                        .collect::<Vec<_>>();
+                    if !names.is_empty() {
+                        println!("    Fields: {}", names.join(", "));
+                    }
                 }
                 if let Some(headers) = credential.auth_headers {
                     let names = headers.into_iter().map(|h| h.name).collect::<Vec<_>>();
@@ -1921,6 +1962,15 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             println!("  Secret: {}", credential.api_key_masked);
             if let Some(source) = credential.secret_source {
                 println!("  Source: {}", source.kind);
+            }
+            if let Some(fields) = credential.fields {
+                let names = fields
+                    .into_iter()
+                    .map(|field| field.name)
+                    .collect::<Vec<_>>();
+                if !names.is_empty() {
+                    println!("  Fields: {}", names.join(", "));
+                }
             }
             if let Some(headers) = credential.auth_headers {
                 let names = headers.into_iter().map(|h| h.name).collect::<Vec<_>>();
@@ -3203,6 +3253,7 @@ async fn handle_auth_credential_command(
             api_key_header,
             header,
             query_param,
+            field,
             description,
         } => {
             let mut profiles = Profiles::load_profiles()?;
@@ -3292,6 +3343,25 @@ async fn handle_auth_credential_command(
                 profile_obj.auth_query_params = Some(auth_query_params);
             }
 
+            if resolved_auth_type == AuthType::OAuth {
+                profile_obj.clear_fields();
+                if !field.is_empty() {
+                    return Err(UxcError::InvalidArguments(
+                        "--field is not supported for OAuth credentials".to_string(),
+                    )
+                    .into());
+                }
+            } else if !field.is_empty() {
+                profile_obj.clear_fields();
+                for spec in field {
+                    let (name, source) = crate::auth::parse_field_spec(spec)
+                        .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+                    profile_obj
+                        .set_field_source(name, source)
+                        .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+                }
+            }
+
             if resolved_auth_type != AuthType::OAuth {
                 let has_existing_secret = matches!(
                     profile_obj.secret_source,
@@ -3307,7 +3377,7 @@ async fn handle_auth_credential_command(
                     {
                         profile_obj.api_key_injections_require_secret()
                     } else {
-                        true
+                        profile_obj.fields.is_empty()
                     }
                 } else {
                     true
@@ -3452,6 +3522,7 @@ fn handle_auth_binding_command(command: &AuthBindingCommands) -> Result<OutputEn
             path_prefix,
             scheme,
             credential,
+            signer_json,
             priority,
             disabled,
         } => {
@@ -3466,6 +3537,13 @@ fn handle_auth_binding_command(command: &AuthBindingCommands) -> Result<OutputEn
             }
 
             let mut bindings = AuthBindings::load_bindings()?;
+            let signer = signer_json
+                .as_ref()
+                .map(|value| serde_json::from_str::<auth::AuthSignerConfig>(value))
+                .transpose()
+                .map_err(|e| {
+                    UxcError::InvalidArguments(format!("Invalid --signer-json payload: {}", e))
+                })?;
             bindings
                 .add_binding(AuthBindingRule {
                     id: id.clone(),
@@ -3473,6 +3551,7 @@ fn handle_auth_binding_command(command: &AuthBindingCommands) -> Result<OutputEn
                     path_prefix: path_prefix.clone(),
                     scheme: scheme.clone(),
                     credential: credential.clone(),
+                    signer: signer.clone(),
                     priority: *priority,
                     enabled: !disabled,
                 })
@@ -3485,6 +3564,7 @@ fn handle_auth_binding_command(command: &AuthBindingCommands) -> Result<OutputEn
                 host: host.clone(),
                 path_prefix: path_prefix.clone(),
                 scheme: scheme.clone(),
+                signer,
                 priority: *priority,
                 enabled: !disabled,
             })?;
@@ -3968,6 +4048,22 @@ fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
             .map(|source| AuthSecretSourceView {
                 kind: source.kind().to_string(),
             }),
+        fields: {
+            let fields = profile
+                .field_source_kinds()
+                .into_iter()
+                .map(|(field_name, source_kind)| AuthFieldView {
+                    name: field_name,
+                    source_kind,
+                    value_masked: "***".to_string(),
+                })
+                .collect::<Vec<_>>();
+            if fields.is_empty() {
+                None
+            } else {
+                Some(fields)
+            }
+        },
         auth_headers: profile.auth_headers.as_ref().map(|headers| {
             headers
                 .iter()

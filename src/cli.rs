@@ -76,9 +76,10 @@ impl AuthCredentialLoader for DefaultAuthCredentialLoader {
         let profiles = Profiles::load_profiles()?;
         let mut profile = profiles.get_profile(&credential_id).cloned().map_err(|e| {
             anyhow!(
-                "Failed to load credential '{}': {}. Run 'uxc auth credential set {} --secret <value>' to create it.",
+                "Failed to load credential '{}': {}. Run 'uxc auth credential set {} --secret <value>' or 'uxc auth credential set {} --field api_key=env:API_KEY --field secret_key=env:SECRET_KEY' to create it.",
                 credential_id,
                 e,
+                credential_id,
                 credential_id
             )
         })?;
@@ -209,12 +210,20 @@ pub struct AuthProfileView {
     pub auth_type: String,
     pub api_key_masked: String,
     pub secret_source: Option<AuthSecretSourceView>,
+    pub fields: Option<Vec<AuthFieldView>>,
     pub description: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthSecretSourceView {
     pub kind: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthFieldView {
+    pub name: String,
+    pub source_kind: String,
+    pub value_masked: String,
 }
 
 /// Convert Profile to AuthProfileView
@@ -229,6 +238,22 @@ pub fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
             .map(|source| AuthSecretSourceView {
                 kind: source.kind().to_string(),
             }),
+        fields: {
+            let fields = profile
+                .field_source_kinds()
+                .into_iter()
+                .map(|(field_name, source_kind)| AuthFieldView {
+                    name: field_name,
+                    source_kind,
+                    value_masked: "***".to_string(),
+                })
+                .collect::<Vec<_>>();
+            if fields.is_empty() {
+                None
+            } else {
+                Some(fields)
+            }
+        },
         description: profile.description.clone(),
     }
 }
@@ -363,7 +388,7 @@ mod tests {
     fn test_cache_config_builder_default() {
         let config = CacheConfigBuilder::from_cli_flags(false, None);
         // Should load from file or use defaults
-        assert!(config.enabled || config.ttl > 0 || !config.enabled);
+        assert!(config.ttl > 0);
     }
 
     #[test]

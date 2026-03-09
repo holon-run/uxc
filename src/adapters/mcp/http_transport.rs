@@ -1514,13 +1514,11 @@ mod tests {
             .as_secs() as i64
     }
 
+    type LegacySseSender = mpsc::UnboundedSender<Result<hyper::body::Bytes, Infallible>>;
+
     #[derive(Clone, Default)]
     struct LegacySseTestState {
-        sender: Arc<
-            tokio::sync::Mutex<
-                Option<mpsc::UnboundedSender<Result<hyper::body::Bytes, Infallible>>>,
-            >,
-        >,
+        sender: Arc<tokio::sync::Mutex<Option<LegacySseSender>>>,
     }
 
     struct LegacySseTestServer {
@@ -2616,7 +2614,7 @@ data: invalid json
 
         let result = McpHttpTransport::probe_initialize(&server.url(), None).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[tokio::test]
@@ -2641,7 +2639,7 @@ data: invalid json
 
         let result = McpHttpTransport::probe_initialize(&server.url(), None).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[tokio::test]
@@ -2649,7 +2647,7 @@ data: invalid json
         let result =
             McpHttpTransport::probe_initialize("http://localhost:59999/nonexistent", None).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[tokio::test]
@@ -2665,7 +2663,7 @@ data: invalid json
 
         let result = McpHttpTransport::probe_initialize(&server.url(), None).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[tokio::test]
@@ -2691,7 +2689,7 @@ data: invalid json
 
         let result = McpHttpTransport::probe_initialize(&server.url(), None).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
     }
 
     #[tokio::test]
@@ -2739,7 +2737,7 @@ data: invalid json
 
         let result = McpHttpTransport::probe_initialize(&server.url(), None).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[tokio::test]
@@ -3037,7 +3035,7 @@ data: invalid json
         let profile = Profile::new("test-token".to_string(), AuthType::Bearer);
         let result = McpHttpTransport::probe_initialize(&server.url(), Some(profile)).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[tokio::test]

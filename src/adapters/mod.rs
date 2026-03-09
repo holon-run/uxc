@@ -386,9 +386,8 @@ mod tests {
         let result = detector
             .detect_adapter_with_options(&server.url(), &options)
             .await;
-        match result {
-            Ok(adapter) => assert!(!matches!(adapter, AdapterEnum::Mcp(_))),
-            Err(_) => {}
+        if let Ok(adapter) = result {
+            assert!(!matches!(adapter, AdapterEnum::Mcp(_)));
         }
     }
 
