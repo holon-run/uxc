@@ -3,6 +3,7 @@ mod common;
 use assert_cmd::Command;
 use common::test_server_binary;
 use serial_test::serial;
+use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -16,9 +17,12 @@ fn daemon_stop_best_effort() {
 }
 
 fn uxc_command_with_home(home: &Path) -> Command {
+    let runtime_dir = home.join("runtime");
+    fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
     let mut cmd = uxc_command();
     cmd.env("HOME", home);
     cmd.env("USERPROFILE", home);
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
     cmd
 }
 
@@ -385,7 +389,10 @@ fn mcp_stdio_execute_includes_structured_content_via_daemon() {
 #[test]
 #[serial]
 fn mcp_stdio_dynamic_toolset_refreshes_live_help_and_invalidates_disk_cache() {
-    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    let temp_home = tempfile::Builder::new()
+        .prefix("uxcth-")
+        .tempdir_in("/tmp")
+        .expect("temp home should be created");
     daemon_stop_best_effort_with_home(temp_home.path());
 
     let bin = test_server_binary("mcp-stdio");

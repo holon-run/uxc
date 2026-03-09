@@ -14,6 +14,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 
 const DEFAULT_STDIO_REQUEST_TIMEOUT_MS: u64 = 30_000;
+const MAX_BUFFERED_NOTIFICATIONS: usize = 64;
 
 /// Trait for executing MCP stdio processes (abstracted for testing)
 #[async_trait]
@@ -336,7 +337,18 @@ impl McpStdioTransport {
                             }
                         }
                         Ok(ParsedJsonRpcMessage::Notification(notification)) => {
-                            notifications_clone.lock().await.push_back(notification);
+                            let mut queue = notifications_clone.lock().await;
+                            if queue.len() >= MAX_BUFFERED_NOTIFICATIONS {
+                                let dropped = queue.pop_front();
+                                if let Some(dropped) = dropped {
+                                    tracing::warn!(
+                                        method = %dropped.method,
+                                        max_buffered = MAX_BUFFERED_NOTIFICATIONS,
+                                        "Dropping oldest buffered MCP stdio notification"
+                                    );
+                                }
+                            }
+                            queue.push_back(notification);
                         }
                         Err(e) => {
                             tracing::warn!("Failed to parse JSON-RPC message: {}", e);

@@ -199,17 +199,13 @@ struct McpHttpSession {
 impl McpStdioSession {
     async fn refresh_tools_if_needed(
         &mut self,
-        endpoint: &str,
-        cache: &Arc<dyn Cache>,
+        _endpoint: &str,
+        _cache: &Arc<dyn Cache>,
     ) -> Result<Vec<adapters::mcp::types::Tool>> {
-        let was_dirty = self.tools_dirty;
         if self.tools.is_none() || self.tools_dirty {
             let tools = self.client.list_tools().await?;
             self.tools = Some(tools);
             self.tools_dirty = false;
-            if was_dirty {
-                let _ = cache.invalidate(endpoint);
-            }
         }
 
         Ok(self.tools.clone().unwrap_or_default())
@@ -1021,11 +1017,9 @@ impl DaemonRuntime {
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
             let result = guard.client.call_tool(op, arguments).await?;
-            if guard.client.supports_tool_list_changed() {
-                let _ = guard
-                    .mark_tools_dirty_from_notifications(endpoint, &cache)
-                    .await;
-            }
+            let _ = guard
+                .mark_tools_dirty_from_notifications(endpoint, &cache)
+                .await;
             Ok((
                 "call_result".to_string(),
                 Some(op.clone()),
@@ -1945,11 +1939,9 @@ async fn invoke_live_stdio_mcp_help(
 
     let mut guard = session.lock().await;
     guard.last_used = Instant::now();
-    if guard.client.supports_tool_list_changed() {
-        let _ = guard
-            .mark_tools_dirty_from_notifications(&request.endpoint, &cache)
-            .await;
-    }
+    let _ = guard
+        .mark_tools_dirty_from_notifications(&request.endpoint, &cache)
+        .await;
     let tools = guard
         .refresh_tools_if_needed(&request.endpoint, &cache)
         .await?;

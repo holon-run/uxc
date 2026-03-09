@@ -88,14 +88,6 @@ impl McpStdioClient {
             .is_some()
     }
 
-    pub fn supports_tool_list_changed(&self) -> bool {
-        self.server_capabilities
-            .as_ref()
-            .and_then(|c| c.tools.as_ref())
-            .and_then(|tools| tools.listChanged)
-            .unwrap_or(false)
-    }
-
     /// Check if the server supports resources
     pub fn supports_resources(&self) -> bool {
         self.server_capabilities
@@ -126,9 +118,20 @@ impl McpStdioClient {
 
     pub async fn take_tool_list_changed(&mut self) -> bool {
         let notifications = self.transport.drain_notifications().await;
-        notifications
-            .into_iter()
-            .any(|notification| notification.method == "notifications/tools/list_changed")
+        let mut tool_list_changed = false;
+
+        for notification in notifications {
+            if notification.method == "notifications/tools/list_changed" {
+                tool_list_changed = true;
+            } else {
+                tracing::debug!(
+                    method = %notification.method,
+                    "Ignoring unsupported MCP stdio notification"
+                );
+            }
+        }
+
+        tool_list_changed
     }
 
     /// List available tools
