@@ -286,7 +286,8 @@ async fn execute_query(
         | Scenario::AuthRequired
         | Scenario::ToolsListFailAfterFirst
         | Scenario::ToolCallTimeout
-        | Scenario::StructuredContent => {
+        | Scenario::StructuredContent
+        | Scenario::DynamicToolset => {
             // Introspection query
             if query.contains("__schema") || query.contains("__type(") {
                 return Ok(GraphQLResponse {

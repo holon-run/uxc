@@ -186,12 +186,43 @@ struct InitLockEntry {
 
 struct McpStdioSession {
     client: adapters::mcp::McpStdioClient,
+    tools: Option<Vec<adapters::mcp::types::Tool>>,
+    tools_dirty: bool,
     last_used: Instant,
 }
 
 struct McpHttpSession {
     transport: adapters::mcp::McpRemoteTransport,
     last_used: Arc<Mutex<Instant>>,
+}
+
+impl McpStdioSession {
+    async fn refresh_tools_if_needed(
+        &mut self,
+        _endpoint: &str,
+        _cache: &Arc<dyn Cache>,
+    ) -> Result<Vec<adapters::mcp::types::Tool>> {
+        if self.tools.is_none() || self.tools_dirty {
+            let tools = self.client.list_tools().await?;
+            self.tools = Some(tools);
+            self.tools_dirty = false;
+        }
+
+        Ok(self.tools.clone().unwrap_or_default())
+    }
+
+    async fn mark_tools_dirty_from_notifications(
+        &mut self,
+        endpoint: &str,
+        cache: &Arc<dyn Cache>,
+    ) -> bool {
+        if self.client.take_tool_list_changed().await {
+            self.tools_dirty = true;
+            let _ = cache.invalidate(endpoint);
+            return true;
+        }
+        false
+    }
 }
 
 impl McpSessionManager {
@@ -340,6 +371,8 @@ impl McpSessionManager {
         .await?;
         let session = Arc::new(Mutex::new(McpStdioSession {
             client,
+            tools: None,
+            tools_dirty: false,
             last_used: Instant::now(),
         }));
 
@@ -350,6 +383,11 @@ impl McpSessionManager {
                 .await;
         }
         Ok((session, false))
+    }
+
+    async fn get_stdio(&self, session_key: &str) -> Option<Arc<Mutex<McpStdioSession>>> {
+        let map = self.stdio.lock().await;
+        map.get(session_key).cloned()
     }
 
     async fn acquire_stdio_exclusive_locks(
@@ -657,6 +695,7 @@ impl DaemonRuntime {
 
         let cache = self.build_cache(&request.options)?;
         let cache_for_fallback = cache.clone();
+        let cache_for_mcp = cache.clone();
         let auth_profile =
             auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
         let stdio_spawn_options =
@@ -746,7 +785,13 @@ impl DaemonRuntime {
             // Clone the pre-computed stdio_spawn_options to avoid duplicate secret resolution
             let stdio_options = stdio_spawn_options.clone();
             let (kind, operation, data, reused) = self
-                .invoke_mcp_execute(&request, prepared_args, auth_profile.clone(), stdio_options)
+                .invoke_mcp_execute(
+                    &request,
+                    prepared_args,
+                    auth_profile.clone(),
+                    stdio_options,
+                    cache_for_mcp.clone(),
+                )
                 .await?;
             meta.daemon_session_reused = Some(reused);
 
@@ -761,7 +806,22 @@ impl DaemonRuntime {
 
             Ok((kind, operation, data))
         } else {
-            invoke_with_adapter(&resolved.adapter, &request).await
+            if protocol == "mcp" {
+                if let Some(live_result) = invoke_live_stdio_mcp_help(
+                    self,
+                    &request,
+                    auth_profile.as_ref(),
+                    cache_for_mcp.clone(),
+                )
+                .await?
+                {
+                    Ok(live_result)
+                } else {
+                    invoke_with_adapter(&resolved.adapter, &request).await
+                }
+            } else {
+                invoke_with_adapter(&resolved.adapter, &request).await
+            }
         };
 
         // If invocation failed, attempt a stale-cache fallback even when protocol detection
@@ -810,6 +870,7 @@ impl DaemonRuntime {
                                     prepared_args,
                                     auth_profile.clone(),
                                     None,
+                                    cache_for_fallback.clone(),
                                 )
                                 .await?;
                             meta.daemon_session_reused = Some(reused);
@@ -917,6 +978,7 @@ impl DaemonRuntime {
         args: HashMap<String, Value>,
         auth_profile: Option<Profile>,
         precomputed_stdio_spawn_options: Option<adapters::mcp::StdioSpawnOptions>,
+        cache: Arc<dyn Cache>,
     ) -> Result<(String, Option<String>, Value, bool)> {
         let endpoint = &request.endpoint;
         let op = request
@@ -940,12 +1002,8 @@ impl DaemonRuntime {
                         .unwrap_or_default()
                 }
             };
-            let key = format!(
-                "stdio:{}:{}:{}",
-                endpoint,
-                auth_fingerprint(auth_profile.as_ref()),
-                stdio_env_fingerprint(&request.options.inject_env, auth_profile.as_ref())?
-            );
+            let key =
+                stdio_session_key(endpoint, auth_profile.as_ref(), &request.options.inject_env)?;
             let (session, reused) = self
                 .mcp
                 .get_or_create_stdio(
@@ -959,6 +1017,9 @@ impl DaemonRuntime {
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
             let result = guard.client.call_tool(op, arguments).await?;
+            let _ = guard
+                .mark_tools_dirty_from_notifications(endpoint, &cache)
+                .await;
             Ok((
                 "call_result".to_string(),
                 Some(op.clone()),
@@ -1524,6 +1585,19 @@ fn stdio_env_fingerprint(specs: &[InjectEnvSpec], profile: Option<&Profile>) -> 
     fingerprint_injected_env(specs, profile)
 }
 
+fn stdio_session_key(
+    endpoint: &str,
+    profile: Option<&Profile>,
+    inject_env: &[InjectEnvSpec],
+) -> Result<String> {
+    Ok(format!(
+        "stdio:{}:{}:{}",
+        endpoint,
+        auth_fingerprint(profile),
+        stdio_env_fingerprint(inject_env, profile)?
+    ))
+}
+
 fn build_stdio_spawn_options(
     endpoint: &str,
     options: &RuntimeInvokeOptions,
@@ -1840,6 +1914,78 @@ async fn invoke_with_adapter(
     }
 }
 
+async fn invoke_live_stdio_mcp_help(
+    runtime: &DaemonRuntime,
+    request: &RuntimeInvokeRequest,
+    auth_profile: Option<&Profile>,
+    cache: Arc<dyn Cache>,
+) -> Result<Option<(String, Option<String>, Value)>> {
+    if !matches!(
+        request.action,
+        RuntimeAction::HostHelp | RuntimeAction::OperationHelp
+    ) {
+        return Ok(None);
+    }
+
+    if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+        return Ok(None);
+    }
+
+    let session_key =
+        stdio_session_key(&request.endpoint, auth_profile, &request.options.inject_env)?;
+    let Some(session) = runtime.mcp.get_stdio(&session_key).await else {
+        return Ok(None);
+    };
+
+    let mut guard = session.lock().await;
+    guard.last_used = Instant::now();
+    let _ = guard
+        .mark_tools_dirty_from_notifications(&request.endpoint, &cache)
+        .await;
+    let tools = guard
+        .refresh_tools_if_needed(&request.endpoint, &cache)
+        .await?;
+
+    match request.action {
+        RuntimeAction::HostHelp => {
+            let operations = tools
+                .iter()
+                .map(operation_from_mcp_tool)
+                .collect::<Vec<_>>();
+            let summaries = operations
+                .iter()
+                .map(|op| to_operation_summary("mcp", op))
+                .collect::<Vec<_>>();
+            let mut payload = json!({
+                "operations": summaries,
+                "count": summaries.len(),
+                "examples": host_help_examples(request.options.link_name.as_deref()),
+            });
+            let service = live_stdio_service_summary(&guard.client);
+            if let Some(service) = service {
+                payload["service"] = serde_json::to_value(service)?;
+            }
+            Ok(Some(("host_help".to_string(), None, payload)))
+        }
+        RuntimeAction::OperationHelp => {
+            let op = request
+                .operation_id
+                .as_ref()
+                .ok_or_else(|| anyhow!("operation_id is required"))?;
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == *op)
+                .ok_or_else(|| UxcError::OperationNotFound(op.clone()))?;
+            Ok(Some((
+                "operation_detail".to_string(),
+                Some(op.clone()),
+                serde_json::to_value(operation_detail_from_mcp_tool(tool))?,
+            )))
+        }
+        RuntimeAction::Execute => Ok(None),
+    }
+}
+
 async fn prepare_runtime_execute_args(
     adapter: &AdapterEnum,
     request: &RuntimeInvokeRequest,
@@ -1885,6 +2031,44 @@ async fn host_help_service_summary(
         return Ok(None);
     }
     Ok(Some(ServiceSummary { name, description }))
+}
+
+fn live_stdio_service_summary(client: &adapters::mcp::McpStdioClient) -> Option<ServiceSummary> {
+    let name = client.server_info().map(|info| info.name.clone());
+    let description = client.instructions().map(ToString::to_string);
+    if name.is_none() && description.is_none() {
+        return None;
+    }
+    Some(ServiceSummary { name, description })
+}
+
+fn operation_from_mcp_tool(tool: &adapters::mcp::types::Tool) -> Operation {
+    Operation {
+        operation_id: tool.name.clone(),
+        display_name: tool.name.clone(),
+        description: Some(tool.description.clone()),
+        parameters: tool
+            .inputSchema
+            .as_ref()
+            .map(adapters::mcp::parse_schema_to_parameters_for_daemon)
+            .unwrap_or_default(),
+        return_type: Some("ToolContent".to_string()),
+    }
+}
+
+fn operation_detail_from_mcp_tool(tool: &adapters::mcp::types::Tool) -> adapters::OperationDetail {
+    adapters::OperationDetail {
+        operation_id: tool.name.clone(),
+        display_name: tool.name.clone(),
+        description: Some(tool.description.clone()),
+        parameters: tool
+            .inputSchema
+            .as_ref()
+            .map(adapters::mcp::parse_schema_to_parameters_for_daemon)
+            .unwrap_or_default(),
+        return_type: Some("ToolContent".to_string()),
+        input_schema: tool.inputSchema.clone(),
+    }
 }
 
 fn to_operation_summary(protocol: &str, op: &Operation) -> OperationSummary {

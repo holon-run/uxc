@@ -116,6 +116,24 @@ impl McpStdioClient {
         self.transport.start_kill();
     }
 
+    pub async fn take_tool_list_changed(&mut self) -> bool {
+        let notifications = self.transport.drain_notifications().await;
+        let mut tool_list_changed = false;
+
+        for notification in notifications {
+            if notification.method == "notifications/tools/list_changed" {
+                tool_list_changed = true;
+            } else {
+                tracing::debug!(
+                    method = %notification.method,
+                    "Ignoring unsupported MCP stdio notification"
+                );
+            }
+        }
+
+        tool_list_changed
+    }
+
     /// List available tools
     pub async fn list_tools(&mut self) -> Result<Vec<Tool>> {
         if !self.supports_tools() {

@@ -153,7 +153,8 @@ fn create_router(state: ServerState) -> Router {
             Scenario::Ok
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
-            | Scenario::StructuredContent => Ok(Json(json!({"status": "ok"})).into_response()),
+            | Scenario::StructuredContent
+            | Scenario::DynamicToolset => Ok(Json(json!({"status": "ok"})).into_response()),
             Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
             Scenario::Malformed => {
                 // Return invalid JSON
@@ -175,7 +176,8 @@ fn create_router(state: ServerState) -> Router {
             Scenario::Ok
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
-            | Scenario::StructuredContent => {
+            | Scenario::StructuredContent
+            | Scenario::DynamicToolset => {
                 let users = vec![
                     json!({"id": 1, "name": "Alice", "email": "alice@example.com"}),
                     json!({"id": 2, "name": "Bob", "email": "bob@example.com"}),
@@ -203,7 +205,8 @@ fn create_router(state: ServerState) -> Router {
             Scenario::Ok
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
-            | Scenario::StructuredContent => {
+            | Scenario::StructuredContent
+            | Scenario::DynamicToolset => {
                 let name = payload
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -239,7 +242,8 @@ fn create_router(state: ServerState) -> Router {
             Scenario::Ok
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
-            | Scenario::StructuredContent => {
+            | Scenario::StructuredContent
+            | Scenario::DynamicToolset => {
                 if id == 1 {
                     Ok(
                         Json(json!({"id": 1, "name": "Alice", "email": "alice@example.com"}))

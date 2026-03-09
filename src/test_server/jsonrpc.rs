@@ -158,7 +158,8 @@ async fn execute_method(
         Scenario::Ok
         | Scenario::ToolsListFailAfterFirst
         | Scenario::ToolCallTimeout
-        | Scenario::StructuredContent => {
+        | Scenario::StructuredContent
+        | Scenario::DynamicToolset => {
             let result = match method {
                 "rpc.discover" => schema_value(),
                 "health" => json!({"status": "ok"}),

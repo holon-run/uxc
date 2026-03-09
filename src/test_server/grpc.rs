@@ -27,7 +27,8 @@ impl addsvc::add_server::Add for AddService {
             Scenario::Ok
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
-            | Scenario::StructuredContent => {
+            | Scenario::StructuredContent
+            | Scenario::DynamicToolset => {
                 let req = request.into_inner();
                 Ok(Response::new(addsvc::SumReply { v: req.a + req.b }))
             }
