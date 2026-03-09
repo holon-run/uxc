@@ -8,6 +8,7 @@ use crate::auth::{oauth, AuthType, Profile};
 use crate::error::UxcError;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -26,6 +27,11 @@ pub struct OpenAPIAdapter {
 }
 
 impl OpenAPIAdapter {
+    const PATH_SEGMENT_ENCODE_SET: &'static AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
     const MAX_SCHEMA_EXPANSION_DEPTH: usize = 8;
     const SCHEMA_ENDPOINTS: [&'static str; 7] = [
         "/openapi.json",
@@ -396,8 +402,8 @@ impl OpenAPIAdapter {
         let mut seen = HashSet::new();
 
         for source in [
-            path_item.get("parameters").and_then(|p| p.as_array()),
             operation_spec.get("parameters").and_then(|p| p.as_array()),
+            path_item.get("parameters").and_then(|p| p.as_array()),
         ]
         .into_iter()
         .flatten()
@@ -555,6 +561,7 @@ impl OpenAPIAdapter {
     }
 
     fn prepare_request(
+        method: &str,
         base_url: &str,
         path_template: &str,
         path_item: &Value,
@@ -569,8 +576,8 @@ impl OpenAPIAdapter {
         let mut seen = HashSet::new();
 
         for source in [
-            path_item.get("parameters").and_then(|p| p.as_array()),
             operation_spec.get("parameters").and_then(|p| p.as_array()),
+            path_item.get("parameters").and_then(|p| p.as_array()),
         ]
         .into_iter()
         .flatten()
@@ -589,10 +596,14 @@ impl OpenAPIAdapter {
                     continue;
                 }
 
-                let required = resolved
-                    .get("required")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
+                let required = if location == "path" {
+                    true
+                } else {
+                    resolved
+                        .get("required")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false)
+                };
                 let value = remaining.remove(name);
                 if required && value.is_none() {
                     anyhow::bail!("Missing required parameter '{}'", name);
@@ -604,7 +615,10 @@ impl OpenAPIAdapter {
 
                 match location {
                     "path" => {
-                        resolved_path = resolved_path.replace(&format!("{{{}}}", name), &rendered);
+                        resolved_path = resolved_path.replace(
+                            &format!("{{{}}}", name),
+                            &Self::encode_path_param_value(&rendered),
+                        );
                     }
                     "query" => query_pairs.push((name.to_string(), rendered)),
                     "header" => headers.push((name.to_string(), rendered)),
@@ -632,7 +646,19 @@ impl OpenAPIAdapter {
             None => (None, None),
         };
 
+        let has_parameter_schema = !seen.is_empty();
         if body_config.is_none() {
+            if Self::method_prefers_implicit_json_body(method) && !has_parameter_schema {
+                let body = Self::json_body_from_remaining(&mut remaining)?;
+                return Ok(PreparedRequest {
+                    url: format!("{}{}", base_url.trim_end_matches('/'), resolved_path),
+                    headers,
+                    query_pairs,
+                    json_body: Some(body),
+                    form_body: None,
+                });
+            }
+
             query_pairs.extend(Self::query_pairs_from_remaining(&mut remaining)?);
         } else if !remaining.is_empty() {
             anyhow::bail!(
@@ -671,6 +697,14 @@ impl OpenAPIAdapter {
             return Ok(content.keys().next().cloned());
         }
         Ok(None)
+    }
+
+    fn encode_path_param_value(value: &str) -> String {
+        utf8_percent_encode(value, Self::PATH_SEGMENT_ENCODE_SET).to_string()
+    }
+
+    fn method_prefers_implicit_json_body(method: &str) -> bool {
+        matches!(method, "post" | "put" | "patch")
     }
 
     fn json_body_from_remaining(remaining: &mut HashMap<String, Value>) -> Result<Value> {
@@ -933,8 +967,15 @@ impl Adapter for OpenAPIAdapter {
         let operation_spec = path_item
             .get(&method)
             .ok_or_else(|| UxcError::OperationNotFound(operation.to_string()))?;
-        let prepared =
-            Self::prepare_request(url, &path, path_item, operation_spec, &schema, &args)?;
+        let prepared = Self::prepare_request(
+            &method,
+            url,
+            &path,
+            path_item,
+            operation_spec,
+            &schema,
+            &args,
+        )?;
         let prepared_url = prepared.url.clone();
         let prepared_headers = prepared.headers.clone();
         let prepared_query_pairs = prepared.query_pairs.clone();
@@ -1049,6 +1090,7 @@ impl Adapter for OpenAPIAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn swagger_doc() -> &'static str {
         r#"{
@@ -1339,5 +1381,164 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["status"], "ok");
+    }
+
+    #[test]
+    fn prepare_request_prefers_operation_parameters_over_path_item_parameters() {
+        let root = json!({});
+        let path_item = json!({
+            "parameters": [
+                {"name": "expand", "in": "query", "required": false}
+            ]
+        });
+        let operation = json!({
+            "parameters": [
+                {"name": "expand", "in": "query", "required": true}
+            ]
+        });
+
+        let err = OpenAPIAdapter::prepare_request(
+            "get",
+            "https://example.com",
+            "/pets",
+            &path_item,
+            &operation,
+            &root,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("Missing required parameter 'expand'"));
+    }
+
+    #[test]
+    fn prepare_request_requires_and_encodes_path_parameters() {
+        let root = json!({});
+        let path_item = json!({});
+        let operation = json!({
+            "parameters": [
+                {"name": "pet_id", "in": "path"}
+            ]
+        });
+
+        let err = OpenAPIAdapter::prepare_request(
+            "get",
+            "https://example.com",
+            "/pets/{pet_id}",
+            &path_item,
+            &operation,
+            &root,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Missing required parameter 'pet_id'"));
+
+        let mut args = HashMap::new();
+        args.insert(
+            "pet_id".to_string(),
+            Value::String("cats/dogs?x#y".to_string()),
+        );
+        let prepared = OpenAPIAdapter::prepare_request(
+            "get",
+            "https://example.com",
+            "/pets/{pet_id}",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.url, "https://example.com/pets/cats%2Fdogs%3Fx%23y");
+    }
+
+    #[test]
+    fn prepare_request_splits_query_params_and_json_body_by_schema() {
+        let root = json!({});
+        let path_item = json!({});
+        let operation = json!({
+            "parameters": [
+                {"name": "symbol", "in": "query", "required": true},
+                {"name": "x-trace-id", "in": "header"}
+            ],
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {"type": "object"}
+                    }
+                }
+            }
+        });
+
+        let mut args = HashMap::new();
+        args.insert("symbol".to_string(), Value::String("BTCUSDT".to_string()));
+        args.insert(
+            "x-trace-id".to_string(),
+            Value::String("trace-1".to_string()),
+        );
+        args.insert("side".to_string(), Value::String("BUY".to_string()));
+        args.insert("quantity".to_string(), Value::String("1".to_string()));
+
+        let prepared = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://example.com",
+            "/orders",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.url, "https://example.com/orders");
+        assert_eq!(
+            prepared.query_pairs,
+            vec![("symbol".to_string(), "BTCUSDT".to_string())]
+        );
+        assert_eq!(
+            prepared.headers,
+            vec![("x-trace-id".to_string(), "trace-1".to_string())]
+        );
+        assert_eq!(
+            prepared.json_body,
+            Some(json!({"quantity": "1", "side": "BUY"}))
+        );
+        assert!(prepared.form_body.is_none());
+    }
+
+    #[test]
+    fn prepare_request_uses_implicit_json_body_for_post_without_schema_hints() {
+        let root = json!({});
+        let path_item = json!({});
+        let operation = json!({});
+
+        let mut args = HashMap::new();
+        args.insert("name".to_string(), Value::String("John".to_string()));
+        args.insert(
+            "email".to_string(),
+            Value::String("john@example.com".to_string()),
+        );
+
+        let prepared = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://example.com",
+            "/users",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.url, "https://example.com/users");
+        assert!(prepared.query_pairs.is_empty());
+        assert_eq!(
+            prepared.json_body,
+            Some(json!({"email": "john@example.com", "name": "John"}))
+        );
     }
 }

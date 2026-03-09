@@ -388,7 +388,7 @@ mod tests {
     fn test_cache_config_builder_default() {
         let config = CacheConfigBuilder::from_cli_flags(false, None);
         // Should load from file or use defaults
-        assert!(config.enabled || config.ttl > 0 || !config.enabled);
+        assert!(config.ttl > 0);
     }
 
     #[test]

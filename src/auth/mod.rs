@@ -576,6 +576,10 @@ impl Profile {
             return Ok(Vec::new());
         }
 
+        if self.signer.is_some() || self.api_key.is_empty() {
+            return Ok(Vec::new());
+        }
+
         Ok(vec![("x-api-key".to_string(), self.api_key.clone())])
     }
 
@@ -1122,7 +1126,14 @@ fn validate_ready(profile: &Profile) -> Result<()> {
             }
         }
         AuthType::ApiKey => {
-            if profile.has_custom_api_key_headers() || profile.has_custom_api_key_query_params() {
+            let requires_primary_secret = if profile.has_custom_api_key_headers()
+                || profile.has_custom_api_key_query_params()
+            {
+                profile.api_key_injections_require_secret()
+            } else {
+                profile.signer.is_none()
+            };
+            if !requires_primary_secret {
                 return Ok(());
             }
             if profile.api_key.is_empty() {
@@ -1304,7 +1315,7 @@ fn template_has_secret(template: &str) -> bool {
     match parse_template_tokens(template) {
         Ok(tokens) => tokens
             .iter()
-            .any(|token| matches!(token, TemplateToken::Secret | TemplateToken::Field(_))),
+            .any(|token| matches!(token, TemplateToken::Secret)),
         Err(_) => false,
     }
 }
@@ -1376,9 +1387,17 @@ fn render_template(template: &str, profile: &Profile, target: &str) -> Result<St
                     target
                 );
             };
+            if value.is_empty() {
+                anyhow::bail!(
+                    "Credential '{}' requires a non-empty secret for '{{{{secret}}}}' {} template",
+                    profile.name.as_deref().unwrap_or("unknown"),
+                    target
+                );
+            }
             rendered.push_str(&value);
         } else if let Some(field_name) = raw.strip_prefix("field:") {
             let field_name = validate_field_name(field_name.trim())?;
+            debug_assert!(validate_field_name(&field_name).is_ok());
             let Some(value) = profile.resolve_field_value(&field_name)? else {
                 anyhow::bail!(
                     "Credential '{}' is missing field '{}' required by {} template",
@@ -1619,31 +1638,15 @@ fn current_timestamp(unit: &TimestampUnit) -> String {
 }
 
 fn hmac_sha256(secret: &str, data: &[u8]) -> Vec<u8> {
-    use sha2::{Digest, Sha256};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
 
-    const BLOCK_SIZE: usize = 64;
-    let mut key = secret.as_bytes().to_vec();
-    if key.len() > BLOCK_SIZE {
-        key = Sha256::digest(&key).to_vec();
-    }
-    key.resize(BLOCK_SIZE, 0);
+    type HmacSha256 = Hmac<Sha256>;
 
-    let mut inner_pad = vec![0x36u8; BLOCK_SIZE];
-    let mut outer_pad = vec![0x5cu8; BLOCK_SIZE];
-    for index in 0..BLOCK_SIZE {
-        inner_pad[index] ^= key[index];
-        outer_pad[index] ^= key[index];
-    }
-
-    let mut inner = Sha256::new();
-    inner.update(&inner_pad);
-    inner.update(data);
-    let inner_digest = inner.finalize();
-
-    let mut outer = Sha256::new();
-    outer.update(&outer_pad);
-    outer.update(inner_digest);
-    outer.finalize().to_vec()
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .expect("HMAC-SHA256 accepts arbitrary key sizes");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
 }
 
 fn encode_signature(bytes: &[u8], encoding: &SignatureEncoding) -> String {
@@ -2124,6 +2127,25 @@ mod tests {
     }
 
     #[test]
+    fn resolved_api_key_headers_skip_default_when_signer_is_present() {
+        let mut profile = Profile::new(String::new(), AuthType::ApiKey);
+        profile.signer = Some(AuthSignerConfig::HmacQueryV1(HmacQuerySignerConfig {
+            algorithm: SignerAlgorithm::HmacSha256,
+            signing_field: "secret_key".to_string(),
+            key_field: Some("api_key".to_string()),
+            key_placement: Some(SignerValuePlacement::Header),
+            key_name: Some("X-MBX-APIKEY".to_string()),
+            signature_param: "signature".to_string(),
+            signature_encoding: SignatureEncoding::Hex,
+            timestamp_param: None,
+            timestamp_unit: None,
+            canonicalization: QueryCanonicalization::default(),
+        }));
+
+        assert!(profile.resolved_api_key_headers().unwrap().is_empty());
+    }
+
+    #[test]
     fn parse_field_spec_supports_explicit_sources() {
         let (name, source) = parse_field_spec("api_key=env:BINANCE_API_KEY").unwrap();
         assert_eq!(name, "api_key");
@@ -2184,5 +2206,101 @@ mod tests {
             &SignatureEncoding::Hex,
         );
         assert!(url.contains(&format!("signature={}", expected)));
+    }
+
+    #[test]
+    fn render_secret_template_rejects_empty_secret() {
+        let header = AuthHeader::parse("X-API-Key={{secret}}").unwrap();
+        let mut profile = Profile::new(String::new(), AuthType::ApiKey);
+        profile.secret_source = Some(SecretSource::Literal {
+            value: String::new(),
+        });
+
+        let err = header.render_value(&profile).unwrap_err();
+        assert!(err.to_string().contains("non-empty secret"));
+    }
+
+    #[test]
+    fn validate_signer_config_rejects_invalid_field_name() {
+        let err = validate_signer_config(&AuthSignerConfig::HmacQueryV1(HmacQuerySignerConfig {
+            algorithm: SignerAlgorithm::HmacSha256,
+            signing_field: "secret key".to_string(),
+            key_field: None,
+            key_placement: None,
+            key_name: None,
+            signature_param: "signature".to_string(),
+            signature_encoding: SignatureEncoding::Hex,
+            timestamp_param: None,
+            timestamp_unit: None,
+            canonicalization: QueryCanonicalization::default(),
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Invalid field name"));
+    }
+
+    #[test]
+    fn validate_signer_config_rejects_invalid_signature_param() {
+        let err = validate_signer_config(&AuthSignerConfig::HmacQueryV1(HmacQuerySignerConfig {
+            algorithm: SignerAlgorithm::HmacSha256,
+            signing_field: "secret_key".to_string(),
+            key_field: None,
+            key_placement: None,
+            key_name: None,
+            signature_param: "bad=name".to_string(),
+            signature_encoding: SignatureEncoding::Hex,
+            timestamp_param: None,
+            timestamp_unit: None,
+            canonicalization: QueryCanonicalization::default(),
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Invalid query param name"));
+    }
+
+    #[test]
+    fn validate_signer_config_requires_complete_key_injection_triplet() {
+        let err = validate_signer_config(&AuthSignerConfig::HmacQueryV1(HmacQuerySignerConfig {
+            algorithm: SignerAlgorithm::HmacSha256,
+            signing_field: "secret_key".to_string(),
+            key_field: Some("api_key".to_string()),
+            key_placement: Some(SignerValuePlacement::Header),
+            key_name: None,
+            signature_param: "signature".to_string(),
+            signature_encoding: SignatureEncoding::Hex,
+            timestamp_param: None,
+            timestamp_unit: None,
+            canonicalization: QueryCanonicalization::default(),
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("set together"));
+    }
+
+    #[test]
+    fn validate_ready_allows_signer_only_api_key_credentials() {
+        let mut profile = Profile::new(String::new(), AuthType::ApiKey);
+        profile
+            .set_field_source(
+                "secret_key".to_string(),
+                SecretSource::Literal {
+                    value: "super-secret".to_string(),
+                },
+            )
+            .unwrap();
+        profile.signer = Some(AuthSignerConfig::HmacQueryV1(HmacQuerySignerConfig {
+            algorithm: SignerAlgorithm::HmacSha256,
+            signing_field: "secret_key".to_string(),
+            key_field: None,
+            key_placement: None,
+            key_name: None,
+            signature_param: "signature".to_string(),
+            signature_encoding: SignatureEncoding::Hex,
+            timestamp_param: Some("timestamp".to_string()),
+            timestamp_unit: Some(TimestampUnit::Milliseconds),
+            canonicalization: QueryCanonicalization::default(),
+        }));
+
+        validate_ready(&profile).unwrap();
     }
 }

@@ -315,6 +315,35 @@ fn auth_binding_add_supports_signer_json() {
     );
 }
 
+#[test]
+fn auth_binding_add_rejects_invalid_signer_json() {
+    let files = AuthFiles::new();
+    create_test_credential(&files, "binance");
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("binding")
+        .arg("add")
+        .arg("--id")
+        .arg("invalid-signer")
+        .arg("--host")
+        .arg("api.binance.com")
+        .arg("--credential")
+        .arg("binance")
+        .arg("--signer-json")
+        .arg(r#"{"kind":"hmac_query_v1","algorithm":"hmac_sha256"}"#)
+        .output()
+        .expect("binding add should run");
+
+    assert!(!output.status.success(), "binding add should fail");
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], false);
+    assert!(json["error"]["message"]
+        .as_str()
+        .expect("error message should be present")
+        .contains("Invalid --signer-json payload"));
+}
+
 #[cfg(unix)]
 #[test]
 fn auth_bindings_file_permissions_are_0600() {
@@ -445,6 +474,31 @@ fn auth_credential_set_supports_named_fields() {
         .expect("secret_key field should be present");
     assert_eq!(api_key["source_kind"], "env");
     assert_eq!(secret_key["source_kind"], "op");
+}
+
+#[test]
+fn auth_credential_set_rejects_fields_for_oauth_credentials() {
+    let files = AuthFiles::new();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("oauth-demo")
+        .arg("--auth-type")
+        .arg("oauth")
+        .arg("--field")
+        .arg("client_secret=env:CLIENT_SECRET")
+        .output()
+        .expect("credential set should run");
+
+    assert!(!output.status.success(), "credential set should fail");
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], false);
+    assert!(json["error"]["message"]
+        .as_str()
+        .expect("error message should be present")
+        .contains("--field is not supported for OAuth credentials"));
 }
 
 #[test]

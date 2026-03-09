@@ -224,6 +224,7 @@ enum AuthCommands {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum AuthCredentialCommands {
     /// List all credentials
     List,
@@ -3342,7 +3343,15 @@ async fn handle_auth_credential_command(
                 profile_obj.auth_query_params = Some(auth_query_params);
             }
 
-            if !field.is_empty() {
+            if resolved_auth_type == AuthType::OAuth {
+                profile_obj.clear_fields();
+                if !field.is_empty() {
+                    return Err(UxcError::InvalidArguments(
+                        "--field is not supported for OAuth credentials".to_string(),
+                    )
+                    .into());
+                }
+            } else if !field.is_empty() {
                 profile_obj.clear_fields();
                 for spec in field {
                     let (name, source) = crate::auth::parse_field_spec(spec)
@@ -3368,7 +3377,7 @@ async fn handle_auth_credential_command(
                     {
                         profile_obj.api_key_injections_require_secret()
                     } else {
-                        true
+                        profile_obj.fields.is_empty()
                     }
                 } else {
                     true
