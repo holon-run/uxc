@@ -1,0 +1,1482 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Binance Spot API",
+    "version": "1.0.0",
+    "description": "Curated OpenAPI schema for high-value Binance Spot market, account, and order endpoints."
+  },
+  "servers": [
+    {
+      "url": "https://api.binance.com"
+    },
+    {
+      "url": "https://testnet.binance.vision"
+    }
+  ],
+  "paths": {
+    "/api/v3/ping": {
+      "get": {
+        "operationId": "ping",
+        "summary": "Test connectivity",
+        "responses": {
+          "200": {
+            "description": "Connectivity check response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/time": {
+      "get": {
+        "operationId": "getServerTime",
+        "summary": "Check server time",
+        "responses": {
+          "200": {
+            "description": "Server time",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "serverTime": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "serverTime"
+                  ],
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/exchangeInfo": {
+      "get": {
+        "operationId": "getExchangeInfo",
+        "summary": "Exchange information",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "symbols",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "JSON-style symbols array accepted by Binance."
+            }
+          },
+          {
+            "name": "permissions",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "showPermissionSets",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "symbolStatus",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/SymbolStatus"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exchange information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExchangeInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/avgPrice": {
+      "get": {
+        "operationId": "getAveragePrice",
+        "summary": "Current average price",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Average price",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "mins": {
+                      "type": "integer"
+                    },
+                    "price": {
+                      "type": "string"
+                    },
+                    "closeTime": {
+                      "type": "integer"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/depth": {
+      "get": {
+        "operationId": "getOrderBook",
+        "summary": "Order book",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          },
+          {
+            "name": "symbolStatus",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/SymbolStatus"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order book",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "lastUpdateId": {
+                      "type": "integer"
+                    },
+                    "bids": {
+                      "$ref": "#/components/schemas/PriceLevelArray"
+                    },
+                    "asks": {
+                      "$ref": "#/components/schemas/PriceLevelArray"
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/klines": {
+      "get": {
+        "operationId": "getKlines",
+        "summary": "Kline candlestick data",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "interval",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/KlineInterval"
+            }
+          },
+          {
+            "name": "startTime",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "endTime",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "timeZone",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Kline rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KlineRow"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/ticker/24hr": {
+      "get": {
+        "operationId": "getTicker24hr",
+        "summary": "24hr ticker price change statistics",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "symbols",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/TickerType"
+            }
+          },
+          {
+            "name": "symbolStatus",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/SymbolStatus"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "24hr ticker stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Ticker24hr"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Ticker24hr"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/ticker/price": {
+      "get": {
+        "operationId": "getTickerPrice",
+        "summary": "Symbol price ticker",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "symbols",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "symbolStatus",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/SymbolStatus"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ticker price result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/TickerPrice"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TickerPrice"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/trades": {
+      "get": {
+        "operationId": "getRecentTrades",
+        "summary": "Recent trades list",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent trades",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RecentTrade"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/account": {
+      "get": {
+        "operationId": "getAccount",
+        "summary": "Account information",
+        "parameters": [
+          {
+            "name": "omitZeroBalances",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "recvWindow",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RecvWindow"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/openOrders": {
+      "get": {
+        "operationId": "getOpenOrders",
+        "summary": "Current open orders",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recvWindow",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RecvWindow"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Open orders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Order"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "cancelOpenOrders",
+        "summary": "Cancel all open orders on a symbol",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recvWindow",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RecvWindow"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel all open orders result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/order/test": {
+      "post": {
+        "operationId": "testOrder",
+        "summary": "Test new order",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderSymbol"
+          },
+          {
+            "$ref": "#/components/parameters/OrderSide"
+          },
+          {
+            "$ref": "#/components/parameters/OrderType"
+          },
+          {
+            "$ref": "#/components/parameters/TimeInForce"
+          },
+          {
+            "$ref": "#/components/parameters/Quantity"
+          },
+          {
+            "$ref": "#/components/parameters/QuoteOrderQty"
+          },
+          {
+            "$ref": "#/components/parameters/Price"
+          },
+          {
+            "$ref": "#/components/parameters/NewClientOrderId"
+          },
+          {
+            "$ref": "#/components/parameters/RecvWindow"
+          },
+          {
+            "name": "newOrderRespType",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/NewOrderRespType"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Test order result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/order": {
+      "get": {
+        "operationId": "getOrder",
+        "summary": "Query order",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "orderId",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "origClientOrderId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recvWindow",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RecvWindow"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createOrder",
+        "summary": "New order",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderSymbol"
+          },
+          {
+            "$ref": "#/components/parameters/OrderSide"
+          },
+          {
+            "$ref": "#/components/parameters/OrderType"
+          },
+          {
+            "$ref": "#/components/parameters/TimeInForce"
+          },
+          {
+            "$ref": "#/components/parameters/Quantity"
+          },
+          {
+            "$ref": "#/components/parameters/QuoteOrderQty"
+          },
+          {
+            "$ref": "#/components/parameters/Price"
+          },
+          {
+            "$ref": "#/components/parameters/NewClientOrderId"
+          },
+          {
+            "$ref": "#/components/parameters/RecvWindow"
+          },
+          {
+            "name": "newOrderRespType",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/NewOrderRespType"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order placement result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "cancelOrder",
+        "summary": "Cancel order",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "orderId",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "origClientOrderId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "newClientOrderId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cancelRestrictions",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/CancelRestrictions"
+            }
+          },
+          {
+            "name": "recvWindow",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RecvWindow"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel order result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/allOrders": {
+      "get": {
+        "operationId": "getAllOrders",
+        "summary": "All orders",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "orderId",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "startTime",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "endTime",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 500
+            }
+          },
+          {
+            "name": "recvWindow",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RecvWindow"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "All orders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Order"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/myTrades": {
+      "get": {
+        "operationId": "getMyTrades",
+        "summary": "Account trade list",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "orderId",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "startTime",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "endTime",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "fromId",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 500
+            }
+          },
+          {
+            "name": "recvWindow",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RecvWindow"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account trades",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Trade"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v3/rateLimit/order": {
+      "get": {
+        "operationId": "getOrderRateLimit",
+        "summary": "Query current order count usage",
+        "parameters": [
+          {
+            "name": "recvWindow",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RecvWindow"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order count usage",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "rateLimitType": {
+                        "type": "string"
+                      },
+                      "interval": {
+                        "type": "string"
+                      },
+                      "intervalNum": {
+                        "type": "integer"
+                      },
+                      "limit": {
+                        "type": "integer"
+                      },
+                      "count": {
+                        "type": "integer"
+                      }
+                    },
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "OrderSymbol": {
+        "name": "symbol",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "OrderSide": {
+        "name": "side",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/OrderSide"
+        }
+      },
+      "OrderType": {
+        "name": "type",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/OrderType"
+        }
+      },
+      "TimeInForce": {
+        "name": "timeInForce",
+        "in": "query",
+        "schema": {
+          "$ref": "#/components/schemas/TimeInForce"
+        }
+      },
+      "Quantity": {
+        "name": "quantity",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "QuoteOrderQty": {
+        "name": "quoteOrderQty",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Price": {
+        "name": "price",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "NewClientOrderId": {
+        "name": "newClientOrderId",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "RecvWindow": {
+        "name": "recvWindow",
+        "in": "query",
+        "schema": {
+          "$ref": "#/components/schemas/RecvWindow"
+        }
+      }
+    },
+    "schemas": {
+      "RecvWindow": {
+        "type": "number",
+        "description": "Binance recvWindow in milliseconds, up to 60000 and may contain decimal precision."
+      },
+      "KlineInterval": {
+        "type": "string",
+        "enum": [
+          "1s",
+          "1m",
+          "3m",
+          "5m",
+          "15m",
+          "30m",
+          "1h",
+          "2h",
+          "4h",
+          "6h",
+          "8h",
+          "12h",
+          "1d",
+          "3d",
+          "1w",
+          "1M"
+        ]
+      },
+      "TickerType": {
+        "type": "string",
+        "enum": [
+          "FULL",
+          "MINI"
+        ]
+      },
+      "SymbolStatus": {
+        "type": "string",
+        "enum": [
+          "TRADING",
+          "END_OF_DAY",
+          "HALT",
+          "BREAK"
+        ]
+      },
+      "OrderSide": {
+        "type": "string",
+        "enum": [
+          "BUY",
+          "SELL"
+        ]
+      },
+      "OrderType": {
+        "type": "string",
+        "enum": [
+          "LIMIT",
+          "MARKET",
+          "STOP_LOSS",
+          "STOP_LOSS_LIMIT",
+          "TAKE_PROFIT",
+          "TAKE_PROFIT_LIMIT",
+          "LIMIT_MAKER"
+        ]
+      },
+      "TimeInForce": {
+        "type": "string",
+        "enum": [
+          "GTC",
+          "IOC",
+          "FOK"
+        ]
+      },
+      "NewOrderRespType": {
+        "type": "string",
+        "enum": [
+          "ACK",
+          "RESULT",
+          "FULL"
+        ]
+      },
+      "CancelRestrictions": {
+        "type": "string",
+        "enum": [
+          "ONLY_NEW",
+          "ONLY_PARTIALLY_FILLED"
+        ]
+      },
+      "PriceLevelArray": {
+        "type": "array",
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "KlineRow": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "items": false,
+        "minItems": 12,
+        "maxItems": 12
+      },
+      "TickerPrice": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string"
+          },
+          "price": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "price"
+        ],
+        "additionalProperties": true
+      },
+      "Ticker24hr": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string"
+          },
+          "priceChange": {
+            "type": "string"
+          },
+          "priceChangePercent": {
+            "type": "string"
+          },
+          "weightedAvgPrice": {
+            "type": "string"
+          },
+          "lastPrice": {
+            "type": "string"
+          },
+          "volume": {
+            "type": "string"
+          },
+          "quoteVolume": {
+            "type": "string"
+          },
+          "openTime": {
+            "type": "integer"
+          },
+          "closeTime": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "symbol"
+        ],
+        "additionalProperties": true
+      },
+      "RecentTrade": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "price": {
+            "type": "string"
+          },
+          "qty": {
+            "type": "string"
+          },
+          "quoteQty": {
+            "type": "string"
+          },
+          "time": {
+            "type": "integer"
+          },
+          "isBuyerMaker": {
+            "type": "boolean"
+          },
+          "isBestMatch": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "Order": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string"
+          },
+          "orderId": {
+            "type": "integer"
+          },
+          "orderListId": {
+            "type": "integer"
+          },
+          "clientOrderId": {
+            "type": "string"
+          },
+          "price": {
+            "type": "string"
+          },
+          "origQty": {
+            "type": "string"
+          },
+          "executedQty": {
+            "type": "string"
+          },
+          "cummulativeQuoteQty": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "timeInForce": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "stopPrice": {
+            "type": "string"
+          },
+          "icebergQty": {
+            "type": "string"
+          },
+          "time": {
+            "type": "integer"
+          },
+          "updateTime": {
+            "type": "integer"
+          },
+          "isWorking": {
+            "type": "boolean"
+          },
+          "workingTime": {
+            "type": "integer"
+          },
+          "origQuoteOrderQty": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "orderId",
+          "status",
+          "type",
+          "side"
+        ],
+        "additionalProperties": true
+      },
+      "Trade": {
+        "type": "object",
+        "properties": {
+          "symbol": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "orderId": {
+            "type": "integer"
+          },
+          "orderListId": {
+            "type": "integer"
+          },
+          "price": {
+            "type": "string"
+          },
+          "qty": {
+            "type": "string"
+          },
+          "quoteQty": {
+            "type": "string"
+          },
+          "commission": {
+            "type": "string"
+          },
+          "commissionAsset": {
+            "type": "string"
+          },
+          "time": {
+            "type": "integer"
+          },
+          "isBuyer": {
+            "type": "boolean"
+          },
+          "isMaker": {
+            "type": "boolean"
+          },
+          "isBestMatch": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "Balance": {
+        "type": "object",
+        "properties": {
+          "asset": {
+            "type": "string"
+          },
+          "free": {
+            "type": "string"
+          },
+          "locked": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset",
+          "free",
+          "locked"
+        ]
+      },
+      "AccountInfo": {
+        "type": "object",
+        "properties": {
+          "makerCommission": {
+            "type": "integer"
+          },
+          "takerCommission": {
+            "type": "integer"
+          },
+          "buyerCommission": {
+            "type": "integer"
+          },
+          "sellerCommission": {
+            "type": "integer"
+          },
+          "canTrade": {
+            "type": "boolean"
+          },
+          "canWithdraw": {
+            "type": "boolean"
+          },
+          "canDeposit": {
+            "type": "boolean"
+          },
+          "brokered": {
+            "type": "boolean"
+          },
+          "requireSelfTradePrevention": {
+            "type": "boolean"
+          },
+          "preventSor": {
+            "type": "boolean"
+          },
+          "updateTime": {
+            "type": "integer"
+          },
+          "accountType": {
+            "type": "string"
+          },
+          "balances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Balance"
+            }
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "balances"
+        ],
+        "additionalProperties": true
+      },
+      "ExchangeInfo": {
+        "type": "object",
+        "properties": {
+          "timezone": {
+            "type": "string"
+          },
+          "serverTime": {
+            "type": "integer"
+          },
+          "rateLimits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "exchangeFilters": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "symbols": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "symbol": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "baseAsset": {
+                  "type": "string"
+                },
+                "quoteAsset": {
+                  "type": "string"
+                },
+                "filters": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              },
+              "required": [
+                "symbol",
+                "status"
+              ],
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

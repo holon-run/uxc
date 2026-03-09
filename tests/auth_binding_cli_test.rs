@@ -316,6 +316,51 @@ fn auth_binding_add_supports_signer_json() {
 }
 
 #[test]
+fn auth_binding_add_supports_ed25519_signer_json() {
+    let files = AuthFiles::new();
+
+    let set_output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("binance-ed25519")
+        .arg("--auth-type")
+        .arg("api_key")
+        .arg("--field")
+        .arg("api_key=env:BINANCE_API_KEY")
+        .arg("--field")
+        .arg("private_key=env:BINANCE_PRIVATE_KEY")
+        .output()
+        .expect("credential set should run");
+    assert!(set_output.status.success(), "credential set should succeed");
+
+    let signer = r#"{"kind":"ed25519_query_v1","algorithm":"ed25519","signing_field":"private_key","key_field":"api_key","key_placement":"header","key_name":"X-MBX-APIKEY","signature_param":"signature","signature_encoding":"base64","timestamp_param":"timestamp","timestamp_unit":"milliseconds","canonicalization":{"mode":"preserve_order"}}"#;
+    let add_output = uxc_command(&files)
+        .arg("auth")
+        .arg("binding")
+        .arg("add")
+        .arg("--id")
+        .arg("binance-ed25519")
+        .arg("--host")
+        .arg("api.binance.com")
+        .arg("--path-prefix")
+        .arg("/api/v3")
+        .arg("--scheme")
+        .arg("https")
+        .arg("--credential")
+        .arg("binance-ed25519")
+        .arg("--signer-json")
+        .arg(signer)
+        .output()
+        .expect("binding add should run");
+    assert!(add_output.status.success(), "binding add should succeed");
+
+    let add_json = parse_stdout_json(&add_output);
+    assert_eq!(add_json["data"]["signer"]["kind"], "ed25519_query_v1");
+    assert_eq!(add_json["data"]["signer"]["signing_field"], "private_key");
+}
+
+#[test]
 fn auth_binding_add_rejects_invalid_signer_json() {
     let files = AuthFiles::new();
     create_test_credential(&files, "binance");

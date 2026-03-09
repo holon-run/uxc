@@ -186,6 +186,7 @@ impl SecretSource {
 #[serde(rename_all = "snake_case")]
 pub enum SignerAlgorithm {
     HmacSha256,
+    Ed25519,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,9 +251,30 @@ pub struct HmacQuerySignerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Ed25519QuerySignerConfig {
+    pub algorithm: SignerAlgorithm,
+    pub signing_field: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_placement: Option<SignerValuePlacement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_name: Option<String>,
+    pub signature_param: String,
+    pub signature_encoding: SignatureEncoding,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_unit: Option<TimestampUnit>,
+    #[serde(default)]
+    pub canonicalization: QueryCanonicalization,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthSignerConfig {
     HmacQueryV1(HmacQuerySignerConfig),
+    Ed25519QueryV1(Ed25519QuerySignerConfig),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1159,6 +1181,9 @@ fn validate_ready(profile: &Profile) -> Result<()> {
 pub fn validate_signer_config(config: &AuthSignerConfig) -> Result<()> {
     match config {
         AuthSignerConfig::HmacQueryV1(hmac) => {
+            if hmac.algorithm != SignerAlgorithm::HmacSha256 {
+                anyhow::bail!("hmac_query_v1 signer requires algorithm=hmac_sha256");
+            }
             validate_field_name(&hmac.signing_field)?;
             validate_query_param_name(&hmac.signature_param)?;
             if let Some(timestamp_param) = &hmac.timestamp_param {
@@ -1184,6 +1209,45 @@ pub fn validate_signer_config(config: &AuthSignerConfig) -> Result<()> {
                         "hmac_query_v1 signer requires key_field, key_placement, and key_name to be set together"
                     );
                 }
+            }
+        }
+        AuthSignerConfig::Ed25519QueryV1(ed25519) => {
+            if ed25519.algorithm != SignerAlgorithm::Ed25519 {
+                anyhow::bail!("ed25519_query_v1 signer requires algorithm=ed25519");
+            }
+            validate_field_name(&ed25519.signing_field)?;
+            validate_query_param_name(&ed25519.signature_param)?;
+            if let Some(timestamp_param) = &ed25519.timestamp_param {
+                validate_query_param_name(timestamp_param)?;
+            }
+
+            match (
+                &ed25519.key_field,
+                &ed25519.key_placement,
+                &ed25519.key_name,
+            ) {
+                (None, None, None) => {}
+                (Some(field), Some(_), Some(name)) => {
+                    validate_field_name(field)?;
+                    match ed25519.key_placement {
+                        Some(SignerValuePlacement::Query) => {
+                            validate_query_param_name(name)?;
+                        }
+                        Some(SignerValuePlacement::Header) => {
+                            validate_header_name(name)?;
+                        }
+                        None => unreachable!(),
+                    };
+                }
+                _ => {
+                    anyhow::bail!(
+                        "ed25519_query_v1 signer requires key_field, key_placement, and key_name to be set together"
+                    );
+                }
+            }
+
+            if ed25519.signature_encoding != SignatureEncoding::Base64 {
+                anyhow::bail!("ed25519_query_v1 signer requires signature_encoding=base64");
             }
         }
     }
@@ -1649,6 +1713,17 @@ fn hmac_sha256(secret: &str, data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
+fn ed25519_sign(private_key_pem: &str, data: &[u8]) -> Result<Vec<u8>> {
+    use ed25519_dalek::pkcs8::DecodePrivateKey;
+    use ed25519_dalek::Signer;
+
+    let signing_key =
+        ed25519_dalek::SigningKey::from_pkcs8_pem(private_key_pem.trim()).map_err(|err| {
+            anyhow::anyhow!("Failed to parse Ed25519 private key as PKCS#8 PEM: {}", err)
+        })?;
+    Ok(signing_key.sign(data).to_bytes().to_vec())
+}
+
 fn encode_signature(bytes: &[u8], encoding: &SignatureEncoding) -> String {
     match encoding {
         SignatureEncoding::Hex => bytes.iter().map(|byte| format!("{:02x}", byte)).collect(),
@@ -1659,15 +1734,15 @@ fn encode_signature(bytes: &[u8], encoding: &SignatureEncoding) -> String {
     }
 }
 
-fn signer_header(profile: &Profile) -> Result<Option<(String, String)>> {
-    let Some(AuthSignerConfig::HmacQueryV1(config)) = profile.signer.as_ref() else {
-        return Ok(None);
-    };
-    let (Some(field_name), Some(SignerValuePlacement::Header), Some(header_name)) = (
-        config.key_field.as_ref(),
-        config.key_placement.as_ref(),
-        config.key_name.as_ref(),
-    ) else {
+fn signer_key_header(
+    key_field: Option<&String>,
+    key_placement: Option<&SignerValuePlacement>,
+    key_name: Option<&String>,
+    profile: &Profile,
+) -> Result<Option<(String, String)>> {
+    let (Some(field_name), Some(SignerValuePlacement::Header), Some(header_name)) =
+        (key_field, key_placement, key_name)
+    else {
         return Ok(None);
     };
 
@@ -1681,8 +1756,26 @@ fn signer_header(profile: &Profile) -> Result<Option<(String, String)>> {
     Ok(Some((header_name.clone(), value)))
 }
 
+fn signer_header(profile: &Profile) -> Result<Option<(String, String)>> {
+    match profile.signer.as_ref() {
+        Some(AuthSignerConfig::HmacQueryV1(config)) => signer_key_header(
+            config.key_field.as_ref(),
+            config.key_placement.as_ref(),
+            config.key_name.as_ref(),
+            profile,
+        ),
+        Some(AuthSignerConfig::Ed25519QueryV1(config)) => signer_key_header(
+            config.key_field.as_ref(),
+            config.key_placement.as_ref(),
+            config.key_name.as_ref(),
+            profile,
+        ),
+        None => Ok(None),
+    }
+}
+
 fn apply_signer_to_url(url: &str, profile: &Profile) -> Result<String> {
-    let Some(AuthSignerConfig::HmacQueryV1(config)) = profile.signer.as_ref() else {
+    let Some(config) = profile.signer.as_ref() else {
         return Ok(url.to_string());
     };
 
@@ -1693,21 +1786,60 @@ fn apply_signer_to_url(url: &str, profile: &Profile) -> Result<String> {
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .collect();
 
-    pairs.retain(|(name, _)| name != &config.signature_param);
+    let (
+        signature_param,
+        timestamp_param,
+        timestamp_unit,
+        key_field,
+        key_placement,
+        key_name,
+        signing_field,
+        signature_encoding,
+        canonicalization_mode,
+    ) = match config {
+        AuthSignerConfig::HmacQueryV1(config) => (
+            &config.signature_param,
+            config.timestamp_param.as_ref(),
+            config
+                .timestamp_unit
+                .as_ref()
+                .unwrap_or(&TimestampUnit::Milliseconds),
+            config.key_field.as_ref(),
+            config.key_placement.as_ref(),
+            config.key_name.as_ref(),
+            &config.signing_field,
+            &config.signature_encoding,
+            &config.canonicalization.mode,
+        ),
+        AuthSignerConfig::Ed25519QueryV1(config) => (
+            &config.signature_param,
+            config.timestamp_param.as_ref(),
+            config
+                .timestamp_unit
+                .as_ref()
+                .unwrap_or(&TimestampUnit::Milliseconds),
+            config.key_field.as_ref(),
+            config.key_placement.as_ref(),
+            config.key_name.as_ref(),
+            &config.signing_field,
+            &config.signature_encoding,
+            &config.canonicalization.mode,
+        ),
+    };
 
-    if let Some(timestamp_param) = &config.timestamp_param {
-        let unit = config
-            .timestamp_unit
-            .as_ref()
-            .unwrap_or(&TimestampUnit::Milliseconds);
-        upsert_query_pair(&mut pairs, timestamp_param, current_timestamp(unit));
+    pairs.retain(|(name, _)| name != signature_param);
+
+    if let Some(timestamp_param) = timestamp_param {
+        upsert_query_pair(
+            &mut pairs,
+            timestamp_param,
+            current_timestamp(timestamp_unit),
+        );
     }
 
-    if let (Some(field_name), Some(SignerValuePlacement::Query), Some(param_name)) = (
-        config.key_field.as_ref(),
-        config.key_placement.as_ref(),
-        config.key_name.as_ref(),
-    ) {
+    if let (Some(field_name), Some(SignerValuePlacement::Query), Some(param_name)) =
+        (key_field, key_placement, key_name)
+    {
         let Some(value) = profile.resolve_field_value(field_name)? else {
             anyhow::bail!(
                 "Credential '{}' is missing field '{}' required by signer query injection",
@@ -1718,24 +1850,27 @@ fn apply_signer_to_url(url: &str, profile: &Profile) -> Result<String> {
         upsert_query_pair(&mut pairs, param_name, value);
     }
 
-    let canonical_pairs = canonicalize_pairs(&pairs, &config.canonicalization.mode);
+    let canonical_pairs = canonicalize_pairs(&pairs, canonicalization_mode);
     let canonical_query = encode_query_pairs(&canonical_pairs);
-    let Some(signing_secret) = profile.resolve_field_value(&config.signing_field)? else {
+    let Some(signing_secret) = profile.resolve_field_value(signing_field)? else {
         anyhow::bail!(
             "Credential '{}' is missing signing field '{}'",
             profile.name.as_deref().unwrap_or("unknown"),
-            config.signing_field
+            signing_field
         );
     };
-    let signature = match config.algorithm {
-        SignerAlgorithm::HmacSha256 => encode_signature(
-            &hmac_sha256(&signing_secret, canonical_query.as_bytes()),
-            &config.signature_encoding,
-        ),
+    let signature_bytes = match config {
+        AuthSignerConfig::HmacQueryV1(_) => {
+            hmac_sha256(&signing_secret, canonical_query.as_bytes())
+        }
+        AuthSignerConfig::Ed25519QueryV1(_) => {
+            ed25519_sign(&signing_secret, canonical_query.as_bytes())?
+        }
     };
+    let signature = encode_signature(&signature_bytes, signature_encoding);
 
-    pairs.push((config.signature_param.clone(), signature));
-    let final_pairs = canonicalize_pairs(&pairs, &config.canonicalization.mode);
+    pairs.push((signature_param.clone(), signature));
+    let final_pairs = canonicalize_pairs(&pairs, canonicalization_mode);
     let final_query = encode_query_pairs(&final_pairs);
     parsed.set_query(Some(&final_query));
     Ok(parsed.to_string())
@@ -1910,6 +2045,9 @@ mod dirs {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    // Test-only Ed25519 key for signer unit tests. Never used in production.
+    const TEST_ED25519_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIFM839r6dC+FQ4zIFCwogFaLq3ugAG4cxQWjSZZu6Cxl\n-----END PRIVATE KEY-----";
 
     #[test]
     fn test_profile_default() {
@@ -2302,5 +2440,105 @@ mod tests {
         }));
 
         validate_ready(&profile).unwrap();
+    }
+
+    #[test]
+    fn apply_profile_auth_to_url_signs_ed25519_query_requests() {
+        let mut profile = Profile::new("unused".to_string(), AuthType::ApiKey);
+        profile
+            .set_field_source(
+                "private_key".to_string(),
+                SecretSource::Literal {
+                    value: TEST_ED25519_PRIVATE_KEY_PEM.to_string(),
+                },
+            )
+            .unwrap();
+        profile.signer = Some(AuthSignerConfig::Ed25519QueryV1(Ed25519QuerySignerConfig {
+            algorithm: SignerAlgorithm::Ed25519,
+            signing_field: "private_key".to_string(),
+            key_field: Some("api_key".to_string()),
+            key_placement: Some(SignerValuePlacement::Header),
+            key_name: Some("X-MBX-APIKEY".to_string()),
+            signature_param: "signature".to_string(),
+            signature_encoding: SignatureEncoding::Base64,
+            timestamp_param: None,
+            timestamp_unit: None,
+            canonicalization: QueryCanonicalization {
+                mode: QueryCanonicalizationMode::SortByKey,
+            },
+        }));
+
+        let url = apply_profile_auth_to_url(
+            "https://api.binance.com/api/v3/account?recvWindow=5000&symbol=BTCUSDT",
+            &profile,
+        )
+        .unwrap();
+        let parsed = url::Url::parse(&url).unwrap();
+        let pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect();
+        let canonical = canonicalize_pairs(
+            &pairs
+                .iter()
+                .filter(|(name, _)| name != "signature")
+                .cloned()
+                .collect::<Vec<_>>(),
+            &QueryCanonicalizationMode::SortByKey,
+        );
+        let expected = encode_signature(
+            &ed25519_sign(
+                TEST_ED25519_PRIVATE_KEY_PEM,
+                encode_query_pairs(&canonical).as_bytes(),
+            )
+            .unwrap(),
+            &SignatureEncoding::Base64,
+        );
+        let actual = pairs
+            .iter()
+            .find(|(name, _)| name == "signature")
+            .map(|(_, value)| value.clone())
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn validate_signer_config_rejects_ed25519_non_base64_encoding() {
+        let err = validate_signer_config(&AuthSignerConfig::Ed25519QueryV1(
+            Ed25519QuerySignerConfig {
+                algorithm: SignerAlgorithm::Ed25519,
+                signing_field: "private_key".to_string(),
+                key_field: Some("api_key".to_string()),
+                key_placement: Some(SignerValuePlacement::Header),
+                key_name: Some("X-MBX-APIKEY".to_string()),
+                signature_param: "signature".to_string(),
+                signature_encoding: SignatureEncoding::Hex,
+                timestamp_param: None,
+                timestamp_unit: None,
+                canonicalization: QueryCanonicalization::default(),
+            },
+        ))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("signature_encoding=base64"));
+    }
+
+    #[test]
+    fn resolved_api_key_headers_skip_default_when_ed25519_signer_is_present() {
+        let mut profile = Profile::new(String::new(), AuthType::ApiKey);
+        profile.signer = Some(AuthSignerConfig::Ed25519QueryV1(Ed25519QuerySignerConfig {
+            algorithm: SignerAlgorithm::Ed25519,
+            signing_field: "private_key".to_string(),
+            key_field: Some("api_key".to_string()),
+            key_placement: Some(SignerValuePlacement::Header),
+            key_name: Some("X-MBX-APIKEY".to_string()),
+            signature_param: "signature".to_string(),
+            signature_encoding: SignatureEncoding::Base64,
+            timestamp_param: None,
+            timestamp_unit: None,
+            canonicalization: QueryCanonicalization::default(),
+        }));
+
+        assert!(profile.resolved_api_key_headers().unwrap().is_empty());
     }
 }

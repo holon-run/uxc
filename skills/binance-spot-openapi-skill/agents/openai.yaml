@@ -1,0 +1,4 @@
+interface:
+  display_name: "Binance Spot API"
+  short_description: "Operate Binance Spot public market, signed account, and order endpoints via UXC with curated OpenAPI mapping and Ed25519 (recommended) and HMAC query signing"
+  default_prompt: "Use $binance-spot-openapi-skill to discover and execute Binance Spot REST operations through UXC with separate mainnet/testnet link flows, Ed25519 (recommended) and HMAC signer bindings, and testnet-first write guardrails."
