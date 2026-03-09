@@ -1,0 +1,1367 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Binance Web3 Public API",
+    "version": "1.0.0",
+    "description": "Curated OpenAPI schema for selected public Binance Web3 endpoints on web3.binance.com."
+  },
+  "servers": [
+    {
+      "url": "https://web3.binance.com"
+    }
+  ],
+  "paths": {
+    "/bapi/defi/v5/public/wallet-direct/buw/wallet/market/token/search": {
+      "get": {
+        "summary": "Search tokens",
+        "description": "Search tokens by keyword, optionally filtered by chain IDs and sort order.",
+        "parameters": [
+          {
+            "name": "keyword",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chainIds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated Binance chain IDs such as 56,8453,CT_501."
+            }
+          },
+          {
+            "name": "orderBy",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenSearchEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bapi/defi/v1/public/wallet-direct/buw/wallet/dex/market/token/meta/info": {
+      "get": {
+        "summary": "Get token metadata",
+        "description": "Fetch token metadata, social links, creator address, and description.",
+        "parameters": [
+          {
+            "name": "chainId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "contractAddress",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenMetadataEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bapi/defi/v4/public/wallet-direct/buw/wallet/market/token/dynamic/info": {
+      "get": {
+        "summary": "Get token market data",
+        "description": "Fetch real-time token market data such as price, volume, holder counts, and liquidity.",
+        "parameters": [
+          {
+            "name": "chainId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "contractAddress",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token market data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenMarketEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bapi/defi/v3/public/wallet-direct/buw/wallet/address/pnl/active-position-list": {
+      "get": {
+        "summary": "List address active positions",
+        "description": "Fetch active token positions for a wallet address. This endpoint requires operation-level browser-style headers and should not be modeled as host-wide defaults.",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chainId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0
+            }
+          },
+          {
+            "name": "clienttype",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "clientversion",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Address active positions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddressPositionsEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bapi/defi/v1/public/wallet-direct/security/token/audit": {
+      "post": {
+        "summary": "Audit token security",
+        "description": "Run Binance Web3 token security checks such as contract risk, trading risk, and scam risk.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenAuditRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token audit result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenAuditEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/social/hype/rank/leaderboard": {
+      "get": {
+        "summary": "Get social hype leaderboard",
+        "description": "Retrieve Binance Web3 social hype leaderboard entries by chain and time range.",
+        "parameters": [
+          {
+            "name": "chainId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "targetLanguage",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timeRange",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "sentiment",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "All",
+                "Positive",
+                "Negative",
+                "Neutral"
+              ]
+            }
+          },
+          {
+            "name": "socialLanguage",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Social hype leaderboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SocialHypeLeaderboardEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/unified/rank/list": {
+      "post": {
+        "summary": "List unified token rank",
+        "description": "Query trending, top search, alpha, or stock token rankings.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnifiedRankRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Unified token ranking",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnifiedRankEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/rank/list": {
+      "post": {
+        "summary": "List meme rush rank",
+        "description": "Query meme token launchpad rankings such as New, Finalizing, and Migrated.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemeRushRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Meme rush ranking",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemeRushEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bapi/defi/v1/public/wallet-direct/buw/wallet/web/signal/smart-money": {
+      "post": {
+        "summary": "List smart money signals",
+        "description": "Retrieve Binance Web3 smart money buy and sell signals.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SmartMoneySignalsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Smart money signals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmartMoneySignalsEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "EnvelopeBase": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messageDetail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "LinkItem": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "TokenSearchItem": {
+        "type": "object",
+        "properties": {
+          "chainId": {
+            "type": "string"
+          },
+          "contractAddress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tokenId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "price": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "percentChange24h": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "volume24h": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "marketCap": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "liquidity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkItem"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "TokenSearchEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EnvelopeBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TokenSearchItem"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "TokenMetadata": {
+        "type": "object",
+        "properties": {
+          "tokenId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chainId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chainName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contractAddress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decimals": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "creatorAddress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkItem"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "TokenMetadataEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EnvelopeBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/TokenMetadata"
+              }
+            }
+          }
+        ]
+      },
+      "TokenMarketData": {
+        "type": "object",
+        "properties": {
+          "price": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nativeTokenPrice": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "volume24h": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "percentChange5m": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "percentChange1h": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "percentChange4h": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "percentChange24h": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "marketCap": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fdv": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "liquidity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "holders": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "top10HoldersPercentage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "TokenMarketEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EnvelopeBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/TokenMarketData"
+              }
+            }
+          }
+        ]
+      },
+      "AddressPositionItem": {
+        "type": "object",
+        "properties": {
+          "chainId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contractAddress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tokenId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "price": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "percentChange24h": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remainQty": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "costAmount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pnlAmount": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pnlPercent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "AddressPositionsData": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "addressStatus": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "list": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AddressPositionItem"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "AddressPositionsEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EnvelopeBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/AddressPositionsData"
+              }
+            }
+          }
+        ]
+      },
+      "TokenAuditRequest": {
+        "type": "object",
+        "required": [
+          "binanceChainId",
+          "contractAddress",
+          "requestId"
+        ],
+        "properties": {
+          "binanceChainId": {
+            "type": "string"
+          },
+          "contractAddress": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RiskItemDetail": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isHit": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "riskType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "RiskItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RiskItemDetail"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "TokenAuditData": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hasResult": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "isSupported": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "riskLevelEnum": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "riskLevel": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "extraInfo": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "riskItems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RiskItem"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "TokenAuditEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EnvelopeBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/TokenAuditData"
+              }
+            }
+          }
+        ]
+      },
+      "SocialHypeLeaderboardItem": {
+        "type": "object",
+        "properties": {
+          "metaInfo": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "marketInfo": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "socialHypeInfo": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "SocialHypeLeaderboardData": {
+        "type": "object",
+        "properties": {
+          "leaderBoardList": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SocialHypeLeaderboardItem"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "SocialHypeLeaderboardEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EnvelopeBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/SocialHypeLeaderboardData"
+              }
+            }
+          }
+        ]
+      },
+      "UnifiedRankRequest": {
+        "type": "object",
+        "properties": {
+          "rankType": {
+            "type": "integer",
+            "enum": [
+              10,
+              11,
+              20,
+              40
+            ]
+          },
+          "chainId": {
+            "type": "string"
+          },
+          "period": {
+            "type": "integer"
+          },
+          "sortBy": {
+            "type": "integer"
+          },
+          "orderAsc": {
+            "type": "boolean"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "additionalProperties": true
+      },
+      "RankTokenItem": {
+        "type": "object",
+        "properties": {
+          "chainId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contractAddress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "price": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "marketCap": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "liquidity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "holders": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "launchTime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "UnifiedRankData": {
+        "type": "object",
+        "properties": {
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RankTokenItem"
+            }
+          },
+          "total": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "page": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "size": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "UnifiedRankEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EnvelopeBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/UnifiedRankData"
+              }
+            }
+          }
+        ]
+      },
+      "MemeRushRequest": {
+        "type": "object",
+        "required": [
+          "chainId",
+          "rankType"
+        ],
+        "properties": {
+          "chainId": {
+            "type": "string"
+          },
+          "rankType": {
+            "type": "integer",
+            "enum": [
+              10,
+              20,
+              30
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "excludes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "MemeRushData": {
+        "type": "object",
+        "properties": {
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RankTokenItem"
+            }
+          },
+          "total": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "MemeRushEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EnvelopeBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/MemeRushData"
+              }
+            }
+          }
+        ]
+      },
+      "SmartMoneySignalsRequest": {
+        "type": "object",
+        "required": [
+          "page",
+          "pageSize",
+          "chainId"
+        ],
+        "properties": {
+          "smartSignalType": {
+            "type": "string"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "pageSize": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "chainId": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "SmartMoneySignalItem": {
+        "type": "object",
+        "properties": {
+          "signalId": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ticker": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chainId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contractAddress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "smartSignalType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "smartMoneyCount": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "direction": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signalTriggerTime": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "alertPrice": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currentPrice": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "maxGain": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exitRate": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "SmartMoneySignalsEnvelope": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EnvelopeBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SmartMoneySignalItem"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

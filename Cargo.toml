@@ -20,7 +20,7 @@ clap = { version = "4.4", features = ["derive"] }
 clap_complete = "4.4"
 
 # HTTP Client
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.11", features = ["json", "rustls-tls", "gzip", "brotli", "deflate"], default-features = false }
 url = "2.4"
 
 # JSON/Serde

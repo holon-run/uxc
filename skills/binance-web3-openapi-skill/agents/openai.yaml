@@ -1,0 +1,4 @@
+interface:
+  display_name: "Binance Web3 API"
+  short_description: "Operate Binance Web3 public token, address holdings, ranking, audit, and signal APIs via UXC + OpenAPI schema mapping"
+  default_prompt: "Use $binance-web3-openapi-skill to discover and execute Binance Web3 public read operations through UXC with the curated OpenAPI schema and operation-level headers where required."
