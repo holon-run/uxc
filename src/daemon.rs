@@ -820,23 +820,21 @@ impl DaemonRuntime {
             }
 
             Ok((kind, operation, data))
-        } else {
-            if protocol == "mcp" {
-                if let Some(live_result) = invoke_live_stdio_mcp_help(
-                    self,
-                    &request,
-                    execution_auth_profile.as_ref(),
-                    cache_for_mcp.clone(),
-                )
-                .await?
-                {
-                    Ok(live_result)
-                } else {
-                    invoke_with_adapter(&resolved.adapter, &request).await
-                }
+        } else if protocol == "mcp" {
+            if let Some(live_result) = invoke_live_stdio_mcp_help(
+                self,
+                &request,
+                execution_auth_profile.as_ref(),
+                cache_for_mcp.clone(),
+            )
+            .await?
+            {
+                Ok(live_result)
             } else {
                 invoke_with_adapter(&resolved.adapter, &request).await
             }
+        } else {
+            invoke_with_adapter(&resolved.adapter, &request).await
         };
 
         // If invocation failed, attempt a stale-cache fallback even when protocol detection

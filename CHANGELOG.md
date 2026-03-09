@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-03-09
+
+### Added
+- Added named auth `fields` for non-OAuth credentials and binding-level request signers, enabling multi-part auth setups such as API key + signing key.
+- Added `ed25519_query_v1` alongside `hmac_query_v1` for signed query-style HTTP APIs, with Binance Spot testnet verified against live signed requests.
+- Added `binance-web3-openapi-skill` for public Binance Web3 token discovery, rankings, audit, signals, and address position queries.
+- Added `binance-spot-openapi-skill` with mainnet/testnet link patterns, signed account/order operations, and Binance Spot auth guidance for Ed25519 and HMAC keys.
+
+### Changed
+- OpenAPI execution now resolves auth bindings against the final operation URL, so path-scoped bindings such as `/api/v3` apply correctly to generated operations.
+- OpenAPI schema fetches requested through `--schema-url` no longer inherit business auth/signers from endpoint bindings.
+
+### Fixed
+- Enabled standard HTTP response decompression (`gzip`, `brotli`, `deflate`) for reqwest-based adapters, fixing compressed API responses such as Binance Web3.
+- Improved signer validation and help text so JSON signer configs, key-field usage, and mixed key-type pitfalls are surfaced more clearly.
+
 ## [0.10.0] - 2026-03-08
 
 ### Added
@@ -257,7 +273,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/holon-run/uxc/releases/tag/v0.11.0
 [0.10.0]: https://github.com/holon-run/uxc/releases/tag/v0.10.0
 [0.9.0]: https://github.com/holon-run/uxc/releases/tag/v0.9.0
 [0.8.0]: https://github.com/holon-run/uxc/releases/tag/v0.8.0
