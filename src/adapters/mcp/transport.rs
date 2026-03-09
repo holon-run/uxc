@@ -4,6 +4,7 @@ use super::types::*;
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -205,6 +206,8 @@ pub struct McpStdioTransport {
     response_channels: Arc<
         Mutex<std::collections::HashMap<RequestId, tokio::sync::oneshot::Sender<JsonRpcResponse>>>,
     >,
+    /// Buffered server notifications received outside the request/response flow.
+    notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>>,
     /// Process executor (abstracted for testing)
     _executor: Arc<dyn StdioProcessExecutor>,
 }
@@ -216,6 +219,7 @@ impl std::fmt::Debug for McpStdioTransport {
             .field("next_id", &self.next_id)
             .field("request_tx", &self.request_tx)
             .field("response_channels", &self.response_channels)
+            .field("notifications", &self.notifications)
             .finish()
     }
 }
@@ -268,6 +272,7 @@ impl McpStdioTransport {
             RequestId,
             tokio::sync::oneshot::Sender<JsonRpcResponse>,
         >::new()));
+        let notifications = Arc::new(Mutex::new(VecDeque::<JsonRpcNotification>::new()));
 
         // Spawn a task to handle writing to stdin
         let mut stdin_writer = stdin;
@@ -306,6 +311,7 @@ impl McpStdioTransport {
 
         // Spawn a task to read responses from stdout
         let response_channels_clone = response_channels.clone();
+        let notifications_clone = notifications.clone();
         tokio::spawn(async move {
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
@@ -322,15 +328,15 @@ impl McpStdioTransport {
 
                     // Parse the JSON-RPC message
                     match parse_jsonrpc_message(&json_str) {
-                        Ok(Some(response)) => {
+                        Ok(ParsedJsonRpcMessage::Response(response)) => {
                             let id = response.id.clone();
                             let mut channels = response_channels_clone.lock().await;
                             if let Some(tx) = channels.remove(&id) {
                                 let _ = tx.send(response);
                             }
                         }
-                        Ok(None) => {
-                            // Notification (no response expected), ignore
+                        Ok(ParsedJsonRpcMessage::Notification(notification)) => {
+                            notifications_clone.lock().await.push_back(notification);
                         }
                         Err(e) => {
                             tracing::warn!("Failed to parse JSON-RPC message: {}", e);
@@ -345,6 +351,7 @@ impl McpStdioTransport {
             next_id,
             request_tx,
             response_channels,
+            notifications,
             _executor: executor,
         })
     }
@@ -472,6 +479,11 @@ impl McpStdioTransport {
     pub async fn initialized(&mut self) -> Result<()> {
         self.send_notification("notifications/initialized", None)
             .await
+    }
+
+    pub async fn drain_notifications(&self) -> Vec<JsonRpcNotification> {
+        let mut queue = self.notifications.lock().await;
+        queue.drain(..).collect()
     }
 }
 
@@ -669,16 +681,22 @@ fn find_complete_json(s: &str) -> Option<usize> {
 }
 
 /// Parse a JSON-RPC message
-fn parse_jsonrpc_message(s: &str) -> Result<Option<JsonRpcResponse>> {
+#[derive(Debug)]
+enum ParsedJsonRpcMessage {
+    Response(JsonRpcResponse),
+    Notification(JsonRpcNotification),
+}
+
+fn parse_jsonrpc_message(s: &str) -> Result<ParsedJsonRpcMessage> {
     let value: JsonValue = serde_json::from_str(s)?;
 
     // Check if it's a response (has "id" field)
     if value.get("id").is_some() {
         let response: JsonRpcResponse = serde_json::from_value(value)?;
-        Ok(Some(response))
+        Ok(ParsedJsonRpcMessage::Response(response))
     } else {
-        // It's a notification, no response expected
-        Ok(None)
+        let notification: JsonRpcNotification = serde_json::from_value(value)?;
+        Ok(ParsedJsonRpcMessage::Notification(notification))
     }
 }
 
@@ -849,11 +867,13 @@ mod tests {
         let json = r#"{"jsonrpc": "2.0", "id": 1, "result": {"ok": true}}"#;
         let result = parse_jsonrpc_message(json);
         assert!(result.is_ok());
-        let response = result.unwrap();
-        assert!(response.is_some());
-        let resp = response.unwrap();
-        assert_eq!(resp.id, RequestId::Number(1));
-        assert!(resp.result.is_some());
+        match result.unwrap() {
+            ParsedJsonRpcMessage::Response(resp) => {
+                assert_eq!(resp.id, RequestId::Number(1));
+                assert!(resp.result.is_some());
+            }
+            ParsedJsonRpcMessage::Notification(_) => panic!("expected response"),
+        }
     }
 
     #[tokio::test]
@@ -861,20 +881,27 @@ mod tests {
         let json = r#"{"jsonrpc": "2.0", "id": 1, "error": {"code": -32600, "message": "Invalid Request"}}"#;
         let result = parse_jsonrpc_message(json);
         assert!(result.is_ok());
-        let response = result.unwrap();
-        assert!(response.is_some());
-        let resp = response.unwrap();
-        assert_eq!(resp.id, RequestId::Number(1));
-        assert!(resp.error.is_some());
+        match result.unwrap() {
+            ParsedJsonRpcMessage::Response(resp) => {
+                assert_eq!(resp.id, RequestId::Number(1));
+                assert!(resp.error.is_some());
+            }
+            ParsedJsonRpcMessage::Notification(_) => panic!("expected response"),
+        }
     }
 
     #[tokio::test]
-    async fn parse_jsonrpc_message_parses_notification_as_none() {
+    async fn parse_jsonrpc_message_parses_notification() {
         let json = r#"{"jsonrpc": "2.0", "method": "notification", "params": {}}"#;
         let result = parse_jsonrpc_message(json);
         assert!(result.is_ok());
-        let response = result.unwrap();
-        assert!(response.is_none());
+        match result.unwrap() {
+            ParsedJsonRpcMessage::Notification(notification) => {
+                assert_eq!(notification.method, "notification");
+                assert_eq!(notification.params.unwrap(), serde_json::json!({}));
+            }
+            ParsedJsonRpcMessage::Response(_) => panic!("expected notification"),
+        }
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ mod common;
 use assert_cmd::Command;
 use common::test_server_binary;
 use serial_test::serial;
+use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
@@ -12,6 +13,20 @@ fn uxc_command() -> Command {
 
 fn daemon_stop_best_effort() {
     let _ = uxc_command().arg("daemon").arg("stop").output();
+}
+
+fn uxc_command_with_home(home: &Path) -> Command {
+    let mut cmd = uxc_command();
+    cmd.env("HOME", home);
+    cmd.env("USERPROFILE", home);
+    cmd
+}
+
+fn daemon_stop_best_effort_with_home(home: &Path) {
+    let _ = uxc_command_with_home(home)
+        .arg("daemon")
+        .arg("stop")
+        .output();
 }
 
 #[test]
@@ -365,6 +380,133 @@ fn mcp_stdio_execute_includes_structured_content_via_daemon() {
     assert_eq!(json["data"]["structuredContent"]["source"], "mcp-stdio");
 
     daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
+fn mcp_stdio_dynamic_toolset_refreshes_live_help_and_invalidates_disk_cache() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} dynamic_toolset", bin.display());
+
+    let first_help = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("-h")
+        .output()
+        .expect("initial help should run");
+    assert!(
+        first_help.status.success(),
+        "initial help should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first_help.stdout),
+        String::from_utf8_lossy(&first_help.stderr)
+    );
+
+    let first_help_json: serde_json::Value =
+        serde_json::from_slice(&first_help.stdout).expect("valid json");
+    let first_ops = first_help_json["data"]["operations"]
+        .as_array()
+        .expect("operations should be an array");
+    assert!(first_ops
+        .iter()
+        .any(|op| op["operation_id"] == "home_status"));
+    assert!(!first_ops
+        .iter()
+        .any(|op| op["operation_id"] == "graph3d_render"));
+
+    let cache_after_first_help = uxc_command_with_home(temp_home.path())
+        .arg("cache")
+        .arg("list")
+        .output()
+        .expect("cache list should run");
+    assert!(cache_after_first_help.status.success());
+    let cache_list_json: serde_json::Value =
+        serde_json::from_slice(&cache_after_first_help.stdout).expect("valid json");
+    let entries = cache_list_json["data"]["entries"]
+        .as_array()
+        .expect("entries should be an array");
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected initial host help to prime cache"
+    );
+
+    let navigate = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("navigate")
+        .arg("path=/graph")
+        .output()
+        .expect("navigate should run");
+    assert!(
+        navigate.status.success(),
+        "navigate should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&navigate.stdout),
+        String::from_utf8_lossy(&navigate.stderr)
+    );
+
+    let second_help = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("-h")
+        .output()
+        .expect("updated help should run");
+    assert!(
+        second_help.status.success(),
+        "updated help should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second_help.stdout),
+        String::from_utf8_lossy(&second_help.stderr)
+    );
+
+    let second_help_json: serde_json::Value =
+        serde_json::from_slice(&second_help.stdout).expect("valid json");
+    let second_ops = second_help_json["data"]["operations"]
+        .as_array()
+        .expect("operations should be an array");
+    assert!(second_ops
+        .iter()
+        .any(|op| op["operation_id"] == "graph3d_render"));
+    assert!(!second_ops
+        .iter()
+        .any(|op| op["operation_id"] == "home_status"));
+
+    let graph_help = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("graph3d_render")
+        .arg("-h")
+        .output()
+        .expect("graph help should run");
+    assert!(
+        graph_help.status.success(),
+        "graph help should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&graph_help.stdout),
+        String::from_utf8_lossy(&graph_help.stderr)
+    );
+    let graph_help_json: serde_json::Value =
+        serde_json::from_slice(&graph_help.stdout).expect("valid json");
+    assert_eq!(graph_help_json["data"]["operation_id"], "graph3d_render");
+    assert_eq!(
+        graph_help_json["data"]["parameters"][0]["name"],
+        "expression"
+    );
+
+    let cache_after_refresh = uxc_command_with_home(temp_home.path())
+        .arg("cache")
+        .arg("list")
+        .output()
+        .expect("cache list after refresh should run");
+    assert!(cache_after_refresh.status.success());
+    let cache_after_refresh_json: serde_json::Value =
+        serde_json::from_slice(&cache_after_refresh.stdout).expect("valid json");
+    let entries_after_refresh = cache_after_refresh_json["data"]["entries"]
+        .as_array()
+        .expect("entries should be an array");
+    assert_eq!(
+        entries_after_refresh.len(),
+        0,
+        "expected dynamic refresh to invalidate disk cache without repopulating it"
+    );
+
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]

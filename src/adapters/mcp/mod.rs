@@ -424,7 +424,7 @@ impl Adapter for McpAdapter {
             .into_iter()
             .map(|tool| {
                 let parameters = if let Some(schema) = tool.inputSchema {
-                    parse_schema_to_parameters(&schema)
+                    parse_schema_to_parameters_for_daemon(&schema)
                 } else {
                     Vec::new()
                 };
@@ -453,7 +453,7 @@ impl Adapter for McpAdapter {
                     parameters: tool
                         .inputSchema
                         .as_ref()
-                        .map(parse_schema_to_parameters)
+                        .map(parse_schema_to_parameters_for_daemon)
                         .unwrap_or_default(),
                     return_type: Some("ToolContent".to_string()),
                     input_schema: tool.inputSchema,
@@ -535,7 +535,7 @@ impl Adapter for McpAdapter {
 }
 
 /// Parse JSON Schema to our Parameter format
-fn parse_schema_to_parameters(schema: &Value) -> Vec<super::Parameter> {
+pub(crate) fn parse_schema_to_parameters_for_daemon(schema: &Value) -> Vec<super::Parameter> {
     let mut parameters = Vec::new();
 
     if let Some(obj) = schema.as_object() {

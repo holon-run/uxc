@@ -21,6 +21,8 @@ pub enum Scenario {
     ToolsListFailAfterFirst,
     /// tools/call returns content + structuredContent payload
     StructuredContent,
+    /// tools/list changes after navigate and emits tools/list_changed notification
+    DynamicToolset,
 }
 
 impl Scenario {
@@ -34,8 +36,9 @@ impl Scenario {
             "tool_call_timeout" => Ok(Self::ToolCallTimeout),
             "tools_list_fail_after_first" => Ok(Self::ToolsListFailAfterFirst),
             "structured_content" => Ok(Self::StructuredContent),
+            "dynamic_toolset" => Ok(Self::DynamicToolset),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, tool_call_timeout, tools_list_fail_after_first, structured_content",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, tool_call_timeout, tools_list_fail_after_first, structured_content, dynamic_toolset",
                 s
             ),
         }

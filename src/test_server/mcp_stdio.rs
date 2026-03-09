@@ -16,6 +16,7 @@ pub fn run(scenario: Scenario) -> Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let mut tools_list_calls: u64 = 0;
+    let mut dynamic_tools_enabled = false;
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -72,6 +73,7 @@ pub fn run(scenario: Scenario) -> Result<()> {
 
         match method {
             "initialize" => {
+                let list_changed = matches!(scenario, Scenario::DynamicToolset);
                 respond(
                     &mut out,
                     json!({
@@ -79,7 +81,7 @@ pub fn run(scenario: Scenario) -> Result<()> {
                         "id": id,
                         "result": {
                             "protocolVersion": "2024-11-05",
-                            "capabilities": {"tools": {"listChanged": false}},
+                            "capabilities": {"tools": {"listChanged": list_changed}},
                             "serverInfo": {"name": "uxc-test-mcp-stdio", "version": "1.0.0"},
                             "instructions": "MCP stdio test server for local e2e"
                         }
@@ -95,6 +97,65 @@ pub fn run(scenario: Scenario) -> Result<()> {
                             "jsonrpc": "2.0",
                             "id": id,
                             "error": {"code": -32002, "message": "tools/list failed after first request"}
+                        }),
+                    )?;
+                    continue;
+                }
+                if matches!(scenario, Scenario::DynamicToolset) {
+                    let tools = if dynamic_tools_enabled {
+                        json!([
+                            {
+                                "name": "navigate",
+                                "description": "Navigate to another page",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "path": {"type": "string"}
+                                    },
+                                    "required": ["path"]
+                                }
+                            },
+                            {
+                                "name": "graph3d_render",
+                                "description": "Render a 3D graph on the current page",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "expression": {"type": "string"}
+                                    },
+                                    "required": ["expression"]
+                                }
+                            }
+                        ])
+                    } else {
+                        json!([
+                            {
+                                "name": "navigate",
+                                "description": "Navigate to another page",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "path": {"type": "string"}
+                                    },
+                                    "required": ["path"]
+                                }
+                            },
+                            {
+                                "name": "home_status",
+                                "description": "Inspect the home page state",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            }
+                        ])
+                    };
+                    respond(
+                        &mut out,
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "tools": tools }
                         }),
                     )?;
                     continue;
@@ -135,6 +196,67 @@ pub fn run(scenario: Scenario) -> Result<()> {
                     .and_then(|v| v.get("message"))
                     .and_then(Value::as_str)
                     .unwrap_or("hello");
+
+                if matches!(scenario, Scenario::DynamicToolset) {
+                    let name = req
+                        .get("params")
+                        .and_then(|v| v.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+
+                    match name {
+                        "navigate" => {
+                            dynamic_tools_enabled = true;
+                            respond(
+                                &mut out,
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "method": "notifications/tools/list_changed"
+                                }),
+                            )?;
+                            respond(
+                                &mut out,
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "content": [
+                                            {"type": "text", "text": "navigated"}
+                                        ]
+                                    }
+                                }),
+                            )?;
+                            continue;
+                        }
+                        "graph3d_render" => {
+                            respond(
+                                &mut out,
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "content": [
+                                            {"type": "text", "text": "rendered"}
+                                        ]
+                                    }
+                                }),
+                            )?;
+                            continue;
+                        }
+                        "home_status" => {
+                            respond(
+                                &mut out,
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": {"code": -32601, "message": "Tool not found"}
+                                }),
+                            )?;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
 
                 let mut result = json!({
                     "content": [
