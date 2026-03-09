@@ -142,6 +142,11 @@ Auth model uses:
 - Credentials: auth material
 - Bindings: endpoint match rules that attach credentials
 
+For non-OAuth auth, choose the smallest fitting model:
+
+- simple auth: `--secret`, `--secret-env`, `--secret-op`
+- complex auth or request signing: `--field ...` and optional `--signer-json`
+
 Example bearer setup:
 
 ```bash
@@ -165,6 +170,21 @@ uxc auth credential set flipside \
   --auth-type api_key \
   --query-param "apiKey={{secret}}" \
   --secret-env FLIPSIDE_API_KEY
+
+# signer-backed API example
+uxc auth credential set binance \
+  --auth-type api_key \
+  --field api_key=env:BINANCE_API_KEY \
+  --field secret_key=env:BINANCE_SECRET_KEY
+
+uxc auth binding add \
+  --id binance-account \
+  --host api.binance.com \
+  --path-prefix /api/v3 \
+  --scheme https \
+  --credential binance \
+  --signer-json '{"kind":"hmac_query_v1","algorithm":"hmac_sha256","signing_field":"secret_key","key_field":"api_key","key_placement":"header","key_name":"X-MBX-APIKEY","signature_param":"signature","signature_encoding":"hex","timestamp_param":"timestamp","timestamp_unit":"milliseconds","canonicalization":{"mode":"preserve_order"}}' \
+  --priority 100
 ```
 
 For OAuth (MCP HTTP), see [`docs/oauth-mcp-http.md`](oauth-mcp-http.md).

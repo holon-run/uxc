@@ -417,6 +417,11 @@ UXC authentication has two resources:
 - Credentials: secret material and auth type
 - Bindings: endpoint matching rules that select a credential
 
+For non-OAuth credentials, use two auth tracks:
+
+- simple auth: keep using `--secret`, `--secret-env`, or `--secret-op`
+- complex auth: use repeatable `--field <name>=<source>` plus optional binding-level `--signer-json`
+
 Example:
 
 ```bash
@@ -427,6 +432,10 @@ uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mc
 # api_key supports configurable header names and templates
 uxc auth credential set okx --auth-type api_key --secret-env OKX_ACCESS_KEY --api-key-header OK-ACCESS-KEY
 uxc auth credential set okx-advanced --auth-type api_key --header "OK-ACCESS-KEY={{secret}}" --header "OK-ACCESS-PASSPHRASE={{env:OKX_PASSPHRASE}}"
+
+# multi-field auth for signed APIs
+uxc auth credential set binance --auth-type api_key --field api_key=env:BINANCE_API_KEY --field secret_key=env:BINANCE_SECRET_KEY
+uxc auth binding add --id binance-account --host api.binance.com --path-prefix /api/v3 --scheme https --credential binance --signer-json '{"kind":"hmac_query_v1","algorithm":"hmac_sha256","signing_field":"secret_key","key_field":"api_key","key_placement":"header","key_name":"X-MBX-APIKEY","signature_param":"signature","signature_encoding":"hex","timestamp_param":"timestamp","timestamp_unit":"milliseconds","canonicalization":{"mode":"preserve_order"}}' --priority 100
 ```
 
 For `--secret-op`, secret resolution happens at request runtime through daemon execution.

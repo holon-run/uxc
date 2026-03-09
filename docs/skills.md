@@ -25,6 +25,10 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Wrapper for Notion MCP workflows with OAuth two-step login guidance and guarded-write guidance.
 - `skills/discord-openapi-skill`
   - Wrapper for Discord REST workflows via UXC + link-persisted OpenAPI schema mapping (`uxc link --schema-url`).
+- `skills/binance-web3-openapi-skill`
+  - Wrapper for Binance Web3 public market/research workflows via UXC + curated OpenAPI schema.
+- `skills/binance-spot-openapi-skill`
+  - Wrapper for Binance Spot market/account/order workflows via UXC + curated OpenAPI schema and signer-backed auth.
 - `skills/uxc-skill-creator`
   - Creator skill for authoring new UXC-based wrapper skills with strict conventions.
 
@@ -53,7 +57,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, or `skills/discord-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -110,6 +114,18 @@ bash skills/thegraph-token-mcp-skill/scripts/validate.sh
 
 ```bash
 bash skills/discord-openapi-skill/scripts/validate.sh
+```
+
+- Validate Binance Web3 wrapper docs when touched:
+
+```bash
+bash skills/binance-web3-openapi-skill/scripts/validate.sh
+```
+
+- Validate Binance Spot wrapper docs when touched:
+
+```bash
+bash skills/binance-spot-openapi-skill/scripts/validate.sh
 ```
 
 ## Manual Publish Workflow (GitHub Actions)

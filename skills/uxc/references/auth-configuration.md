@@ -1,116 +1,171 @@
 # Authentication Configuration Guide
 
-Complete guide for configuring credentials and auth bindings for different API authentication patterns.
+Use this guide for non-OAuth authentication. The model now has two tracks:
 
-## Credential Types
+- simple auth: one primary `secret`
+- complex auth: multiple named `fields`
 
-UXC supports three non-OAuth credential types:
+Bindings can optionally attach a typed signer for APIs that require request signing.
 
-### 1. API Key with Custom Headers (Most Flexible)
+## The Two Tracks
 
-Use when the API requires specific header names or formats:
+### Track 1: Simple `secret`
+
+Keep using `--secret`, `--secret-env`, or `--secret-op` when the provider only needs one secret value.
+
+Good fits:
+
+- bearer tokens
+- one API key header
+- one API key query param
+- stdio `--inject-env NAME={{secret}}`
+
+Examples:
 
 ```bash
-# Single header with secret
-uxc auth credential set <credential_id> \
-  --auth-type api_key \
-  --header "Authorization:{{secret}}" \
-  --secret "api_key_value"
+uxc auth credential set deepwiki \
+  --auth-type bearer \
+  --secret-env DEEPWIKI_TOKEN
 
-# Multiple headers
-uxc auth credential set <credential_id> \
+uxc auth credential set okx-market \
   --auth-type api_key \
-  --header "X-API-Key:{{secret}}" \
-  --header "X-API-Secret:{{env:API_SECRET}}" \
-  --secret-env API_KEY
+  --secret-env OKX_ACCESS_KEY \
+  --api-key-header OK-ACCESS-KEY
 
-# Using 1Password
-uxc auth credential set <credential_id> \
+uxc auth credential set flipside \
   --auth-type api_key \
-  --header "Authorization:Bearer {{secret}}" \
-  --secret-op "op://Engineering/api/token"
+  --query-param "apiKey={{secret}}" \
+  --secret-env FLIPSIDE_API_KEY
 ```
 
-**Header Template Syntax:**
-- `{{secret}}` - Resolved from credential secret source
-- `{{env:VAR_NAME}}` - Resolved from environment variable
-- `{{op://path/to/secret}}` - Resolved through 1Password CLI
+### Track 2: Named `fields`
 
-### 1b. API Key in URL Query Params
+Use `--field` when one credential needs multiple values.
 
-Use when the provider expects the API key as part of the endpoint query string, for example `?apiKey=...`:
+Good fits:
+
+- `api_key + secret_key`
+- `api_key + private_key`
+- `api_key + passphrase`
+- multiple headers that should draw from different values
+- signer-backed APIs
+
+Example:
+
+```bash
+uxc auth credential set exchange \
+  --auth-type api_key \
+  --field api_key=env:EXCHANGE_API_KEY \
+  --field secret_key=env:EXCHANGE_SECRET_KEY
+```
+
+## Credential Sources And Templates
+
+### Primary secret sources
+
+`--secret`, `--secret-env`, and `--secret-op` are mutually exclusive.
+
+- literal:
+  ```bash
+  --secret "actual_secret_value"
+  ```
+- env:
+  ```bash
+  --secret-env CREDENTIAL_NAME
+  ```
+- 1Password:
+  ```bash
+  --secret-op "op://Vault/item/field"
+  ```
+
+### Named field sources
+
+`--field` is repeatable. Each field uses an explicit source form:
+
+```bash
+--field api_key=literal:abc123
+--field api_key=env:BINANCE_API_KEY
+--field private_key=op://Trading/binance/private_key
+```
+
+`--field` is not supported for OAuth credentials.
+
+### Template syntax
+
+- `{{secret}}`: primary secret source
+- `{{field:<name>}}`: named field on the credential
+- `{{env:VAR_NAME}}`: direct environment variable lookup
+- `{{op://...}}`: direct 1Password lookup
+
+Examples:
+
+```bash
+uxc auth credential set linear \
+  --auth-type api_key \
+  --header "Authorization:{{secret}}" \
+  --secret-env LINEAR_API_KEY
+
+uxc auth credential set complex-api \
+  --auth-type api_key \
+  --field api_key=env:API_KEY \
+  --field api_secret=env:API_SECRET \
+  --header "X-API-Key:{{field:api_key}}" \
+  --header "X-API-Secret:{{field:api_secret}}"
+```
+
+## Common Credential Patterns
+
+### Bearer token
+
+```bash
+uxc auth credential set myapi \
+  --auth-type bearer \
+  --secret-env MYAPI_TOKEN
+```
+
+### Raw token in `Authorization`
+
+Use this when the provider rejects `Bearer ` prefix:
+
+```bash
+uxc auth credential set linear \
+  --auth-type api_key \
+  --header "Authorization:{{secret}}" \
+  --secret-env LINEAR_API_KEY
+```
+
+### API key in one custom header
+
+```bash
+uxc auth credential set custom-api \
+  --auth-type api_key \
+  --header "X-API-Key:{{secret}}" \
+  --secret-env CUSTOM_API_KEY
+```
+
+### Multiple headers from different values
+
+```bash
+uxc auth credential set okx-advanced \
+  --auth-type api_key \
+  --field access_key=env:OKX_ACCESS_KEY \
+  --field passphrase=env:OKX_PASSPHRASE \
+  --header "OK-ACCESS-KEY:{{field:access_key}}" \
+  --header "OK-ACCESS-PASSPHRASE:{{field:passphrase}}"
+```
+
+### Query-string API key
 
 ```bash
 uxc auth credential set flipside \
   --auth-type api_key \
   --query-param "apiKey={{secret}}" \
   --secret-env FLIPSIDE_API_KEY
-
-uxc auth binding add \
-  --id flipside-mcp \
-  --host mcp.flipsidecrypto.xyz \
-  --path-prefix /mcp \
-  --scheme https \
-  --credential flipside \
-  --priority 100
 ```
 
-Prefer this over embedding the secret directly in the endpoint URL.
+## Bindings
 
-### 2. Bearer Token (Standard OAuth2 Format)
-
-Use when API accepts standard `Authorization: Bearer <token>` format:
-
-```bash
-# With literal secret
-uxc auth credential set <credential_id> \
-  --auth-type bearer \
-  --secret "bearer_token_value"
-
-# From environment variable
-uxc auth credential set <credential_id> \
-  --auth-type bearer \
-  --secret-env BEARER_TOKEN
-
-# From 1Password
-uxc auth credential set <credential_id> \
-  --auth-type bearer \
-  --secret-op "op://Private/bearer/token"
-```
-
-**Note:** This automatically adds `Bearer ` prefix to the Authorization header.
-
-### 3. Secret Sources
-
-All credential types support three secret source kinds:
-
-#### Literal Secret
-```bash
---secret "actual_secret_value"
-```
-- Stored in plaintext in credentials.json
-- **Only for development/testing**
-- Avoid for production credentials
-
-#### Environment Variable
-```bash
---secret-env CREDENTIAL_NAME
-```
-- Secret resolved from environment variable at runtime
-- More secure than literal
-- Requires environment variable to be set in daemon's environment
-
-#### 1Password Reference
-```bash
---secret-op "op://Vault/item/field"
-```
-- Most secure option
-- Requires 1Password CLI (`op`) installed and authenticated
-- Resolved at request execution time
-
-## Auth Bindings
-
-Credentials must be bound to endpoint patterns for automatic use:
+Credentials do nothing until they are bound to endpoint patterns:
 
 ```bash
 uxc auth binding add \
@@ -122,86 +177,75 @@ uxc auth binding add \
   --priority 100
 ```
 
-**Binding Resolution:**
-1. Explicit `--auth <credential_id>` (highest priority)
-2. Best match by `scheme + host + path_prefix + priority`
-3. First match wins when priorities are equal
+Resolution order:
 
-**Check binding for an endpoint:**
+1. explicit `--auth <credential_id>`
+2. best binding match by `scheme + host + path_prefix + priority`
+3. first match wins if all else is equal
+
+Check the effective match:
+
 ```bash
 uxc auth binding match <endpoint>
 ```
 
-## Common Authentication Patterns
+## Request Signers
 
-### Pattern 1: Linear API (Direct API Key, No Prefix)
+Some HTTP APIs need more than static headers. In those cases:
 
-Linear expects `Authorization: lin_api_XXX` (no prefix):
+- store values on the credential as `fields`
+- attach the signer on the binding with `--signer-json`
+
+Current typed signer kinds:
+
+- `hmac_query_v1`
+- `ed25519_query_v1`
+
+### HMAC signed query example
 
 ```bash
-uxc auth credential set linear-mcp \
+uxc auth credential set binance-hmac \
   --auth-type api_key \
-  --header "Authorization:{{secret}}" \
-  --secret "lin_api_XXX"
+  --field api_key=env:BINANCE_API_KEY \
+  --field secret_key=env:BINANCE_SECRET_KEY
 
 uxc auth binding add \
-  --id linear-mcp \
-  --host api.linear.app \
-  --path-prefix /graphql \
+  --id binance-hmac \
+  --host api.binance.com \
+  --path-prefix /api/v3 \
   --scheme https \
-  --credential linear-mcp \
+  --credential binance-hmac \
+  --signer-json '{"kind":"hmac_query_v1","algorithm":"hmac_sha256","signing_field":"secret_key","key_field":"api_key","key_placement":"header","key_name":"X-MBX-APIKEY","signature_param":"signature","signature_encoding":"hex","timestamp_param":"timestamp","timestamp_unit":"milliseconds","canonicalization":{"mode":"preserve_order"}}' \
   --priority 100
 ```
 
-**Wrong:** `--auth-type bearer` (adds "Bearer " prefix, rejected by Linear)
-
-### Pattern 2: Standard Bearer Token
-
-APIs that accept `Authorization: Bearer <token>`:
+### Ed25519 signed query example
 
 ```bash
-uxc auth credential set myapi \
-  --auth-type bearer \
-  --secret-env MYAPI_TOKEN
-```
-
-### Pattern 3: Custom API Key Header
-
-APIs that use non-standard header names:
-
-```bash
-uxc auth credential set custom-api \
+uxc auth credential set binance-ed25519 \
   --auth-type api_key \
-  --header "X-API-Key:{{secret}}" \
-  --secret-env CUSTOM_API_KEY
-```
+  --field api_key=env:BINANCE_API_KEY \
+  --field private_key=env:BINANCE_ED25519_PRIVATE_KEY
 
-### Pattern 4: Multiple Headers
-
-APIs requiring multiple authentication headers:
-
-```bash
-uxc auth credential set complex-api \
-  --auth-type api_key \
-  --header "X-API-Key:{{secret}}" \
-  --header "X-API-Secret:{{env:API_SECRET}}" \
-  --secret-env API_KEY
+uxc auth binding add \
+  --id binance-ed25519 \
+  --host api.binance.com \
+  --path-prefix /api/v3 \
+  --scheme https \
+  --credential binance-ed25519 \
+  --signer-json '{"kind":"ed25519_query_v1","algorithm":"ed25519","signing_field":"private_key","key_field":"api_key","key_placement":"header","key_name":"X-MBX-APIKEY","signature_param":"signature","signature_encoding":"base64","timestamp_param":"timestamp","timestamp_unit":"milliseconds","canonicalization":{"mode":"preserve_order"}}' \
+  --priority 100
 ```
 
 ## Troubleshooting
 
 ### Error: "Bearer token" prefix rejected
 
-**Symptom:** API returns error about removing Bearer prefix
+Cause: using `--auth-type bearer` when the provider expects a raw token in `Authorization`.
 
-**Cause:** Using `--auth-type bearer` when API expects raw token
+Use:
 
-**Solution:**
 ```bash
-# Wrong
-uxc auth credential set myapi --auth-type bearer --secret "token"
-
-# Correct
 uxc auth credential set myapi \
   --auth-type api_key \
   --header "Authorization:{{secret}}" \
@@ -210,98 +254,74 @@ uxc auth credential set myapi \
 
 ### Error: Credential not found
 
-**Symptom:** `Credential 'xxx' not found`
-
-**Check:** List available credentials
 ```bash
 uxc auth credential list
 ```
 
 ### Error: No binding matched
 
-**Symptom:** Auth failures despite valid credential
-
-**Check:** Verify binding exists and matches
 ```bash
 uxc auth binding list
 uxc auth binding match <endpoint>
 ```
 
-**Solution:** Create or fix binding
-```bash
-uxc auth binding add \
-  --id my-binding \
-  --host api.example.com \
-  --credential my-credential \
-  --priority 100
-```
-
 ### Error: Environment variable not set
 
-**Symptom:** `expects env var 'XXX' but it is not set`
+If the credential uses env-backed `secret` or `fields`, export the variable and restart daemon:
 
-**Cause:** Credential uses `--secret-env` but variable not exported in daemon's environment
+```bash
+export MY_API_KEY="value"
+uxc daemon restart
+```
 
-**Solutions:**
-1. Set environment variable before starting daemon:
-   ```bash
-   export MY_API_KEY="value"
-   uxc daemon restart
-   ```
+### Error: `-1022` or provider-specific invalid signature
 
-2. Or switch to literal secret (less secure):
-   ```bash
-   uxc auth credential set mycred --secret "actual_value"
-   ```
+Check all three:
 
-3. Or switch to 1Password (most secure):
-   ```bash
-   uxc auth credential set mycred --secret-op "op://Vault/item/field"
-   ```
+1. the binding matched the intended path
+2. the `API key` and signing material come from the same provider key record
+3. the signer kind matches the provider contract
+
+Useful checks:
+
+```bash
+uxc auth credential info <credential_id>
+uxc auth binding match <endpoint>
+```
 
 ### Error: 1Password CLI not found
 
-**Symptom:** `'op' CLI was not found in PATH`
-
-**Cause:** 1Password CLI not installed or not in daemon's PATH
-
-**Solution:**
-1. Install 1Password CLI: https://developer.1password.com/docs/cli/get-started
-2. Ensure it's in PATH for daemon process
-3. Authenticate: `eval "$(op signin)"` or use service account token
+Install `op`, ensure it is on the daemon's `PATH`, and authenticate before runtime use.
 
 ## Verification Steps
 
-After configuring authentication, verify with:
+After configuring auth:
 
-1. **Check credential:**
+1. inspect the credential
    ```bash
    uxc auth credential info <credential_id>
    ```
-
-2. **Check binding:**
+2. inspect binding match
    ```bash
    uxc auth binding match <endpoint>
    ```
-
-3. **Test with read operation:**
+3. test a read operation first
    ```bash
    uxc <endpoint> <read_operation>
    ```
-
-4. **Test with explicit auth:**
+4. optionally force the credential explicitly
    ```bash
    uxc --auth <credential_id> <endpoint> <read_operation>
    ```
 
 ## Best Practices
 
-1. **Use environment variables or 1Password** for production credentials
-2. **Create bindings** for frequently-used endpoints
-3. **Test with read operations first** before write operations
-4. **Check credential info** to verify auth_headers are configured correctly
-5. **Restart daemon** after changing environment variables
-6. **Use priority** when multiple bindings could match (higher = preferred)
+1. Keep `--secret` for single-secret auth. Do not force everything into `fields`.
+2. Use `fields` for multi-value credentials and signer-backed APIs.
+3. Attach signers to bindings, not to endpoint URLs or shell wrappers.
+4. Prefer environment variables or 1Password over literal values.
+5. Test with reads before writes.
+6. Restart daemon after environment changes.
 
 ## See Also
 

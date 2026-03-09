@@ -1,6 +1,11 @@
 # Auth Secret Sources
 
-UXC supports three secret source kinds for non-OAuth credentials:
+UXC supports two layers of non-OAuth auth values:
+
+- one primary `secret`
+- optional named `fields`
+
+The primary `secret` still uses three source kinds:
 
 - `literal`: secret is provided directly with `--secret`
 - `env`: secret is resolved from environment variable via `--secret-env`
@@ -9,6 +14,7 @@ UXC supports three secret source kinds for non-OAuth credentials:
 For `api_key` credentials, you can also configure custom auth headers or query params with templates:
 
 - `{{secret}}`: resolved from the credential secret source
+- `{{field:<name>}}`: resolved from a named field on the credential
 - `{{env:VAR_NAME}}`: resolved from environment variable
 - `{{op://...}}`: resolved through 1Password CLI secret reference
 
@@ -20,16 +26,20 @@ uxc auth credential set demo --secret-env DEMO_TOKEN
 uxc auth credential set demo --secret-op op://Engineering/demo/token
 uxc auth credential set demo --auth-type api_key --api-key-header OK-ACCESS-KEY --secret-env OKX_ACCESS_KEY
 uxc auth credential set demo --auth-type api_key --header "OK-ACCESS-KEY={{secret}}" --header "OK-ACCESS-PASSPHRASE={{env:OKX_PASSPHRASE}}"
+uxc auth credential set binance --auth-type api_key --field api_key=env:BINANCE_API_KEY --field secret_key=env:BINANCE_SECRET_KEY
+uxc auth credential set demo --auth-type api_key --header "X-API-Key={{field:api_key}}" --header "X-API-Secret={{field:secret_key}}"
 uxc auth credential set flipside --auth-type api_key --query-param "apiKey={{secret}}" --secret-env FLIPSIDE_API_KEY
 ```
 
 ## Behavior
 
 - `--secret`, `--secret-env`, and `--secret-op` are mutually exclusive.
+- `--field` is repeatable and stores additional named auth values on the credential.
 - `--api-key-header` is a shortcut for one header using `{{secret}}`.
-- `--header` can be repeated and supports `{{secret}}`, `{{env:...}}`, and `{{op://...}}`.
-- `--query-param` can be repeated and supports `{{secret}}`, `{{env:...}}`, and `{{op://...}}`.
+- `--header` can be repeated and supports `{{secret}}`, `{{field:...}}`, `{{env:...}}`, and `{{op://...}}`.
+- `--query-param` can be repeated and supports `{{secret}}`, `{{field:...}}`, `{{env:...}}`, and `{{op://...}}`.
 - `auth credential info` and `auth credential list` expose `secret_source.kind`, `auth_headers`, and `auth_query_params` (names with masked values), but not underlying secret values.
+- `auth credential info` also exposes named field source kinds with masked values.
 - Resolved values from `env` and `op` are used at runtime and are not persisted as plaintext values.
 - `op` mode requires 1Password CLI (`op`) in `PATH`.
 - `op` references are resolved during request execution, not at `auth credential set` time.

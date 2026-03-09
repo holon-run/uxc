@@ -62,6 +62,28 @@ uxc auth binding add --id flipside-mcp --host mcp.flipsidecrypto.xyz --path-pref
 uxc https://mcp.flipsidecrypto.xyz/mcp -h
 ```
 
+For multi-part auth, keep one credential and store extra values as named `fields`:
+
+```bash
+uxc auth credential set exchange \
+  --auth-type api_key \
+  --field api_key=env:EXCHANGE_API_KEY \
+  --field secret_key=env:EXCHANGE_SECRET_KEY
+```
+
+For signed HTTP APIs, attach the signer to the binding instead of hardcoding signing into the endpoint URL:
+
+```bash
+uxc auth binding add \
+  --id exchange-signed \
+  --host api.example.com \
+  --path-prefix /v1 \
+  --scheme https \
+  --credential exchange \
+  --signer-json '{"kind":"hmac_query_v1","algorithm":"hmac_sha256","signing_field":"secret_key","key_field":"api_key","key_placement":"header","key_name":"X-API-KEY","signature_param":"signature","signature_encoding":"hex","timestamp_param":"timestamp","timestamp_unit":"milliseconds","canonicalization":{"mode":"preserve_order"}}' \
+  --priority 100
+```
+
 Examples:
 
 ```bash
@@ -118,6 +140,13 @@ Use this when you need quick discovery context before choosing an operation.
 
 ```bash
 uxc auth binding match <endpoint>
+```
+
+For signer-backed HTTP auth, also inspect the credential and binding shape before the first live call:
+
+```bash
+uxc auth credential info <credential_id>
+uxc auth binding list
 ```
 
 2. Run intended read call directly (use as runtime validation).
