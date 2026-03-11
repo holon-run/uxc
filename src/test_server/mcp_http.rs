@@ -5,14 +5,19 @@ use anyhow::Result;
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
+use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::convert::Infallible;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use tokio::signal::ctrl_c;
@@ -22,6 +27,7 @@ use tracing::info;
 struct ServerState {
     scenario: Scenario,
     tools_list_calls: Arc<AtomicU64>,
+    resource_subscribed: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,7 +73,8 @@ async fn mcp_handler(
         "initialize" => json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {
-                "tools": {"listChanged": false}
+                "tools": {"listChanged": false},
+                "resources": {"subscribe": true}
             },
             "serverInfo": {
                 "name": "uxc-test-mcp-http",
@@ -138,6 +145,14 @@ async fn mcp_handler(
             }
             result
         }
+        "resources/subscribe" => {
+            state.resource_subscribed.store(true, Ordering::SeqCst);
+            json!({})
+        }
+        "resources/unsubscribe" => {
+            state.resource_subscribed.store(false, Ordering::SeqCst);
+            json!({})
+        }
         _ => {
             return Ok(Json(json!({
                 "jsonrpc": "2.0",
@@ -156,6 +171,42 @@ async fn mcp_handler(
     .into_response())
 }
 
+async fn mcp_event_stream(
+    State(state): State<ServerState>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    if matches!(state.scenario, Scenario::AuthRequired) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let resource_subscribed = state.resource_subscribed.clone();
+    let stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
+        std::time::Duration::from_millis(200),
+    ))
+    .enumerate()
+    .filter_map(move |(idx, _)| {
+        let resource_subscribed = resource_subscribed.clone();
+        async move {
+            if !resource_subscribed.load(Ordering::SeqCst) {
+                return None;
+            }
+            let seq = idx.saturating_add(1);
+            let payload = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/resources/updated",
+                "params": {
+                    "uri": "test://resource",
+                    "value": seq
+                }
+            });
+            Some(Ok(Event::default()
+                .event("message")
+                .data(payload.to_string())))
+        }
+    });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 fn create_router(state: ServerState) -> Router {
     async fn not_found() -> StatusCode {
         StatusCode::NOT_FOUND
@@ -163,7 +214,7 @@ fn create_router(state: ServerState) -> Router {
 
     Router::new()
         .route("/", get(not_found))
-        .route("/mcp", post(mcp_handler))
+        .route("/mcp", get(mcp_event_stream).post(mcp_handler))
         .route("/.well-known/mcp", post(mcp_handler))
         .with_state(state)
 }
@@ -173,6 +224,7 @@ pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
     let app = create_router(ServerState {
         scenario,
         tools_list_calls: Arc::new(AtomicU64::new(0)),
+        resource_subscribed: Arc::new(AtomicBool::new(false)),
     });
 
     info!("MCP HTTP test server listening on http://{}", addr);

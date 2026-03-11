@@ -702,8 +702,12 @@ impl SubscriptionManager {
             }
             "websocket".to_string()
         } else if request.resource_uri.is_some() {
-            if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
-                bail!("MCP subscriptions currently support stdio endpoints only");
+            if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint)
+                && !adapters::mcp::McpAdapter::is_http_url(&request.endpoint)
+            {
+                bail!(
+                    "MCP subscriptions require a stdio command or http(s) MCP endpoint when --resource-uri is set"
+                );
             }
             "mcp".to_string()
         } else if request.endpoint.starts_with("http://")
@@ -1866,13 +1870,17 @@ async fn run_mcp_subscription_job(
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
-        bail!("MCP subscriptions currently support stdio endpoints only");
-    }
     let resource_uri = request
         .resource_uri
         .as_ref()
         .ok_or_else(|| anyhow!("resource_uri is required for MCP subscriptions"))?;
+    if adapters::mcp::McpAdapter::is_http_url(&request.endpoint) {
+        return run_mcp_http_subscription_job(request, sink_path, view, resource_uri, stop_rx)
+            .await;
+    }
+    if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+        bail!("MCP subscriptions require a stdio command or http(s) MCP endpoint");
+    }
     let auth_profile =
         auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
     let spawn_options =
@@ -1923,6 +1931,92 @@ async fn run_mcp_subscription_job(
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 let notifications = client.drain_notifications().await;
                 for notification in notifications {
+                    append_subscription_event(
+                        &mut sink,
+                        &view,
+                        &mut seq,
+                        "mcp_resource",
+                        "data",
+                        notification.params.clone(),
+                        Some(json!({"method": notification.method})),
+                    ).await?;
+                }
+            }
+        }
+    }
+}
+
+async fn run_mcp_http_subscription_job(
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    resource_uri: &str,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let auth_profile =
+        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+    let resolved_transport =
+        resolve_mcp_http_endpoint(&request.endpoint, auth_profile.clone()).await?;
+    let transport =
+        adapters::mcp::McpRemoteTransport::with_auth(resolved_transport.clone(), auth_profile)?;
+    let init = transport.initialize().await?;
+    let supports_resource_subscribe = init
+        .capabilities
+        .resources
+        .as_ref()
+        .and_then(|resources| resources.subscribe)
+        .unwrap_or(false);
+    if !supports_resource_subscribe {
+        bail!("MCP server does not support resources.subscribe");
+    }
+
+    transport.subscribe_resource(resource_uri).await?;
+
+    let mut sink = open_subscription_sink(&sink_path).await?;
+    let mut seq = 0u64;
+    append_subscription_event(
+        &mut sink,
+        &view,
+        &mut seq,
+        "mcp_resource",
+        "open",
+        None,
+        Some(json!({
+            "resource_uri": resource_uri,
+            "transport_mode": format!("{:?}", resolved_transport.mode),
+            "connect_url": redact_endpoint(&resolved_transport.connect_url),
+        })),
+    )
+    .await?;
+
+    loop {
+        tokio::select! {
+            stop_requested = subscription_stop_requested(&mut stop_rx) => {
+                if stop_requested {
+                    if let Err(err) = transport.unsubscribe_resource(resource_uri).await {
+                        let msg = format!("failed to unsubscribe resource before shutdown: {}", err);
+                        append_subscription_event(
+                            &mut sink,
+                            &view,
+                            &mut seq,
+                            "mcp_resource",
+                            "error",
+                            None,
+                            Some(json!({ "message": msg })),
+                        ).await?;
+                        update_subscription_view(&view, None, Some(msg), false).await;
+                    }
+                    transport.shutdown_notification_stream().await;
+                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "mcp_resource").await?;
+                    return Ok(());
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if let Some(err) = transport.take_stream_error().await {
+                    transport.shutdown_notification_stream().await;
+                    return Err(anyhow!("MCP HTTP subscription stream failed: {}", err));
+                }
+                for notification in transport.drain_notifications().await {
                     append_subscription_event(
                         &mut sink,
                         &view,

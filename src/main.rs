@@ -1528,6 +1528,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             examples: vec![
                 "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
                     .to_string(),
+                "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --sink file:/tmp/mcp-http.ndjson".to_string(),
                 "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --sink file:/tmp/mcp.ndjson".to_string(),
                 "uxc subscribe list".to_string(),
                 "uxc subscribe status sub_123".to_string(),
@@ -1541,11 +1542,12 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: vec![],
             notes: vec![
                 "For HTTP streams, <endpoint> is the final stream URL.".to_string(),
-                "For MCP, pass the endpoint/stdio command and --resource-uri <uri>.".to_string(),
+                "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>.".to_string(),
             ],
             examples: vec![
                 "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
                     .to_string(),
+                "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --sink file:/tmp/mcp-http.ndjson".to_string(),
                 "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --sink file:/tmp/mcp.ndjson".to_string(),
             ],
         },

@@ -9,7 +9,7 @@ use crate::http_client::build_resilient_http_client;
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 
 const PROBE_TIMEOUT_SECS: u64 = 10;
 const MAX_STREAM_BODY_BYTES: usize = 1024 * 1024;
+const MAX_BUFFERED_NOTIFICATIONS: usize = 64;
 const LEGACY_SSE_STREAM_TIMEOUT_SECS: u64 = 60 * 60 * 24;
 const LEGACY_SSE_RESPONSE_TIMEOUT_SECS: u64 = 30;
 
@@ -77,6 +78,12 @@ pub struct McpHttpTransport {
     auth_profile: Arc<Mutex<Option<Profile>>>,
     /// Lock for OAuth refresh operations
     oauth_refresh_lock: Arc<Mutex<()>>,
+    /// Buffered server notifications received from the optional SSE GET stream.
+    notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>>,
+    /// Background reader for the SSE GET stream used by server-to-client notifications.
+    event_stream_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Terminal error from the current event stream reader, if any.
+    event_stream_error: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug)]
@@ -88,6 +95,8 @@ pub struct LegacySseTransport {
     oauth_refresh_lock: Arc<Mutex<()>>,
     connect_lock: Arc<Mutex<()>>,
     session: Arc<Mutex<Option<LegacySseSession>>>,
+    notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>>,
+    event_stream_error: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug)]
@@ -158,6 +167,9 @@ impl McpHttpTransport {
             session_id: Arc::new(Mutex::new(None)),
             auth_profile: Arc::new(Mutex::new(auth_profile)),
             oauth_refresh_lock: Arc::new(Mutex::new(())),
+            notifications: Arc::new(Mutex::new(VecDeque::new())),
+            event_stream_task: Arc::new(Mutex::new(None)),
+            event_stream_error: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -446,6 +458,120 @@ impl McpHttpTransport {
         }
 
         Ok(body)
+    }
+
+    async fn push_notification(
+        notifications: &Arc<Mutex<VecDeque<JsonRpcNotification>>>,
+        notification: JsonRpcNotification,
+    ) {
+        let mut queue = notifications.lock().await;
+        if queue.len() >= MAX_BUFFERED_NOTIFICATIONS {
+            if let Some(dropped) = queue.pop_front() {
+                tracing::warn!(
+                    method = %dropped.method,
+                    max_buffered = MAX_BUFFERED_NOTIFICATIONS,
+                    "Dropping oldest buffered MCP HTTP notification"
+                );
+            }
+        }
+        queue.push_back(notification);
+    }
+
+    async fn set_stream_error(stream_error: &Arc<Mutex<Option<String>>>, message: String) {
+        let mut guard = stream_error.lock().await;
+        *guard = Some(message);
+    }
+
+    fn parse_notification_payload(payload: &str) -> Result<Vec<JsonRpcNotification>> {
+        let value = serde_json::from_str::<JsonValue>(payload)
+            .with_context(|| format!("Invalid JSON-RPC notification payload: {}", payload))?;
+        Self::notifications_from_json(&value)
+    }
+
+    fn notifications_from_json(value: &JsonValue) -> Result<Vec<JsonRpcNotification>> {
+        match value {
+            JsonValue::Array(items) => {
+                let mut notifications = Vec::with_capacity(items.len());
+                for item in items {
+                    notifications.extend(Self::notifications_from_json(item)?);
+                }
+                Ok(notifications)
+            }
+            JsonValue::Object(map) if map.contains_key("method") && !map.contains_key("id") => {
+                Ok(vec![serde_json::from_value(value.clone())
+                    .context("Failed to parse JSON-RPC notification")?])
+            }
+            JsonValue::Object(_) => Ok(Vec::new()),
+            _ => bail!("JSON-RPC notification payload must be an object or array"),
+        }
+    }
+
+    async fn run_streamable_event_reader(
+        mut response: reqwest::Response,
+        notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>>,
+        stream_error: Arc<Mutex<Option<String>>>,
+    ) {
+        let mut buffer = String::new();
+
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    match LegacySseTransport::drain_sse_events(&mut buffer) {
+                        Ok(events) => {
+                            for event in events {
+                                if event.event_type != "message" {
+                                    continue;
+                                }
+                                match Self::parse_notification_payload(&event.data) {
+                                    Ok(parsed) => {
+                                        for notification in parsed {
+                                            Self::push_notification(&notifications, notification)
+                                                .await;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        Self::set_stream_error(
+                                            &stream_error,
+                                            format!(
+                                                "Failed to parse MCP HTTP event notification: {}",
+                                                err
+                                            ),
+                                        )
+                                        .await;
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            Self::set_stream_error(
+                                &stream_error,
+                                format!("Failed to parse MCP HTTP event stream: {}", err),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => {
+                    Self::set_stream_error(
+                        &stream_error,
+                        "MCP HTTP event stream closed".to_string(),
+                    )
+                    .await;
+                    return;
+                }
+                Err(err) => {
+                    Self::set_stream_error(
+                        &stream_error,
+                        format!("Failed to read MCP HTTP event stream chunk: {}", err),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
     }
 
     fn summarize_body(body: &str) -> String {
@@ -903,6 +1029,43 @@ impl McpHttpTransport {
         serde_json::from_value(result).context("Failed to parse resources/read result")
     }
 
+    pub async fn subscribe_resource(&self, uri: &str) -> Result<()> {
+        self.ensure_event_stream().await?;
+
+        let params = serde_json::json!({
+            "uri": uri
+        });
+        let _ = self
+            .send_request("resources/subscribe", Some(params))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unsubscribe_resource(&self, uri: &str) -> Result<()> {
+        let params = serde_json::json!({
+            "uri": uri
+        });
+        let _ = self
+            .send_request("resources/unsubscribe", Some(params))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn drain_notifications(&self) -> Vec<JsonRpcNotification> {
+        let mut queue = self.notifications.lock().await;
+        queue.drain(..).collect()
+    }
+
+    pub async fn take_stream_error(&self) -> Option<String> {
+        self.event_stream_error.lock().await.take()
+    }
+
+    pub async fn shutdown_event_stream(&self) {
+        if let Some(task) = self.event_stream_task.lock().await.take() {
+            task.abort();
+        }
+    }
+
     /// List available prompts
     pub async fn list_prompts(&self) -> Result<Vec<Prompt>> {
         let result = self.send_request("prompts/list", None).await?;
@@ -927,6 +1090,94 @@ impl McpHttpTransport {
         let result = self.send_request("prompts/get", Some(params)).await?;
 
         serde_json::from_value(result).context("Failed to parse prompts/get result")
+    }
+
+    async fn ensure_event_stream(&self) -> Result<()> {
+        {
+            let task_guard = self.event_stream_task.lock().await;
+            if let Some(task) = task_guard.as_ref() {
+                if !task.is_finished() {
+                    return Ok(());
+                }
+            }
+        }
+
+        let mut task_guard = self.event_stream_task.lock().await;
+        if let Some(task) = task_guard.as_ref() {
+            if !task.is_finished() {
+                return Ok(());
+            }
+        }
+        if let Some(task) = task_guard.take() {
+            let _ = task.await;
+        }
+
+        let response = self.open_event_stream().await?;
+        *self.event_stream_error.lock().await = None;
+        let notifications = self.notifications.clone();
+        let stream_error = self.event_stream_error.clone();
+        *task_guard = Some(tokio::spawn(async move {
+            Self::run_streamable_event_reader(response, notifications, stream_error).await;
+        }));
+        Ok(())
+    }
+
+    async fn open_event_stream(&self) -> Result<reqwest::Response> {
+        self.maybe_refresh_oauth_token().await?;
+
+        let mut response = self.send_get_event_stream_request().await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.is_oauth_profile().await {
+            self.force_refresh_oauth_token().await?;
+            response = self.send_get_event_stream_request().await?;
+        }
+
+        let status = response.status();
+        let www_authenticate = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            Self::map_http_error(status, &body, www_authenticate.as_deref())?;
+            unreachable!("map_http_error should always return an error");
+        }
+
+        if !content_type.contains("text/event-stream") {
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "MCP HTTP event stream did not return text/event-stream: {}",
+                body
+            );
+        }
+
+        Ok(response)
+    }
+
+    async fn send_get_event_stream_request(&self) -> Result<reqwest::Response> {
+        let profile = self.auth_profile.lock().await.clone();
+        let session_id = self.session_id.lock().await.clone();
+        let authed_url = Self::apply_profile_auth_to_url(&self.server_url, profile.as_ref())?;
+
+        let mut req = self
+            .client
+            .get(&authed_url)
+            .header("Accept", "text/event-stream");
+        if let Some(session_id) = session_id {
+            req = req.header("mcp-session-id", session_id);
+        }
+        if let Some(profile) = profile {
+            req = Self::apply_profile_auth(req, &profile)?;
+        }
+
+        req.send().await.map_err(Into::into)
     }
 }
 
@@ -953,6 +1204,8 @@ impl LegacySseTransport {
             oauth_refresh_lock: Arc::new(Mutex::new(())),
             connect_lock: Arc::new(Mutex::new(())),
             session: Arc::new(Mutex::new(None)),
+            notifications: Arc::new(Mutex::new(VecDeque::new())),
+            event_stream_error: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1052,7 +1305,13 @@ impl LegacySseTransport {
         let messages_url =
             messages_url.context("Legacy SSE bootstrap stream did not emit endpoint event")?;
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let reader_task = tokio::spawn(Self::run_sse_reader(response, buffer, pending.clone()));
+        let reader_task = tokio::spawn(Self::run_sse_reader(
+            response,
+            buffer,
+            pending.clone(),
+            self.notifications.clone(),
+            self.event_stream_error.clone(),
+        ));
 
         *self.session.lock().await = Some(LegacySseSession {
             messages_url,
@@ -1270,10 +1529,41 @@ impl LegacySseTransport {
         serde_json::from_value(result).context("Failed to parse tools/call result")
     }
 
+    async fn subscribe_resource(&self, uri: &str) -> Result<()> {
+        let params = serde_json::json!({
+            "uri": uri
+        });
+        let _ = self
+            .send_request("resources/subscribe", Some(params))
+            .await?;
+        Ok(())
+    }
+
+    async fn unsubscribe_resource(&self, uri: &str) -> Result<()> {
+        let params = serde_json::json!({
+            "uri": uri
+        });
+        let _ = self
+            .send_request("resources/unsubscribe", Some(params))
+            .await?;
+        Ok(())
+    }
+
+    async fn drain_notifications(&self) -> Vec<JsonRpcNotification> {
+        let mut queue = self.notifications.lock().await;
+        queue.drain(..).collect()
+    }
+
+    async fn take_stream_error(&self) -> Option<String> {
+        self.event_stream_error.lock().await.take()
+    }
+
     async fn run_sse_reader(
         mut response: reqwest::Response,
         mut buffer: String,
         pending: PendingResponses,
+        notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>>,
+        stream_error: Arc<Mutex<Option<String>>>,
     ) {
         loop {
             match Self::drain_sse_events(&mut buffer) {
@@ -1283,22 +1573,65 @@ impl LegacySseTransport {
                             continue;
                         }
 
-                        match serde_json::from_str::<JsonRpcResponse>(&event.data) {
-                            Ok(message) => {
-                                let payload = if let Some(error) = message.error {
-                                    Err(format!(
-                                        "MCP server returned error: {} - {}",
-                                        error.code, error.message
-                                    ))
-                                } else {
-                                    message
-                                        .result
-                                        .context("MCP server response missing result field")
-                                        .map_err(|err| err.to_string())
-                                };
+                        match serde_json::from_str::<JsonValue>(&event.data) {
+                            Ok(value) => {
+                                let notifications_only =
+                                    match McpHttpTransport::notifications_from_json(&value) {
+                                        Ok(parsed) => parsed,
+                                        Err(err) => {
+                                            McpHttpTransport::set_stream_error(
+                                                &stream_error,
+                                                format!(
+                                                    "Failed to parse legacy SSE event payload: {}",
+                                                    err
+                                                ),
+                                            )
+                                            .await;
+                                            Self::fail_pending(
+                                                &pending,
+                                                "Legacy SSE stream failed".to_string(),
+                                            )
+                                            .await;
+                                            return;
+                                        }
+                                    };
+                                if !notifications_only.is_empty() {
+                                    for notification in notifications_only {
+                                        McpHttpTransport::push_notification(
+                                            &notifications,
+                                            notification,
+                                        )
+                                        .await;
+                                    }
+                                    continue;
+                                }
 
-                                if let Some(sender) = pending.lock().await.remove(&message.id) {
-                                    let _ = sender.send(payload);
+                                match serde_json::from_value::<JsonRpcResponse>(value) {
+                                    Ok(message) => {
+                                        let payload = if let Some(error) = message.error {
+                                            Err(format!(
+                                                "MCP server returned error: {} - {}",
+                                                error.code, error.message
+                                            ))
+                                        } else {
+                                            message
+                                                .result
+                                                .context("MCP server response missing result field")
+                                                .map_err(|err| err.to_string())
+                                        };
+
+                                        if let Some(sender) =
+                                            pending.lock().await.remove(&message.id)
+                                        {
+                                            let _ = sender.send(payload);
+                                        }
+                                    }
+                                    Err(err) => {
+                                        tracing::debug!(
+                                            "Ignoring malformed legacy SSE message event: {}",
+                                            err
+                                        );
+                                    }
                                 }
                             }
                             Err(err) => {
@@ -1307,10 +1640,15 @@ impl LegacySseTransport {
                                     err
                                 );
                             }
-                        }
+                        };
                     }
                 }
                 Err(err) => {
+                    McpHttpTransport::set_stream_error(
+                        &stream_error,
+                        format!("Failed to parse legacy SSE event stream: {}", err),
+                    )
+                    .await;
                     Self::fail_pending(
                         &pending,
                         format!("Failed to parse legacy SSE event stream: {}", err),
@@ -1323,10 +1661,20 @@ impl LegacySseTransport {
             match response.chunk().await {
                 Ok(Some(chunk)) => buffer.push_str(&String::from_utf8_lossy(&chunk)),
                 Ok(None) => {
+                    McpHttpTransport::set_stream_error(
+                        &stream_error,
+                        "Legacy SSE stream closed".to_string(),
+                    )
+                    .await;
                     Self::fail_pending(&pending, "Legacy SSE stream closed".to_string()).await;
                     return;
                 }
                 Err(err) => {
+                    McpHttpTransport::set_stream_error(
+                        &stream_error,
+                        format!("Failed to read legacy SSE stream chunk: {}", err),
+                    )
+                    .await;
                     Self::fail_pending(
                         &pending,
                         format!("Failed to read legacy SSE stream chunk: {}", err),
@@ -1447,6 +1795,41 @@ impl McpRemoteTransport {
         match self {
             Self::Streamable(transport) => transport.call_tool(name, arguments).await,
             Self::Legacy(transport) => transport.call_tool(name, arguments).await,
+        }
+    }
+
+    pub async fn subscribe_resource(&self, uri: &str) -> Result<()> {
+        match self {
+            Self::Streamable(transport) => transport.subscribe_resource(uri).await,
+            Self::Legacy(transport) => transport.subscribe_resource(uri).await,
+        }
+    }
+
+    pub async fn unsubscribe_resource(&self, uri: &str) -> Result<()> {
+        match self {
+            Self::Streamable(transport) => transport.unsubscribe_resource(uri).await,
+            Self::Legacy(transport) => transport.unsubscribe_resource(uri).await,
+        }
+    }
+
+    pub async fn drain_notifications(&self) -> Vec<JsonRpcNotification> {
+        match self {
+            Self::Streamable(transport) => transport.drain_notifications().await,
+            Self::Legacy(transport) => transport.drain_notifications().await,
+        }
+    }
+
+    pub async fn take_stream_error(&self) -> Option<String> {
+        match self {
+            Self::Streamable(transport) => transport.take_stream_error().await,
+            Self::Legacy(transport) => transport.take_stream_error().await,
+        }
+    }
+
+    pub async fn shutdown_notification_stream(&self) {
+        match self {
+            Self::Streamable(transport) => transport.shutdown_event_stream().await,
+            Self::Legacy(_) => {}
         }
     }
 }

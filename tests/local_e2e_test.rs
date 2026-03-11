@@ -969,6 +969,59 @@ fn test_mcp_stdio_subscribe_start_status_stop_writes_file() {
 
 #[test]
 #[serial_test::serial]
+fn test_mcp_http_subscribe_start_status_stop_writes_file() {
+    let server = start_test_server("mcp-http", "ok");
+    let endpoint = mcp_http_endpoint(&server.addr);
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("mcp-http-subscribe.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "--resource-uri",
+            "test://resource",
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(
+        start.is_ok(),
+        "MCP HTTP subscribe start failed: {:?}",
+        start
+    );
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    assert_eq!(start_json["ok"], true);
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""value":2"#, Duration::from_secs(5)),
+        "MCP HTTP subscribe sink did not receive expected events"
+    );
+
+    let status = run_uxc_in_home(&["subscribe", "status", &job_id], &test_home);
+    assert!(
+        status.is_ok(),
+        "MCP HTTP subscribe status failed: {:?}",
+        status
+    );
+    let status_json: serde_json::Value = serde_json::from_str(&status.unwrap()).unwrap();
+    assert_eq!(status_json["ok"], true);
+    assert_eq!(status_json["data"]["protocol"], "mcp");
+    assert_eq!(status_json["data"]["resource_uri"], "test://resource");
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(stop.is_ok(), "MCP HTTP subscribe stop failed: {:?}", stop);
+    let stop_json: serde_json::Value = serde_json::from_str(&stop.unwrap()).unwrap();
+    assert_eq!(stop_json["ok"], true);
+    assert_eq!(stop_json["data"]["stopped"], true);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_openapi_describe_operation() {
     let _server = start_test_server("openapi", "ok");
 
