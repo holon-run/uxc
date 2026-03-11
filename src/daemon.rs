@@ -1387,10 +1387,9 @@ fn validate_subscription_sink_path(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() {
         bail!("subscribe sink path cannot be empty");
     }
-    if !path.is_absolute()
-        && path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
     {
         bail!("subscribe sink path cannot contain '..'");
     }
@@ -3520,6 +3519,12 @@ mod tests {
     fn parse_file_sink_rejects_absolute_path_outside_allowed_roots() {
         let err = parse_file_sink("file:/etc/passwd").unwrap_err();
         assert!(err.to_string().contains("under HOME or temp directory"));
+    }
+
+    #[test]
+    fn parse_file_sink_rejects_absolute_path_with_parent_component() {
+        let err = parse_file_sink("file:/tmp/../events.ndjson").unwrap_err();
+        assert!(err.to_string().contains("cannot contain '..'"));
     }
 
     #[test]

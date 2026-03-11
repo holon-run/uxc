@@ -28,6 +28,7 @@ struct ServerState {
     scenario: Scenario,
     tools_list_calls: Arc<AtomicU64>,
     resource_subscribed: Arc<AtomicBool>,
+    resource_event_seq: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,10 +148,12 @@ async fn mcp_handler(
         }
         "resources/subscribe" => {
             state.resource_subscribed.store(true, Ordering::SeqCst);
+            state.resource_event_seq.store(0, Ordering::SeqCst);
             json!({})
         }
         "resources/unsubscribe" => {
             state.resource_subscribed.store(false, Ordering::SeqCst);
+            state.resource_event_seq.store(0, Ordering::SeqCst);
             json!({})
         }
         _ => {
@@ -179,17 +182,20 @@ async fn mcp_event_stream(
     }
 
     let resource_subscribed = state.resource_subscribed.clone();
+    let resource_event_seq = state.resource_event_seq.clone();
     let stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
         std::time::Duration::from_millis(200),
     ))
-    .enumerate()
-    .filter_map(move |(idx, _)| {
+    .filter_map(move |_| {
         let resource_subscribed = resource_subscribed.clone();
+        let resource_event_seq = resource_event_seq.clone();
         async move {
             if !resource_subscribed.load(Ordering::SeqCst) {
                 return None;
             }
-            let seq = idx.saturating_add(1);
+            let seq = resource_event_seq
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
             let payload = json!({
                 "jsonrpc": "2.0",
                 "method": "notifications/resources/updated",
@@ -225,6 +231,7 @@ pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
         scenario,
         tools_list_calls: Arc::new(AtomicU64::new(0)),
         resource_subscribed: Arc::new(AtomicBool::new(false)),
+        resource_event_seq: Arc::new(AtomicU64::new(0)),
     });
 
     info!("MCP HTTP test server listening on http://{}", addr);

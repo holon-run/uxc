@@ -516,7 +516,19 @@ impl McpHttpTransport {
         loop {
             match response.chunk().await {
                 Ok(Some(chunk)) => {
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    let chunk_str = String::from_utf8_lossy(&chunk);
+                    if buffer.len() + chunk_str.len() > MAX_STREAM_BODY_BYTES {
+                        Self::set_stream_error(
+                            &stream_error,
+                            format!(
+                                "MCP HTTP event stream exceeded maximum buffered size of {} bytes",
+                                MAX_STREAM_BODY_BYTES
+                            ),
+                        )
+                        .await;
+                        return;
+                    }
+                    buffer.push_str(&chunk_str);
                     match LegacySseTransport::drain_sse_events(&mut buffer) {
                         Ok(events) => {
                             for event in events {
@@ -1178,6 +1190,16 @@ impl McpHttpTransport {
         }
 
         req.send().await.map_err(Into::into)
+    }
+}
+
+impl Drop for McpHttpTransport {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.event_stream_task.try_lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
     }
 }
 
