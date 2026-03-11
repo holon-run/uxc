@@ -8,6 +8,9 @@ use crate::cache::{self, Cache, CacheConfig};
 use crate::daemon_log::{redact_endpoint, redact_sensitive};
 use crate::daemon_log::{DaemonEventType, DaemonLogEntry, DaemonLogger};
 use crate::error::UxcError;
+use crate::subscription_websocket::{
+    self, RawFrameHandler, WebSocketRuntimeConfig, WebSocketRuntimeObserver,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -116,6 +119,8 @@ pub struct SubscribeStartRequest {
     pub endpoint: String,
     pub sink: String,
     pub resource_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_hint: Option<SubscriptionTransportHint>,
     pub options: RuntimeInvokeOptions,
 }
 
@@ -133,6 +138,12 @@ pub struct SubscribeStartResponse {
 pub struct SubscribeStopResponse {
     pub job_id: String,
     pub stopped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionTransportHint {
+    Websocket,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -681,7 +692,16 @@ impl SubscriptionManager {
     async fn start(&self, request: &SubscribeStartRequest) -> Result<SubscribeStartResponse> {
         let sink_path = parse_file_sink(&request.sink)?;
         let sink_spec = format!("file:{}", sink_path.display());
-        let protocol = if request.resource_uri.is_some() {
+        let protocol = if matches!(
+            request.transport_hint,
+            Some(SubscriptionTransportHint::Websocket)
+        ) {
+            let lower = request.endpoint.to_ascii_lowercase();
+            if !lower.starts_with("ws://") && !lower.starts_with("wss://") {
+                bail!("websocket subscription transport requires a ws:// or wss:// endpoint");
+            }
+            "websocket".to_string()
+        } else if request.resource_uri.is_some() {
             if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
                 bail!("MCP subscriptions currently support stdio endpoints only");
             }
@@ -722,7 +742,19 @@ impl SubscriptionManager {
         let job_id_clone = job_id.clone();
         let view_clone = view.clone();
         let task = tokio::spawn(async move {
-            let result = if request_clone.resource_uri.is_some() {
+            let result = if matches!(
+                request_clone.transport_hint,
+                Some(SubscriptionTransportHint::Websocket)
+            ) {
+                run_websocket_subscription_job(
+                    &job_id_clone,
+                    &request_clone,
+                    sink_path,
+                    view_clone.clone(),
+                    stop_rx,
+                )
+                .await
+            } else if request_clone.resource_uri.is_some() {
                 run_mcp_subscription_job(
                     &job_id_clone,
                     &request_clone,
@@ -1755,6 +1787,76 @@ async fn run_http_subscription_job(
             }
         }
     }
+}
+
+struct DaemonWebSocketObserver<'a> {
+    sink: &'a mut tokio::fs::File,
+    view: &'a Arc<Mutex<SubscriptionJobView>>,
+    seq: &'a mut u64,
+}
+
+#[async_trait::async_trait]
+impl WebSocketRuntimeObserver for DaemonWebSocketObserver<'_> {
+    async fn emit(
+        &mut self,
+        event_kind: &str,
+        data: Option<Value>,
+        meta: Option<Value>,
+    ) -> Result<()> {
+        append_subscription_event(
+            self.sink,
+            self.view,
+            self.seq,
+            "websocket",
+            event_kind,
+            data,
+            meta,
+        )
+        .await
+    }
+
+    async fn update_status(
+        &mut self,
+        status: Option<&str>,
+        last_error: Option<String>,
+        increment_reconnect: bool,
+    ) -> Result<()> {
+        update_subscription_view(self.view, status, last_error, increment_reconnect).await;
+        Ok(())
+    }
+}
+
+async fn run_websocket_subscription_job(
+    _job_id: &str,
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let auth_profile =
+        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+    let mut sink = open_subscription_sink(&sink_path).await?;
+    let mut seq = 0u64;
+    let mut handler = RawFrameHandler;
+    let mut observer = DaemonWebSocketObserver {
+        sink: &mut sink,
+        view: &view,
+        seq: &mut seq,
+    };
+
+    subscription_websocket::run_websocket_subscription_runtime(
+        WebSocketRuntimeConfig {
+            endpoint: request.endpoint.clone(),
+            auth_profile,
+            subprotocols: Vec::new(),
+            initial_reconnect_delay_secs: SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS,
+            max_reconnect_delay_secs: SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS,
+        },
+        &mut handler,
+        &mut observer,
+        &mut stop_rx,
+    )
+    .await
 }
 
 async fn run_mcp_subscription_job(
@@ -3247,6 +3349,15 @@ impl Default for DaemonRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::SinkExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
+    use std::time::Duration as StdDuration;
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_hdr_async;
+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    use tokio_tungstenite::tungstenite::Message;
 
     #[test]
     fn openapi_runtime_endpoint_appends_operation_path_for_execute() {
@@ -3410,6 +3521,192 @@ mod tests {
             Some("你".to_string())
         );
         assert!(buffer.is_empty());
+    }
+
+    #[derive(Clone)]
+    enum TestWsFrame {
+        Text(&'static str),
+        Binary(Vec<u8>),
+    }
+
+    #[derive(Clone)]
+    struct TestWsConnectionPlan {
+        frames: Vec<TestWsFrame>,
+        hold_open_after_send: bool,
+    }
+
+    async fn start_test_websocket_server(
+        plans: Vec<TestWsConnectionPlan>,
+    ) -> (String, StdArc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connects = StdArc::new(AtomicUsize::new(0));
+        let connects_clone = connects.clone();
+        let task = tokio::spawn(async move {
+            for plan in plans {
+                let (stream, _) = listener.accept().await.unwrap();
+                let connects_for_cb = connects_clone.clone();
+                let mut websocket = accept_hdr_async(
+                    stream,
+                    move |_request: &Request, response: Response| {
+                        connects_for_cb.fetch_add(1, Ordering::SeqCst);
+                        Ok(response)
+                    },
+                )
+                .await
+                .unwrap();
+
+                for frame in plan.frames {
+                    match frame {
+                        TestWsFrame::Text(text) => {
+                            websocket
+                                .send(Message::Text(text.to_string().into()))
+                                .await
+                                .unwrap();
+                        }
+                        TestWsFrame::Binary(bytes) => {
+                            websocket.send(Message::Binary(bytes.into())).await.unwrap();
+                        }
+                    }
+                    tokio::time::sleep(StdDuration::from_millis(50)).await;
+                }
+
+                if plan.hold_open_after_send {
+                    tokio::time::sleep(StdDuration::from_secs(2)).await;
+                }
+                let _ = websocket.close(None).await;
+            }
+        });
+
+        (format!("ws://{}", addr), connects, task)
+    }
+
+    fn subscription_request(endpoint: &str, sink: &str) -> SubscribeStartRequest {
+        SubscribeStartRequest {
+            request_id: "test-request".to_string(),
+            endpoint: endpoint.to_string(),
+            sink: sink.to_string(),
+            resource_uri: None,
+            transport_hint: Some(SubscriptionTransportHint::Websocket),
+            options: RuntimeInvokeOptions {
+                auth: None,
+                inject_env: Vec::new(),
+                no_cache: false,
+                cache_ttl: None,
+                refresh_schema: false,
+                schema_url: None,
+                link_name: None,
+                schema_mapping_file: None,
+                daemon_exclusive: Vec::new(),
+            },
+        }
+    }
+
+    async fn wait_for_file_contains(path: &Path, needle: &str, timeout: StdDuration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if let Ok(content) = tokio::fs::read_to_string(path).await {
+                if content.contains(needle) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(StdDuration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn websocket_subscription_runtime_reconnects_and_stops_cleanly() {
+        let temp = tempdir().unwrap();
+        let sink_path = temp.path().join("websocket.ndjson");
+        let sink_spec = format!("file:{}", sink_path.display());
+        let (endpoint, connects, server_task) = start_test_websocket_server(vec![
+            TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":1}"#)],
+                hold_open_after_send: false,
+            },
+            TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":2}"#)],
+                hold_open_after_send: true,
+            },
+        ])
+        .await;
+
+        let runtime = DaemonRuntime::new();
+        let response = runtime
+            .subscribe_start(subscription_request(&endpoint, &sink_spec))
+            .await
+            .unwrap();
+
+        assert_eq!(response.protocol, "websocket");
+        assert!(
+            wait_for_file_contains(&sink_path, r#""value":2"#, StdDuration::from_secs(5)).await,
+            "websocket sink did not receive second event"
+        );
+        assert!(
+            wait_for_file_contains(
+                &sink_path,
+                r#""event_kind":"reconnect""#,
+                StdDuration::from_secs(5)
+            )
+            .await,
+            "websocket sink did not record reconnect"
+        );
+
+        let status = runtime.subscribe_status(&response.job_id).await.unwrap();
+        assert_eq!(status.protocol, "websocket");
+        assert!(status.reconnect_count >= 1);
+        assert!(connects.load(Ordering::SeqCst) >= 2);
+
+        let stop = runtime.subscribe_stop(&response.job_id).await.unwrap();
+        assert!(stop.stopped);
+        assert!(
+            wait_for_file_contains(
+                &sink_path,
+                r#""reason":"stopped""#,
+                StdDuration::from_secs(5)
+            )
+            .await,
+            "websocket sink did not record stop"
+        );
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_subscription_runtime_preserves_text_and_binary_frames() {
+        let temp = tempdir().unwrap();
+        let sink_path = temp.path().join("websocket-frames.ndjson");
+        let sink_spec = format!("file:{}", sink_path.display());
+        let (endpoint, _connects, server_task) = start_test_websocket_server(vec![
+            TestWsConnectionPlan {
+                frames: vec![
+                    TestWsFrame::Text("tick"),
+                    TestWsFrame::Binary(vec![1, 2, 3]),
+                ],
+                hold_open_after_send: true,
+            },
+        ])
+        .await;
+
+        let runtime = DaemonRuntime::new();
+        let response = runtime
+            .subscribe_start(subscription_request(&endpoint, &sink_spec))
+            .await
+            .unwrap();
+
+        assert!(
+            wait_for_file_contains(&sink_path, r#""text":"tick""#, StdDuration::from_secs(5)).await,
+            "websocket sink did not record plain text frame"
+        );
+        assert!(
+            wait_for_file_contains(&sink_path, r#""base64":"AQID""#, StdDuration::from_secs(5))
+                .await,
+            "websocket sink did not record binary frame"
+        );
+
+        runtime.subscribe_stop(&response.job_id).await.unwrap();
+        server_task.abort();
     }
 }
 

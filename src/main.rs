@@ -24,6 +24,7 @@ mod error;
 mod http_client;
 mod output;
 mod schema_mapping;
+mod subscription_websocket;
 
 use adapters::OperationDetail;
 use auth::injected_env::{parse_inject_env_specs, InjectEnvSpec};
@@ -3422,6 +3423,7 @@ async fn handle_subscribe_command(
                 endpoint: normalize_endpoint_url(endpoint),
                 sink: sink.clone(),
                 resource_uri: resource_uri.clone(),
+                transport_hint: None,
                 options: daemon::RuntimeInvokeOptions {
                     auth: cli.auth.clone(),
                     inject_env: collect_inject_env_specs(cli)?,

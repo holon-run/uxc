@@ -41,11 +41,12 @@ toml = "0.8"
 tokio = { version = "1.35", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 async-trait = "0.1"
 futures = "0.3"
 
 # Web server for test servers
-axum = { version = "0.7", optional = true }
+axum = { version = "0.7", optional = true, features = ["ws"] }
 
 # Error Handling
 anyhow = "1.0"
