@@ -33,14 +33,14 @@ impl OpenAPIAdapter {
         .remove(b'_')
         .remove(b'~');
     const MAX_SCHEMA_EXPANSION_DEPTH: usize = 8;
-    const SCHEMA_ENDPOINTS: [&'static str; 7] = [
+    pub(crate) const SCHEMA_ENDPOINTS: [&'static str; 7] = [
+        "/swagger/v1/swagger.json",
+        "/docs/swagger.json",
         "/openapi.json",
         "/swagger.json",
-        "/api-docs",
-        "/swagger/v1/swagger.json",
-        "/api/docs",
-        "/docs/swagger.json",
         "/swagger-docs",
+        "/api-docs",
+        "/api/docs",
     ];
     const HTTP_METHODS: [&'static str; 8] = [
         "get", "post", "put", "patch", "delete", "head", "options", "trace",
@@ -528,7 +528,22 @@ impl OpenAPIAdapter {
         }
     }
 
-    fn extract_request_body_input_schema(operation_spec: &Value, root: &Value) -> Option<Value> {
+    fn extract_request_body_input_schema(
+        path_item: &Value,
+        operation_spec: &Value,
+        root: &Value,
+    ) -> Option<Value> {
+        if let Some(schema) = Self::extract_oas3_request_body_input_schema(operation_spec, root) {
+            return Some(schema);
+        }
+
+        Self::extract_swagger2_request_body_input_schema(path_item, operation_spec, root)
+    }
+
+    fn extract_oas3_request_body_input_schema(
+        operation_spec: &Value,
+        root: &Value,
+    ) -> Option<Value> {
         let request_body_raw = operation_spec.get("requestBody")?;
         let request_body = Self::dereference_value(request_body_raw, root);
         let content = request_body.get("content")?.as_object()?;
@@ -588,6 +603,65 @@ impl OpenAPIAdapter {
         Some(Value::Object(body))
     }
 
+    fn extract_swagger2_request_body_input_schema(
+        path_item: &Value,
+        operation_spec: &Value,
+        root: &Value,
+    ) -> Option<Value> {
+        let body_parameter =
+            Self::collect_effective_operation_parameters(path_item, operation_spec)
+                .into_iter()
+                .find_map(|parameter| {
+                    let resolved = Self::dereference_value(parameter, root);
+                    (resolved.get("in").and_then(|v| v.as_str()) == Some("body"))
+                        .then_some(resolved)
+                })?;
+        let schema = body_parameter.get("schema")?;
+
+        let source_ref = schema
+            .get("$ref")
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string());
+        let expanded_schema = Self::expand_schema(
+            schema,
+            root,
+            &mut HashSet::new(),
+            Self::MAX_SCHEMA_EXPANSION_DEPTH,
+        );
+
+        let mut media = Map::new();
+        media.insert("schema".to_string(), expanded_schema);
+        if let Some(reference) = source_ref {
+            media.insert("source_ref".to_string(), Value::String(reference));
+        }
+
+        let mut content = Map::new();
+        content.insert("application/json".to_string(), Value::Object(media));
+
+        let mut body = Map::new();
+        body.insert(
+            "kind".to_string(),
+            Value::String("openapi_request_body".to_string()),
+        );
+        body.insert(
+            "required".to_string(),
+            Value::Bool(
+                body_parameter
+                    .get("required")
+                    .and_then(|r| r.as_bool())
+                    .unwrap_or(false),
+            ),
+        );
+        if let Some(description) = body_parameter.get("description").and_then(|d| d.as_str()) {
+            body.insert(
+                "description".to_string(),
+                Value::String(description.to_string()),
+            );
+        }
+        body.insert("content".to_string(), Value::Object(content));
+        Some(Value::Object(body))
+    }
+
     fn prepare_request(
         method: &str,
         base_url: &str,
@@ -600,6 +674,9 @@ impl OpenAPIAdapter {
         let mut remaining = args.clone();
         let mut headers = Vec::new();
         let mut query_pairs = Vec::new();
+        let mut form_pairs = Vec::new();
+        let mut explicit_body = None;
+        let mut missing_required_body_param = None;
         let mut resolved_path = path_template.to_string();
         let mut seen = HashSet::new();
 
@@ -633,49 +710,100 @@ impl OpenAPIAdapter {
                         .unwrap_or(false)
                 };
                 let value = remaining.remove(name);
-                if required && value.is_none() {
-                    anyhow::bail!("Missing required parameter '{}'", name);
-                }
-                let Some(value) = value else {
-                    continue;
-                };
-                let rendered = Self::value_to_string(&value, name)?;
-
                 match location {
                     "path" => {
+                        if required && value.is_none() {
+                            anyhow::bail!("Missing required parameter '{}'", name);
+                        }
+                        let Some(value) = value else {
+                            continue;
+                        };
+                        let rendered = Self::value_to_string(&value, name)?;
                         resolved_path = resolved_path.replace(
                             &format!("{{{}}}", name),
                             &Self::encode_path_param_value(&rendered),
                         );
                     }
-                    "query" => query_pairs.push((name.to_string(), rendered)),
-                    "header" => headers.push((name.to_string(), rendered)),
+                    "query" => {
+                        if required && value.is_none() {
+                            anyhow::bail!("Missing required parameter '{}'", name);
+                        }
+                        let Some(value) = value else {
+                            continue;
+                        };
+                        let rendered = Self::value_to_string(&value, name)?;
+                        query_pairs.push((name.to_string(), rendered));
+                    }
+                    "header" => {
+                        if required && value.is_none() {
+                            anyhow::bail!("Missing required parameter '{}'", name);
+                        }
+                        let Some(value) = value else {
+                            continue;
+                        };
+                        let rendered = Self::value_to_string(&value, name)?;
+                        headers.push((name.to_string(), rendered));
+                    }
+                    "body" => {
+                        if let Some(value) = value {
+                            explicit_body = Some(value);
+                        } else if required {
+                            missing_required_body_param = Some(name.to_string());
+                        }
+                    }
+                    "formData" => {
+                        if required && value.is_none() {
+                            anyhow::bail!("Missing required parameter '{}'", name);
+                        }
+                        let Some(value) = value else {
+                            continue;
+                        };
+                        let rendered = Self::value_to_string(&value, name)?;
+                        form_pairs.push((name.to_string(), rendered));
+                    }
                     _ => {}
                 }
             }
         }
 
-        let body_config = Self::request_body_kind(operation_spec, root)?;
-        let (json_body, form_body) = match body_config.as_deref() {
-            Some("application/x-www-form-urlencoded") => {
-                let form_pairs = Self::form_pairs_from_remaining(&mut remaining)?;
+        let body_config = Self::request_body_config(path_item, operation_spec, root)?;
+        let (json_body, form_body) = match body_config {
+            RequestBodyConfig::None => (None, None),
+            RequestBodyConfig::FormUrlEncoded => {
+                if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
+                    if !remaining.is_empty() || !form_pairs.is_empty() {
+                        anyhow::bail!("Cannot mix 'body' with form arguments for this operation");
+                    }
+                    form_pairs.extend(Self::form_pairs_from_value(body)?);
+                } else {
+                    if remaining.is_empty() && form_pairs.is_empty() {
+                        if let Some(name) = &missing_required_body_param {
+                            anyhow::bail!("Missing required parameter '{}'", name);
+                        }
+                    }
+                    form_pairs.extend(Self::query_pairs_from_remaining(&mut remaining)?);
+                }
                 (None, Some(form_pairs))
             }
-            Some("application/json") => {
-                let json_body = Self::json_body_from_remaining(&mut remaining)?;
+            RequestBodyConfig::Json => {
+                if explicit_body.is_none() && remaining.is_empty() {
+                    if let Some(name) = &missing_required_body_param {
+                        anyhow::bail!("Missing required parameter '{}'", name);
+                    }
+                }
+                let json_body =
+                    Self::json_body_from_remaining_with_explicit(&mut remaining, explicit_body)?;
                 (Some(json_body), None)
             }
-            Some(other) => {
+            RequestBodyConfig::UnsupportedMultipart => {
                 anyhow::bail!(
-                    "Unsupported OpenAPI request body content type '{}'. Supported: application/json, application/x-www-form-urlencoded",
-                    other
+                    "Unsupported OpenAPI request body content type 'multipart/form-data'. Supported: application/json, application/x-www-form-urlencoded"
                 );
             }
-            None => (None, None),
         };
 
         let has_parameter_schema = !seen.is_empty();
-        if body_config.is_none() {
+        if matches!(body_config, RequestBodyConfig::None) {
             if Self::method_prefers_implicit_json_body(method) && !has_parameter_schema {
                 let body = Self::json_body_from_remaining(&mut remaining)?;
                 return Ok(PreparedRequest {
@@ -704,7 +832,42 @@ impl OpenAPIAdapter {
         })
     }
 
-    fn request_body_kind(operation_spec: &Value, root: &Value) -> Result<Option<String>> {
+    fn collect_effective_operation_parameters<'a>(
+        path_item: &'a Value,
+        operation_spec: &'a Value,
+    ) -> Vec<&'a Value> {
+        let mut out = Vec::new();
+        if let Some(parameters) = operation_spec
+            .get("parameters")
+            .and_then(|value| value.as_array())
+        {
+            out.extend(parameters.iter());
+        }
+        if let Some(parameters) = path_item
+            .get("parameters")
+            .and_then(|value| value.as_array())
+        {
+            out.extend(parameters.iter());
+        }
+        out
+    }
+
+    fn request_body_config(
+        path_item: &Value,
+        operation_spec: &Value,
+        root: &Value,
+    ) -> Result<RequestBodyConfig> {
+        if let Some(config) = Self::request_body_config_from_oas3(operation_spec, root)? {
+            return Ok(config);
+        }
+
+        Self::request_body_config_from_swagger2(path_item, operation_spec, root)
+    }
+
+    fn request_body_config_from_oas3(
+        operation_spec: &Value,
+        root: &Value,
+    ) -> Result<Option<RequestBodyConfig>> {
         let Some(request_body_raw) = operation_spec.get("requestBody") else {
             return Ok(None);
         };
@@ -713,18 +876,109 @@ impl OpenAPIAdapter {
             .get("content")
             .and_then(|value| value.as_object())
         else {
-            return Ok(None);
+            return Ok(Some(RequestBodyConfig::None));
         };
         if content.contains_key("application/json") {
-            return Ok(Some("application/json".to_string()));
+            return Ok(Some(RequestBodyConfig::Json));
         }
         if content.contains_key("application/x-www-form-urlencoded") {
-            return Ok(Some("application/x-www-form-urlencoded".to_string()));
+            return Ok(Some(RequestBodyConfig::FormUrlEncoded));
+        }
+        if content.contains_key("multipart/form-data") {
+            return Ok(Some(RequestBodyConfig::UnsupportedMultipart));
         }
         if content.len() == 1 {
-            return Ok(content.keys().next().cloned());
+            if let Some(kind) = content.keys().next() {
+                anyhow::bail!(
+                    "Unsupported OpenAPI request body content type '{}'. Supported: application/json, application/x-www-form-urlencoded",
+                    kind
+                );
+            }
         }
-        Ok(None)
+        Ok(Some(RequestBodyConfig::None))
+    }
+
+    fn request_body_config_from_swagger2(
+        path_item: &Value,
+        operation_spec: &Value,
+        root: &Value,
+    ) -> Result<RequestBodyConfig> {
+        if root.get("swagger").and_then(|v| v.as_str()) != Some("2.0") {
+            return Ok(RequestBodyConfig::None);
+        }
+
+        let mut has_body_param = false;
+        let mut has_form_param = false;
+        let mut has_file_param = false;
+
+        for parameter in Self::collect_effective_operation_parameters(path_item, operation_spec) {
+            let resolved = Self::dereference_value(parameter, root);
+            match resolved.get("in").and_then(|value| value.as_str()) {
+                Some("body") => has_body_param = true,
+                Some("formData") => {
+                    has_form_param = true;
+                    if resolved.get("type").and_then(|value| value.as_str()) == Some("file") {
+                        has_file_param = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if has_body_param && has_form_param {
+            anyhow::bail!("Swagger 2.0 operation cannot mix 'body' and 'formData' parameters");
+        }
+
+        if !has_body_param && !has_form_param {
+            return Ok(RequestBodyConfig::None);
+        }
+
+        let consumes = operation_spec
+            .get("consumes")
+            .or_else(|| root.get("consumes"))
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if has_body_param {
+            if consumes.is_empty()
+                || consumes
+                    .iter()
+                    .any(|item| item.as_str() == Some("application/json"))
+            {
+                return Ok(RequestBodyConfig::Json);
+            }
+            if consumes
+                .iter()
+                .any(|item| item.as_str() == Some("application/x-www-form-urlencoded"))
+            {
+                return Ok(RequestBodyConfig::FormUrlEncoded);
+            }
+            if consumes
+                .iter()
+                .any(|item| item.as_str() == Some("multipart/form-data"))
+            {
+                return Ok(RequestBodyConfig::UnsupportedMultipart);
+            }
+            anyhow::bail!(
+                "Unsupported Swagger 2.0 body content type '{}'. Supported: application/json, application/x-www-form-urlencoded",
+                consumes
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .next()
+                    .unwrap_or("unknown")
+            );
+        }
+
+        if has_file_param
+            || consumes
+                .iter()
+                .any(|item| item.as_str() == Some("multipart/form-data"))
+        {
+            return Ok(RequestBodyConfig::UnsupportedMultipart);
+        }
+
+        Ok(RequestBodyConfig::FormUrlEncoded)
     }
 
     fn encode_path_param_value(value: &str) -> String {
@@ -736,10 +990,17 @@ impl OpenAPIAdapter {
     }
 
     fn json_body_from_remaining(remaining: &mut HashMap<String, Value>) -> Result<Value> {
-        if let Some(body) = remaining.remove("body") {
+        Self::json_body_from_remaining_with_explicit(remaining, None)
+    }
+
+    fn json_body_from_remaining_with_explicit(
+        remaining: &mut HashMap<String, Value>,
+        explicit_body: Option<Value>,
+    ) -> Result<Value> {
+        if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
             if !remaining.is_empty() {
                 anyhow::bail!(
-                    "Cannot mix 'body' with other request body arguments: {}",
+                    "Cannot mix explicit request body with other request body arguments: {}",
                     remaining.keys().cloned().collect::<Vec<_>>().join(", ")
                 );
             }
@@ -753,20 +1014,50 @@ impl OpenAPIAdapter {
         Ok(Value::Object(object))
     }
 
-    fn form_pairs_from_remaining(
-        remaining: &mut HashMap<String, Value>,
-    ) -> Result<Vec<(String, String)>> {
-        if let Some(body) = remaining.remove("body") {
-            if !remaining.is_empty() {
-                anyhow::bail!(
-                    "Cannot mix 'body' with other form body arguments: {}",
-                    remaining.keys().cloned().collect::<Vec<_>>().join(", ")
-                );
+    fn strip_schema_endpoint(url: &str) -> String {
+        let normalized = Self::normalized_url(url);
+        for endpoint in Self::SCHEMA_ENDPOINTS {
+            if normalized.ends_with(endpoint) {
+                let stripped = normalized.trim_end_matches(endpoint).trim_end_matches('/');
+                return stripped.to_string();
             }
-            return Self::form_pairs_from_value(body);
+        }
+        normalized
+    }
+
+    fn operation_base_url(endpoint: &str, schema: &Value) -> String {
+        if schema.get("swagger").and_then(|v| v.as_str()) != Some("2.0") {
+            return endpoint.to_string();
         }
 
-        Self::query_pairs_from_remaining(remaining)
+        let fallback = Self::strip_schema_endpoint(endpoint);
+
+        let host = match schema.get("host").and_then(|v| v.as_str()) {
+            Some(host) if !host.trim().is_empty() => host.trim(),
+            _ => return fallback,
+        };
+
+        let parsed_endpoint = url::Url::parse(endpoint).ok();
+        let scheme = schema
+            .get("schemes")
+            .and_then(|v| v.as_array())
+            .and_then(|schemes| schemes.iter().find_map(|item| item.as_str()))
+            .or_else(|| parsed_endpoint.as_ref().map(|parsed| parsed.scheme()))
+            .unwrap_or("https");
+
+        let base_path = schema
+            .get("basePath")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let base_path = if base_path.is_empty() {
+            String::new()
+        } else if base_path.starts_with('/') {
+            base_path.trim_end_matches('/').to_string()
+        } else {
+            format!("/{}", base_path.trim_end_matches('/'))
+        };
+
+        format!("{}://{}{}", scheme, host, base_path)
     }
 
     fn form_pairs_from_value(value: Value) -> Result<Vec<(String, String)>> {
@@ -877,6 +1168,14 @@ struct PreparedRequest {
     query_pairs: Vec<(String, String)>,
     json_body: Option<Value>,
     form_body: Option<Vec<(String, String)>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestBodyConfig {
+    None,
+    Json,
+    FormUrlEncoded,
+    UnsupportedMultipart,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1031,7 +1330,8 @@ impl Adapter for OpenAPIAdapter {
             .or(operation_spec.get("summary"))
             .and_then(|d| d.as_str())
             .map(|s| s.to_string());
-        let input_schema = Self::extract_request_body_input_schema(operation_spec, &schema);
+        let input_schema =
+            Self::extract_request_body_input_schema(path_item, operation_spec, &schema);
 
         Ok(OperationDetail {
             operation_id: operation.to_string(),
@@ -1064,9 +1364,10 @@ impl Adapter for OpenAPIAdapter {
         let operation_spec = path_item
             .get(&method)
             .ok_or_else(|| UxcError::OperationNotFound(operation.to_string()))?;
+        let operation_base_url = Self::operation_base_url(url, &schema);
         let prepared = Self::prepare_request(
             &method,
-            url,
+            &operation_base_url,
             &path,
             path_item,
             operation_spec,
@@ -1710,6 +2011,270 @@ mod tests {
         assert_eq!(result.data["ok"], true);
     }
 
+    #[tokio::test]
+    async fn describe_operation_extracts_swagger2_body_input_schema() {
+        let mut server = mockito::Server::new_async().await;
+        let schema_url = format!("{}/v2/swagger.json", server.url());
+        let _schema = server
+            .mock("GET", "/v2/swagger.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r##"{
+                  "swagger": "2.0",
+                  "host": "petstore.swagger.io",
+                  "basePath": "/v2",
+                  "schemes": ["https"],
+                  "info": {"title":"Petstore","version":"1.0.0"},
+                  "paths": {
+                    "/pet": {
+                      "post": {
+                        "parameters": [
+                          {
+                            "in": "body",
+                            "name": "body",
+                            "required": true,
+                            "description": "Pet payload",
+                            "schema": { "$ref": "#/definitions/Pet" }
+                          }
+                        ],
+                        "responses": {"200": {"description":"ok"}}
+                      }
+                    }
+                  },
+                  "definitions": {
+                    "Pet": {
+                      "type": "object",
+                      "required": ["name"],
+                      "properties": {
+                        "name": {"type":"string"},
+                        "photoUrls": {
+                          "type":"array",
+                          "items": {"type":"string"}
+                        }
+                      }
+                    }
+                  }
+                }"##,
+            )
+            .expect(2)
+            .create_async()
+            .await;
+
+        let adapter = OpenAPIAdapter::new().with_schema_url_override(Some(schema_url));
+        let detail = adapter
+            .describe_operation(&server.url(), "post:/pet")
+            .await
+            .unwrap();
+
+        let input_schema = detail.input_schema.expect("input schema should exist");
+        assert_eq!(input_schema["kind"], "openapi_request_body");
+        assert_eq!(input_schema["required"], true);
+        assert_eq!(
+            input_schema["content"]["application/json"]["source_ref"],
+            "#/definitions/Pet"
+        );
+        assert_eq!(
+            input_schema["content"]["application/json"]["schema"]["properties"]["name"]["type"],
+            "string"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_swagger2_body_uses_schema_url_base_and_supports_top_level_payload() {
+        let mut server = mockito::Server::new_async().await;
+        let schema_url = format!("{}/v2/swagger.json", server.url());
+        let host = server
+            .url()
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .to_string();
+        let schema = json!({
+            "swagger": "2.0",
+            "host": host,
+            "basePath": "/v2",
+            "schemes": ["http"],
+            "info": {"title":"Petstore","version":"1.0.0"},
+            "paths": {
+                "/pet": {
+                    "post": {
+                        "parameters": [
+                            {"in":"body","name":"body","required":true,"schema":{"type":"object"}}
+                        ],
+                        "responses": {"200":{"description":"ok"}}
+                    }
+                }
+            }
+        });
+        let _schema = server
+            .mock("GET", "/v2/swagger.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(schema.to_string())
+            .expect(2)
+            .create_async()
+            .await;
+
+        let _pet = server
+            .mock("POST", "/v2/pet")
+            .match_body(mockito::Matcher::JsonString(
+                r#"{"name":"doggie","photoUrls":["x"]}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let adapter = OpenAPIAdapter::new().with_schema_url_override(Some(schema_url.clone()));
+
+        let mut args = HashMap::new();
+        args.insert("name".to_string(), Value::String("doggie".to_string()));
+        args.insert(
+            "photoUrls".to_string(),
+            Value::Array(vec![Value::String("x".to_string())]),
+        );
+        let result = adapter
+            .execute(&schema_url, "post:/pet", args)
+            .await
+            .unwrap();
+        assert_eq!(result.data["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn execute_swagger2_form_data_uses_urlencoded_body() {
+        let mut server = mockito::Server::new_async().await;
+        let schema_url = format!("{}/v2/swagger.json", server.url());
+        let host = server
+            .url()
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .to_string();
+        let schema = json!({
+            "swagger": "2.0",
+            "host": host,
+            "basePath": "/v2",
+            "schemes": ["http"],
+            "consumes": ["application/x-www-form-urlencoded"],
+            "info": {"title":"Petstore","version":"1.0.0"},
+            "paths": {
+                "/pet/{petId}": {
+                    "post": {
+                        "parameters": [
+                            {"name":"petId","in":"path","required":true,"type":"integer","format":"int64"},
+                            {"name":"additionalMetadata","in":"formData","required":true,"type":"string"}
+                        ],
+                        "responses": {"200":{"description":"ok"}}
+                    }
+                }
+            }
+        });
+        let _schema = server
+            .mock("GET", "/v2/swagger.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(schema.to_string())
+            .expect(2)
+            .create_async()
+            .await;
+
+        let _update = server
+            .mock("POST", "/v2/pet/123")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "additionalMetadata".to_string(),
+                "meta".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let adapter = OpenAPIAdapter::new().with_schema_url_override(Some(schema_url.clone()));
+
+        let mut args = HashMap::new();
+        args.insert("petId".to_string(), Value::Number(123.into()));
+        args.insert(
+            "additionalMetadata".to_string(),
+            Value::String("meta".to_string()),
+        );
+        let result = adapter
+            .execute(&schema_url, "post:/pet/{petId}", args)
+            .await
+            .unwrap();
+        assert_eq!(result.data["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn execute_swagger2_multipart_file_returns_unsupported_error() {
+        let mut server = mockito::Server::new_async().await;
+        let schema_url = format!("{}/v2/swagger.json", server.url());
+        let _schema = server
+            .mock("GET", "/v2/swagger.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                  "swagger": "2.0",
+                  "host": "127.0.0.1:1234",
+                  "basePath": "/v2",
+                  "schemes": ["http"],
+                  "paths": {
+                    "/pet/{petId}/uploadImage": {
+                      "post": {
+                        "consumes": ["multipart/form-data"],
+                        "parameters": [
+                          {"name":"petId","in":"path","required":true,"type":"integer","format":"int64"},
+                          {"name":"file","in":"formData","required":false,"type":"file"}
+                        ],
+                        "responses": {"200":{"description":"ok"}}
+                      }
+                    }
+                  }
+                }"#,
+            )
+            .expect(2)
+            .create_async()
+            .await;
+
+        let adapter = OpenAPIAdapter::new().with_schema_url_override(Some(schema_url.clone()));
+
+        let mut args = HashMap::new();
+        args.insert("petId".to_string(), Value::Number(123.into()));
+        args.insert("file".to_string(), Value::String("dummy.txt".to_string()));
+        let err = adapter
+            .execute(&schema_url, "post:/pet/{petId}/uploadImage", args)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("multipart/form-data"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn operation_base_url_uses_swagger_host_and_base_path() {
+        let schema = json!({
+            "swagger": "2.0",
+            "host": "api.example.com:8443",
+            "basePath": "/v2",
+            "schemes": ["https"]
+        });
+        let base =
+            OpenAPIAdapter::operation_base_url("https://ignored.example.com/swagger.json", &schema);
+        assert_eq!(base, "https://api.example.com:8443/v2");
+    }
+
+    #[test]
+    fn strip_schema_endpoint_prefers_longest_suffix() {
+        let stripped =
+            OpenAPIAdapter::strip_schema_endpoint("https://example.com/swagger/v1/swagger.json");
+        assert_eq!(stripped, "https://example.com");
+    }
+
     #[test]
     fn prepare_request_prefers_operation_parameters_over_path_item_parameters() {
         let root = json!({});
@@ -1866,6 +2431,51 @@ mod tests {
         assert_eq!(
             prepared.json_body,
             Some(json!({"email": "john@example.com", "name": "John"}))
+        );
+    }
+
+    #[test]
+    fn prepare_request_swagger2_form_urlencoded_uses_explicit_body() {
+        let root = json!({
+            "swagger": "2.0"
+        });
+        let path_item = json!({});
+        let operation = json!({
+            "consumes": ["application/x-www-form-urlencoded"],
+            "parameters": [
+                {"name": "body", "in": "body", "required": true, "schema": {"type": "object"}}
+            ]
+        });
+
+        let mut args = HashMap::new();
+        args.insert(
+            "body".to_string(),
+            json!({
+                "symbol": "BTCUSDT",
+                "side": "BUY"
+            }),
+        );
+
+        let prepared = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://example.com",
+            "/order",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        assert!(prepared.json_body.is_none());
+        let mut actual = prepared.form_body.expect("form body should exist");
+        actual.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            actual,
+            vec![
+                ("side".to_string(), "BUY".to_string()),
+                ("symbol".to_string(), "BTCUSDT".to_string()),
+            ]
         );
     }
 }
