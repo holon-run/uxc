@@ -806,6 +806,68 @@ impl OpenAPIAdapter {
             ),
         }
     }
+
+    fn security_requirement(requirement: &Value) -> Option<OperationAuthRequirement> {
+        let items = requirement.as_array()?;
+        if items.is_empty() {
+            return Some(OperationAuthRequirement::Public);
+        }
+
+        let mut has_non_empty_object = false;
+        for item in items {
+            let Some(obj) = item.as_object() else {
+                continue;
+            };
+            if obj.is_empty() {
+                return Some(OperationAuthRequirement::Public);
+            }
+            has_non_empty_object = true;
+        }
+
+        if has_non_empty_object {
+            Some(OperationAuthRequirement::RequiresAuth)
+        } else {
+            None
+        }
+    }
+
+    fn schema_has_any_operation_security(root: &Value) -> bool {
+        root.get("paths")
+            .and_then(|paths| paths.as_object())
+            .is_some_and(|paths| {
+                paths.values().any(|path_item| {
+                    path_item.as_object().is_some_and(|methods| {
+                        methods.iter().any(|(method, spec)| {
+                            Self::is_http_method(&method.to_lowercase())
+                                && spec.get("security").is_some()
+                        })
+                    })
+                })
+            })
+    }
+
+    fn operation_auth_requirement(
+        operation_spec: &Value,
+        root: &Value,
+    ) -> OperationAuthRequirement {
+        if let Some(requirement) = operation_spec.get("security") {
+            return Self::security_requirement(requirement)
+                .unwrap_or(OperationAuthRequirement::Unknown);
+        }
+
+        if let Some(requirement) = root.get("security") {
+            return Self::security_requirement(requirement)
+                .unwrap_or(OperationAuthRequirement::Unknown);
+        }
+
+        if Self::schema_has_any_operation_security(root) {
+            // When security requirements exist elsewhere and this operation has none,
+            // OpenAPI semantics treat this operation as public.
+            return OperationAuthRequirement::Public;
+        }
+
+        OperationAuthRequirement::Unknown
+    }
 }
 
 #[derive(Debug)]
@@ -815,6 +877,13 @@ struct PreparedRequest {
     query_pairs: Vec<(String, String)>,
     json_body: Option<Value>,
     form_body: Option<Vec<(String, String)>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperationAuthRequirement {
+    Public,
+    RequiresAuth,
+    Unknown,
 }
 
 impl Default for OpenAPIAdapter {
@@ -1009,6 +1078,8 @@ impl Adapter for OpenAPIAdapter {
         let prepared_query_pairs = prepared.query_pairs.clone();
         let prepared_json_body = prepared.json_body.clone();
         let prepared_form_body = prepared.form_body.clone();
+        let auth_requirement = Self::operation_auth_requirement(operation_spec, &schema);
+        let should_apply_auth = !matches!(auth_requirement, OperationAuthRequirement::Public);
 
         let resp = self
             .send_with_oauth_retry(|profile| {
@@ -1022,7 +1093,11 @@ impl Adapter for OpenAPIAdapter {
                             .extend_pairs(prepared_query_pairs.iter().map(|(k, v)| (&**k, &**v)));
                     }
                     let with_args = parsed.to_string();
-                    Self::apply_auth_profile_to_url(&with_args, profile)?
+                    if should_apply_auth {
+                        Self::apply_auth_profile_to_url(&with_args, profile)?
+                    } else {
+                        with_args
+                    }
                 };
                 let mut req = match method.as_str() {
                     "get" => self.client.get(&full_url),
@@ -1044,7 +1119,11 @@ impl Adapter for OpenAPIAdapter {
                 for (name, value) in &prepared_headers {
                     req = req.header(name, value);
                 }
-                let mut req = Self::apply_auth_profile(req, profile)?;
+                let mut req = if should_apply_auth {
+                    Self::apply_auth_profile(req, profile)?
+                } else {
+                    req
+                };
                 if let Some(body) = &prepared_json_body {
                     req = req.json(body);
                 } else if let Some(body) = &prepared_form_body {
@@ -1207,6 +1286,72 @@ mod tests {
             err.to_string().contains("method:/path"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    #[test]
+    fn operation_auth_requirement_uses_operation_security() {
+        let root = json!({
+            "openapi": "3.0.0",
+            "security": [{"api_key": []}]
+        });
+        let operation = json!({
+            "security": []
+        });
+
+        assert_eq!(
+            OpenAPIAdapter::operation_auth_requirement(&operation, &root),
+            OperationAuthRequirement::Public
+        );
+    }
+
+    #[test]
+    fn operation_auth_requirement_uses_root_security() {
+        let root = json!({
+            "swagger": "2.0",
+            "securityDefinitions": {
+                "api_key": {"type": "apiKey", "name": "X-API-Key", "in": "header"}
+            },
+            "security": [{"api_key": []}]
+        });
+        let operation = json!({});
+
+        assert_eq!(
+            OpenAPIAdapter::operation_auth_requirement(&operation, &root),
+            OperationAuthRequirement::RequiresAuth
+        );
+    }
+
+    #[test]
+    fn operation_auth_requirement_public_when_other_operations_are_secured() {
+        let root = json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/public": {"get": {}},
+                "/private": {"get": {"security": [{"api_key": []}]}}
+            }
+        });
+        let operation = json!({});
+
+        assert_eq!(
+            OpenAPIAdapter::operation_auth_requirement(&operation, &root),
+            OperationAuthRequirement::Public
+        );
+    }
+
+    #[test]
+    fn operation_auth_requirement_unknown_without_security_metadata() {
+        let root = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/public": {"get": {}}
+            }
+        });
+        let operation = json!({});
+
+        assert_eq!(
+            OpenAPIAdapter::operation_auth_requirement(&operation, &root),
+            OperationAuthRequirement::Unknown
         );
     }
 
@@ -1436,6 +1581,133 @@ mod tests {
             .with_schema_url_override(Some(schema_url));
 
         assert!(adapter.can_handle(&server.url()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn execute_skips_all_auth_injection_for_public_operations() {
+        let mut server = mockito::Server::new_async().await;
+        let schema_url = format!("{}/openapi.json", server.url());
+        let _schema = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                  "openapi": "3.1.0",
+                  "info": {"title":"Test","version":"1.0.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "api_key": {"type":"apiKey","in":"header","name":"X-MBX-APIKEY"}
+                    }
+                  },
+                  "paths": {
+                    "/public": {"get": {"responses": {"200": {"description":"ok"}}}},
+                    "/signed": {
+                      "get": {
+                        "security": [{"api_key": []}],
+                        "responses": {"200": {"description":"ok"}}
+                      }
+                    }
+                  }
+                }"#,
+            )
+            .expect(2)
+            .create_async()
+            .await;
+
+        let _public = server
+            .mock("GET", "/public")
+            .match_query(mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _signed = server
+            .mock("GET", "/signed")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "apiKey".to_string(),
+                "secret".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut profile = Profile::new("secret".to_string(), crate::auth::AuthType::ApiKey);
+        profile.auth_query_params = Some(vec![crate::auth::AuthQueryParam::parse(
+            "apiKey={{secret}}",
+        )
+        .unwrap()]);
+
+        let adapter = OpenAPIAdapter::new()
+            .with_auth(profile)
+            .with_schema_url_override(Some(schema_url));
+        let public_result = adapter
+            .execute(&server.url(), "get:/public", HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(public_result.data["ok"], true);
+
+        let signed_result = adapter
+            .execute(&server.url(), "get:/signed", HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(signed_result.data["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn execute_keeps_auth_injection_when_security_is_unknown() {
+        let mut server = mockito::Server::new_async().await;
+        let schema_url = format!("{}/openapi.json", server.url());
+        let _schema = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                  "openapi": "3.1.0",
+                  "info": {"title":"Test","version":"1.0.0"},
+                  "paths": {
+                    "/public": {"get": {"responses": {"200": {"description":"ok"}}}}
+                  }
+                }"#,
+            )
+            .expect(2)
+            .create_async()
+            .await;
+
+        let _public = server
+            .mock("GET", "/public")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "apiKey".to_string(),
+                "secret".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let mut profile = Profile::new("secret".to_string(), crate::auth::AuthType::ApiKey);
+        profile.auth_query_params = Some(vec![crate::auth::AuthQueryParam::parse(
+            "apiKey={{secret}}",
+        )
+        .unwrap()]);
+        let adapter = OpenAPIAdapter::new()
+            .with_auth(profile)
+            .with_schema_url_override(Some(schema_url));
+
+        let result = adapter
+            .execute(&server.url(), "get:/public", HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(result.data["ok"], true);
     }
 
     #[test]
