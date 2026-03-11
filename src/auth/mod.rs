@@ -1907,13 +1907,22 @@ pub struct ResolvedRequestAuth {
 fn resolved_profile_auth_headers(profile: &Profile) -> Result<Vec<(String, String)>> {
     let mut headers = match profile.auth_type {
         AuthType::Bearer | AuthType::OAuth => {
-            vec![("authorization".to_string(), format!("Bearer {}", profile.api_key))]
+            vec![(
+                "authorization".to_string(),
+                format!("Bearer {}", profile.api_key),
+            )]
         }
         AuthType::ApiKey => profile.resolved_api_key_headers()?,
         AuthType::Basic => {
             use base64::Engine;
 
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&profile.api_key);
+            let parts: Vec<&str> = profile.api_key.splitn(2, ':').collect();
+            let basic_cred = if parts.len() == 2 {
+                format!("{}:{}", parts[0], parts[1])
+            } else {
+                format!("{}:", parts[0])
+            };
+            let encoded = base64::engine::general_purpose::STANDARD.encode(basic_cred);
             vec![("authorization".to_string(), format!("Basic {}", encoded))]
         }
     };
@@ -2561,7 +2570,8 @@ mod tests {
     fn resolve_profile_request_auth_combines_query_and_headers() {
         let mut profile = Profile::new("token-123".to_string(), AuthType::ApiKey);
         profile.auth_headers = Some(vec![AuthHeader::new("X-Test-Key", "{{secret}}").unwrap()]);
-        profile.auth_query_params = Some(vec![AuthQueryParam::new("api_key", "{{secret}}").unwrap()]);
+        profile.auth_query_params =
+            Some(vec![AuthQueryParam::new("api_key", "{{secret}}").unwrap()]);
 
         let resolved =
             resolve_profile_request_auth("https://example.com/ws?existing=1", &profile).unwrap();
@@ -2606,16 +2616,33 @@ mod tests {
             canonicalization: QueryCanonicalization::default(),
         }));
 
-        let resolved = resolve_profile_request_auth(
-            "https://api.binance.com/ws?symbol=BTCUSDT",
-            &profile,
-        )
-        .unwrap();
+        let resolved =
+            resolve_profile_request_auth("https://api.binance.com/ws?symbol=BTCUSDT", &profile)
+                .unwrap();
 
         assert!(resolved.url.contains("signature="));
         assert_eq!(
             resolved.headers,
             vec![("X-MBX-APIKEY".to_string(), "key-123".to_string())]
+        );
+    }
+
+    #[test]
+    fn resolve_profile_request_auth_keeps_basic_auth_username_only_semantics() {
+        use base64::Engine;
+
+        let profile = Profile::new("alice".to_string(), AuthType::Basic);
+        let resolved = resolve_profile_request_auth("https://example.com/ws", &profile).unwrap();
+
+        assert_eq!(
+            resolved.headers,
+            vec![(
+                "authorization".to_string(),
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode("alice:")
+                )
+            )]
         );
     }
 }

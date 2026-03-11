@@ -3546,15 +3546,13 @@ mod tests {
             for plan in plans {
                 let (stream, _) = listener.accept().await.unwrap();
                 let connects_for_cb = connects_clone.clone();
-                let mut websocket = accept_hdr_async(
-                    stream,
-                    move |_request: &Request, response: Response| {
+                let mut websocket =
+                    accept_hdr_async(stream, move |_request: &Request, response: Response| {
                         connects_for_cb.fetch_add(1, Ordering::SeqCst);
                         Ok(response)
-                    },
-                )
-                .await
-                .unwrap();
+                    })
+                    .await
+                    .unwrap();
 
                 for frame in plan.frames {
                     match frame {
@@ -3678,16 +3676,15 @@ mod tests {
         let temp = tempdir().unwrap();
         let sink_path = temp.path().join("websocket-frames.ndjson");
         let sink_spec = format!("file:{}", sink_path.display());
-        let (endpoint, _connects, server_task) = start_test_websocket_server(vec![
-            TestWsConnectionPlan {
+        let (endpoint, _connects, server_task) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
                 frames: vec![
                     TestWsFrame::Text("tick"),
                     TestWsFrame::Binary(vec![1, 2, 3]),
                 ],
                 hold_open_after_send: true,
-            },
-        ])
-        .await;
+            }])
+            .await;
 
         let runtime = DaemonRuntime::new();
         let response = runtime

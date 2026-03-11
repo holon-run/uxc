@@ -2,7 +2,7 @@ use crate::auth::{self, Profile, ResolvedRequestAuth};
 use crate::daemon_log::redact_endpoint;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -10,6 +10,8 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
+
+const WEBSOCKET_CONNECT_TIMEOUT_SECS: u64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct WebSocketRuntimeConfig {
@@ -158,6 +160,7 @@ fn resolved_request_auth(
 
 async fn connect_once(
     config: &WebSocketRuntimeConfig,
+    stop_rx: &mut watch::Receiver<bool>,
 ) -> std::result::Result<
     (
         tokio_tungstenite::WebSocketStream<
@@ -177,8 +180,8 @@ async fn connect_once(
         .map_err(WebSocketRunError::Fatal)?;
 
     for (name, value) in resolved.headers {
-        let header_name =
-            HeaderName::from_bytes(name.as_bytes()).map_err(|err| WebSocketRunError::Fatal(anyhow!(err)))?;
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|err| WebSocketRunError::Fatal(anyhow!(err)))?;
         let header_value =
             HeaderValue::from_str(&value).map_err(|err| WebSocketRunError::Fatal(anyhow!(err)))?;
         request.headers_mut().insert(header_name, header_value);
@@ -192,9 +195,25 @@ async fn connect_once(
             .insert(HeaderName::from_static("sec-websocket-protocol"), value);
     }
 
-    let (stream, response) = connect_async(request)
-        .await
-        .map_err(|err| WebSocketRunError::Retry(anyhow!(err)))?;
+    let connect_future = connect_async(request);
+    let (stream, response) = tokio::select! {
+        changed = stop_rx.changed() => {
+            if changed.is_ok() && *stop_rx.borrow() {
+                return Err(WebSocketRunError::Retry(anyhow!("websocket connect cancelled by stop request")));
+            }
+            return Err(WebSocketRunError::Retry(anyhow!("subscription stop channel closed unexpectedly")));
+        }
+        result = tokio::time::timeout(Duration::from_secs(WEBSOCKET_CONNECT_TIMEOUT_SECS), connect_future) => {
+            match result {
+                Ok(Ok(value)) => value,
+                Ok(Err(err)) => return Err(WebSocketRunError::Retry(anyhow!(err).context("websocket connection failed"))),
+                Err(_) => return Err(WebSocketRunError::Retry(anyhow!(
+                    "websocket connect timed out after {}s",
+                    WEBSOCKET_CONNECT_TIMEOUT_SECS
+                ))),
+            }
+        }
+    };
     let subprotocol = response
         .headers()
         .get("sec-websocket-protocol")
@@ -222,7 +241,7 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
         return Ok(());
     }
 
-    let (mut stream, open_meta) = connect_once(config).await?;
+    let (mut stream, open_meta) = connect_once(config, stop_rx).await?;
 
     observer
         .emit(
@@ -236,7 +255,11 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
         .await
         .map_err(WebSocketRunError::Fatal)?;
 
-    match handler.on_open(&open_meta).await.map_err(WebSocketRunError::Fatal)? {
+    match handler
+        .on_open(&open_meta)
+        .await
+        .map_err(WebSocketRunError::Fatal)?
+    {
         WebSocketHandlerAction::Stop => {
             close_as_stopped(observer, "handler_stop")
                 .await
@@ -347,7 +370,13 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
                             }
                         }
                     }
-                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
+                    Some(Ok(Message::Ping(payload))) => {
+                        stream
+                            .send(Message::Pong(payload))
+                            .await
+                            .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket pong send failed: {}", err)))?;
+                    }
+                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
                     Some(Err(err)) => return Err(WebSocketRunError::Retry(anyhow!("websocket read failed: {}", err))),
                     None => return Err(WebSocketRunError::Retry(anyhow!("websocket stream ended"))),
                 }
