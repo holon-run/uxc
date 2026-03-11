@@ -1898,31 +1898,46 @@ pub fn apply_auth_to_request(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRequestAuth {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+}
+
+fn resolved_profile_auth_headers(profile: &Profile) -> Result<Vec<(String, String)>> {
+    let mut headers = match profile.auth_type {
+        AuthType::Bearer | AuthType::OAuth => {
+            vec![("authorization".to_string(), format!("Bearer {}", profile.api_key))]
+        }
+        AuthType::ApiKey => profile.resolved_api_key_headers()?,
+        AuthType::Basic => {
+            use base64::Engine;
+
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&profile.api_key);
+            vec![("authorization".to_string(), format!("Basic {}", encoded))]
+        }
+    };
+
+    if let Some((name, value)) = signer_header(profile)? {
+        headers.push((name, value));
+    }
+
+    Ok(headers)
+}
+
+pub fn resolve_profile_request_auth(url: &str, profile: &Profile) -> Result<ResolvedRequestAuth> {
+    Ok(ResolvedRequestAuth {
+        url: apply_profile_auth_to_url(url, profile)?,
+        headers: resolved_profile_auth_headers(profile)?,
+    })
+}
+
 /// Apply authentication from a credential profile to a reqwest request builder.
 pub fn apply_profile_auth_to_request(
     mut request_builder: reqwest::RequestBuilder,
     profile: &Profile,
 ) -> Result<reqwest::RequestBuilder> {
-    request_builder = match profile.auth_type {
-        AuthType::Bearer => request_builder.bearer_auth(&profile.api_key),
-        AuthType::ApiKey => {
-            for (name, value) in profile.resolved_api_key_headers()? {
-                request_builder = request_builder.header(name, value);
-            }
-            request_builder
-        }
-        AuthType::Basic => {
-            let parts: Vec<&str> = profile.api_key.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                request_builder.basic_auth(parts[0], Some(parts[1]))
-            } else {
-                request_builder.basic_auth(&profile.api_key, Option::<&str>::None)
-            }
-        }
-        AuthType::OAuth => request_builder.bearer_auth(&profile.api_key),
-    };
-
-    if let Some((name, value)) = signer_header(profile)? {
+    for (name, value) in resolved_profile_auth_headers(profile)? {
         request_builder = request_builder.header(name, value);
     }
 
@@ -2540,5 +2555,67 @@ mod tests {
         }));
 
         assert!(profile.resolved_api_key_headers().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolve_profile_request_auth_combines_query_and_headers() {
+        let mut profile = Profile::new("token-123".to_string(), AuthType::ApiKey);
+        profile.auth_headers = Some(vec![AuthHeader::new("X-Test-Key", "{{secret}}").unwrap()]);
+        profile.auth_query_params = Some(vec![AuthQueryParam::new("api_key", "{{secret}}").unwrap()]);
+
+        let resolved =
+            resolve_profile_request_auth("https://example.com/ws?existing=1", &profile).unwrap();
+
+        assert!(resolved.url.contains("existing=1"));
+        assert!(resolved.url.contains("api_key=token-123"));
+        assert_eq!(
+            resolved.headers,
+            vec![("X-Test-Key".to_string(), "token-123".to_string())]
+        );
+    }
+
+    #[test]
+    fn resolve_profile_request_auth_includes_signer_header_and_signed_query() {
+        let mut profile = Profile::new("unused".to_string(), AuthType::ApiKey);
+        profile
+            .set_field_source(
+                "secret_key".to_string(),
+                SecretSource::Literal {
+                    value: "super-secret".to_string(),
+                },
+            )
+            .unwrap();
+        profile
+            .set_field_source(
+                "api_key".to_string(),
+                SecretSource::Literal {
+                    value: "key-123".to_string(),
+                },
+            )
+            .unwrap();
+        profile.signer = Some(AuthSignerConfig::HmacQueryV1(HmacQuerySignerConfig {
+            algorithm: SignerAlgorithm::HmacSha256,
+            signing_field: "secret_key".to_string(),
+            key_field: Some("api_key".to_string()),
+            key_placement: Some(SignerValuePlacement::Header),
+            key_name: Some("X-MBX-APIKEY".to_string()),
+            signature_param: "signature".to_string(),
+            signature_encoding: SignatureEncoding::Hex,
+            timestamp_param: None,
+            timestamp_unit: None,
+            canonicalization: QueryCanonicalization::default(),
+        }));
+
+        let resolved = resolve_profile_request_auth(
+            "https://api.binance.com/ws?symbol=BTCUSDT",
+            &profile,
+        )
+        .unwrap();
+
+        assert!(resolved.url.contains("signature="));
+        assert_eq!(
+            resolved.headers,
+            vec![("X-MBX-APIKEY".to_string(), "key-123".to_string())]
+        );
     }
 }
