@@ -431,6 +431,11 @@
       "get": {
         "operationId": "getAccount",
         "summary": "Account information",
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
         "parameters": [
           {
             "name": "omitZeroBalances",
@@ -465,6 +470,11 @@
       "get": {
         "operationId": "getOpenOrders",
         "summary": "Current open orders",
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
         "parameters": [
           {
             "name": "symbol",
@@ -500,6 +510,11 @@
       "delete": {
         "operationId": "cancelOpenOrders",
         "summary": "Cancel all open orders on a symbol",
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
         "parameters": [
           {
             "name": "symbol",
@@ -539,6 +554,11 @@
       "post": {
         "operationId": "testOrder",
         "summary": "Test new order",
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/OrderSymbol"
@@ -594,6 +614,11 @@
       "get": {
         "operationId": "getOrder",
         "summary": "Query order",
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
         "parameters": [
           {
             "name": "symbol",
@@ -641,6 +666,11 @@
       "post": {
         "operationId": "createOrder",
         "summary": "New order",
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
         "parameters": [
           {
             "$ref": "#/components/parameters/OrderSymbol"
@@ -694,6 +724,11 @@
       "delete": {
         "operationId": "cancelOrder",
         "summary": "Cancel order",
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
         "parameters": [
           {
             "name": "symbol",
@@ -757,6 +792,11 @@
       "get": {
         "operationId": "getAllOrders",
         "summary": "All orders",
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
         "parameters": [
           {
             "name": "symbol",
@@ -824,6 +864,11 @@
       "get": {
         "operationId": "getMyTrades",
         "summary": "Account trade list",
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
         "parameters": [
           {
             "name": "symbol",
@@ -898,6 +943,11 @@
       "get": {
         "operationId": "getOrderRateLimit",
         "summary": "Query current order count usage",
+        "security": [
+          {
+            "api_key": []
+          }
+        ],
         "parameters": [
           {
             "name": "recvWindow",
@@ -944,6 +994,13 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "api_key": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-MBX-APIKEY"
+      }
+    },
     "parameters": {
       "OrderSymbol": {
         "name": "symbol",
