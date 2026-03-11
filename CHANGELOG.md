@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-03-11
+
+### Changed
+- OpenAPI execution now supports Swagger 2.0 schema URLs more robustly, including correct operation base URL derivation and schema-endpoint stripping when building runtime paths.
+
+### Fixed
+- Fixed auth/signer injection behavior for public OpenAPI operations so non-auth endpoints are no longer polluted with signer/query parameters.
+- Fixed Swagger 2.0 request-body execution and schema mapping for `in: body`/`in: formData` paths, with clearer unsupported handling for multipart file uploads.
+- Fixed Swagger schema endpoint suffix matching by preferring longest endpoint patterns first to avoid incorrect URL stripping.
+
 ## [0.11.0] - 2026-03-09
 
 ### Added
