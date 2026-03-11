@@ -17,8 +17,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 #[cfg(unix)]
 use std::process::Stdio;
 use std::sync::Arc;
@@ -41,6 +40,11 @@ const MCP_IDLE_TTL_SECS: u64 = 600;
 const CONNECT_TIMEOUT_SECS: u64 = 2;
 const FRAME_IO_TIMEOUT_SECS: u64 = 120;
 const MAX_FRAME_BODY_BYTES: usize = 8 * 1024 * 1024;
+const SUBSCRIPTION_HTTP_TIMEOUT_SECS: u64 = 300;
+const SUBSCRIPTION_STOP_TIMEOUT_SECS: u64 = 5;
+const SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
+const SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS: u64 = 30;
+const SUBSCRIPTION_MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const ERR_PROTOCOL_DETECTION: i32 = -32010;
 const ERR_OPERATION_NOT_FOUND: i32 = -32011;
 const ERR_OAUTH_REQUIRED: i32 = -32012;
@@ -676,7 +680,11 @@ impl SubscriptionManager {
 
     async fn start(&self, request: &SubscribeStartRequest) -> Result<SubscribeStartResponse> {
         let sink_path = parse_file_sink(&request.sink)?;
+        let sink_spec = format!("file:{}", sink_path.display());
         let protocol = if request.resource_uri.is_some() {
+            if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+                bail!("MCP subscriptions currently support stdio endpoints only");
+            }
             "mcp".to_string()
         } else if request.endpoint.starts_with("http://")
             || request.endpoint.starts_with("https://")
@@ -698,7 +706,7 @@ impl SubscriptionManager {
             job_id: job_id.clone(),
             endpoint: request.endpoint.clone(),
             protocol: protocol.clone(),
-            sink: sink_path.display().to_string(),
+            sink: sink_spec.clone(),
             resource_uri: request.resource_uri.clone(),
             status: "running".to_string(),
             created_at_unix: now,
@@ -760,7 +768,7 @@ impl SubscriptionManager {
             job_id,
             protocol,
             endpoint: guard.endpoint.clone(),
-            sink: request.sink.clone(),
+            sink: sink_spec,
             resource_uri: guard.resource_uri.clone(),
             status: guard.status.clone(),
         })
@@ -801,8 +809,22 @@ impl SubscriptionManager {
         })?;
 
         let _ = entry.stop_tx.send(true);
-        if let Some(handle) = entry.task.lock().await.take() {
-            let _ = handle.await;
+        if let Some(mut handle) = entry.task.lock().await.take() {
+            if tokio::time::timeout(
+                Duration::from_secs(SUBSCRIPTION_STOP_TIMEOUT_SECS),
+                &mut handle,
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!(
+                    "subscription job {} did not stop within {}s; aborting task",
+                    job_id,
+                    SUBSCRIPTION_STOP_TIMEOUT_SECS
+                );
+                handle.abort();
+                let _ = handle.await;
+            }
         }
         {
             let mut guard = entry.view.lock().await;
@@ -1320,7 +1342,36 @@ fn parse_file_sink(spec: &str) -> Result<PathBuf> {
     if path.trim().is_empty() {
         bail!("subscribe sink path cannot be empty");
     }
-    Ok(PathBuf::from(path))
+    let path = PathBuf::from(path);
+    validate_subscription_sink_path(&path)?;
+    Ok(path)
+}
+
+fn validate_subscription_sink_path(path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        bail!("subscribe sink path cannot be empty");
+    }
+    if !path.is_absolute()
+        && path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!("subscribe sink path cannot contain '..'");
+    }
+    if path.is_absolute() {
+        let allowed_roots = [
+            std::env::var_os("HOME").map(PathBuf::from),
+            Some(std::env::temp_dir()),
+        ];
+        let allowed = allowed_roots
+            .into_iter()
+            .flatten()
+            .any(|root| path.starts_with(&root));
+        if !allowed {
+            bail!("absolute subscribe sink path must be under HOME or temp directory");
+        }
+    }
+    Ok(())
 }
 
 async fn open_subscription_sink(path: &Path) -> Result<tokio::fs::File> {
@@ -1366,12 +1417,12 @@ async fn append_subscription_event(
     data: Option<Value>,
     meta: Option<Value>,
 ) -> Result<()> {
-    *seq = seq.saturating_add(1);
+    let next_seq = seq.saturating_add(1);
     let snapshot = view.lock().await.clone();
     let record = SubscriptionEventEnvelope {
         version: "v1".to_string(),
         job_id: snapshot.job_id.clone(),
-        seq: *seq,
+        seq: next_seq,
         timestamp_unix: now_unix_secs(),
         protocol: snapshot.protocol,
         source_kind: source_kind.to_string(),
@@ -1384,9 +1435,21 @@ async fn append_subscription_event(
     sink.write_all(&line).await?;
     sink.flush().await?;
 
+    *seq = next_seq;
     let mut guard = view.lock().await;
     guard.written_events = guard.written_events.saturating_add(1);
     guard.last_event_at_unix = Some(now_unix_secs());
+    Ok(())
+}
+
+fn ensure_subscription_buffer_limit(len: usize, kind: &str) -> Result<()> {
+    if len > SUBSCRIPTION_MAX_BUFFER_BYTES {
+        bail!(
+            "{} buffer exceeded {} bytes without a complete event",
+            kind,
+            SUBSCRIPTION_MAX_BUFFER_BYTES
+        );
+    }
     Ok(())
 }
 
@@ -1423,6 +1486,7 @@ fn drain_sse_json_events(buffer: &mut String) -> Result<Vec<Value>> {
             .with_context(|| format!("SSE event data is not valid JSON: {}", payload))?;
         events.push(value);
     }
+    ensure_subscription_buffer_limit(buffer.len(), "sse")?;
     Ok(events)
 }
 
@@ -1438,7 +1502,71 @@ fn drain_ndjson_events(buffer: &mut String) -> Result<Vec<Value>> {
             .with_context(|| format!("stream line is not valid JSON: {}", line))?;
         events.push(value);
     }
+    ensure_subscription_buffer_limit(buffer.len(), "ndjson")?;
     Ok(events)
+}
+
+fn decode_utf8_prefix(buffer: &mut Vec<u8>) -> Result<Option<String>> {
+    match std::str::from_utf8(buffer) {
+        Ok(decoded) => {
+            if decoded.is_empty() {
+                return Ok(None);
+            }
+            let text = decoded.to_string();
+            buffer.clear();
+            Ok(Some(text))
+        }
+        Err(err) => {
+            if err.error_len().is_some() {
+                bail!("stream chunk contains invalid utf-8");
+            }
+            let valid_up_to = err.valid_up_to();
+            if valid_up_to == 0 {
+                ensure_subscription_buffer_limit(buffer.len(), "utf8")?;
+                return Ok(None);
+            }
+            let text = std::str::from_utf8(&buffer[..valid_up_to])?.to_string();
+            buffer.drain(..valid_up_to);
+            Ok(Some(text))
+        }
+    }
+}
+
+async fn subscription_stop_requested(stop_rx: &mut watch::Receiver<bool>) -> bool {
+    if *stop_rx.borrow() {
+        return true;
+    }
+    matches!(stop_rx.changed().await, Ok(())) && *stop_rx.borrow()
+}
+
+async fn wait_for_stop_or_timeout(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -> bool {
+    if *stop_rx.borrow() {
+        return true;
+    }
+    tokio::select! {
+        changed = stop_rx.changed() => matches!(changed, Ok(())) && *stop_rx.borrow(),
+        _ = tokio::time::sleep(duration) => false,
+    }
+}
+
+async fn close_subscription_as_stopped(
+    sink: &mut tokio::fs::File,
+    view: &Arc<Mutex<SubscriptionJobView>>,
+    seq: &mut u64,
+    source_kind: &str,
+) -> Result<()> {
+    append_subscription_event(
+        sink,
+        view,
+        seq,
+        source_kind,
+        "closed",
+        None,
+        Some(json!({"reason":"stopped"})),
+    )
+    .await?;
+    update_subscription_view(view, Some("stopped"), None, false).await;
+    Ok(())
 }
 
 async fn execute_http_stream_once(
@@ -1458,7 +1586,7 @@ async fn execute_http_stream_once(
         .map_err(SubscriptionRunError::Fatal)?
         .unwrap_or_else(|| request.endpoint.clone());
     let client = crate::http_client::build_resilient_http_client(
-        Duration::from_secs(60 * 60 * 24),
+        Duration::from_secs(SUBSCRIPTION_HTTP_TIMEOUT_SECS),
         "subscription http stream",
     )
     .map_err(SubscriptionRunError::Retry)?;
@@ -1470,10 +1598,25 @@ async fn execute_http_stream_once(
         req = auth::apply_profile_auth_to_request(req, profile)
             .map_err(SubscriptionRunError::Fatal)?;
     }
-    let response = req
-        .send()
-        .await
-        .map_err(|err| SubscriptionRunError::Retry(anyhow!(err)))?;
+    if *stop_rx.borrow() {
+        close_subscription_as_stopped(sink, view, seq, "http")
+            .await
+            .map_err(SubscriptionRunError::Fatal)?;
+        return Ok(());
+    }
+    let response = tokio::select! {
+        changed = stop_rx.changed() => {
+            if changed.is_ok() && *stop_rx.borrow() {
+                close_subscription_as_stopped(sink, view, seq, "http").await
+                    .map_err(SubscriptionRunError::Fatal)?;
+                return Ok(());
+            }
+            return Err(SubscriptionRunError::Retry(anyhow!("subscription stop channel closed unexpectedly")));
+        }
+        result = req.send() => {
+            result.map_err(|err| SubscriptionRunError::Retry(anyhow!(err)))?
+        }
+    };
     if !response.status().is_success() {
         return Err(SubscriptionRunError::Retry(anyhow!(
             "HTTP subscribe request failed with status {}",
@@ -1499,41 +1642,43 @@ async fn execute_http_stream_once(
         source_kind,
         "open",
         None,
-        Some(json!({ "content_type": content_type, "url": authed_url })),
+        Some(json!({ "content_type": content_type, "url": redact_endpoint(&authed_url) })),
     )
     .await
     .map_err(SubscriptionRunError::Fatal)?;
     update_subscription_view(view, Some("running"), None, false).await;
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut raw_buffer = Vec::new();
+    let mut text_buffer = String::new();
     loop {
+        if *stop_rx.borrow() {
+            close_subscription_as_stopped(sink, view, seq, source_kind)
+                .await
+                .map_err(SubscriptionRunError::Fatal)?;
+            return Ok(());
+        }
         tokio::select! {
             changed = stop_rx.changed() => {
                 if changed.is_ok() && *stop_rx.borrow() {
-                    append_subscription_event(
-                        sink,
-                        view,
-                        seq,
-                        source_kind,
-                        "closed",
-                        None,
-                        Some(json!({"reason":"stopped"})),
-                    ).await.map_err(SubscriptionRunError::Fatal)?;
-                    update_subscription_view(view, Some("stopped"), None, false).await;
+                    close_subscription_as_stopped(sink, view, seq, source_kind).await
+                        .map_err(SubscriptionRunError::Fatal)?;
                     return Ok(());
                 }
             }
             item = stream.next() => {
                 match item {
                     Some(Ok(bytes)) => {
-                        let chunk = String::from_utf8(bytes.to_vec())
-                            .map_err(|err| SubscriptionRunError::Fatal(anyhow!("stream chunk is not utf-8: {}", err)))?;
-                        buffer.push_str(&chunk);
+                        raw_buffer.extend_from_slice(&bytes);
+                        ensure_subscription_buffer_limit(raw_buffer.len(), "http stream")
+                            .map_err(SubscriptionRunError::Fatal)?;
+                        if let Some(chunk) = decode_utf8_prefix(&mut raw_buffer).map_err(SubscriptionRunError::Fatal)? {
+                            text_buffer.push_str(&chunk);
+                        }
                         let values = if source_kind == "http_sse" {
-                            drain_sse_json_events(&mut buffer).map_err(SubscriptionRunError::Fatal)?
+                            drain_sse_json_events(&mut text_buffer).map_err(SubscriptionRunError::Fatal)?
                         } else {
-                            drain_ndjson_events(&mut buffer).map_err(SubscriptionRunError::Fatal)?
+                            drain_ndjson_events(&mut text_buffer).map_err(SubscriptionRunError::Fatal)?
                         };
                         for value in values {
                             append_subscription_event(
@@ -1568,10 +1713,10 @@ async fn run_http_subscription_job(
 ) -> Result<()> {
     let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
-    let mut delay_secs = 1u64;
+    let mut delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
     loop {
         if *stop_rx.borrow() {
-            update_subscription_view(&view, Some("stopped"), None, false).await;
+            close_subscription_as_stopped(&mut sink, &view, &mut seq, "http").await?;
             return Ok(());
         }
         match execute_http_stream_once(request, &view, &mut sink, &mut seq, &mut stop_rx).await {
@@ -1601,16 +1746,12 @@ async fn run_http_subscription_job(
                     Some(json!({ "delay_secs": delay_secs })),
                 )
                 .await?;
-                tokio::select! {
-                    _ = stop_rx.changed() => {
-                        if *stop_rx.borrow() {
-                            update_subscription_view(&view, Some("stopped"), None, false).await;
-                            return Ok(());
-                        }
-                    }
-                    _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
+                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
+                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "http").await?;
+                    return Ok(());
                 }
-                delay_secs = (delay_secs.saturating_mul(2)).min(30);
+                delay_secs =
+                    (delay_secs.saturating_mul(2)).min(SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS);
             }
         }
     }
@@ -1658,19 +1799,22 @@ async fn run_mcp_subscription_job(
 
     loop {
         tokio::select! {
-            changed = stop_rx.changed() => {
-                if changed.is_ok() && *stop_rx.borrow() {
-                    let _ = client.unsubscribe_resource(resource_uri).await;
-                    append_subscription_event(
-                        &mut sink,
-                        &view,
-                        &mut seq,
-                        "mcp_resource",
-                        "closed",
-                        None,
-                        Some(json!({"reason":"stopped"})),
-                    ).await?;
-                    update_subscription_view(&view, Some("stopped"), None, false).await;
+            stop_requested = subscription_stop_requested(&mut stop_rx) => {
+                if stop_requested {
+                    if let Err(err) = client.unsubscribe_resource(resource_uri).await {
+                        let msg = format!("failed to unsubscribe resource before shutdown: {}", err);
+                        append_subscription_event(
+                            &mut sink,
+                            &view,
+                            &mut seq,
+                            "mcp_resource",
+                            "error",
+                            None,
+                            Some(json!({ "message": msg })),
+                        ).await?;
+                        update_subscription_view(&view, None, Some(msg), false).await;
+                    }
+                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "mcp_resource").await?;
                     return Ok(());
                 }
             }
@@ -3162,6 +3306,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_file_sink_rejects_parent_relative_path() {
+        let err = parse_file_sink("file:../events.ndjson").unwrap_err();
+        assert!(err.to_string().contains("cannot contain '..'"));
+    }
+
+    #[test]
+    fn parse_file_sink_rejects_absolute_path_outside_allowed_roots() {
+        let err = parse_file_sink("file:/etc/passwd").unwrap_err();
+        assert!(err.to_string().contains("under HOME or temp directory"));
+    }
+
+    #[test]
     fn drain_ndjson_events_parses_complete_lines_and_leaves_partial() {
         let mut buffer = "{\"a\":1}\n{\"b\":2}\n{\"c\":".to_string();
         let values = drain_ndjson_events(&mut buffer).unwrap();
@@ -3235,6 +3391,25 @@ mod tests {
             openapi_runtime_endpoint(&request).as_deref(),
             Some("https://example.com/health")
         );
+    }
+
+    #[test]
+    fn drain_ndjson_events_rejects_oversized_buffer() {
+        let mut buffer = "x".repeat(SUBSCRIPTION_MAX_BUFFER_BYTES + 1);
+        let err = drain_ndjson_events(&mut buffer).unwrap_err();
+        assert!(err.to_string().contains("buffer exceeded"));
+    }
+
+    #[test]
+    fn decode_utf8_prefix_handles_split_multibyte_sequence() {
+        let mut buffer = vec![0xE4, 0xBD];
+        assert!(decode_utf8_prefix(&mut buffer).unwrap().is_none());
+        buffer.push(0xA0);
+        assert_eq!(
+            decode_utf8_prefix(&mut buffer).unwrap(),
+            Some("你".to_string())
+        );
+        assert!(buffer.is_empty());
     }
 }
 
