@@ -33,14 +33,14 @@ impl OpenAPIAdapter {
         .remove(b'_')
         .remove(b'~');
     const MAX_SCHEMA_EXPANSION_DEPTH: usize = 8;
-    const SCHEMA_ENDPOINTS: [&'static str; 7] = [
+    pub(crate) const SCHEMA_ENDPOINTS: [&'static str; 7] = [
+        "/swagger/v1/swagger.json",
+        "/docs/swagger.json",
         "/openapi.json",
         "/swagger.json",
-        "/api-docs",
-        "/swagger/v1/swagger.json",
-        "/api/docs",
-        "/docs/swagger.json",
         "/swagger-docs",
+        "/api-docs",
+        "/api/docs",
     ];
     const HTTP_METHODS: [&'static str; 8] = [
         "get", "post", "put", "patch", "delete", "head", "options", "trace",
@@ -770,12 +770,17 @@ impl OpenAPIAdapter {
         let (json_body, form_body) = match body_config {
             RequestBodyConfig::None => (None, None),
             RequestBodyConfig::FormUrlEncoded => {
-                if let Some(body) = remaining.remove("body") {
+                if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
                     if !remaining.is_empty() || !form_pairs.is_empty() {
                         anyhow::bail!("Cannot mix 'body' with form arguments for this operation");
                     }
                     form_pairs.extend(Self::form_pairs_from_value(body)?);
                 } else {
+                    if remaining.is_empty() && form_pairs.is_empty() {
+                        if let Some(name) = &missing_required_body_param {
+                            anyhow::bail!("Missing required parameter '{}'", name);
+                        }
+                    }
                     form_pairs.extend(Self::query_pairs_from_remaining(&mut remaining)?);
                 }
                 (None, Some(form_pairs))
@@ -995,7 +1000,7 @@ impl OpenAPIAdapter {
         if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
             if !remaining.is_empty() {
                 anyhow::bail!(
-                    "Cannot mix 'body' with other request body arguments: {}",
+                    "Cannot mix explicit request body with other request body arguments: {}",
                     remaining.keys().cloned().collect::<Vec<_>>().join(", ")
                 );
             }
@@ -2264,6 +2269,13 @@ mod tests {
     }
 
     #[test]
+    fn strip_schema_endpoint_prefers_longest_suffix() {
+        let stripped =
+            OpenAPIAdapter::strip_schema_endpoint("https://example.com/swagger/v1/swagger.json");
+        assert_eq!(stripped, "https://example.com");
+    }
+
+    #[test]
     fn prepare_request_prefers_operation_parameters_over_path_item_parameters() {
         let root = json!({});
         let path_item = json!({
@@ -2419,6 +2431,51 @@ mod tests {
         assert_eq!(
             prepared.json_body,
             Some(json!({"email": "john@example.com", "name": "John"}))
+        );
+    }
+
+    #[test]
+    fn prepare_request_swagger2_form_urlencoded_uses_explicit_body() {
+        let root = json!({
+            "swagger": "2.0"
+        });
+        let path_item = json!({});
+        let operation = json!({
+            "consumes": ["application/x-www-form-urlencoded"],
+            "parameters": [
+                {"name": "body", "in": "body", "required": true, "schema": {"type": "object"}}
+            ]
+        });
+
+        let mut args = HashMap::new();
+        args.insert(
+            "body".to_string(),
+            json!({
+                "symbol": "BTCUSDT",
+                "side": "BUY"
+            }),
+        );
+
+        let prepared = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://example.com",
+            "/order",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        assert!(prepared.json_body.is_none());
+        let mut actual = prepared.form_body.expect("form body should exist");
+        actual.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            actual,
+            vec![
+                ("side".to_string(), "BUY".to_string()),
+                ("symbol".to_string(), "BTCUSDT".to_string()),
+            ]
         );
     }
 }
