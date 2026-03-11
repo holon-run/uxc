@@ -96,6 +96,14 @@ impl McpStdioClient {
             .is_some()
     }
 
+    pub fn supports_resource_subscribe(&self) -> bool {
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.resources.as_ref())
+            .and_then(|r| r.subscribe)
+            .unwrap_or(false)
+    }
+
     /// Check if the server supports prompts
     pub fn supports_prompts(&self) -> bool {
         self.server_capabilities
@@ -132,6 +140,10 @@ impl McpStdioClient {
         }
 
         tool_list_changed
+    }
+
+    pub async fn drain_notifications(&mut self) -> Vec<JsonRpcNotification> {
+        self.transport.drain_notifications().await
     }
 
     /// List available tools
@@ -238,6 +250,35 @@ impl McpStdioClient {
             serde_json::from_value(result).context("Failed to parse resource contents")?;
 
         Ok(contents)
+    }
+
+    pub async fn subscribe_resource(&mut self, uri: &str) -> Result<()> {
+        if !self.supports_resources() {
+            bail!("Server does not support resources");
+        }
+        if !self.supports_resource_subscribe() {
+            bail!("Server does not support resources.subscribe");
+        }
+
+        let params = json!({ "uri": uri });
+        self.transport
+            .send_request("resources/subscribe", Some(params))
+            .await
+            .context(format!("Failed to subscribe resource '{}'", uri))?;
+        Ok(())
+    }
+
+    pub async fn unsubscribe_resource(&mut self, uri: &str) -> Result<()> {
+        if !self.supports_resources() {
+            bail!("Server does not support resources");
+        }
+
+        let params = json!({ "uri": uri });
+        self.transport
+            .send_request("resources/unsubscribe", Some(params))
+            .await
+            .context(format!("Failed to unsubscribe resource '{}'", uri))?;
+        Ok(())
     }
 
     /// List available prompts

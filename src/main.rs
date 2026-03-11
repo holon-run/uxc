@@ -151,6 +151,12 @@ enum Commands {
         daemon_command: DaemonCommands,
     },
 
+    /// Manage background subscriptions via daemon
+    Subscribe {
+        #[command(subcommand)]
+        subscribe_command: SubscribeCommands,
+    },
+
     /// Dynamic operation execution: `uxc <url> <operation_id> [key=value ...] ['{...}']`
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -169,6 +175,38 @@ enum DaemonCommands {
     /// Internal daemon server entrypoint
     #[command(name = "_serve", hide = true)]
     Serve,
+}
+
+#[derive(Subcommand)]
+enum SubscribeCommands {
+    /// Start a background subscription job
+    Start {
+        /// HTTP stream URL or MCP endpoint/stdio command
+        #[arg(value_name = "ENDPOINT")]
+        endpoint: String,
+
+        /// File sink spec, for example file:/tmp/events.ndjson
+        #[arg(long, value_name = "file:/path.ndjson")]
+        sink: String,
+
+        /// MCP resource URI to subscribe to
+        #[arg(long = "resource-uri", value_name = "URI")]
+        resource_uri: Option<String>,
+    },
+    /// List background subscription jobs
+    List,
+    /// Show a background subscription job
+    Status {
+        /// Subscription job ID
+        #[arg(value_name = "JOB_ID")]
+        job_id: String,
+    },
+    /// Stop a background subscription job
+    Stop {
+        /// Subscription job ID
+        #[arg(value_name = "JOB_ID")]
+        job_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -666,6 +704,11 @@ struct AuthBindingRemoveData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct SubscribeListData {
+    jobs: Vec<daemon::SubscriptionJobView>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct LinkCreateData {
     name: String,
     host: String,
@@ -915,7 +958,10 @@ fn raw_has_help_token(raw_args: &[String]) -> bool {
 }
 
 fn is_top_level_command_token(token: &str) -> bool {
-    matches!(token, "help" | "cache" | "auth" | "link")
+    matches!(
+        token,
+        "help" | "cache" | "auth" | "link" | "daemon" | "subscribe"
+    )
 }
 
 fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
@@ -987,6 +1033,13 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
         "daemon" => {
             if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
                 if matches!(level1, "start" | "stop" | "status" | "restart" | "_serve") {
+                    path.push(level1.to_string());
+                }
+            }
+        }
+        "subscribe" => {
+            if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
+                if matches!(level1, "start" | "list" | "status" | "stop") {
                     path.push(level1.to_string());
                 }
             }
@@ -1076,6 +1129,12 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             DaemonCommands::Status => Some(vec!["daemon", "status"]),
             DaemonCommands::Restart => Some(vec!["daemon", "restart"]),
             DaemonCommands::Serve => Some(vec!["daemon", "_serve"]),
+        },
+        Some(Commands::Subscribe { subscribe_command }) => match subscribe_command {
+            SubscribeCommands::Start { .. } => Some(vec!["subscribe", "start"]),
+            SubscribeCommands::List => Some(vec!["subscribe", "list"]),
+            SubscribeCommands::Status { .. } => Some(vec!["subscribe", "status"]),
+            SubscribeCommands::Stop { .. } => Some(vec!["subscribe", "stop"]),
         },
         Some(Commands::External(_)) | None => None,
     }
@@ -1203,6 +1262,10 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
 
     if let Some(Commands::Daemon { daemon_command }) = &cli.command {
         return handle_daemon_command(daemon_command).await;
+    }
+
+    if let Some(Commands::Subscribe { subscribe_command }) = &cli.command {
+        return handle_subscribe_command(subscribe_command, cli).await;
     }
 
     let url = cli
@@ -1353,6 +1416,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 ("auth", "Manage credentials, bindings, and OAuth"),
                 ("link", "Create a host-bound shortcut command"),
                 ("daemon", "Manage local runtime daemon"),
+                ("subscribe", "Manage background subscriptions via daemon"),
             ]),
             notes: vec![
                 "Default output is JSON. Use --text for human-readable output.".to_string(),
@@ -1442,6 +1506,71 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: vec![],
             notes: vec![],
             examples: vec!["uxc daemon restart".to_string()],
+        },
+        ["subscribe"] => HelpData {
+            path: "uxc subscribe".to_string(),
+            about: "Manage background subscriptions via daemon".to_string(),
+            usage: "uxc subscribe <start|list|status|stop> ...".to_string(),
+            commands: commands(&[
+                ("start", "Start a background subscription job"),
+                ("list", "List background subscription jobs"),
+                ("status", "Show a background subscription job"),
+                ("stop", "Stop a background subscription job"),
+            ]),
+            notes: vec![
+                "v1 supports HTTP JSON streams and MCP resource subscriptions.".to_string(),
+                "Use --sink file:/path.ndjson to append normalized event envelopes to a file."
+                    .to_string(),
+                "HTTP subscribe uses the raw final URL and reuses auth bindings/signers; schema is not involved."
+                    .to_string(),
+            ],
+            examples: vec![
+                "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
+                    .to_string(),
+                "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --sink file:/tmp/mcp.ndjson".to_string(),
+                "uxc subscribe list".to_string(),
+                "uxc subscribe status sub_123".to_string(),
+                "uxc subscribe stop sub_123".to_string(),
+            ],
+        },
+        ["subscribe", "start"] => HelpData {
+            path: "uxc subscribe start".to_string(),
+            about: "Start a background subscription job".to_string(),
+            usage: "uxc subscribe start <endpoint> --sink file:<path> [--resource-uri <uri>]".to_string(),
+            commands: vec![],
+            notes: vec![
+                "For HTTP streams, <endpoint> is the final stream URL.".to_string(),
+                "For MCP, pass the endpoint/stdio command and --resource-uri <uri>.".to_string(),
+            ],
+            examples: vec![
+                "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
+                    .to_string(),
+                "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --sink file:/tmp/mcp.ndjson".to_string(),
+            ],
+        },
+        ["subscribe", "list"] => HelpData {
+            path: "uxc subscribe list".to_string(),
+            about: "List background subscription jobs".to_string(),
+            usage: "uxc subscribe list".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc subscribe list".to_string()],
+        },
+        ["subscribe", "status"] => HelpData {
+            path: "uxc subscribe status".to_string(),
+            about: "Show a background subscription job".to_string(),
+            usage: "uxc subscribe status <job_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc subscribe status sub_123".to_string()],
+        },
+        ["subscribe", "stop"] => HelpData {
+            path: "uxc subscribe stop".to_string(),
+            about: "Stop a background subscription job".to_string(),
+            usage: "uxc subscribe stop <job_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc subscribe stop sub_123".to_string()],
         },
         ["cache"] => HelpData {
             path: "uxc cache".to_string(),
@@ -1900,6 +2029,64 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             }
             Ok(())
         }
+        Some("subscribe_start_result") => {
+            let data = envelope.data.clone().unwrap_or(Value::Null);
+            if let Some(job_id) = data.get("job_id").and_then(Value::as_str) {
+                println!("Job ID: {}", job_id);
+            }
+            if let Some(status) = data.get("status").and_then(Value::as_str) {
+                println!("Status: {}", status);
+            }
+            if let Some(protocol) = data.get("protocol").and_then(Value::as_str) {
+                println!("Protocol: {}", protocol);
+            }
+            if let Some(sink) = data.get("sink").and_then(Value::as_str) {
+                println!("Sink: {}", sink);
+            }
+            Ok(())
+        }
+        Some("subscribe_list") => {
+            let data: SubscribeListData = decode_envelope_data(envelope)?;
+            if data.jobs.is_empty() {
+                println!("No subscription jobs.");
+                return Ok(());
+            }
+            for job in data.jobs {
+                println!(
+                    "{} [{}] {} -> {}",
+                    job.job_id, job.protocol, job.status, job.sink
+                );
+            }
+            Ok(())
+        }
+        Some("subscribe_status") => {
+            let data: daemon::SubscriptionJobView = decode_envelope_data(envelope)?;
+            println!("Job ID: {}", data.job_id);
+            println!("Status: {}", data.status);
+            println!("Protocol: {}", data.protocol);
+            println!("Endpoint: {}", data.endpoint);
+            println!("Sink: {}", data.sink);
+            if let Some(resource_uri) = data.resource_uri {
+                println!("Resource URI: {}", resource_uri);
+            }
+            if let Some(last_error) = data.last_error {
+                println!("Last Error: {}", last_error);
+            }
+            Ok(())
+        }
+        Some("subscribe_stop_result") => {
+            let data = envelope.data.clone().unwrap_or(Value::Null);
+            if data
+                .get("stopped")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                println!("Subscription stopped.");
+            } else {
+                println!("Subscription was not running.");
+            }
+            Ok(())
+        }
         Some("auth_list") => {
             let data: AuthListData = decode_envelope_data(envelope)?;
             if data.credentials.is_empty() {
@@ -2132,7 +2319,8 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
         Some(Commands::Cache { .. })
         | Some(Commands::Auth { .. })
         | Some(Commands::Link { .. })
-        | Some(Commands::Daemon { .. }) => Err(UxcError::InvalidArguments(
+        | Some(Commands::Daemon { .. })
+        | Some(Commands::Subscribe { .. }) => Err(UxcError::InvalidArguments(
             "Internal routing error for management command".to_string(),
         )
         .into()),
@@ -3190,6 +3378,87 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
             ))
         }
     }
+}
+
+async fn handle_subscribe_command(
+    command: &SubscribeCommands,
+    cli: &Cli,
+) -> Result<OutputEnvelope> {
+    if cli.schema_url.is_some() {
+        return Err(UxcError::InvalidArguments(
+            "--schema-url is not supported for subscribe commands".to_string(),
+        )
+        .into());
+    }
+
+    let daemon_used = daemon::daemon_supported();
+    let daemon_ensure = if daemon_used {
+        Some(daemon::ensure_compatible_daemon_running().await?)
+    } else {
+        None
+    };
+    let daemon_autostarted = daemon_ensure
+        .as_ref()
+        .map(|outcome| outcome.started_now && !outcome.restarted_for_version_mismatch);
+    let daemon_restarted_for_version_mismatch = daemon_ensure
+        .as_ref()
+        .map(|outcome| outcome.restarted_for_version_mismatch);
+
+    let envelope = match command {
+        SubscribeCommands::Start {
+            endpoint,
+            sink,
+            resource_uri,
+        } => {
+            let request = daemon::SubscribeStartRequest {
+                request_id: format!(
+                    "{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                ),
+                endpoint: normalize_endpoint_url(endpoint),
+                sink: sink.clone(),
+                resource_uri: resource_uri.clone(),
+                options: daemon::RuntimeInvokeOptions {
+                    auth: cli.auth.clone(),
+                    inject_env: collect_inject_env_specs(cli)?,
+                    no_cache: cli.no_cache,
+                    cache_ttl: cli.cache_ttl,
+                    refresh_schema: cli.refresh_schema,
+                    schema_url: None,
+                    link_name: std::env::var("UXC_LINK_NAME").ok(),
+                    schema_mapping_file: None,
+                    daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
+                },
+            };
+            let data = serde_json::to_value(daemon::subscribe_start_client(&request).await?)?;
+            OutputEnvelope::success("subscribe_start_result", "cli", "uxc", None, data, None)
+        }
+        SubscribeCommands::List => {
+            let data = serde_json::to_value(SubscribeListData {
+                jobs: daemon::subscribe_list_client().await?,
+            })?;
+            OutputEnvelope::success("subscribe_list", "cli", "uxc", None, data, None)
+        }
+        SubscribeCommands::Status { job_id } => {
+            let data = serde_json::to_value(daemon::subscribe_status_client(job_id).await?)?;
+            OutputEnvelope::success("subscribe_status", "cli", "uxc", None, data, None)
+        }
+        SubscribeCommands::Stop { job_id } => {
+            let data = serde_json::to_value(daemon::subscribe_stop_client(job_id).await?)?;
+            OutputEnvelope::success("subscribe_stop_result", "cli", "uxc", None, data, None)
+        }
+    };
+
+    Ok(envelope.with_daemon_meta(
+        daemon_used,
+        daemon_autostarted,
+        daemon_restarted_for_version_mismatch,
+        None,
+    ))
 }
 
 async fn handle_auth_command(command: &AuthCommands) -> Result<OutputEnvelope> {
