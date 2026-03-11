@@ -1825,11 +1825,22 @@ fn openapi_runtime_endpoint(request: &RuntimeInvokeRequest) -> Option<String> {
         return None;
     }
 
-    Some(format!(
-        "{}{}",
-        request.endpoint.trim_end_matches('/'),
-        path
-    ))
+    let endpoint = request.endpoint.trim_end_matches('/');
+    let endpoint = [
+        "/openapi.json",
+        "/swagger.json",
+        "/api-docs",
+        "/swagger/v1/swagger.json",
+        "/api/docs",
+        "/docs/swagger.json",
+        "/swagger-docs",
+    ]
+    .iter()
+    .find_map(|suffix| endpoint.strip_suffix(suffix))
+    .unwrap_or(endpoint)
+    .trim_end_matches('/');
+
+    Some(format!("{}{}", endpoint, path))
 }
 
 fn effective_runtime_auth_profile(
@@ -2350,6 +2361,33 @@ mod tests {
         };
 
         assert!(openapi_runtime_endpoint(&request).is_none());
+    }
+
+    #[test]
+    fn openapi_runtime_endpoint_strips_schema_suffix_before_appending_path() {
+        let request = RuntimeInvokeRequest {
+            request_id: "req-1".to_string(),
+            endpoint: "https://petstore.swagger.io/v2/swagger.json".to_string(),
+            action: RuntimeAction::Execute,
+            operation_id: Some("post:/pet".to_string()),
+            args: None,
+            options: RuntimeInvokeOptions {
+                auth: None,
+                inject_env: Vec::new(),
+                no_cache: false,
+                cache_ttl: None,
+                refresh_schema: false,
+                schema_url: None,
+                link_name: None,
+                schema_mapping_file: None,
+                daemon_exclusive: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            openapi_runtime_endpoint(&request).as_deref(),
+            Some("https://petstore.swagger.io/v2/pet")
+        );
     }
 }
 
