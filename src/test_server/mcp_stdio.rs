@@ -17,6 +17,7 @@ pub fn run(scenario: Scenario) -> Result<()> {
     let mut out = stdout.lock();
     let mut tools_list_calls: u64 = 0;
     let mut dynamic_tools_enabled = false;
+    let mut resource_subscribed = false;
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -81,7 +82,10 @@ pub fn run(scenario: Scenario) -> Result<()> {
                         "id": id,
                         "result": {
                             "protocolVersion": "2024-11-05",
-                            "capabilities": {"tools": {"listChanged": list_changed}},
+                            "capabilities": {
+                                "tools": {"listChanged": list_changed},
+                                "resources": {"subscribe": true}
+                            },
                             "serverInfo": {"name": "uxc-test-mcp-stdio", "version": "1.0.0"},
                             "instructions": "MCP stdio test server for local e2e"
                         }
@@ -277,6 +281,79 @@ pub fn run(scenario: Scenario) -> Result<()> {
                         "jsonrpc": "2.0",
                         "id": id,
                         "result": result
+                    }),
+                )?;
+            }
+            "resources/subscribe" => {
+                resource_subscribed = true;
+                respond(
+                    &mut out,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {}
+                    }),
+                )?;
+                respond(
+                    &mut out,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/resources/updated",
+                        "params": {
+                            "uri": req.get("params").and_then(|v| v.get("uri")).cloned().unwrap_or(json!("unknown")),
+                            "value": 1
+                        }
+                    }),
+                )?;
+                respond(
+                    &mut out,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/resources/updated",
+                        "params": {
+                            "uri": req.get("params").and_then(|v| v.get("uri")).cloned().unwrap_or(json!("unknown")),
+                            "value": 2
+                        }
+                    }),
+                )?;
+            }
+            "resources/unsubscribe" => {
+                resource_subscribed = false;
+                respond(
+                    &mut out,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {}
+                    }),
+                )?;
+            }
+            "resources/list" => {
+                let resources = if resource_subscribed {
+                    json!([
+                        {
+                            "uri": "test://resource",
+                            "name": "test-resource",
+                            "description": "A subscribed test resource"
+                        }
+                    ])
+                } else {
+                    json!([
+                        {
+                            "uri": "test://resource",
+                            "name": "test-resource",
+                            "description": "A test resource"
+                        }
+                    ])
+                };
+                respond(
+                    &mut out,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "resources": resources
+                        }
                     }),
                 )?;
             }

@@ -9,6 +9,7 @@ use crate::daemon_log::{redact_endpoint, redact_sensitive};
 use crate::daemon_log::{DaemonEventType, DaemonLogEntry, DaemonLogger};
 use crate::error::UxcError;
 use anyhow::{anyhow, bail, Context, Result};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -26,7 +27,8 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
+use tokio::task::JoinHandle;
 
 const JSONRPC_VERSION: &str = "2.0";
 const START_POLL_TRIES: usize = 30;
@@ -102,6 +104,63 @@ pub struct RuntimeMeta {
     pub cache_stale: Option<bool>,
     pub cache_fallback: Option<bool>,
     pub daemon_session_reused: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeStartRequest {
+    pub request_id: String,
+    pub endpoint: String,
+    pub sink: String,
+    pub resource_uri: Option<String>,
+    pub options: RuntimeInvokeOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeStartResponse {
+    pub job_id: String,
+    pub protocol: String,
+    pub endpoint: String,
+    pub sink: String,
+    pub resource_uri: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeStopResponse {
+    pub job_id: String,
+    pub stopped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionJobView {
+    pub job_id: String,
+    pub endpoint: String,
+    pub protocol: String,
+    pub sink: String,
+    pub resource_uri: Option<String>,
+    pub status: String,
+    pub created_at_unix: u64,
+    pub started_at_unix: Option<u64>,
+    pub stopped_at_unix: Option<u64>,
+    pub last_event_at_unix: Option<u64>,
+    pub last_error: Option<String>,
+    pub reconnect_count: u64,
+    pub written_events: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubscriptionEventEnvelope {
+    version: String,
+    job_id: String,
+    seq: u64,
+    timestamp_unix: u64,
+    protocol: String,
+    source_kind: String,
+    event_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +253,18 @@ struct McpStdioSession {
 struct McpHttpSession {
     transport: adapters::mcp::McpRemoteTransport,
     last_used: Arc<Mutex<Instant>>,
+}
+
+#[derive(Clone, Default)]
+struct SubscriptionManager {
+    jobs: Arc<Mutex<HashMap<String, Arc<SubscriptionJobEntry>>>>,
+    next_id: Arc<Mutex<u64>>,
+}
+
+struct SubscriptionJobEntry {
+    view: Arc<Mutex<SubscriptionJobView>>,
+    stop_tx: watch::Sender<bool>,
+    task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl McpStdioSession {
@@ -598,6 +669,153 @@ impl McpSessionManager {
     }
 }
 
+impl SubscriptionManager {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    async fn start(&self, request: &SubscribeStartRequest) -> Result<SubscribeStartResponse> {
+        let sink_path = parse_file_sink(&request.sink)?;
+        let protocol = if request.resource_uri.is_some() {
+            "mcp".to_string()
+        } else if request.endpoint.starts_with("http://")
+            || request.endpoint.starts_with("https://")
+        {
+            "http".to_string()
+        } else {
+            bail!(
+                "subscribe start requires an http(s) endpoint or --resource-uri for MCP subscriptions"
+            );
+        };
+
+        let job_id = {
+            let mut next = self.next_id.lock().await;
+            *next += 1;
+            format!("sub_{}", *next)
+        };
+        let now = now_unix_secs();
+        let view = Arc::new(Mutex::new(SubscriptionJobView {
+            job_id: job_id.clone(),
+            endpoint: request.endpoint.clone(),
+            protocol: protocol.clone(),
+            sink: sink_path.display().to_string(),
+            resource_uri: request.resource_uri.clone(),
+            status: "running".to_string(),
+            created_at_unix: now,
+            started_at_unix: Some(now),
+            stopped_at_unix: None,
+            last_event_at_unix: None,
+            last_error: None,
+            reconnect_count: 0,
+            written_events: 0,
+        }));
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let request_clone = request.clone();
+        let job_id_clone = job_id.clone();
+        let view_clone = view.clone();
+        let task = tokio::spawn(async move {
+            let result = if request_clone.resource_uri.is_some() {
+                run_mcp_subscription_job(
+                    &job_id_clone,
+                    &request_clone,
+                    sink_path,
+                    view_clone.clone(),
+                    stop_rx,
+                )
+                .await
+            } else {
+                run_http_subscription_job(
+                    &job_id_clone,
+                    &request_clone,
+                    sink_path,
+                    view_clone.clone(),
+                    stop_rx,
+                )
+                .await
+            };
+
+            let mut guard = view_clone.lock().await;
+            if guard.status != "stopped" {
+                match result {
+                    Ok(()) => {
+                        guard.status = "stopped".to_string();
+                    }
+                    Err(err) => {
+                        guard.status = "failed".to_string();
+                        guard.last_error = Some(err.to_string());
+                    }
+                }
+            }
+            guard.stopped_at_unix = Some(now_unix_secs());
+        });
+        let entry = Arc::new(SubscriptionJobEntry {
+            view: view.clone(),
+            stop_tx,
+            task: Mutex::new(Some(task)),
+        });
+        self.jobs.lock().await.insert(job_id.clone(), entry);
+
+        let guard = view.lock().await;
+        Ok(SubscribeStartResponse {
+            job_id,
+            protocol,
+            endpoint: guard.endpoint.clone(),
+            sink: request.sink.clone(),
+            resource_uri: guard.resource_uri.clone(),
+            status: guard.status.clone(),
+        })
+    }
+
+    async fn list(&self) -> Vec<SubscriptionJobView> {
+        let entries = {
+            let jobs = self.jobs.lock().await;
+            jobs.values().cloned().collect::<Vec<_>>()
+        };
+        let mut views = Vec::with_capacity(entries.len());
+        for entry in entries {
+            views.push(entry.view.lock().await.clone());
+        }
+        views.sort_by(|a, b| a.job_id.cmp(&b.job_id));
+        views
+    }
+
+    async fn status(&self, job_id: &str) -> Result<SubscriptionJobView> {
+        let entry = {
+            let jobs = self.jobs.lock().await;
+            jobs.get(job_id).cloned()
+        }
+        .ok_or_else(|| {
+            UxcError::OperationNotFound(format!("subscription job not found: {}", job_id))
+        })?;
+        let view = entry.view.lock().await.clone();
+        Ok(view)
+    }
+
+    async fn stop(&self, job_id: &str) -> Result<SubscribeStopResponse> {
+        let entry = {
+            let jobs = self.jobs.lock().await;
+            jobs.get(job_id).cloned()
+        }
+        .ok_or_else(|| {
+            UxcError::OperationNotFound(format!("subscription job not found: {}", job_id))
+        })?;
+
+        let _ = entry.stop_tx.send(true);
+        if let Some(handle) = entry.task.lock().await.take() {
+            let _ = handle.await;
+        }
+        {
+            let mut guard = entry.view.lock().await;
+            guard.status = "stopped".to_string();
+            guard.stopped_at_unix = Some(now_unix_secs());
+        }
+        Ok(SubscribeStopResponse {
+            job_id: job_id.to_string(),
+            stopped: true,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OperationSummary {
     operation_id: String,
@@ -620,6 +838,7 @@ struct ServiceSummary {
 pub struct DaemonRuntime {
     state: Arc<Mutex<ServerState>>,
     mcp: McpSessionManager,
+    subscriptions: SubscriptionManager,
     should_stop: Arc<RwLock<bool>>,
     schema_mapping_lock: Arc<Mutex<()>>,
     logger: Option<DaemonLogger>,
@@ -634,6 +853,7 @@ impl DaemonRuntime {
                 request_count: 0,
             })),
             mcp: McpSessionManager::new(),
+            subscriptions: SubscriptionManager::new(),
             should_stop: Arc::new(RwLock::new(false)),
             schema_mapping_lock: Arc::new(Mutex::new(())),
             logger,
@@ -959,6 +1179,25 @@ impl DaemonRuntime {
         }
     }
 
+    pub async fn subscribe_start(
+        &self,
+        request: SubscribeStartRequest,
+    ) -> Result<SubscribeStartResponse> {
+        self.subscriptions.start(&request).await
+    }
+
+    pub async fn subscribe_list(&self) -> Vec<SubscriptionJobView> {
+        self.subscriptions.list().await
+    }
+
+    pub async fn subscribe_status(&self, job_id: &str) -> Result<SubscriptionJobView> {
+        self.subscriptions.status(job_id).await
+    }
+
+    pub async fn subscribe_stop(&self, job_id: &str) -> Result<SubscribeStopResponse> {
+        self.subscriptions.stop(job_id).await
+    }
+
     pub async fn request_stop(&self) {
         let mut stop = self.should_stop.write().await;
         *stop = true;
@@ -1069,6 +1308,390 @@ impl DaemonRuntime {
     }
 }
 
+enum SubscriptionRunError {
+    Retry(anyhow::Error),
+    Fatal(anyhow::Error),
+}
+
+fn parse_file_sink(spec: &str) -> Result<PathBuf> {
+    let Some(path) = spec.strip_prefix("file:") else {
+        bail!("subscribe sink must use file:<path>");
+    };
+    if path.trim().is_empty() {
+        bail!("subscribe sink path cannot be empty");
+    }
+    Ok(PathBuf::from(path))
+}
+
+async fn open_subscription_sink(path: &Path) -> Result<tokio::fs::File> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Failed to create sink directory {}", parent.display()))?;
+    }
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+        .with_context(|| format!("Failed to open sink file {}", path.display()))
+}
+
+async fn update_subscription_view(
+    view: &Arc<Mutex<SubscriptionJobView>>,
+    status: Option<&str>,
+    last_error: Option<String>,
+    increment_reconnect: bool,
+) {
+    let mut guard = view.lock().await;
+    if let Some(status) = status {
+        guard.status = status.to_string();
+    }
+    if increment_reconnect {
+        guard.reconnect_count = guard.reconnect_count.saturating_add(1);
+    }
+    if let Some(last_error) = last_error {
+        guard.last_error = Some(last_error);
+    } else if status == Some("running") {
+        guard.last_error = None;
+    }
+}
+
+async fn append_subscription_event(
+    sink: &mut tokio::fs::File,
+    view: &Arc<Mutex<SubscriptionJobView>>,
+    seq: &mut u64,
+    source_kind: &str,
+    event_kind: &str,
+    data: Option<Value>,
+    meta: Option<Value>,
+) -> Result<()> {
+    *seq = seq.saturating_add(1);
+    let snapshot = view.lock().await.clone();
+    let record = SubscriptionEventEnvelope {
+        version: "v1".to_string(),
+        job_id: snapshot.job_id.clone(),
+        seq: *seq,
+        timestamp_unix: now_unix_secs(),
+        protocol: snapshot.protocol,
+        source_kind: source_kind.to_string(),
+        event_kind: event_kind.to_string(),
+        data,
+        meta,
+    };
+    let mut line = serde_json::to_vec(&record)?;
+    line.push(b'\n');
+    sink.write_all(&line).await?;
+    sink.flush().await?;
+
+    let mut guard = view.lock().await;
+    guard.written_events = guard.written_events.saturating_add(1);
+    guard.last_event_at_unix = Some(now_unix_secs());
+    Ok(())
+}
+
+fn sse_delimiter(input: &str) -> Option<(usize, usize)> {
+    if let Some(pos) = input.find("\r\n\r\n") {
+        return Some((pos, 4));
+    }
+    input.find("\n\n").map(|pos| (pos, 2))
+}
+
+fn drain_sse_json_events(buffer: &mut String) -> Result<Vec<Value>> {
+    let mut events = Vec::new();
+    while let Some((pos, delim_len)) = sse_delimiter(buffer) {
+        let chunk = buffer[..pos].to_string();
+        buffer.drain(..pos + delim_len);
+        let mut data_lines = Vec::new();
+        for raw in chunk.lines() {
+            let line = raw.trim_end_matches('\r');
+            if line.is_empty() || line.starts_with(':') {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest.trim_start().to_string());
+            }
+        }
+        if data_lines.is_empty() {
+            continue;
+        }
+        let payload = data_lines.join("\n");
+        if payload == "[DONE]" {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&payload)
+            .with_context(|| format!("SSE event data is not valid JSON: {}", payload))?;
+        events.push(value);
+    }
+    Ok(events)
+}
+
+fn drain_ndjson_events(buffer: &mut String) -> Result<Vec<Value>> {
+    let mut events = Vec::new();
+    while let Some(pos) = buffer.find('\n') {
+        let line = buffer[..pos].trim_end_matches('\r').trim().to_string();
+        buffer.drain(..=pos);
+        if line.is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&line)
+            .with_context(|| format!("stream line is not valid JSON: {}", line))?;
+        events.push(value);
+    }
+    Ok(events)
+}
+
+async fn execute_http_stream_once(
+    request: &SubscribeStartRequest,
+    view: &Arc<Mutex<SubscriptionJobView>>,
+    sink: &mut tokio::fs::File,
+    seq: &mut u64,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> std::result::Result<(), SubscriptionRunError> {
+    let auth_profile =
+        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())
+            .map_err(SubscriptionRunError::Fatal)?;
+    let authed_url = auth_profile
+        .as_ref()
+        .map(|profile| auth::apply_profile_auth_to_url(&request.endpoint, profile))
+        .transpose()
+        .map_err(SubscriptionRunError::Fatal)?
+        .unwrap_or_else(|| request.endpoint.clone());
+    let client = crate::http_client::build_resilient_http_client(
+        Duration::from_secs(60 * 60 * 24),
+        "subscription http stream",
+    )
+    .map_err(SubscriptionRunError::Retry)?;
+    let mut req = client.get(&authed_url).header(
+        reqwest::header::ACCEPT,
+        "application/json, application/x-ndjson, text/event-stream",
+    );
+    if let Some(profile) = auth_profile.as_ref() {
+        req = auth::apply_profile_auth_to_request(req, profile)
+            .map_err(SubscriptionRunError::Fatal)?;
+    }
+    let response = req
+        .send()
+        .await
+        .map_err(|err| SubscriptionRunError::Retry(anyhow!(err)))?;
+    if !response.status().is_success() {
+        return Err(SubscriptionRunError::Retry(anyhow!(
+            "HTTP subscribe request failed with status {}",
+            response.status()
+        )));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let source_kind = if content_type.contains("text/event-stream") {
+        "http_sse"
+    } else {
+        "http_ndjson"
+    };
+
+    append_subscription_event(
+        sink,
+        view,
+        seq,
+        source_kind,
+        "open",
+        None,
+        Some(json!({ "content_type": content_type, "url": authed_url })),
+    )
+    .await
+    .map_err(SubscriptionRunError::Fatal)?;
+    update_subscription_view(view, Some("running"), None, false).await;
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    loop {
+        tokio::select! {
+            changed = stop_rx.changed() => {
+                if changed.is_ok() && *stop_rx.borrow() {
+                    append_subscription_event(
+                        sink,
+                        view,
+                        seq,
+                        source_kind,
+                        "closed",
+                        None,
+                        Some(json!({"reason":"stopped"})),
+                    ).await.map_err(SubscriptionRunError::Fatal)?;
+                    update_subscription_view(view, Some("stopped"), None, false).await;
+                    return Ok(());
+                }
+            }
+            item = stream.next() => {
+                match item {
+                    Some(Ok(bytes)) => {
+                        let chunk = String::from_utf8(bytes.to_vec())
+                            .map_err(|err| SubscriptionRunError::Fatal(anyhow!("stream chunk is not utf-8: {}", err)))?;
+                        buffer.push_str(&chunk);
+                        let values = if source_kind == "http_sse" {
+                            drain_sse_json_events(&mut buffer).map_err(SubscriptionRunError::Fatal)?
+                        } else {
+                            drain_ndjson_events(&mut buffer).map_err(SubscriptionRunError::Fatal)?
+                        };
+                        for value in values {
+                            append_subscription_event(
+                                sink,
+                                view,
+                                seq,
+                                source_kind,
+                                "data",
+                                Some(value),
+                                None,
+                            ).await.map_err(SubscriptionRunError::Fatal)?;
+                        }
+                    }
+                    Some(Err(err)) => {
+                        return Err(SubscriptionRunError::Retry(anyhow!("stream read failed: {}", err)));
+                    }
+                    None => {
+                        return Err(SubscriptionRunError::Retry(anyhow!("stream closed by remote peer")));
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn run_http_subscription_job(
+    _job_id: &str,
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let mut sink = open_subscription_sink(&sink_path).await?;
+    let mut seq = 0u64;
+    let mut delay_secs = 1u64;
+    loop {
+        if *stop_rx.borrow() {
+            update_subscription_view(&view, Some("stopped"), None, false).await;
+            return Ok(());
+        }
+        match execute_http_stream_once(request, &view, &mut sink, &mut seq, &mut stop_rx).await {
+            Ok(()) => return Ok(()),
+            Err(SubscriptionRunError::Fatal(err)) => return Err(err),
+            Err(SubscriptionRunError::Retry(err)) => {
+                let msg = err.to_string();
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "http",
+                    "error",
+                    None,
+                    Some(json!({ "message": msg })),
+                )
+                .await?;
+                update_subscription_view(&view, Some("reconnecting"), Some(msg.clone()), true)
+                    .await;
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "http",
+                    "reconnect",
+                    None,
+                    Some(json!({ "delay_secs": delay_secs })),
+                )
+                .await?;
+                tokio::select! {
+                    _ = stop_rx.changed() => {
+                        if *stop_rx.borrow() {
+                            update_subscription_view(&view, Some("stopped"), None, false).await;
+                            return Ok(());
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
+                }
+                delay_secs = (delay_secs.saturating_mul(2)).min(30);
+            }
+        }
+    }
+}
+
+async fn run_mcp_subscription_job(
+    _job_id: &str,
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+        bail!("MCP subscriptions currently support stdio endpoints only");
+    }
+    let resource_uri = request
+        .resource_uri
+        .as_ref()
+        .ok_or_else(|| anyhow!("resource_uri is required for MCP subscriptions"))?;
+    let auth_profile =
+        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+    let spawn_options =
+        build_stdio_spawn_options(&request.endpoint, &request.options, auth_profile.as_ref())?
+            .unwrap_or_default();
+    let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(&request.endpoint)?;
+    let mut client =
+        adapters::mcp::McpStdioClient::connect_with_options(&cmd, &cmd_args, spawn_options).await?;
+    if !client.supports_resource_subscribe() {
+        bail!("MCP server does not support resources.subscribe");
+    }
+    client.subscribe_resource(resource_uri).await?;
+
+    let mut sink = open_subscription_sink(&sink_path).await?;
+    let mut seq = 0u64;
+    append_subscription_event(
+        &mut sink,
+        &view,
+        &mut seq,
+        "mcp_resource",
+        "open",
+        None,
+        Some(json!({ "resource_uri": resource_uri })),
+    )
+    .await?;
+
+    loop {
+        tokio::select! {
+            changed = stop_rx.changed() => {
+                if changed.is_ok() && *stop_rx.borrow() {
+                    let _ = client.unsubscribe_resource(resource_uri).await;
+                    append_subscription_event(
+                        &mut sink,
+                        &view,
+                        &mut seq,
+                        "mcp_resource",
+                        "closed",
+                        None,
+                        Some(json!({"reason":"stopped"})),
+                    ).await?;
+                    update_subscription_view(&view, Some("stopped"), None, false).await;
+                    return Ok(());
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                let notifications = client.drain_notifications().await;
+                for notification in notifications {
+                    append_subscription_event(
+                        &mut sink,
+                        &view,
+                        &mut seq,
+                        "mcp_resource",
+                        "data",
+                        notification.params.clone(),
+                        Some(json!({"method": notification.method})),
+                    ).await?;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 pub async fn daemon_status_client() -> Result<DaemonStatus> {
     let value = client_call("daemon.status", None).await?;
@@ -1104,6 +1727,55 @@ pub async fn runtime_invoke_client(
 pub async fn runtime_invoke_client(
     _request: &RuntimeInvokeRequest,
 ) -> Result<RuntimeInvokeResponse> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+pub async fn subscribe_start_client(
+    request: &SubscribeStartRequest,
+) -> Result<SubscribeStartResponse> {
+    let params = serde_json::to_value(request)?;
+    let value = client_call("subscription.start", Some(params)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn subscribe_start_client(
+    _request: &SubscribeStartRequest,
+) -> Result<SubscribeStartResponse> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+pub async fn subscribe_list_client() -> Result<Vec<SubscriptionJobView>> {
+    let value = client_call("subscription.list", None).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn subscribe_list_client() -> Result<Vec<SubscriptionJobView>> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+pub async fn subscribe_status_client(job_id: &str) -> Result<SubscriptionJobView> {
+    let value = client_call("subscription.status", Some(json!({ "job_id": job_id }))).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn subscribe_status_client(_job_id: &str) -> Result<SubscriptionJobView> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+pub async fn subscribe_stop_client(job_id: &str) -> Result<SubscribeStopResponse> {
+    let value = client_call("subscription.stop", Some(json!({ "job_id": job_id }))).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn subscribe_stop_client(_job_id: &str) -> Result<SubscribeStopResponse> {
     bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
 }
 
@@ -1348,6 +2020,134 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 }
             };
             match runtime.invoke(invoke).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: map_runtime_error_code(&err),
+                        message: err.to_string(),
+                    }),
+                },
+            }
+        }
+        "subscription.start" => {
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let start: SubscribeStartRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
+            match runtime.subscribe_start(start).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: map_runtime_error_code(&err),
+                        message: err.to_string(),
+                    }),
+                },
+            }
+        }
+        "subscription.list" => JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: req.id,
+            result: Some(serde_json::to_value(runtime.subscribe_list().await)?),
+            error: None,
+        },
+        "subscription.status" => {
+            let Some(job_id) = req
+                .params
+                .as_ref()
+                .and_then(|v| v.get("job_id"))
+                .and_then(Value::as_str)
+            else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing job_id".to_string(),
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            match runtime.subscribe_status(job_id).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: map_runtime_error_code(&err),
+                        message: err.to_string(),
+                    }),
+                },
+            }
+        }
+        "subscription.stop" => {
+            let Some(job_id) = req
+                .params
+                .as_ref()
+                .and_then(|v| v.get("job_id"))
+                .and_then(Value::as_str)
+            else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing job_id".to_string(),
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            match runtime.subscribe_stop(job_id).await {
                 Ok(result) => JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: req.id,
@@ -2353,6 +3153,34 @@ mod tests {
         };
 
         assert!(openapi_runtime_endpoint(&request).is_none());
+    }
+
+    #[test]
+    fn parse_file_sink_requires_file_prefix() {
+        let err = parse_file_sink("stdout").unwrap_err();
+        assert!(err.to_string().contains("file:<path>"));
+    }
+
+    #[test]
+    fn drain_ndjson_events_parses_complete_lines_and_leaves_partial() {
+        let mut buffer = "{\"a\":1}\n{\"b\":2}\n{\"c\":".to_string();
+        let values = drain_ndjson_events(&mut buffer).unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["a"], 1);
+        assert_eq!(values[1]["b"], 2);
+        assert_eq!(buffer, "{\"c\":");
+    }
+
+    #[test]
+    fn drain_sse_json_events_parses_json_payloads() {
+        let mut buffer =
+            "event: message\ndata: {\"a\":1}\n\n:data-only comment\n\ndata: {\"b\":2}\n\n"
+                .to_string();
+        let values = drain_sse_json_events(&mut buffer).unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["a"], 1);
+        assert_eq!(values[1]["b"], 2);
+        assert!(buffer.is_empty());
     }
 
     #[test]

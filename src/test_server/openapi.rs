@@ -3,12 +3,14 @@
 use super::common::{bind_available, write_addr_file, Scenario, ServerHandle};
 use anyhow::Result;
 use axum::{
+    body::{Body, Bytes},
     extract::{Path as AxumPath, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
+use futures::stream;
 use serde_json::json;
 use tokio::signal::ctrl_c;
 use tracing::info;
@@ -270,9 +272,50 @@ fn create_router(state: ServerState) -> Router {
         }
     }
 
+    async fn stream_json(State(state): State<ServerState>) -> Result<Response, StatusCode> {
+        match state.scenario {
+            Scenario::Ok
+            | Scenario::ToolsListFailAfterFirst
+            | Scenario::ToolCallTimeout
+            | Scenario::StructuredContent
+            | Scenario::DynamicToolset => {
+                let body = Body::from_stream(stream::iter(vec![
+                    Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
+                        br#"{"type":"tick","value":1}
+"#,
+                    )),
+                    Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
+                        br#"{"type":"tick","value":2}
+"#,
+                    )),
+                ]));
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/x-ndjson")
+                    .body(body)
+                    .unwrap())
+            }
+            Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
+            Scenario::Malformed => Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/x-ndjson")
+                .body(Body::from("{broken\n"))
+                .unwrap()),
+            Scenario::Timeout => {
+                tokio::time::sleep(super::common::timeout_duration()).await;
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/x-ndjson")
+                    .body(Body::from("{\"type\":\"tick\",\"value\":1}\n"))
+                    .unwrap())
+            }
+        }
+    }
+
     Router::new()
         .route("/openapi.json", get(serve_schema))
         .route("/health", get(health_check))
+        .route("/stream", get(stream_json))
         .route("/users", get(list_users).post(create_user))
         .route("/users/:id", get(get_user))
         .with_state(state)
