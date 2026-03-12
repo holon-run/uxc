@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use serial_test::serial;
 
+#[allow(deprecated)]
 fn uxc_command() -> Command {
     Command::cargo_bin("uxc").expect("uxc binary should build")
 }

@@ -153,6 +153,7 @@ fn daemon_log_contains_start_event() {
     let _ = fs::remove_file(&log_file);
 }
 
+#[allow(deprecated)]
 fn uxc_command() -> assert_cmd::Command {
     assert_cmd::Command::cargo_bin(env!("CARGO_PKG_NAME")).unwrap()
 }

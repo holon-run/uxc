@@ -24,6 +24,7 @@ mod error;
 mod http_client;
 mod output;
 mod schema_mapping;
+mod subscription_graphql;
 mod subscription_websocket;
 
 use adapters::OperationDetail;
@@ -97,7 +98,7 @@ struct Cli {
     text: bool,
 
     /// Remote endpoint URL (not used with 'cache'/'auth' subcommands)
-    #[arg(value_name = "URL", global = true)]
+    #[arg(value_name = "URL")]
     url: Option<String>,
 
     #[command(subcommand)]
@@ -182,9 +183,21 @@ enum DaemonCommands {
 enum SubscribeCommands {
     /// Start a background subscription job
     Start {
-        /// HTTP stream URL or MCP endpoint/stdio command
+        /// HTTP stream URL, GraphQL endpoint, or MCP endpoint/stdio command
         #[arg(value_name = "ENDPOINT")]
         endpoint: String,
+
+        /// Optional operation ID for protocol-aware subscriptions (for example subscription/messageAdded)
+        #[arg(value_name = "OPERATION_ID")]
+        operation_id: Option<String>,
+
+        /// Operation arguments as key=value pairs or one positional JSON object
+        #[arg(value_name = "ARG")]
+        args: Vec<String>,
+
+        /// JSON object payload for operation arguments
+        #[arg(long = "input-json", value_name = "JSON")]
+        input_json: Option<String>,
 
         /// File sink spec, for example file:/tmp/events.ndjson
         #[arg(long, value_name = "file:/path.ndjson")]
@@ -1519,15 +1532,16 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 ("stop", "Stop a background subscription job"),
             ]),
             notes: vec![
-                "v1 supports HTTP JSON streams and MCP resource subscriptions.".to_string(),
+                "Supports raw HTTP JSON streams, GraphQL subscription operations, and MCP resource subscriptions.".to_string(),
                 "Use --sink file:/path.ndjson to append normalized event envelopes to a file."
                     .to_string(),
-                "HTTP subscribe uses the raw final URL and reuses auth bindings/signers; schema is not involved."
+                "Raw HTTP subscribe uses the final stream URL directly; GraphQL subscribe uses schema discovery plus a derived ws(s) endpoint."
                     .to_string(),
             ],
             examples: vec![
                 "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
                     .to_string(),
+                "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --sink file:/tmp/mcp-http.ndjson".to_string(),
                 "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --sink file:/tmp/mcp.ndjson".to_string(),
                 "uxc subscribe list".to_string(),
@@ -1538,15 +1552,17 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["subscribe", "start"] => HelpData {
             path: "uxc subscribe start".to_string(),
             about: "Start a background subscription job".to_string(),
-            usage: "uxc subscribe start <endpoint> --sink file:<path> [--resource-uri <uri>]".to_string(),
+            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--resource-uri <uri>]".to_string(),
             commands: vec![],
             notes: vec![
-                "For HTTP streams, <endpoint> is the final stream URL.".to_string(),
+                "For raw HTTP streams, omit <operation_id> and use <endpoint> as the final stream URL.".to_string(),
+                "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint and reuses auth/cache behavior.".to_string(),
                 "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>.".to_string(),
             ],
             examples: vec![
                 "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
                     .to_string(),
+                "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\",\"_select\":\"id body\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --sink file:/tmp/mcp-http.ndjson".to_string(),
                 "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --sink file:/tmp/mcp.ndjson".to_string(),
             ],
@@ -3410,9 +3426,47 @@ async fn handle_subscribe_command(
     let envelope = match command {
         SubscribeCommands::Start {
             endpoint,
+            operation_id,
+            args,
+            input_json,
             sink,
             resource_uri,
         } => {
+            let (normalized_args, normalized_input_json) = match operation_id {
+                Some(op) => {
+                    let mut explicit_args = Vec::new();
+                    let mut positional = Vec::new();
+                    for arg in args {
+                        if arg.contains('=') {
+                            explicit_args.push(arg.clone());
+                        } else {
+                            positional.push(arg.clone());
+                        }
+                    }
+                    normalize_operation_inputs(op, explicit_args, input_json.clone(), &positional)?
+                }
+                None => {
+                    if input_json.is_some() || !args.is_empty() {
+                        return Err(UxcError::InvalidArguments(
+                            "subscribe start only accepts operation arguments when <operation_id> is provided".to_string(),
+                        )
+                        .into());
+                    }
+                    (Vec::new(), None)
+                }
+            };
+            let args_map = if let Some(op) = operation_id {
+                Some(
+                    parse_arguments(normalized_args, normalized_input_json).map_err(|err| {
+                        UxcError::InvalidArguments(format!(
+                            "Invalid arguments for subscribe operation '{}': {}",
+                            op, err
+                        ))
+                    })?,
+                )
+            } else {
+                None
+            };
             let request = daemon::SubscribeStartRequest {
                 request_id: format!(
                     "{}-{}",
@@ -3424,6 +3478,8 @@ async fn handle_subscribe_command(
                 ),
                 endpoint: normalize_endpoint_url(endpoint),
                 sink: sink.clone(),
+                operation_id: operation_id.clone(),
+                args: args_map,
                 resource_uri: resource_uri.clone(),
                 transport_hint: None,
                 options: daemon::RuntimeInvokeOptions {

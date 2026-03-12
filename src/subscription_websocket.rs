@@ -18,6 +18,8 @@ pub struct WebSocketRuntimeConfig {
     pub endpoint: String,
     pub auth_profile: Option<Profile>,
     pub subprotocols: Vec<String>,
+    pub initial_text_frames: Vec<String>,
+    pub first_message_timeout_secs: Option<u64>,
     pub initial_reconnect_delay_secs: u64,
     pub max_reconnect_delay_secs: u64,
 }
@@ -35,6 +37,8 @@ pub struct WebSocketHandlerOutput {
     pub action: WebSocketHandlerAction,
     pub data: Option<Value>,
     pub meta: Option<Value>,
+    pub outbound_text_frames: Vec<String>,
+    pub stop_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,11 +97,15 @@ impl WebSocketSessionHandler for RawFrameHandler {
                 action: WebSocketHandlerAction::Continue,
                 data: Some(value),
                 meta: Some(json!({"frame_type":"text_json"})),
+                outbound_text_frames: Vec::new(),
+                stop_reason: None,
             }),
             Err(_) => Ok(WebSocketHandlerOutput {
                 action: WebSocketHandlerAction::Continue,
                 data: None,
                 meta: Some(json!({"frame_type":"text","text":text})),
+                outbound_text_frames: Vec::new(),
+                stop_reason: None,
             }),
         }
     }
@@ -112,6 +120,8 @@ impl WebSocketSessionHandler for RawFrameHandler {
                 "frame_type":"binary",
                 "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
             })),
+            outbound_text_frames: Vec::new(),
+            stop_reason: None,
         })
     }
 }
@@ -255,6 +265,15 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
         .await
         .map_err(WebSocketRunError::Fatal)?;
 
+    for frame in &config.initial_text_frames {
+        stream
+            .send(Message::Text(frame.clone()))
+            .await
+            .map_err(|err| {
+                WebSocketRunError::Retry(anyhow!("websocket initial send failed: {}", err))
+            })?;
+    }
+
     match handler
         .on_open(&open_meta)
         .await
@@ -279,6 +298,8 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
         .await
         .map_err(WebSocketRunError::Fatal)?;
 
+    let mut first_message_timeout = config.first_message_timeout_secs.map(Duration::from_secs);
+
     loop {
         if stop_requested(stop_rx) {
             close_as_stopped(observer, "stopped")
@@ -297,13 +318,36 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
                 }
                 return Err(WebSocketRunError::Retry(anyhow!("subscription stop channel closed unexpectedly")));
             }
-            item = stream.next() => {
+            item = async {
+                if let Some(duration) = first_message_timeout {
+                    match tokio::time::timeout(duration, stream.next()).await {
+                        Ok(item) => item,
+                        Err(_) => {
+                            Some(Err(tokio_tungstenite::tungstenite::Error::Io(
+                                std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    format!("websocket first message timed out after {}s", duration.as_secs()),
+                                ),
+                            )))
+                        }
+                    }
+                } else {
+                    stream.next().await
+                }
+            } => {
                 match item {
                     Some(Ok(Message::Text(text))) => {
+                        first_message_timeout = None;
                         let output = handler
                             .on_text_frame(text.to_string())
                             .await
                             .map_err(WebSocketRunError::Fatal)?;
+                        for frame in &output.outbound_text_frames {
+                            stream
+                                .send(Message::Text(frame.clone()))
+                                .await
+                                .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket send failed: {}", err)))?;
+                        }
                         if output.data.is_some() || output.meta.is_some() {
                             observer
                                 .emit("data", output.data, output.meta)
@@ -313,7 +357,10 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
                         match output.action {
                             WebSocketHandlerAction::Continue => {}
                             WebSocketHandlerAction::Stop => {
-                                close_as_stopped(observer, "handler_stop")
+                                close_as_stopped(
+                                    observer,
+                                    output.stop_reason.as_deref().unwrap_or("handler_stop"),
+                                )
                                     .await
                                     .map_err(WebSocketRunError::Fatal)?;
                                 return Ok(());
@@ -324,10 +371,17 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
                         }
                     }
                     Some(Ok(Message::Binary(bytes))) => {
+                        first_message_timeout = None;
                         let output = handler
                             .on_binary_frame(bytes.to_vec())
                             .await
                             .map_err(WebSocketRunError::Fatal)?;
+                        for frame in &output.outbound_text_frames {
+                            stream
+                                .send(Message::Text(frame.clone()))
+                                .await
+                                .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket send failed: {}", err)))?;
+                        }
                         if output.data.is_some() || output.meta.is_some() {
                             observer
                                 .emit("data", output.data, output.meta)
@@ -337,7 +391,10 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
                         match output.action {
                             WebSocketHandlerAction::Continue => {}
                             WebSocketHandlerAction::Stop => {
-                                close_as_stopped(observer, "handler_stop")
+                                close_as_stopped(
+                                    observer,
+                                    output.stop_reason.as_deref().unwrap_or("handler_stop"),
+                                )
                                     .await
                                     .map_err(WebSocketRunError::Fatal)?;
                                 return Ok(());
@@ -371,12 +428,15 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
+                        first_message_timeout = None;
                         stream
                             .send(Message::Pong(payload))
                             .await
                             .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket pong send failed: {}", err)))?;
                     }
-                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
+                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {
+                        first_message_timeout = None;
+                    }
                     Some(Err(err)) => return Err(WebSocketRunError::Retry(anyhow!("websocket read failed: {}", err))),
                     None => return Err(WebSocketRunError::Retry(anyhow!("websocket stream ended"))),
                 }
