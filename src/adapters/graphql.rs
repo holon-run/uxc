@@ -979,7 +979,7 @@ impl GraphQLAdapter {
                 } else {
                     match arg.get("defaultValue") {
                         Some(v) => v.is_null(),
-                        None => false,
+                        None => true,
                     }
                 };
                 if required && !args.contains_key(name) {

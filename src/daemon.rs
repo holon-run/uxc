@@ -703,6 +703,9 @@ impl SubscriptionManager {
         if request.resource_uri.is_some() && request.operation_id.is_some() {
             bail!("subscribe start cannot combine --resource-uri with an operation_id");
         }
+        if request.args.is_some() && request.operation_id.is_none() {
+            bail!("subscribe start cannot accept args without an operation_id");
+        }
         let protocol = if matches!(
             request.transport_hint,
             Some(SubscriptionTransportHint::Websocket)
