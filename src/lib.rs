@@ -16,6 +16,7 @@ pub mod http_client;
 pub mod output;
 pub mod protocol;
 pub mod schema_mapping;
+pub mod subscription_graphql;
 pub mod subscription_websocket;
 
 #[cfg(feature = "test-server")]

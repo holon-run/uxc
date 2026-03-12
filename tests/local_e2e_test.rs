@@ -924,6 +924,59 @@ fn test_http_subscribe_start_status_stop_writes_file() {
 
 #[test]
 #[serial_test::serial]
+fn test_graphql_subscribe_start_status_stop_writes_file() {
+    let server = start_test_server("graphql", "ok");
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("graphql-subscribe.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+    let endpoint = format!("http://{}/", server.addr);
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "subscription/messageAdded",
+            r#"{"roomId":"room-42","_select":"id roomId body"}"#,
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(start.is_ok(), "GraphQL subscribe start failed: {:?}", start);
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    assert_eq!(start_json["ok"], true);
+    assert_eq!(start_json["data"]["protocol"], "graphql");
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""roomId":"room-42""#, Duration::from_secs(5)),
+        "GraphQL subscribe sink did not receive expected events"
+    );
+    assert!(
+        wait_for_file_contains(&sink_path, r#""reason":"complete""#, Duration::from_secs(5)),
+        "GraphQL subscribe sink did not record completion"
+    );
+
+    let status = run_uxc_in_home(&["subscribe", "status", &job_id], &test_home);
+    assert!(
+        status.is_ok(),
+        "GraphQL subscribe status failed: {:?}",
+        status
+    );
+    let status_json: serde_json::Value = serde_json::from_str(&status.unwrap()).unwrap();
+    assert_eq!(status_json["ok"], true);
+    assert_eq!(status_json["data"]["protocol"], "graphql");
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(stop.is_ok(), "GraphQL subscribe stop failed: {:?}", stop);
+    let stop_json: serde_json::Value = serde_json::from_str(&stop.unwrap()).unwrap();
+    assert_eq!(stop_json["ok"], true);
+    assert_eq!(stop_json["data"]["stopped"], true);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_mcp_stdio_subscribe_start_status_stop_writes_file() {
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} ok", bin.display());

@@ -3,6 +3,7 @@
 use super::common::{bind_available, write_addr_file, Scenario, ServerHandle};
 use anyhow::Result;
 use axum::{
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -59,9 +60,7 @@ fn extract_inline_arg(query: &str, arg_name: &str) -> Option<String> {
         return None;
     }
 
-    let end = rest
-        .find(|c: char| c == ',' || c == ')' || c == ' ' || c == '\n' || c == '\t')
-        .unwrap_or(rest.len());
+    let end = rest.find([',', ')', ' ', '\n', '\t']).unwrap_or(rest.len());
     let token = rest[..end].trim();
     if token.is_empty() {
         None
@@ -71,6 +70,7 @@ fn extract_inline_arg(query: &str, arg_name: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::extract_inline_arg;
 
@@ -153,6 +153,24 @@ fn introspection_schema() -> serde_json::Value {
                 ],
                 "type": {"kind": "OBJECT", "name": "Issue", "ofType": null}
               }
+              ]
+          },
+          "subscriptionType": {
+            "name": "Subscription",
+            "fields": [
+              {
+                "name": "messageAdded",
+                "description": "Watch messages in a room",
+                "args": [
+                  {
+                    "name": "roomId",
+                    "description": "Room identifier",
+                    "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "ID", "name": "ID", "ofType": null}},
+                    "defaultValue": null
+                  }
+                ],
+                "type": {"kind": "OBJECT", "name": "Message", "ofType": null}
+              }
             ]
           },
           "types": [
@@ -224,6 +242,24 @@ fn introspection_schema() -> serde_json::Value {
               ]
             },
             {
+              "name": "Subscription",
+              "fields": [
+                {
+                  "name": "messageAdded",
+                  "description": "Watch messages in a room",
+                  "args": [
+                    {
+                      "name": "roomId",
+                      "description": "Room identifier",
+                      "type": {"kind": "NON_NULL", "name": null, "ofType": {"kind": "ID", "name": "ID", "ofType": null}},
+                      "defaultValue": null
+                    }
+                  ],
+                  "type": {"kind": "OBJECT", "name": "Message", "ofType": null}
+                }
+              ]
+            },
+            {
               "name": "User",
               "fields": [
                 {"name": "id", "type": {"name": "ID", "kind": "SCALAR"}},
@@ -243,6 +279,14 @@ fn introspection_schema() -> serde_json::Value {
                 {"name": "id", "type": {"name": "ID", "kind": "SCALAR"}},
                 {"name": "teamId", "type": {"name": "ID", "kind": "SCALAR"}},
                 {"name": "title", "type": {"name": "String", "kind": "SCALAR"}}
+              ]
+            },
+            {
+              "name": "Message",
+              "fields": [
+                {"name": "id", "type": {"name": "ID", "kind": "SCALAR"}},
+                {"name": "roomId", "type": {"name": "ID", "kind": "SCALAR"}},
+                {"name": "body", "type": {"name": "String", "kind": "SCALAR"}}
               ]
             },
             {
@@ -422,6 +466,92 @@ async fn execute_query(
     }
 }
 
+async fn handle_graphql_websocket(mut socket: WebSocket, state: ServerState) {
+    while let Some(message) = socket.recv().await {
+        let Ok(message) = message else {
+            return;
+        };
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            let _ = socket
+                .send(Message::Text(
+                    json!({"type":"error","payload":{"message":"invalid json"}}).to_string(),
+                ))
+                .await;
+            return;
+        };
+        let msg_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match msg_type {
+            "connection_init" => {
+                if matches!(state.scenario, Scenario::AuthRequired) {
+                    let _ = socket
+                        .send(Message::Text(
+                            json!({"type":"error","payload":{"message":"unauthorized"}})
+                                .to_string(),
+                        ))
+                        .await;
+                    return;
+                }
+                let _ = socket
+                    .send(Message::Text(json!({"type":"connection_ack"}).to_string()))
+                    .await;
+            }
+            "subscribe" => {
+                let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("1");
+                let room_id = value
+                    .get("payload")
+                    .and_then(|v| v.get("variables"))
+                    .and_then(|v| v.get("roomId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("room-1");
+
+                let _ = socket
+                    .send(Message::Text(
+                        json!({
+                            "id": id,
+                            "type":"next",
+                            "payload":{
+                                "data":{"messageAdded":{"id":"m1","roomId":room_id,"body":"hello"}}
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                let _ = socket
+                    .send(Message::Text(
+                        json!({
+                            "id": id,
+                            "type":"next",
+                            "payload":{
+                                "data":{"messageAdded":{"id":"m2","roomId":room_id,"body":"world"}},
+                                "extensions":{"trace":"ok"}
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                let _ = socket
+                    .send(Message::Text(
+                        json!({"id":id,"type":"complete"}).to_string(),
+                    ))
+                    .await;
+                let _ = socket.close().await;
+                return;
+            }
+            "ping" => {
+                let _ = socket
+                    .send(Message::Text(
+                        json!({"type":"pong","payload":value.get("payload").cloned().unwrap_or(json!(null))}).to_string(),
+                    ))
+                    .await;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Create the GraphQL test router
 fn create_router(state: ServerState) -> Router {
     async fn graphql_handler(
@@ -443,12 +573,23 @@ fn create_router(state: ServerState) -> Router {
         Ok(Json(response).into_response())
     }
 
-    async fn graphql_playground() -> &'static str {
+    async fn graphql_get(
+        ws: Option<WebSocketUpgrade>,
+        State(state): State<ServerState>,
+    ) -> Response {
+        if let Some(ws) = ws {
+            return ws
+                .protocols(["graphql-transport-ws"])
+                .on_upgrade(move |socket| handle_graphql_websocket(socket, state))
+                .into_response();
+        }
+
         "<!DOCTYPE html><html><head><title>GraphQL Playground</title></head><body><h1>GraphQL Test Server</body></html>"
+            .into_response()
     }
 
     Router::new()
-        .route("/", get(graphql_playground).post(graphql_handler))
+        .route("/", get(graphql_get).post(graphql_handler))
         .with_state(state)
 }
 

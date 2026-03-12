@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
+#[allow(deprecated)]
 fn uxc_command() -> Command {
     Command::cargo_bin("uxc").expect("uxc binary should build")
 }

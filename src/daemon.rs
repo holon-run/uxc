@@ -8,6 +8,10 @@ use crate::cache::{self, Cache, CacheConfig};
 use crate::daemon_log::{redact_endpoint, redact_sensitive};
 use crate::daemon_log::{DaemonEventType, DaemonLogEntry, DaemonLogger};
 use crate::error::UxcError;
+use crate::subscription_graphql::{
+    derive_graphql_websocket_endpoint, graphql_transport_init_message, GraphQLSubscriptionConfig,
+    GraphQLSubscriptionHandler,
+};
 use crate::subscription_websocket::{
     self, RawFrameHandler, WebSocketRuntimeConfig, WebSocketRuntimeObserver,
 };
@@ -118,6 +122,10 @@ pub struct SubscribeStartRequest {
     pub request_id: String,
     pub endpoint: String,
     pub sink: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<HashMap<String, Value>>,
     pub resource_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_hint: Option<SubscriptionTransportHint>,
@@ -692,6 +700,9 @@ impl SubscriptionManager {
     async fn start(&self, request: &SubscribeStartRequest) -> Result<SubscribeStartResponse> {
         let sink_path = parse_file_sink(&request.sink)?;
         let sink_spec = format!("file:{}", sink_path.display());
+        if request.resource_uri.is_some() && request.operation_id.is_some() {
+            bail!("subscribe start cannot combine --resource-uri with an operation_id");
+        }
         let protocol = if matches!(
             request.transport_hint,
             Some(SubscriptionTransportHint::Websocket)
@@ -701,6 +712,19 @@ impl SubscriptionManager {
                 bail!("websocket subscription transport requires a ws:// or wss:// endpoint");
             }
             "websocket".to_string()
+        } else if let Some(operation_id) = request.operation_id.as_deref() {
+            if !operation_id.starts_with("subscription/") {
+                bail!(
+                    "subscribe start currently supports only GraphQL subscription/<field> operation IDs"
+                );
+            }
+            let lower = request.endpoint.to_ascii_lowercase();
+            if !lower.starts_with("http://") && !lower.starts_with("https://") {
+                bail!(
+                    "GraphQL subscriptions require an http:// or https:// endpoint for schema discovery"
+                );
+            }
+            "graphql".to_string()
         } else if request.resource_uri.is_some() {
             if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint)
                 && !adapters::mcp::McpAdapter::is_http_url(&request.endpoint)
@@ -751,6 +775,15 @@ impl SubscriptionManager {
                 Some(SubscriptionTransportHint::Websocket)
             ) {
                 run_websocket_subscription_job(
+                    &job_id_clone,
+                    &request_clone,
+                    sink_path,
+                    view_clone.clone(),
+                    stop_rx,
+                )
+                .await
+            } else if request_clone.operation_id.is_some() {
+                run_graphql_subscription_job(
                     &job_id_clone,
                     &request_clone,
                     sink_path,
@@ -1796,6 +1829,7 @@ struct DaemonWebSocketObserver<'a> {
     sink: &'a mut tokio::fs::File,
     view: &'a Arc<Mutex<SubscriptionJobView>>,
     seq: &'a mut u64,
+    source_kind: &'a str,
 }
 
 #[async_trait::async_trait]
@@ -1810,7 +1844,7 @@ impl WebSocketRuntimeObserver for DaemonWebSocketObserver<'_> {
             self.sink,
             self.view,
             self.seq,
-            "websocket",
+            self.source_kind,
             event_kind,
             data,
             meta,
@@ -1845,6 +1879,7 @@ async fn run_websocket_subscription_job(
         sink: &mut sink,
         view: &view,
         seq: &mut seq,
+        source_kind: "websocket",
     };
 
     subscription_websocket::run_websocket_subscription_runtime(
@@ -1852,6 +1887,8 @@ async fn run_websocket_subscription_job(
             endpoint: request.endpoint.clone(),
             auth_profile,
             subprotocols: Vec::new(),
+            initial_text_frames: Vec::new(),
+            first_message_timeout_secs: None,
             initial_reconnect_delay_secs: SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS,
             max_reconnect_delay_secs: SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS,
         },
@@ -1860,6 +1897,135 @@ async fn run_websocket_subscription_job(
         &mut stop_rx,
     )
     .await
+}
+
+async fn resolve_graphql_subscription_prepared_operation(
+    request: &SubscribeStartRequest,
+) -> Result<(
+    adapters::graphql::GraphQLAdapter,
+    String,
+    HashMap<String, Value>,
+)> {
+    let operation_id = request
+        .operation_id
+        .as_ref()
+        .ok_or_else(|| anyhow!("operation_id is required for GraphQL subscriptions"))?;
+    if !operation_id.starts_with("subscription/") {
+        bail!("subscribe start currently supports only GraphQL subscription/<field> operation IDs");
+    }
+
+    let cache = if request.options.no_cache {
+        cache::create_cache(CacheConfig {
+            enabled: false,
+            ..Default::default()
+        })?
+    } else if let Some(ttl) = request.options.cache_ttl {
+        cache::create_cache(CacheConfig {
+            ttl,
+            ..Default::default()
+        })?
+    } else {
+        cache::create_cache(CacheConfig::load_from_file().unwrap_or_default())?
+    };
+    let root_auth_profile =
+        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+    let detection_options = DetectionOptions {
+        schema_url: request.options.schema_url.clone(),
+        auth_profile: root_auth_profile.clone(),
+        stdio_spawn_options: None,
+    };
+
+    let resolved = resolve_adapter_with_schema_cache(
+        &request.endpoint,
+        &detection_options,
+        cache,
+        root_auth_profile.clone(),
+        request.options.no_cache,
+        request.options.refresh_schema,
+    )
+    .await?;
+
+    let adapter = match resolved.adapter {
+        AdapterEnum::GraphQL(adapter) => adapter,
+        other => bail!(
+            "endpoint '{}' does not resolve to GraphQL for subscription '{}'; detected {}",
+            request.endpoint,
+            operation_id,
+            other.protocol_type().as_str()
+        ),
+    };
+
+    Ok((
+        adapter,
+        operation_id.clone(),
+        request.args.clone().unwrap_or_default(),
+    ))
+}
+
+async fn run_graphql_subscription_job(
+    _job_id: &str,
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let (adapter, operation_id, args) =
+        resolve_graphql_subscription_prepared_operation(request).await?;
+    let prepared = adapter
+        .prepare_operation(&request.endpoint, &operation_id, args)
+        .await?;
+    let endpoint = derive_graphql_websocket_endpoint(&request.endpoint)?;
+
+    let auth_profile =
+        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+    let mut sink = open_subscription_sink(&sink_path).await?;
+    let mut seq = 0u64;
+    let mut handler = GraphQLSubscriptionHandler::new(GraphQLSubscriptionConfig {
+        operation_id: operation_id.clone(),
+        query: prepared.query,
+        variables: prepared.variables,
+    });
+    let mut observer = DaemonWebSocketObserver {
+        sink: &mut sink,
+        view: &view,
+        seq: &mut seq,
+        source_kind: "graphql",
+    };
+
+    let result = subscription_websocket::run_websocket_subscription_runtime(
+        WebSocketRuntimeConfig {
+            endpoint,
+            auth_profile,
+            subprotocols: vec!["graphql-transport-ws".to_string()],
+            initial_text_frames: vec![graphql_transport_init_message()],
+            first_message_timeout_secs: Some(5),
+            initial_reconnect_delay_secs: SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS,
+            max_reconnect_delay_secs: SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS,
+        },
+        &mut handler,
+        &mut observer,
+        &mut stop_rx,
+    )
+    .await;
+
+    if let Err(err) = result {
+        append_subscription_event(
+            &mut sink,
+            &view,
+            &mut seq,
+            "graphql",
+            "error",
+            None,
+            Some(json!({
+                "message": err.to_string(),
+                "operation_id": operation_id,
+            })),
+        )
+        .await?;
+        return Err(err);
+    }
+
+    Ok(())
 }
 
 async fn run_mcp_subscription_job(
@@ -3440,6 +3606,7 @@ impl Default for DaemonRuntime {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use futures::SinkExt;
@@ -3657,12 +3824,12 @@ mod tests {
                     match frame {
                         TestWsFrame::Text(text) => {
                             websocket
-                                .send(Message::Text(text.to_string().into()))
+                                .send(Message::Text(text.to_string()))
                                 .await
                                 .unwrap();
                         }
                         TestWsFrame::Binary(bytes) => {
-                            websocket.send(Message::Binary(bytes.into())).await.unwrap();
+                            websocket.send(Message::Binary(bytes)).await.unwrap();
                         }
                     }
                     tokio::time::sleep(StdDuration::from_millis(50)).await;
@@ -3683,6 +3850,8 @@ mod tests {
             request_id: "test-request".to_string(),
             endpoint: endpoint.to_string(),
             sink: sink.to_string(),
+            operation_id: None,
+            args: None,
             resource_uri: None,
             transport_hint: Some(SubscriptionTransportHint::Websocket),
             options: RuntimeInvokeOptions {

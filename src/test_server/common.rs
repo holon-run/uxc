@@ -27,6 +27,7 @@ pub enum Scenario {
 
 impl Scenario {
     /// Parse scenario from command-line argument
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "ok" => Ok(Self::Ok),

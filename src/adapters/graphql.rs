@@ -20,6 +20,14 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedGraphQLOperation {
+    pub operation_keyword: String,
+    pub field_name: String,
+    pub query: String,
+    pub variables: Option<Value>,
+}
+
 pub struct GraphQLAdapter {
     client: reqwest::Client,
     cache: Option<Arc<dyn crate::cache::Cache>>,
@@ -918,6 +926,169 @@ impl GraphQLAdapter {
             format!("{} {{ {} }}", keyword, field_name)
         }
     }
+
+    fn selection_override_from_args(args: &mut HashMap<String, Value>) -> Result<Option<String>> {
+        let selection_override = args.remove("_select");
+        match selection_override {
+            Some(Value::String(s)) => Ok(Some(s)),
+            Some(other) => bail!(
+                "GraphQL reserved argument '_select' must be a string, got {}",
+                other
+            ),
+            None => Ok(None),
+        }
+    }
+
+    fn validate_declared_arguments(
+        operation: &str,
+        declared_args: &[Value],
+        args: &HashMap<String, Value>,
+    ) -> Result<()> {
+        let known_arg_names: HashSet<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                arg.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.to_string())
+            })
+            .collect();
+        let unknown_args: Vec<String> = args
+            .keys()
+            .filter(|k| !known_arg_names.contains(*k))
+            .cloned()
+            .collect();
+        if !unknown_args.is_empty() {
+            bail!(
+                "Unknown argument(s) for GraphQL operation '{}': {}",
+                operation,
+                unknown_args.join(", ")
+            );
+        }
+
+        let missing_required: Vec<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                let name = arg.get("name").and_then(|n| n.as_str())?;
+                let is_non_null = arg
+                    .get("type")
+                    .and_then(|t| t.get("kind"))
+                    .and_then(|k| k.as_str())
+                    == Some("NON_NULL");
+                let required = if !is_non_null {
+                    false
+                } else {
+                    match arg.get("defaultValue") {
+                        Some(v) => v.is_null(),
+                        None => false,
+                    }
+                };
+                if required && !args.contains_key(name) {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !missing_required.is_empty() {
+            bail!(
+                "Missing required GraphQL argument(s) for '{}': {}",
+                operation,
+                missing_required.join(", ")
+            );
+        }
+
+        Ok(())
+    }
+
+    fn build_prepared_operation_from_schema(
+        schema: &Value,
+        operation: &str,
+        mut args: HashMap<String, Value>,
+    ) -> Result<PreparedGraphQLOperation> {
+        let (op_type, field_name) = Self::parse_operation_name(operation)?;
+        let selection_override = Self::selection_override_from_args(&mut args)?;
+        let field = Self::find_operation_field(schema, operation)
+            .ok_or_else(|| anyhow!("Operation '{}' not found", operation))?;
+
+        let declared_args = field
+            .get("args")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        Self::validate_declared_arguments(operation, &declared_args, &args)?;
+
+        let var_defs: Vec<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                let name = arg.get("name").and_then(|n| n.as_str())?;
+                if !args.contains_key(name) {
+                    return None;
+                }
+                let type_info = arg.get("type")?;
+                let type_name = Self::type_to_string(type_info);
+                Some(format!("${}: {}", name, type_name))
+            })
+            .collect();
+
+        let arg_bindings: Vec<String> = declared_args
+            .iter()
+            .filter_map(|arg| {
+                let name = arg.get("name").and_then(|n| n.as_str())?;
+                if args.contains_key(name) {
+                    Some(format!("{}: ${}", name, name))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let var_defs_str = if var_defs.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", var_defs.join(", "))
+        };
+        let args_str = if arg_bindings.is_empty() {
+            String::new()
+        } else {
+            format!("({})", arg_bindings.join(", "))
+        };
+
+        let selection_set =
+            selection_override.unwrap_or_else(|| Self::default_selection_set(schema, operation));
+        let operation_keyword = match op_type {
+            OperationType::Query => "query",
+            OperationType::Mutation => "mutation",
+            OperationType::Subscription => "subscription",
+        }
+        .to_string();
+        let query = format!(
+            "{}{} {{ {}{} {{ {} }} }}",
+            operation_keyword, var_defs_str, field_name, args_str, selection_set
+        );
+        let variables = if args.is_empty() {
+            None
+        } else {
+            Some(Value::Object(args.into_iter().collect()))
+        };
+
+        Ok(PreparedGraphQLOperation {
+            operation_keyword,
+            field_name,
+            query,
+            variables,
+        })
+    }
+
+    pub async fn prepare_operation(
+        &self,
+        url: &str,
+        operation: &str,
+        args: HashMap<String, Value>,
+    ) -> Result<PreparedGraphQLOperation> {
+        let schema = self.fetch_schema(url).await?;
+        Self::build_prepared_operation_from_schema(&schema, operation, args)
+    }
 }
 
 impl Default for GraphQLAdapter {
@@ -1059,147 +1230,10 @@ impl Adapter for GraphQLAdapter {
         args: HashMap<String, Value>,
     ) -> Result<ExecutionResult> {
         let start = std::time::Instant::now();
-        let mut args = args;
-
-        // Parse operation name to determine type
-        let (op_type, field_name) = Self::parse_operation_name(operation)?;
-        let selection_override = args.remove("_select");
-        let selection_override = match selection_override {
-            Some(Value::String(s)) => Some(s),
-            Some(other) => {
-                bail!(
-                    "GraphQL reserved argument '_select' must be a string, got {}",
-                    other
-                );
-            }
-            None => None,
-        };
-
-        let schema = self.fetch_schema(url).await?;
-        let field = Self::find_operation_field(&schema, operation)
-            .ok_or_else(|| anyhow!("Operation '{}' not found", operation))?;
-
-        let declared_args = field
-            .get("args")
-            .and_then(|a| a.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let known_arg_names: HashSet<String> = declared_args
-            .iter()
-            .filter_map(|arg| {
-                arg.get("name")
-                    .and_then(|n| n.as_str())
-                    .map(|n| n.to_string())
-            })
-            .collect();
-        let unknown_args: Vec<String> = args
-            .keys()
-            .filter(|k| !known_arg_names.contains(*k))
-            .cloned()
-            .collect();
-        if !unknown_args.is_empty() {
-            bail!(
-                "Unknown argument(s) for GraphQL operation '{}': {}",
-                operation,
-                unknown_args.join(", ")
-            );
-        }
-
-        let missing_required: Vec<String> = declared_args
-            .iter()
-            .filter_map(|arg| {
-                let name = arg.get("name").and_then(|n| n.as_str())?;
-                let is_non_null = arg
-                    .get("type")
-                    .and_then(|t| t.get("kind"))
-                    .and_then(|k| k.as_str())
-                    == Some("NON_NULL");
-                let required = if !is_non_null {
-                    false
-                } else {
-                    match arg.get("defaultValue") {
-                        // defaultValue explicitly null => no default => required
-                        Some(v) => v.is_null(),
-                        // defaultValue missing from schema => avoid false positives
-                        None => false,
-                    }
-                };
-                if required && !args.contains_key(name) {
-                    Some(name.to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if !missing_required.is_empty() {
-            bail!(
-                "Missing required GraphQL argument(s) for '{}': {}",
-                operation,
-                missing_required.join(", ")
-            );
-        }
-
-        let var_defs: Vec<String> = declared_args
-            .iter()
-            .filter_map(|arg| {
-                let name = arg.get("name").and_then(|n| n.as_str())?;
-                if !args.contains_key(name) {
-                    return None;
-                }
-                let type_info = arg.get("type")?;
-                let type_name = Self::type_to_string(type_info);
-                Some(format!("${}: {}", name, type_name))
-            })
-            .collect();
-
-        let arg_bindings: Vec<String> = declared_args
-            .iter()
-            .filter_map(|arg| {
-                let name = arg.get("name").and_then(|n| n.as_str())?;
-                if args.contains_key(name) {
-                    Some(format!("{}: ${}", name, name))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let var_defs_str = if var_defs.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", var_defs.join(", "))
-        };
-        let args_str = if arg_bindings.is_empty() {
-            String::new()
-        } else {
-            format!("({})", arg_bindings.join(", "))
-        };
-
-        let selection_set =
-            selection_override.unwrap_or_else(|| Self::default_selection_set(&schema, operation));
-
-        let query_string = format!(
-            "{}{} {{ {}{} {{ {} }} }}",
-            match op_type {
-                OperationType::Query => "query",
-                OperationType::Mutation => "mutation",
-                OperationType::Subscription => "subscription",
-            },
-            var_defs_str,
-            field_name,
-            args_str,
-            selection_set
-        );
-
-        let variables = if args.is_empty() {
-            None
-        } else {
-            Some(Value::Object(args.into_iter().collect()))
-        };
+        let prepared = self.prepare_operation(url, operation, args).await?;
 
         let result = self
-            .execute_graphql(url, &query_string, variables, None)
+            .execute_graphql(url, &prepared.query, prepared.variables, None)
             .await?;
 
         // Extract data from response
@@ -1289,6 +1323,64 @@ mod tests {
 
         let mutation = GraphQLAdapter::build_query(OperationType::Mutation, "addStar", None);
         assert_eq!(mutation, "mutation { addStar }");
+    }
+
+    #[test]
+    fn test_build_prepared_subscription_operation_uses_select_override() {
+        let schema = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": null,
+                    "mutationType": null,
+                    "subscriptionType": {
+                        "name": "Subscription",
+                        "fields": [
+                            {
+                                "name": "messageAdded",
+                                "args": [
+                                    {
+                                        "name": "roomId",
+                                        "defaultValue": null,
+                                        "type": {
+                                            "kind": "NON_NULL",
+                                            "ofType": { "kind": "SCALAR", "name": "ID" }
+                                        }
+                                    }
+                                ],
+                                "type": { "kind": "OBJECT", "name": "Message" }
+                            }
+                        ]
+                    },
+                    "types": [
+                        {
+                            "name": "Message",
+                            "kind": "OBJECT",
+                            "fields": [
+                                { "name": "id", "type": { "kind": "SCALAR", "name": "ID" } },
+                                { "name": "body", "type": { "kind": "SCALAR", "name": "String" } }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let mut args = HashMap::new();
+        args.insert("roomId".to_string(), serde_json::json!("room-42"));
+        args.insert("_select".to_string(), serde_json::json!("id body"));
+
+        let prepared = GraphQLAdapter::build_prepared_operation_from_schema(
+            &schema,
+            "subscription/messageAdded",
+            args,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.operation_keyword, "subscription");
+        assert_eq!(
+            prepared.query,
+            "subscription ($roomId: ID!) { messageAdded(roomId: $roomId) { id body } }"
+        );
+        assert_eq!(prepared.variables.unwrap()["roomId"], "room-42");
     }
 
     #[test]

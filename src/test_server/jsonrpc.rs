@@ -170,7 +170,7 @@ async fn execute_method(
                 "get_user" => {
                     // Extract ID from params
                     let user_id = if let Some(arr) = params.as_array() {
-                        arr.get(0).and_then(|v| v.as_i64())
+                        arr.first().and_then(|v| v.as_i64())
                     } else if let Some(obj) = params.as_object() {
                         obj.get("id").and_then(|v| v.as_i64())
                     } else {
