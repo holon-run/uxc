@@ -780,7 +780,9 @@ fn test_graphql_execute_non_null_without_default_value_is_required() {
             })
             .unwrap_err();
 
-        assert!(err.to_string().contains("Missing required GraphQL argument(s)"));
+        assert!(err
+            .to_string()
+            .contains("Missing required GraphQL argument(s)"));
         assert!(err.to_string().contains("first"));
     });
 }
