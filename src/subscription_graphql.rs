@@ -5,6 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+// Each daemon job owns exactly one GraphQL subscription, so a fixed wire id is enough here.
 const DEFAULT_SUBSCRIPTION_ID: &str = "1";
 
 #[derive(Debug, Clone)]
@@ -117,13 +118,24 @@ impl WebSocketSessionHandler for GraphQLSubscriptionHandler {
                     stop_reason: None,
                 })
             }
-            "complete" => Ok(WebSocketHandlerOutput {
-                action: WebSocketHandlerAction::Stop,
-                data: None,
-                meta: None,
-                outbound_text_frames: Vec::new(),
-                stop_reason: Some("complete".to_string()),
-            }),
+            "complete" => {
+                if value.get("id").and_then(Value::as_str) != Some(DEFAULT_SUBSCRIPTION_ID) {
+                    return Ok(WebSocketHandlerOutput {
+                        action: WebSocketHandlerAction::Continue,
+                        data: None,
+                        meta: None,
+                        outbound_text_frames: Vec::new(),
+                        stop_reason: None,
+                    });
+                }
+                Ok(WebSocketHandlerOutput {
+                    action: WebSocketHandlerAction::Stop,
+                    data: None,
+                    meta: None,
+                    outbound_text_frames: Vec::new(),
+                    stop_reason: Some("complete".to_string()),
+                })
+            }
             "ping" => Ok(WebSocketHandlerOutput {
                 action: WebSocketHandlerAction::Continue,
                 data: None,
@@ -230,5 +242,22 @@ mod tests {
 
         assert_eq!(output.action, WebSocketHandlerAction::Stop);
         assert_eq!(output.stop_reason.as_deref(), Some("complete"));
+    }
+
+    #[tokio::test]
+    async fn graphql_handler_ignores_complete_for_other_subscription_id() {
+        let mut handler = GraphQLSubscriptionHandler::new(GraphQLSubscriptionConfig {
+            operation_id: "subscription/messageAdded".to_string(),
+            query: "subscription { messageAdded { id } }".to_string(),
+            variables: None,
+        });
+
+        let output = handler
+            .on_text_frame(json!({"id":"2","type":"complete"}).to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(output.action, WebSocketHandlerAction::Continue);
+        assert!(output.stop_reason.is_none());
     }
 }

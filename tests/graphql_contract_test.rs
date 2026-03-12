@@ -731,6 +731,60 @@ fn test_graphql_parses_subscription_fields() {
     });
 }
 
+#[test]
+fn test_graphql_execute_non_null_without_default_value_is_required() {
+    run_async(|mut server| {
+        let introspection_response = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": {
+                        "name": "Query",
+                        "fields": [
+                            {
+                                "name": "issues",
+                                "args": [
+                                    {
+                                        "name": "first",
+                                        "type": {
+                                            "kind": "NON_NULL",
+                                            "ofType": { "kind": "SCALAR", "name": "Int" }
+                                        }
+                                    }
+                                ],
+                                "type": { "kind": "OBJECT", "name": "IssueConnection" }
+                            }
+                        ]
+                    },
+                    "mutationType": null,
+                    "subscriptionType": null
+                }
+            }
+        });
+
+        let _introspection = server
+            .mock("POST", "/")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::Regex("__schema".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&introspection_response.to_string())
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = GraphQLAdapter::new();
+        let err = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "query/issues", HashMap::new())
+                    .await
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Missing required GraphQL argument(s)"));
+        assert!(err.to_string().contains("first"));
+    });
+}
+
 // ============================================================================
 // Type System Tests
 // ============================================================================
