@@ -37,6 +37,7 @@ rg -q 'coingecko-openapi-cli get:/simple/price -h' "${SKILL_FILE}" || fail 'miss
 rg -q -- '--api-key-header x-cg-demo-api-key' "${SKILL_FILE}" || fail 'missing demo api key setup'
 rg -q 'uxc auth binding match https://api.coingecko.com/api/v3' "${SKILL_FILE}" || fail 'missing binding match check'
 rg -q 'x-cg-pro-api-key' "${SKILL_FILE}" || fail 'missing pro override guidance'
+rg -q 'pro-api.coingecko.com' "${SKILL_FILE}" "${USAGE_FILE}" || fail 'missing pro host binding guidance'
 rg -q 'read-only' "${SKILL_FILE}" || fail 'missing read-only guardrail'
 
 if rg -q -- "--args\\s+'\\{" "${SKILL_FILE}" "${USAGE_FILE}"; then

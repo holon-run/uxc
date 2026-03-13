@@ -40,6 +40,14 @@ uxc auth credential set coingecko-pro \
   --api-key-header x-cg-pro-api-key \
   --secret-env COINGECKO_PRO_API_KEY
 
+uxc auth binding add \
+  --id coingecko-pro \
+  --host pro-api.coingecko.com \
+  --path-prefix /api/v3 \
+  --scheme https \
+  --credential coingecko-pro \
+  --priority 100
+
 uxc link coingecko-pro-openapi-cli https://pro-api.coingecko.com/api/v3 \
   --schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/coingecko-openapi-skill/references/coingecko-market.openapi.json
 ```

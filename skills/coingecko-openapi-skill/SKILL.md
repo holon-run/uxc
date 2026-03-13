@@ -66,13 +66,21 @@ uxc auth binding match https://api.coingecko.com/api/v3
 
 ### Pro Host Override
 
-If you have a Pro plan, keep the same curated schema and create a separate credential/link pair:
+If you have a Pro plan, keep the same curated schema and create a separate credential, binding, and link:
 
 ```bash
 uxc auth credential set coingecko-pro \
   --auth-type api_key \
   --api-key-header x-cg-pro-api-key \
   --secret-env COINGECKO_PRO_API_KEY
+
+uxc auth binding add \
+  --id coingecko-pro \
+  --host pro-api.coingecko.com \
+  --path-prefix /api/v3 \
+  --scheme https \
+  --credential coingecko-pro \
+  --priority 100
 
 uxc link coingecko-pro-openapi-cli https://pro-api.coingecko.com/api/v3 \
   --schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/coingecko-openapi-skill/references/coingecko-market.openapi.json
@@ -123,6 +131,7 @@ uxc link coingecko-pro-openapi-cli https://pro-api.coingecko.com/api/v3 \
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Treat this v1 skill as read-only. Do not imply wallet, trading, or portfolio mutation support.
 - Demo and Pro hosts use different API-key headers. If the default Demo credential fails against the Pro host, create a separate Pro credential rather than reusing the Demo header name.
+- The Pro host needs its own auth binding on `pro-api.coingecko.com/api/v3`; creating only a credential is not enough for linked calls to send `x-cg-pro-api-key`.
 - CoinGecko public and Demo limits are tighter than Pro. Keep default examples narrow and avoid large paginated loops without explicit user intent.
 - The GeckoTerminal endpoints in this schema share the same API root and auth flow as the rest of the curated CoinGecko host contract.
 - `coingecko-openapi-cli <operation> ...` is equivalent to `uxc https://api.coingecko.com/api/v3 --schema-url <coingecko_openapi_schema> <operation> ...`.
