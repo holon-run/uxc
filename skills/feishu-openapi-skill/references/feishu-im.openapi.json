@@ -1,0 +1,494 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Feishu / Lark IM API (Curated)",
+    "version": "1.0.0",
+    "description": "Curated Feishu / Lark IM and contact surface for UXC messaging workflows."
+  },
+  "servers": [
+    {
+      "url": "https://open.feishu.cn/open-apis"
+    },
+    {
+      "url": "https://open.larksuite.com/open-apis"
+    }
+  ],
+  "security": [
+    {
+      "FeishuBearerAuth": []
+    }
+  ],
+  "paths": {
+    "/im/v1/chats": {
+      "get": {
+        "summary": "List chats visible to the app",
+        "parameters": [
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "description": "Number of chats to return"
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Pagination token from a previous response"
+          },
+          {
+            "name": "sort_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ByCreateTimeAsc",
+                "ByCreateTimeDesc",
+                "ByActiveTimeAsc",
+                "ByActiveTimeDesc"
+              ]
+            },
+            "description": "Sort order for the chat list"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat list response"
+          }
+        }
+      }
+    },
+    "/im/v1/chats/{chat_id}": {
+      "get": {
+        "summary": "Get details for one chat",
+        "parameters": [
+          {
+            "name": "chat_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feishu chat identifier"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat detail response"
+          }
+        }
+      }
+    },
+    "/im/v1/chats/{chat_id}/members": {
+      "get": {
+        "summary": "List members of a chat",
+        "parameters": [
+          {
+            "name": "chat_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feishu chat identifier"
+          },
+          {
+            "name": "member_id_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open_id",
+                "union_id",
+                "user_id"
+              ]
+            },
+            "description": "Identifier type for returned members"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "description": "Number of members to return"
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Pagination token from a previous response"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat member list response"
+          }
+        }
+      }
+    },
+    "/im/v1/messages": {
+      "get": {
+        "summary": "List historical messages for a container",
+        "parameters": [
+          {
+            "name": "container_id_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "chat"
+              ]
+            },
+            "description": "Container type used for the lookup"
+          },
+          {
+            "name": "container_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Chat identifier whose history should be returned"
+          },
+          {
+            "name": "sort_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ByCreateTimeAsc",
+                "ByCreateTimeDesc"
+              ]
+            },
+            "description": "Sort order for the message history"
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "description": "Number of messages to return"
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Pagination token from a previous response"
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Inclusive start time filter, typically epoch milliseconds as a string"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Inclusive end time filter, typically epoch milliseconds as a string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message history response"
+          }
+        }
+      },
+      "post": {
+        "summary": "Send a message to a user, chat, or thread target",
+        "parameters": [
+          {
+            "name": "receive_id_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open_id",
+                "user_id",
+                "union_id",
+                "chat_id",
+                "email"
+              ]
+            },
+            "description": "Identifier type for the receive_id field"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Send message response"
+          }
+        }
+      }
+    },
+    "/im/v1/messages/{message_id}": {
+      "get": {
+        "summary": "Get one message by ID",
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feishu message identifier"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message detail response"
+          }
+        }
+      }
+    },
+    "/im/v1/messages/{message_id}/reply": {
+      "post": {
+        "summary": "Reply to an existing message",
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Message identifier to reply to"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplyMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reply message response"
+          }
+        }
+      }
+    },
+    "/contact/v3/users/{user_id}": {
+      "get": {
+        "summary": "Get one user profile",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "User identifier"
+          },
+          {
+            "name": "user_id_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open_id",
+                "union_id",
+                "user_id"
+              ]
+            },
+            "description": "Identifier type used for the path parameter"
+          },
+          {
+            "name": "department_id_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "department_id",
+                "open_department_id"
+              ]
+            },
+            "description": "Preferred department ID type in the response"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User profile response"
+          }
+        }
+      }
+    },
+    "/contact/v3/users/batch_get_id": {
+      "post": {
+        "summary": "Resolve user IDs from email or mobile values",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchGetUserIdRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch user ID lookup response"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "FeishuBearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "tenant_access_token"
+      }
+    },
+    "schemas": {
+      "CreateMessageRequest": {
+        "type": "object",
+        "required": [
+          "receive_id",
+          "msg_type",
+          "content"
+        ],
+        "properties": {
+          "receive_id": {
+            "type": "string",
+            "description": "Target identifier whose type is defined by receive_id_type"
+          },
+          "msg_type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "post",
+              "image",
+              "interactive",
+              "share_chat",
+              "share_user",
+              "audio",
+              "media",
+              "file",
+              "sticker"
+            ],
+            "description": "Message content type"
+          },
+          "content": {
+            "type": "string",
+            "description": "Stringified JSON payload expected by Feishu, for example {\"text\":\"hello\"}"
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Optional client-generated idempotency token"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReplyMessageRequest": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "Stringified JSON payload expected by Feishu, for example {\"text\":\"reply\"}"
+          },
+          "msg_type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "post",
+              "image",
+              "interactive",
+              "share_chat",
+              "share_user",
+              "audio",
+              "media",
+              "file",
+              "sticker"
+            ],
+            "description": "Message content type. Defaults vary by API behavior; set it explicitly."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Optional client-generated idempotency token"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BatchGetUserIdRequest": {
+        "type": "object",
+        "properties": {
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "email"
+            },
+            "description": "Email addresses to resolve"
+          },
+          "mobiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Mobile numbers to resolve"
+          },
+          "include_resigned": {
+            "type": "boolean",
+            "description": "Whether to include resigned users in the lookup"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}
