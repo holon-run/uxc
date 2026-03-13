@@ -26,6 +26,7 @@ mod output;
 mod schema_mapping;
 mod subscription_graphql;
 mod subscription_jsonrpc;
+mod subscription_poll;
 mod subscription_websocket;
 
 use adapters::OperationDetail;
@@ -46,6 +47,12 @@ enum OutputFormat {
 enum OutputMode {
     Json,
     Text,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SubscribeModeArg {
+    Stream,
+    Poll,
 }
 
 #[derive(Parser)]
@@ -207,6 +214,14 @@ enum SubscribeCommands {
         /// MCP resource URI to subscribe to
         #[arg(long = "resource-uri", value_name = "URI")]
         resource_uri: Option<String>,
+
+        /// Event acquisition mode
+        #[arg(long, value_enum, default_value = "stream")]
+        mode: SubscribeModeArg,
+
+        /// JSON object describing poll interval, extraction, and checkpoint strategy
+        #[arg(long = "poll-config", value_name = "JSON")]
+        poll_config: Option<String>,
     },
     /// List background subscription jobs
     List,
@@ -1544,10 +1559,10 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 ("stop", "Stop a background subscription job"),
             ]),
             notes: vec![
-                "Supports raw HTTP JSON streams, GraphQL subscription operations, JSON-RPC pubsub over WebSocket, and MCP resource subscriptions.".to_string(),
+                "Supports stream subscriptions plus polling-based subscriptions under the same daemon-backed job model.".to_string(),
                 "Use --sink file:/path.ndjson to append normalized event envelopes to a file."
                     .to_string(),
-                "Raw HTTP subscribe uses the final stream URL directly; GraphQL subscribe uses schema discovery plus a derived ws(s) endpoint; JSON-RPC pubsub uses a ws(s) endpoint directly."
+                "Stream mode covers raw HTTP JSON streams, GraphQL subscriptions, JSON-RPC pubsub over WebSocket, and MCP resource subscriptions; poll mode repeatedly executes a normal operation and emits only new items."
                     .to_string(),
             ],
             examples: vec![
@@ -1555,6 +1570,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                     .to_string(),
                 "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"newHeads\"]}' --sink file:/tmp/heads.ndjson".to_string(),
+                "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"request_cursor_arg\":\"cursor\",\"response_cursor_pointer\":\"/next_cursor\",\"checkpoint_strategy\":{\"type\":\"cursor_only\"}}' --sink file:/tmp/poll.ndjson".to_string(),
                 "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --sink file:/tmp/mcp-http.ndjson".to_string(),
                 "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --sink file:/tmp/mcp.ndjson".to_string(),
                 "uxc subscribe list".to_string(),
@@ -1565,19 +1581,21 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["subscribe", "start"] => HelpData {
             path: "uxc subscribe start".to_string(),
             about: "Start a background subscription job".to_string(),
-            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--resource-uri <uri>]".to_string(),
+            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>]".to_string(),
             commands: vec![],
             notes: vec![
                 "For raw HTTP streams, omit <operation_id> and use <endpoint> as the final stream URL.".to_string(),
                 "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint and reuses auth/cache behavior.".to_string(),
                 "For JSON-RPC pubsub, pass a ws:// or wss:// endpoint plus a method ending in _subscribe; send raw JSON-RPC params through '{\"params\":...}'.".to_string(),
                 "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>.".to_string(),
+                "For poll mode, pass a normal operation ID plus --mode poll and --poll-config '{...}'; poll config controls interval, extraction, and checkpoint strategy.".to_string(),
             ],
             examples: vec![
                 "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
                     .to_string(),
                 "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\",\"_select\":\"id body\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"logs\",{\"address\":\"0xabc\"}]}' --sink file:/tmp/logs.ndjson".to_string(),
+                "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}' --sink file:/tmp/events.ndjson".to_string(),
                 "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --sink file:/tmp/mcp-http.ndjson".to_string(),
                 "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --sink file:/tmp/mcp.ndjson".to_string(),
             ],
@@ -3448,6 +3466,8 @@ async fn handle_subscribe_command(
             input_json,
             sink,
             resource_uri,
+            mode,
+            poll_config,
         } => {
             let (normalized_args, normalized_input_json) = match operation_id {
                 Some(op) => {
@@ -3484,6 +3504,12 @@ async fn handle_subscribe_command(
             } else {
                 None
             };
+            let poll_config = match poll_config {
+                Some(raw) => Some(serde_json::from_str::<Value>(raw).map_err(|err| {
+                    UxcError::InvalidArguments(format!("Invalid JSON for --poll-config: {}", err))
+                })?),
+                None => None,
+            };
             let request = daemon::SubscribeStartRequest {
                 request_id: format!(
                     "{}-{}",
@@ -3499,6 +3525,11 @@ async fn handle_subscribe_command(
                 args: args_map,
                 resource_uri: resource_uri.clone(),
                 transport_hint: None,
+                mode: match mode {
+                    SubscribeModeArg::Stream => daemon::SubscriptionMode::Stream,
+                    SubscribeModeArg::Poll => daemon::SubscriptionMode::Poll,
+                },
+                poll_config,
                 options: daemon::RuntimeInvokeOptions {
                     auth: cli.auth.clone(),
                     inject_env: collect_inject_env_specs(cli)?,

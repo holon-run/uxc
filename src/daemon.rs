@@ -15,6 +15,7 @@ use crate::subscription_graphql::{
 use crate::subscription_jsonrpc::{
     derive_jsonrpc_unsubscribe_operation, JsonRpcSubscriptionConfig, JsonRpcSubscriptionHandler,
 };
+use crate::subscription_poll::{PollRuntimeContext, PollRuntimeObserver, PollSubscriptionConfig};
 use crate::subscription_websocket::{
     self, RawFrameHandler, WebSocketRuntimeConfig, WebSocketRuntimeObserver,
 };
@@ -132,12 +133,16 @@ pub struct SubscribeStartRequest {
     pub resource_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_hint: Option<SubscriptionTransportHint>,
+    pub mode: SubscriptionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_config: Option<Value>,
     pub options: RuntimeInvokeOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeStartResponse {
     pub job_id: String,
+    pub mode: SubscriptionMode,
     pub protocol: String,
     pub endpoint: String,
     pub sink: String,
@@ -157,9 +162,17 @@ pub enum SubscriptionTransportHint {
     Websocket,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionMode {
+    Stream,
+    Poll,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionJobView {
     pub job_id: String,
+    pub mode: SubscriptionMode,
     pub endpoint: String,
     pub protocol: String,
     pub sink: String,
@@ -695,12 +708,65 @@ impl McpSessionManager {
     }
 }
 
+fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Result<String> {
+    if matches!(
+        request.transport_hint,
+        Some(SubscriptionTransportHint::Websocket)
+    ) {
+        let lower = request.endpoint.to_ascii_lowercase();
+        if !lower.starts_with("ws://") && !lower.starts_with("wss://") {
+            bail!("websocket subscription transport requires a ws:// or wss:// endpoint");
+        }
+        return Ok("websocket".to_string());
+    }
+
+    if let Some(operation_id) = request.operation_id.as_deref() {
+        let lower = request.endpoint.to_ascii_lowercase();
+        if operation_id.starts_with("subscription/") {
+            if !lower.starts_with("http://") && !lower.starts_with("https://") {
+                bail!(
+                    "GraphQL subscriptions require an http:// or https:// endpoint for schema discovery"
+                );
+            }
+            return Ok("graphql".to_string());
+        }
+        if lower.starts_with("ws://") || lower.starts_with("wss://") {
+            derive_jsonrpc_unsubscribe_operation(operation_id)?;
+            return Ok("jsonrpc".to_string());
+        }
+        bail!(
+            "JSON-RPC subscriptions require a ws:// or wss:// endpoint; GraphQL subscriptions require subscription/<field> on an http:// or https:// endpoint"
+        );
+    }
+
+    if request.resource_uri.is_some() {
+        if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint)
+            && !adapters::mcp::McpAdapter::is_http_url(&request.endpoint)
+        {
+            bail!(
+                "MCP subscriptions require a stdio command or http(s) MCP endpoint when --resource-uri is set"
+            );
+        }
+        return Ok("mcp".to_string());
+    }
+
+    if request.endpoint.starts_with("http://") || request.endpoint.starts_with("https://") {
+        return Ok("http".to_string());
+    }
+
+    bail!("subscribe start requires an http(s) endpoint or --resource-uri for MCP subscriptions")
+}
+
 impl SubscriptionManager {
     fn new() -> Self {
         Self::default()
     }
 
-    async fn start(&self, request: &SubscribeStartRequest) -> Result<SubscribeStartResponse> {
+    async fn start(
+        &self,
+        runtime: &DaemonRuntime,
+        request: &SubscribeStartRequest,
+    ) -> Result<SubscribeStartResponse> {
         let sink_path = parse_file_sink(&request.sink)?;
         let sink_spec = format!("file:{}", sink_path.display());
         if request.resource_uri.is_some() && request.operation_id.is_some() {
@@ -709,49 +775,19 @@ impl SubscriptionManager {
         if request.args.is_some() && request.operation_id.is_none() {
             bail!("subscribe start cannot accept args without an operation_id");
         }
-        let protocol = if matches!(
-            request.transport_hint,
-            Some(SubscriptionTransportHint::Websocket)
-        ) {
-            let lower = request.endpoint.to_ascii_lowercase();
-            if !lower.starts_with("ws://") && !lower.starts_with("wss://") {
-                bail!("websocket subscription transport requires a ws:// or wss:// endpoint");
-            }
-            "websocket".to_string()
-        } else if let Some(operation_id) = request.operation_id.as_deref() {
-            let lower = request.endpoint.to_ascii_lowercase();
-            if operation_id.starts_with("subscription/") {
-                if !lower.starts_with("http://") && !lower.starts_with("https://") {
-                    bail!(
-                        "GraphQL subscriptions require an http:// or https:// endpoint for schema discovery"
-                    );
+        match request.mode {
+            SubscriptionMode::Stream => {
+                if request.poll_config.is_some() {
+                    bail!("--poll-config is only valid with --mode poll");
                 }
-                "graphql".to_string()
-            } else if lower.starts_with("ws://") || lower.starts_with("wss://") {
-                derive_jsonrpc_unsubscribe_operation(operation_id)?;
-                "jsonrpc".to_string()
-            } else {
-                bail!(
-                    "JSON-RPC subscriptions require a ws:// or wss:// endpoint; GraphQL subscriptions require subscription/<field> on an http:// or https:// endpoint"
-                );
             }
-        } else if request.resource_uri.is_some() {
-            if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint)
-                && !adapters::mcp::McpAdapter::is_http_url(&request.endpoint)
-            {
-                bail!(
-                    "MCP subscriptions require a stdio command or http(s) MCP endpoint when --resource-uri is set"
-                );
+            SubscriptionMode::Poll => {
+                let _ = resolve_poll_subscription_config(request)?;
             }
-            "mcp".to_string()
-        } else if request.endpoint.starts_with("http://")
-            || request.endpoint.starts_with("https://")
-        {
-            "http".to_string()
-        } else {
-            bail!(
-                "subscribe start requires an http(s) endpoint or --resource-uri for MCP subscriptions"
-            );
+        }
+        let protocol = match request.mode {
+            SubscriptionMode::Stream => resolve_stream_subscription_protocol(request)?,
+            SubscriptionMode::Poll => runtime.detect_poll_subscription_protocol(request).await?,
         };
 
         let job_id = {
@@ -762,6 +798,7 @@ impl SubscriptionManager {
         let now = now_unix_secs();
         let view = Arc::new(Mutex::new(SubscriptionJobView {
             job_id: job_id.clone(),
+            mode: request.mode,
             endpoint: request.endpoint.clone(),
             protocol: protocol.clone(),
             sink: sink_spec.clone(),
@@ -779,35 +816,11 @@ impl SubscriptionManager {
         let request_clone = request.clone();
         let job_id_clone = job_id.clone();
         let view_clone = view.clone();
+        let runtime_clone = runtime.clone();
         let task = tokio::spawn(async move {
-            let result = if matches!(
-                request_clone.transport_hint,
-                Some(SubscriptionTransportHint::Websocket)
-            ) {
-                run_websocket_subscription_job(
-                    &job_id_clone,
-                    &request_clone,
-                    sink_path,
-                    view_clone.clone(),
-                    stop_rx,
-                )
-                .await
-            } else if request_clone.operation_id.is_some() {
-                if request_clone
-                    .operation_id
-                    .as_deref()
-                    .is_some_and(|operation_id| operation_id.starts_with("subscription/"))
-                {
-                    run_graphql_subscription_job(
-                        &job_id_clone,
-                        &request_clone,
-                        sink_path,
-                        view_clone.clone(),
-                        stop_rx,
-                    )
-                    .await
-                } else {
-                    run_jsonrpc_subscription_job(
+            let result = match request_clone.mode {
+                SubscriptionMode::Stream => {
+                    run_stream_subscription_job(
                         &job_id_clone,
                         &request_clone,
                         sink_path,
@@ -816,24 +829,17 @@ impl SubscriptionManager {
                     )
                     .await
                 }
-            } else if request_clone.resource_uri.is_some() {
-                run_mcp_subscription_job(
-                    &job_id_clone,
-                    &request_clone,
-                    sink_path,
-                    view_clone.clone(),
-                    stop_rx,
-                )
-                .await
-            } else {
-                run_http_subscription_job(
-                    &job_id_clone,
-                    &request_clone,
-                    sink_path,
-                    view_clone.clone(),
-                    stop_rx,
-                )
-                .await
+                SubscriptionMode::Poll => {
+                    run_poll_subscription_job(
+                        &runtime_clone,
+                        &job_id_clone,
+                        &request_clone,
+                        sink_path,
+                        view_clone.clone(),
+                        stop_rx,
+                    )
+                    .await
+                }
             };
 
             let mut guard = view_clone.lock().await;
@@ -860,6 +866,7 @@ impl SubscriptionManager {
         let guard = view.lock().await;
         Ok(SubscribeStartResponse {
             job_id,
+            mode: request.mode,
             protocol,
             endpoint: guard.endpoint.clone(),
             sink: sink_spec,
@@ -1299,7 +1306,7 @@ impl DaemonRuntime {
         &self,
         request: SubscribeStartRequest,
     ) -> Result<SubscribeStartResponse> {
-        self.subscriptions.start(&request).await
+        self.subscriptions.start(self, &request).await
     }
 
     pub async fn subscribe_list(&self) -> Vec<SubscriptionJobView> {
@@ -1312,6 +1319,53 @@ impl DaemonRuntime {
 
     pub async fn subscribe_stop(&self, job_id: &str) -> Result<SubscribeStopResponse> {
         self.subscriptions.stop(job_id).await
+    }
+
+    async fn detect_poll_subscription_protocol(
+        &self,
+        request: &SubscribeStartRequest,
+    ) -> Result<String> {
+        let operation_id = request
+            .operation_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("poll subscriptions require an operation_id"))?;
+        if request.resource_uri.is_some() {
+            bail!("poll subscriptions do not support --resource-uri");
+        }
+        if matches!(
+            request.transport_hint,
+            Some(SubscriptionTransportHint::Websocket)
+        ) {
+            bail!("poll subscriptions do not support websocket transport hints");
+        }
+        if operation_id.starts_with("subscription/") {
+            bail!("poll subscriptions do not support GraphQL subscription/<field> operations");
+        }
+
+        let cache = self.build_cache(&request.options)?;
+        let root_auth_profile =
+            auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+        let stdio_spawn_options = build_stdio_spawn_options(
+            &request.endpoint,
+            &request.options,
+            root_auth_profile.as_ref(),
+        )?;
+        let detection_options = DetectionOptions {
+            schema_url: request.options.schema_url.clone(),
+            auth_profile: root_auth_profile.clone(),
+            stdio_spawn_options,
+        };
+        let resolved = resolve_adapter_with_schema_cache(
+            &request.endpoint,
+            &detection_options,
+            cache,
+            root_auth_profile,
+            request.options.no_cache,
+            request.options.refresh_schema,
+        )
+        .await?;
+
+        Ok(resolved.adapter.protocol_type().as_str().to_string())
     }
 
     pub async fn request_stop(&self) {
@@ -1888,6 +1942,69 @@ impl WebSocketRuntimeObserver for DaemonWebSocketObserver<'_> {
     }
 }
 
+#[async_trait::async_trait]
+impl PollRuntimeObserver for DaemonWebSocketObserver<'_> {
+    async fn emit(
+        &mut self,
+        event_kind: &str,
+        data: Option<Value>,
+        meta: Option<Value>,
+    ) -> Result<()> {
+        append_subscription_event(
+            self.sink,
+            self.view,
+            self.seq,
+            self.source_kind,
+            event_kind,
+            data,
+            meta,
+        )
+        .await
+    }
+
+    async fn update_status(
+        &mut self,
+        status: Option<&str>,
+        last_error: Option<String>,
+        increment_reconnect: bool,
+    ) -> Result<()> {
+        update_subscription_view(self.view, status, last_error, increment_reconnect).await;
+        Ok(())
+    }
+}
+
+async fn run_stream_subscription_job(
+    job_id: &str,
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    if matches!(
+        request.transport_hint,
+        Some(SubscriptionTransportHint::Websocket)
+    ) {
+        return run_websocket_subscription_job(job_id, request, sink_path, view, stop_rx).await;
+    }
+
+    if request.operation_id.is_some() {
+        if request
+            .operation_id
+            .as_deref()
+            .is_some_and(|operation_id| operation_id.starts_with("subscription/"))
+        {
+            return run_graphql_subscription_job(job_id, request, sink_path, view, stop_rx).await;
+        }
+        return run_jsonrpc_subscription_job(job_id, request, sink_path, view, stop_rx).await;
+    }
+
+    if request.resource_uri.is_some() {
+        return run_mcp_subscription_job(job_id, request, sink_path, view, stop_rx).await;
+    }
+
+    run_http_subscription_job(job_id, request, sink_path, view, stop_rx).await
+}
+
 async fn run_websocket_subscription_job(
     _job_id: &str,
     request: &SubscribeStartRequest,
@@ -1949,6 +2066,25 @@ fn resolve_jsonrpc_subscription_config(
         unsubscribe_operation_id,
         params: if params.is_null() { None } else { Some(params) },
     })
+}
+
+fn resolve_poll_subscription_config(
+    request: &SubscribeStartRequest,
+) -> Result<PollSubscriptionConfig> {
+    if request.operation_id.is_none() {
+        bail!("poll subscriptions require an operation_id");
+    }
+    if request.resource_uri.is_some() {
+        bail!("poll subscriptions do not support --resource-uri");
+    }
+    let raw = request
+        .poll_config
+        .clone()
+        .ok_or_else(|| anyhow!("poll subscriptions require --poll-config"))?;
+    let config: PollSubscriptionConfig =
+        serde_json::from_value(raw).context("invalid poll subscription config")?;
+    config.validate()?;
+    Ok(config)
 }
 
 async fn resolve_graphql_subscription_prepared_operation(
@@ -2135,6 +2271,105 @@ async fn run_jsonrpc_subscription_job(
     }
 
     Ok(())
+}
+
+struct DaemonPollContext {
+    runtime: DaemonRuntime,
+    request: SubscribeStartRequest,
+    checkpoint_path: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl PollRuntimeContext for DaemonPollContext {
+    async fn load_checkpoint(
+        &mut self,
+    ) -> Result<Option<crate::subscription_poll::PollCheckpointState>> {
+        match tokio::fs::read(&self.checkpoint_path).await {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    async fn store_checkpoint(
+        &mut self,
+        checkpoint: &crate::subscription_poll::PollCheckpointState,
+    ) -> Result<()> {
+        if let Some(parent) = self.checkpoint_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&self.checkpoint_path, serde_json::to_vec(checkpoint)?).await?;
+        Ok(())
+    }
+
+    async fn fetch(
+        &mut self,
+        args: HashMap<String, Value>,
+    ) -> Result<crate::subscription_poll::PollFetchResult> {
+        let response = self
+            .runtime
+            .invoke(RuntimeInvokeRequest {
+                request_id: format!("{}-poll-{}", self.request.request_id, now_unix_secs()),
+                endpoint: self.request.endpoint.clone(),
+                action: RuntimeAction::Execute,
+                operation_id: self.request.operation_id.clone(),
+                args: Some(args),
+                options: self.request.options.clone(),
+            })
+            .await?;
+        Ok(crate::subscription_poll::PollFetchResult {
+            data: response.data,
+            duration_ms: response.duration_ms,
+        })
+    }
+}
+
+fn subscription_checkpoint_path(job_id: &str) -> PathBuf {
+    daemon_dir()
+        .join("subscriptions")
+        .join(format!("{job_id}.checkpoint.json"))
+}
+
+async fn cleanup_subscription_checkpoint(job_id: &str) {
+    let _ = tokio::fs::remove_file(subscription_checkpoint_path(job_id)).await;
+}
+
+async fn run_poll_subscription_job(
+    runtime: &DaemonRuntime,
+    job_id: &str,
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let config = resolve_poll_subscription_config(request)?;
+    let mut sink = open_subscription_sink(&sink_path).await?;
+    let mut seq = 0u64;
+    let mut observer = DaemonWebSocketObserver {
+        sink: &mut sink,
+        view: &view,
+        seq: &mut seq,
+        source_kind: "poll",
+    };
+    let mut context = DaemonPollContext {
+        runtime: runtime.clone(),
+        request: request.clone(),
+        checkpoint_path: subscription_checkpoint_path(job_id),
+    };
+
+    let result = crate::subscription_poll::run_poll_subscription_runtime(
+        config,
+        request.args.clone().unwrap_or_default(),
+        &mut context,
+        &mut observer,
+        &mut stop_rx,
+    )
+    .await;
+
+    if result.is_ok() {
+        cleanup_subscription_checkpoint(job_id).await;
+    }
+    result
 }
 
 async fn run_mcp_subscription_job(
@@ -3963,6 +4198,8 @@ mod tests {
             args: None,
             resource_uri: None,
             transport_hint: Some(SubscriptionTransportHint::Websocket),
+            mode: SubscriptionMode::Stream,
+            poll_config: None,
             options: RuntimeInvokeOptions {
                 auth: None,
                 inject_env: Vec::new(),

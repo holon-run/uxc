@@ -924,6 +924,70 @@ fn test_http_subscribe_start_status_stop_writes_file() {
 
 #[test]
 #[serial_test::serial]
+fn test_poll_subscribe_start_status_stop_writes_file() {
+    let server = start_test_server("openapi", "ok");
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("poll-subscribe.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+    let endpoint = format!("http://{}/", server.addr);
+    let poll_config = r#"{"interval_secs":1,"extract_items_pointer":"/items","request_cursor_arg":"cursor","response_cursor_pointer":"/next_cursor","checkpoint_strategy":{"type":"cursor_only"}}"#;
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "get:/poll/events",
+            "--mode",
+            "poll",
+            "--poll-config",
+            poll_config,
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(start.is_ok(), "Poll subscribe start failed: {:?}", start);
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    assert_eq!(start_json["ok"], true);
+    assert_eq!(start_json["data"]["protocol"], "openapi");
+    assert_eq!(start_json["data"]["mode"], "poll");
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""id":3"#, Duration::from_secs(5)),
+        "Poll subscribe sink did not receive expected events"
+    );
+    assert!(
+        wait_for_file_contains(
+            &sink_path,
+            r#""event_kind":"checkpoint""#,
+            Duration::from_secs(5)
+        ),
+        "Poll subscribe sink did not record checkpoint events"
+    );
+
+    let sink_body = std::fs::read_to_string(&sink_path).expect("read sink file");
+    assert_eq!(sink_body.matches(r#""id":1"#).count(), 1);
+    assert_eq!(sink_body.matches(r#""id":2"#).count(), 1);
+    assert_eq!(sink_body.matches(r#""id":3"#).count(), 1);
+
+    let status = run_uxc_in_home(&["subscribe", "status", &job_id], &test_home);
+    assert!(status.is_ok(), "Poll subscribe status failed: {:?}", status);
+    let status_json: serde_json::Value = serde_json::from_str(&status.unwrap()).unwrap();
+    assert_eq!(status_json["ok"], true);
+    assert_eq!(status_json["data"]["protocol"], "openapi");
+    assert_eq!(status_json["data"]["mode"], "poll");
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(stop.is_ok(), "Poll subscribe stop failed: {:?}", stop);
+    let stop_json: serde_json::Value = serde_json::from_str(&stop.unwrap()).unwrap();
+    assert_eq!(stop_json["ok"], true);
+    assert_eq!(stop_json["data"]["stopped"], true);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_graphql_subscribe_start_status_stop_writes_file() {
     let server = start_test_server("graphql", "ok");
     let test_home = fresh_test_home_dir();

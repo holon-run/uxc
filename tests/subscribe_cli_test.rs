@@ -1,15 +1,24 @@
 use assert_cmd::Command;
 use serial_test::serial;
+use tempfile::TempDir;
 
 #[allow(deprecated)]
-fn uxc_command() -> Command {
-    Command::cargo_bin("uxc").expect("uxc binary should build")
+fn isolated_uxc_command() -> (TempDir, Command) {
+    let temp = TempDir::new().expect("temp dir");
+    let runtime_dir = temp.path().join("runtime");
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+    let mut command = Command::cargo_bin("uxc").expect("uxc binary should build");
+    command.env("HOME", temp.path());
+    command.env("USERPROFILE", temp.path());
+    command.env("XDG_RUNTIME_DIR", &runtime_dir);
+    (temp, command)
 }
 
 #[test]
 #[serial]
 fn subscribe_start_help_shows_subcommand_help() {
-    let output = uxc_command()
+    let (_temp, mut command) = isolated_uxc_command();
+    let output = command
         .arg("subscribe")
         .arg("start")
         .arg("-h")
@@ -26,7 +35,8 @@ fn subscribe_start_help_shows_subcommand_help() {
 #[test]
 #[serial]
 fn subscribe_rejects_schema_url_before_daemon_start() {
-    let output = uxc_command()
+    let (_temp, mut command) = isolated_uxc_command();
+    let output = command
         .arg("--schema-url")
         .arg("https://example.com/schema.json")
         .arg("subscribe")
@@ -43,4 +53,29 @@ fn subscribe_rejects_schema_url_before_daemon_start() {
     assert!(json["error"]["message"]
         .as_str()
         .is_some_and(|msg| msg.contains("--schema-url is not supported")));
+}
+
+#[test]
+#[serial]
+fn subscribe_rejects_poll_config_without_poll_mode() {
+    let (temp, mut command) = isolated_uxc_command();
+    let sink = format!("file:{}", temp.path().join("events.ndjson").display());
+    let output = command
+        .arg("subscribe")
+        .arg("start")
+        .arg("https://example.com/stream")
+        .arg("--sink")
+        .arg(&sink)
+        .arg("--poll-config")
+        .arg(r#"{"interval_secs":5,"extract_items_pointer":"/items","checkpoint_strategy":{"type":"content_hash"}}"#)
+        .output()
+        .expect("subscribe start should run");
+    assert!(!output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "EXECUTION_FAILED");
+    assert!(json["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| msg.contains("--poll-config is only valid with --mode poll")));
 }

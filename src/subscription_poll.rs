@@ -1,0 +1,670 @@
+use anyhow::{anyhow, bail, Result};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
+use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
+use tokio::sync::watch;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollSubscriptionConfig {
+    pub interval_secs: u64,
+    pub extract_items_pointer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_cursor_arg: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_cursor_pointer: Option<String>,
+    pub checkpoint_strategy: PollCheckpointStrategy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PollCheckpointStrategy {
+    CursorOnly,
+    ItemKey {
+        item_key_pointer: String,
+        #[serde(default)]
+        seen_window: Option<usize>,
+    },
+    Watermark {
+        item_watermark_pointer: String,
+        #[serde(default)]
+        item_tiebreaker_pointer: Option<String>,
+        #[serde(default)]
+        seen_window: Option<usize>,
+    },
+    ContentHash {
+        #[serde(default)]
+        seen_window: Option<usize>,
+    },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PollCheckpointState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tie_breaker: Option<Value>,
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pub seen_keys: VecDeque<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PollFetchResult {
+    pub data: Value,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PollCycleOutput {
+    pub emitted_items: Vec<Value>,
+    pub fetched_items: usize,
+    pub skipped_items: usize,
+    pub duration_ms: Option<u64>,
+    pub checkpoint_meta: Option<Value>,
+}
+
+#[async_trait]
+pub trait PollRuntimeContext: Send {
+    async fn load_checkpoint(&mut self) -> Result<Option<PollCheckpointState>>;
+    async fn store_checkpoint(&mut self, checkpoint: &PollCheckpointState) -> Result<()>;
+    async fn fetch(&mut self, args: HashMap<String, Value>) -> Result<PollFetchResult>;
+}
+
+#[async_trait]
+pub trait PollRuntimeObserver: Send {
+    async fn emit(
+        &mut self,
+        event_kind: &str,
+        data: Option<Value>,
+        meta: Option<Value>,
+    ) -> Result<()>;
+
+    async fn update_status(
+        &mut self,
+        status: Option<&str>,
+        last_error: Option<String>,
+        increment_reconnect: bool,
+    ) -> Result<()>;
+}
+
+pub struct PollSubscriptionRunner {
+    config: PollSubscriptionConfig,
+    checkpoint: PollCheckpointState,
+}
+
+impl PollSubscriptionConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.interval_secs == 0 {
+            bail!("poll interval_secs must be greater than 0");
+        }
+
+        match &self.checkpoint_strategy {
+            PollCheckpointStrategy::CursorOnly => {
+                if self.request_cursor_arg.as_deref().is_none()
+                    || self.response_cursor_pointer.as_deref().is_none()
+                {
+                    bail!(
+                        "cursor_only polling requires request_cursor_arg and response_cursor_pointer"
+                    );
+                }
+            }
+            PollCheckpointStrategy::ItemKey {
+                item_key_pointer, ..
+            } => {
+                if item_key_pointer.is_empty() {
+                    bail!("item_key polling requires item_key_pointer");
+                }
+            }
+            PollCheckpointStrategy::Watermark {
+                item_watermark_pointer,
+                ..
+            } => {
+                if item_watermark_pointer.is_empty() {
+                    bail!("watermark polling requires item_watermark_pointer");
+                }
+            }
+            PollCheckpointStrategy::ContentHash { .. } => {}
+        }
+
+        Ok(())
+    }
+}
+
+impl PollSubscriptionRunner {
+    pub fn new(config: PollSubscriptionConfig) -> Result<Self> {
+        config.validate()?;
+        Ok(Self {
+            config,
+            checkpoint: PollCheckpointState::default(),
+        })
+    }
+
+    pub fn checkpoint(&self) -> &PollCheckpointState {
+        &self.checkpoint
+    }
+
+    pub fn restore_checkpoint(&mut self, checkpoint: PollCheckpointState) {
+        self.checkpoint = checkpoint;
+    }
+
+    pub fn build_request_args(&self, base_args: &HashMap<String, Value>) -> HashMap<String, Value> {
+        let mut args = base_args.clone();
+        if let Some(request_cursor_arg) = self.config.request_cursor_arg.as_ref() {
+            if let Some(cursor_value) = self.request_cursor_value() {
+                args.insert(request_cursor_arg.clone(), cursor_value);
+            }
+        }
+        args
+    }
+
+    pub fn process_response(
+        &mut self,
+        response: Value,
+        duration_ms: Option<u64>,
+    ) -> Result<PollCycleOutput> {
+        let items_value = pointer_required(&response, &self.config.extract_items_pointer)
+            .with_context(|| "poll extract_items_pointer did not resolve".to_string())?;
+        let items = items_value
+            .as_array()
+            .ok_or_else(|| anyhow!("poll extract_items_pointer must resolve to an array"))?;
+
+        let fetched_items = items.len();
+        let previous_checkpoint = self.checkpoint.clone();
+        let strategy = self.config.checkpoint_strategy.clone();
+        let emitted_items = match strategy {
+            PollCheckpointStrategy::CursorOnly => items.to_vec(),
+            PollCheckpointStrategy::ItemKey {
+                item_key_pointer,
+                seen_window,
+            } => self.filter_by_item_key(items, &item_key_pointer, seen_window.unwrap_or(1024))?,
+            PollCheckpointStrategy::Watermark {
+                item_watermark_pointer,
+                item_tiebreaker_pointer,
+                seen_window,
+            } => self.filter_by_watermark(
+                items,
+                &item_watermark_pointer,
+                item_tiebreaker_pointer.as_deref(),
+                seen_window.unwrap_or(1024),
+            )?,
+            PollCheckpointStrategy::ContentHash { seen_window } => {
+                self.filter_by_content_hash(items, seen_window.unwrap_or(1024))?
+            }
+        };
+
+        if let Some(pointer) = self.config.response_cursor_pointer.as_ref() {
+            self.checkpoint.cursor = Some(
+                pointer_required(&response, pointer)
+                    .with_context(|| {
+                        format!("poll response_cursor_pointer '{}' did not resolve", pointer)
+                    })?
+                    .clone(),
+            );
+        }
+
+        let skipped_items = fetched_items.saturating_sub(emitted_items.len());
+        let checkpoint_meta = (self.checkpoint != previous_checkpoint).then(|| {
+            json!({
+                "cursor": self.checkpoint.cursor.clone(),
+                "watermark": self.checkpoint.watermark.clone(),
+                "tie_breaker": self.checkpoint.tie_breaker.clone(),
+                "seen_window_len": self.checkpoint.seen_keys.len(),
+            })
+        });
+
+        Ok(PollCycleOutput {
+            emitted_items,
+            fetched_items,
+            skipped_items,
+            duration_ms,
+            checkpoint_meta,
+        })
+    }
+
+    fn request_cursor_value(&self) -> Option<Value> {
+        self.checkpoint
+            .cursor
+            .clone()
+            .or_else(|| self.checkpoint.watermark.clone())
+    }
+
+    fn filter_by_item_key(
+        &mut self,
+        items: &[Value],
+        pointer: &str,
+        seen_window: usize,
+    ) -> Result<Vec<Value>> {
+        let mut emitted = Vec::new();
+        for item in items {
+            let key = canonical_key(pointer_required(item, pointer).with_context(|| {
+                format!("poll item_key_pointer '{}' did not resolve", pointer)
+            })?)?;
+            if self.checkpoint.seen_keys.contains(&key) {
+                continue;
+            }
+            push_seen_key(&mut self.checkpoint.seen_keys, key, seen_window);
+            emitted.push(item.clone());
+        }
+        Ok(emitted)
+    }
+
+    fn filter_by_watermark(
+        &mut self,
+        items: &[Value],
+        watermark_pointer: &str,
+        tiebreaker_pointer: Option<&str>,
+        seen_window: usize,
+    ) -> Result<Vec<Value>> {
+        let mut emitted = Vec::new();
+        let mut max_watermark = self.checkpoint.watermark.clone();
+        let mut max_tiebreaker = self.checkpoint.tie_breaker.clone();
+
+        for item in items {
+            let watermark = pointer_required(item, watermark_pointer)
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "poll item_watermark_pointer '{}' did not resolve",
+                        watermark_pointer
+                    )
+                })?;
+            let tiebreaker = match tiebreaker_pointer {
+                Some(pointer) => {
+                    Some(pointer_required(item, pointer).cloned().with_context(|| {
+                        format!("poll item_tiebreaker_pointer '{}' did not resolve", pointer)
+                    })?)
+                }
+                None => None,
+            };
+            let seen_key = match tiebreaker.as_ref() {
+                Some(tie) => Some(canonical_pair(&watermark, tie)?),
+                None => None,
+            };
+            if let Some(key) = seen_key.as_ref() {
+                if self.checkpoint.seen_keys.contains(key) {
+                    continue;
+                }
+            }
+
+            if is_newer_item(
+                &watermark,
+                tiebreaker.as_ref(),
+                self.checkpoint.watermark.as_ref(),
+                self.checkpoint.tie_breaker.as_ref(),
+            ) {
+                emitted.push(item.clone());
+                if let Some(key) = seen_key {
+                    push_seen_key(&mut self.checkpoint.seen_keys, key, seen_window);
+                }
+            }
+
+            if is_newer_item(
+                &watermark,
+                tiebreaker.as_ref(),
+                max_watermark.as_ref(),
+                max_tiebreaker.as_ref(),
+            ) {
+                max_watermark = Some(watermark);
+                max_tiebreaker = tiebreaker;
+            }
+        }
+
+        self.checkpoint.watermark = max_watermark;
+        self.checkpoint.tie_breaker = max_tiebreaker;
+        Ok(emitted)
+    }
+
+    fn filter_by_content_hash(
+        &mut self,
+        items: &[Value],
+        seen_window: usize,
+    ) -> Result<Vec<Value>> {
+        let mut emitted = Vec::new();
+        for item in items {
+            let key = content_hash(item)?;
+            if self.checkpoint.seen_keys.contains(&key) {
+                continue;
+            }
+            push_seen_key(&mut self.checkpoint.seen_keys, key, seen_window);
+            emitted.push(item.clone());
+        }
+        Ok(emitted)
+    }
+}
+
+pub async fn run_poll_subscription_runtime<C: PollRuntimeContext, O: PollRuntimeObserver>(
+    config: PollSubscriptionConfig,
+    base_args: HashMap<String, Value>,
+    context: &mut C,
+    observer: &mut O,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> Result<()> {
+    let mut runner = PollSubscriptionRunner::new(config.clone())?;
+    if let Some(checkpoint) = context.load_checkpoint().await? {
+        runner.restore_checkpoint(checkpoint);
+    }
+
+    observer.update_status(Some("running"), None, false).await?;
+
+    loop {
+        if stop_requested(stop_rx) {
+            close_as_stopped(observer).await?;
+            return Ok(());
+        }
+
+        let args = runner.build_request_args(&base_args);
+        let fetch = context.fetch(args).await;
+        match fetch {
+            Ok(result) => {
+                let output = runner.process_response(result.data, result.duration_ms)?;
+                observer.update_status(Some("running"), None, false).await?;
+                let emitted_items = output.emitted_items.len();
+                for item in output.emitted_items {
+                    observer.emit("data", Some(item), None).await?;
+                }
+                observer
+                    .emit(
+                        "poll",
+                        None,
+                        Some(json!({
+                            "fetched_items": output.fetched_items,
+                            "emitted_items": emitted_items,
+                            "skipped_items": output.skipped_items,
+                            "duration_ms": output.duration_ms,
+                        })),
+                    )
+                    .await?;
+                if let Some(meta) = output.checkpoint_meta {
+                    context.store_checkpoint(runner.checkpoint()).await?;
+                    observer.emit("checkpoint", None, Some(meta)).await?;
+                }
+            }
+            Err(err) => {
+                let message = err.to_string();
+                observer
+                    .emit("error", None, Some(json!({ "message": message })))
+                    .await?;
+                observer
+                    .update_status(Some("reconnecting"), Some(message), true)
+                    .await?;
+            }
+        }
+
+        if wait_for_stop_or_timeout(stop_rx, Duration::from_secs(config.interval_secs)).await {
+            close_as_stopped(observer).await?;
+            return Ok(());
+        }
+    }
+}
+
+fn pointer_required<'a>(value: &'a Value, pointer: &str) -> Result<&'a Value> {
+    value
+        .pointer(pointer)
+        .ok_or_else(|| anyhow!("missing JSON pointer '{}'", pointer))
+}
+
+fn canonical_key(value: &Value) -> Result<String> {
+    Ok(serde_json::to_string(value)?)
+}
+
+fn canonical_pair(left: &Value, right: &Value) -> Result<String> {
+    Ok(format!(
+        "{}:{}",
+        serde_json::to_string(left)?,
+        serde_json::to_string(right)?
+    ))
+}
+
+fn content_hash(value: &Value) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(serde_json::to_vec(value)?);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn push_seen_key(buffer: &mut VecDeque<String>, key: String, seen_window: usize) {
+    buffer.push_back(key);
+    while buffer.len() > seen_window {
+        buffer.pop_front();
+    }
+}
+
+fn compare_json_values(left: &Value, right: &Value) -> Ordering {
+    match (left, right) {
+        (Value::Number(a), Value::Number(b)) => a
+            .as_f64()
+            .zip(b.as_f64())
+            .and_then(|(a, b)| a.partial_cmp(&b))
+            .unwrap_or(Ordering::Equal),
+        (Value::String(a), Value::String(b)) => a.cmp(b),
+        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        _ => serde_json::to_string(left)
+            .unwrap_or_default()
+            .cmp(&serde_json::to_string(right).unwrap_or_default()),
+    }
+}
+
+fn is_newer_item(
+    watermark: &Value,
+    tie_breaker: Option<&Value>,
+    current_watermark: Option<&Value>,
+    current_tie_breaker: Option<&Value>,
+) -> bool {
+    match current_watermark {
+        None => true,
+        Some(current) => match compare_json_values(watermark, current) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => match (tie_breaker, current_tie_breaker) {
+                (Some(next), Some(current)) => {
+                    compare_json_values(next, current) == Ordering::Greater
+                }
+                _ => false,
+            },
+        },
+    }
+}
+
+fn stop_requested(stop_rx: &watch::Receiver<bool>) -> bool {
+    *stop_rx.borrow()
+}
+
+async fn wait_for_stop_or_timeout(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -> bool {
+    if *stop_rx.borrow() {
+        return true;
+    }
+    tokio::select! {
+        changed = stop_rx.changed() => matches!(changed, Ok(())) && *stop_rx.borrow(),
+        _ = tokio::time::sleep(duration) => false,
+    }
+}
+
+async fn close_as_stopped<O: PollRuntimeObserver>(observer: &mut O) -> Result<()> {
+    observer
+        .emit("closed", None, Some(json!({"reason": "stopped"})))
+        .await?;
+    observer.update_status(Some("stopped"), None, false).await
+}
+
+trait ResultExt<T> {
+    fn with_context<F>(self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> String;
+}
+
+impl<T> ResultExt<T> for Result<T> {
+    fn with_context<F>(self, f: F) -> Result<T>
+    where
+        F: FnOnce() -> String,
+    {
+        self.map_err(|err| anyhow!("{}: {}", f(), err))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item_key_config() -> PollSubscriptionConfig {
+        PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: None,
+            response_cursor_pointer: None,
+            checkpoint_strategy: PollCheckpointStrategy::ItemKey {
+                item_key_pointer: "/id".to_string(),
+                seen_window: Some(4),
+            },
+        }
+    }
+
+    #[test]
+    fn cursor_only_requires_cursor_config() {
+        let err = PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: None,
+            response_cursor_pointer: None,
+            checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(err.to_string().contains("cursor_only"));
+    }
+
+    #[test]
+    fn item_key_strategy_filters_seen_items() {
+        let mut runner = PollSubscriptionRunner::new(item_key_config()).unwrap();
+        let first = runner
+            .process_response(json!({"items":[{"id":1},{"id":2}]}), Some(5))
+            .unwrap();
+        assert_eq!(first.emitted_items.len(), 2);
+
+        let second = runner
+            .process_response(json!({"items":[{"id":2},{"id":3}]}), Some(7))
+            .unwrap();
+        assert_eq!(second.emitted_items, vec![json!({"id":3})]);
+    }
+
+    #[test]
+    fn watermark_strategy_uses_tiebreaker() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("since".to_string()),
+            response_cursor_pointer: None,
+            checkpoint_strategy: PollCheckpointStrategy::Watermark {
+                item_watermark_pointer: "/updated_at".to_string(),
+                item_tiebreaker_pointer: Some("/id".to_string()),
+                seen_window: Some(4),
+            },
+        })
+        .unwrap();
+
+        let first = runner
+            .process_response(
+                json!({"items":[
+                    {"id":"a","updated_at":"2025-01-01T00:00:00Z"},
+                    {"id":"b","updated_at":"2025-01-01T00:00:00Z"}
+                ]}),
+                None,
+            )
+            .unwrap();
+        assert_eq!(first.emitted_items.len(), 2);
+
+        let second = runner
+            .process_response(
+                json!({"items":[
+                    {"id":"a","updated_at":"2025-01-01T00:00:00Z"},
+                    {"id":"c","updated_at":"2025-01-01T00:00:01Z"}
+                ]}),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            second.emitted_items,
+            vec![json!({"id":"c","updated_at":"2025-01-01T00:00:01Z"})]
+        );
+        assert_eq!(
+            runner.build_request_args(&HashMap::new())["since"],
+            "2025-01-01T00:00:01Z"
+        );
+    }
+
+    #[test]
+    fn content_hash_strategy_dedupes_equal_payloads() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: None,
+            response_cursor_pointer: None,
+            checkpoint_strategy: PollCheckpointStrategy::ContentHash {
+                seen_window: Some(4),
+            },
+        })
+        .unwrap();
+
+        let first = runner
+            .process_response(json!({"items":[{"v":1},{"v":1}]}), None)
+            .unwrap();
+        assert_eq!(first.emitted_items.len(), 1);
+    }
+
+    #[test]
+    fn cursor_only_requires_response_cursor_in_payload() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("cursor".to_string()),
+            response_cursor_pointer: Some("/next_cursor".to_string()),
+            checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
+        })
+        .unwrap();
+
+        let err = runner
+            .process_response(json!({"items":[{"id":1}]}), None)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("response_cursor_pointer"));
+    }
+
+    #[test]
+    fn watermark_strategy_dedupes_repeated_pair_within_seen_window() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: None,
+            response_cursor_pointer: None,
+            checkpoint_strategy: PollCheckpointStrategy::Watermark {
+                item_watermark_pointer: "/updated_at".to_string(),
+                item_tiebreaker_pointer: Some("/id".to_string()),
+                seen_window: Some(8),
+            },
+        })
+        .unwrap();
+
+        let first = runner
+            .process_response(
+                json!({"items":[
+                    {"id":"a","updated_at":"2025-01-01T00:00:00Z"},
+                    {"id":"a","updated_at":"2025-01-01T00:00:00Z"},
+                    {"id":"b","updated_at":"2025-01-01T00:00:00Z"}
+                ]}),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            first.emitted_items,
+            vec![
+                json!({"id":"a","updated_at":"2025-01-01T00:00:00Z"}),
+                json!({"id":"b","updated_at":"2025-01-01T00:00:00Z"})
+            ]
+        );
+    }
+}
