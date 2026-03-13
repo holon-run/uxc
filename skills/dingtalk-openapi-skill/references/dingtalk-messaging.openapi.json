@@ -1,0 +1,218 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "DingTalk Messaging API (Curated)",
+    "version": "1.0.0",
+    "description": "Curated DingTalk v1.0 messaging and contact surface for UXC enterprise chat workflows."
+  },
+  "servers": [
+    {
+      "url": "https://api.dingtalk.com/v1.0"
+    }
+  ],
+  "security": [
+    {
+      "DingTalkBearerAuth": []
+    }
+  ],
+  "paths": {
+    "/contact/users/{unionId}": {
+      "get": {
+        "summary": "Get one DingTalk user by unionId",
+        "parameters": [
+          {
+            "name": "unionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "DingTalk user unionId"
+          },
+          {
+            "name": "language",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "zh_CN",
+                "en_US"
+              ]
+            },
+            "description": "Optional response language hint"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User detail response"
+          }
+        }
+      }
+    },
+    "/robot/oToMessages/batchSend": {
+      "post": {
+        "summary": "Send one-to-one robot messages to multiple users",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OToBatchSendRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One-to-one batch send response"
+          }
+        }
+      }
+    },
+    "/robot/groupMessages/send": {
+      "post": {
+        "summary": "Send a robot message to a group conversation",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupMessageSendRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Group message send response"
+          }
+        }
+      }
+    },
+    "/serviceGroup/messages/send": {
+      "post": {
+        "summary": "Send a message into a service group conversation",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceGroupMessageSendRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Service group message send response"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "DingTalkBearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "accessToken"
+      }
+    },
+    "schemas": {
+      "OToBatchSendRequest": {
+        "type": "object",
+        "required": [
+          "robotCode",
+          "userIds",
+          "msgKey",
+          "msgParam"
+        ],
+        "properties": {
+          "robotCode": {
+            "type": "string",
+            "description": "Robot code for the DingTalk app or bot"
+          },
+          "userIds": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            },
+            "description": "Target user IDs that should receive the one-to-one message"
+          },
+          "msgKey": {
+            "type": "string",
+            "description": "Message template key such as sampleText, sampleMarkdown, or another supported DingTalk robot message key"
+          },
+          "msgParam": {
+            "type": "string",
+            "description": "JSON-encoded message payload string expected by DingTalk for the selected msgKey"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GroupMessageSendRequest": {
+        "type": "object",
+        "required": [
+          "robotCode",
+          "openConversationId",
+          "msgKey",
+          "msgParam"
+        ],
+        "properties": {
+          "robotCode": {
+            "type": "string",
+            "description": "Robot code for the DingTalk app or bot"
+          },
+          "openConversationId": {
+            "type": "string",
+            "description": "Open conversation ID for the target group"
+          },
+          "msgKey": {
+            "type": "string",
+            "description": "Message template key such as sampleText, sampleMarkdown, or another supported DingTalk robot message key"
+          },
+          "msgParam": {
+            "type": "string",
+            "description": "JSON-encoded message payload string expected by DingTalk for the selected msgKey"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ServiceGroupMessageSendRequest": {
+        "type": "object",
+        "required": [
+          "coolAppCode",
+          "robotCode",
+          "openConversationId",
+          "msgKey",
+          "msgParam"
+        ],
+        "properties": {
+          "coolAppCode": {
+            "type": "string",
+            "description": "Cool app code associated with the service group capability"
+          },
+          "robotCode": {
+            "type": "string",
+            "description": "Robot code for the DingTalk app or bot"
+          },
+          "openConversationId": {
+            "type": "string",
+            "description": "Open conversation ID for the target service group"
+          },
+          "msgKey": {
+            "type": "string",
+            "description": "Message template key such as sampleText, sampleMarkdown, or another supported DingTalk robot message key"
+          },
+          "msgParam": {
+            "type": "string",
+            "description": "JSON-encoded message payload string expected by DingTalk for the selected msgKey"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}
