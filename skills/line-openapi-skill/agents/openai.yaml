@@ -1,0 +1,4 @@
+interface:
+  display_name: "LINE Messaging API"
+  short_description: "Operate LINE Messaging API via UXC + curated OpenAPI schema"
+  default_prompt: "Use $line-openapi-skill to discover and execute LINE Messaging API operations through UXC with bearer-token auth, messaging-core scope, and webhook-management guardrails."

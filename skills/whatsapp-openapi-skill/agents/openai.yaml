@@ -1,0 +1,4 @@
+interface:
+  display_name: "WhatsApp Cloud API"
+  short_description: "Operate WhatsApp Cloud API via UXC + curated OpenAPI schema"
+  default_prompt: "Use $whatsapp-openapi-skill to discover and execute WhatsApp Business Platform Cloud API operations through UXC with bearer-token auth, phone-number and business-profile reads, and guarded message sends."

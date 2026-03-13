@@ -1,0 +1,435 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "LINE Messaging API (Curated)",
+    "version": "1.0.0",
+    "description": "Curated LINE Messaging API surface for UXC messaging workflows."
+  },
+  "servers": [
+    {
+      "url": "https://api.line.me"
+    }
+  ],
+  "security": [
+    {
+      "LineBearerAuth": []
+    }
+  ],
+  "paths": {
+    "/v2/bot/info": {
+      "get": {
+        "summary": "Get bot information",
+        "responses": {
+          "200": {
+            "description": "Bot information response"
+          }
+        }
+      }
+    },
+    "/v2/bot/profile/{userId}": {
+      "get": {
+        "summary": "Get a user profile by user ID",
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "LINE user ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Profile response"
+          }
+        }
+      }
+    },
+    "/v2/bot/message/push": {
+      "post": {
+        "summary": "Push a message to a user, group, or room",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Push message response"
+          }
+        }
+      }
+    },
+    "/v2/bot/message/reply": {
+      "post": {
+        "summary": "Reply to an incoming event with messages",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplyMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reply message response"
+          }
+        }
+      }
+    },
+    "/v2/bot/message/quota": {
+      "get": {
+        "summary": "Get the monthly target limit for push messages",
+        "responses": {
+          "200": {
+            "description": "Quota response"
+          }
+        }
+      }
+    },
+    "/v2/bot/message/quota/consumption": {
+      "get": {
+        "summary": "Get the number of push messages sent this month",
+        "responses": {
+          "200": {
+            "description": "Quota consumption response"
+          }
+        }
+      }
+    },
+    "/v2/bot/channel/webhook/endpoint": {
+      "get": {
+        "summary": "Get the configured webhook endpoint URL",
+        "responses": {
+          "200": {
+            "description": "Webhook endpoint response"
+          }
+        }
+      },
+      "put": {
+        "summary": "Set or update the webhook endpoint URL",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEndpointRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Webhook endpoint update response"
+          }
+        }
+      }
+    },
+    "/v2/bot/channel/webhook/test": {
+      "post": {
+        "summary": "Test webhook endpoint delivery",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookTestRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Webhook test response"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "LineBearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "channel access token"
+      }
+    },
+    "schemas": {
+      "PushMessageRequest": {
+        "type": "object",
+        "required": [
+          "to",
+          "messages"
+        ],
+        "properties": {
+          "to": {
+            "type": "string",
+            "description": "Destination user, group, or room ID"
+          },
+          "messages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "notificationDisabled": {
+            "type": "boolean",
+            "description": "Disable push notification delivery for the message"
+          },
+          "customAggregationUnits": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional aggregation labels for analytics"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReplyMessageRequest": {
+        "type": "object",
+        "required": [
+          "replyToken",
+          "messages"
+        ],
+        "properties": {
+          "replyToken": {
+            "type": "string",
+            "description": "Reply token from a webhook event"
+          },
+          "messages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "notificationDisabled": {
+            "type": "boolean",
+            "description": "Disable push notification delivery for the reply"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebhookEndpointRequest": {
+        "type": "object",
+        "required": [
+          "endpoint"
+        ],
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "Webhook destination URL"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebhookTestRequest": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "format": "uri",
+            "description": "Webhook destination URL to test. If omitted, the configured endpoint is used."
+          }
+        },
+        "additionalProperties": false
+      },
+      "Message": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TextMessage"
+          },
+          {
+            "$ref": "#/components/schemas/ImageMessage"
+          },
+          {
+            "$ref": "#/components/schemas/VideoMessage"
+          },
+          {
+            "$ref": "#/components/schemas/AudioMessage"
+          },
+          {
+            "$ref": "#/components/schemas/LocationMessage"
+          },
+          {
+            "$ref": "#/components/schemas/StickerMessage"
+          }
+        ]
+      },
+      "TextMessage": {
+        "type": "object",
+        "required": [
+          "type",
+          "text"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "text"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "description": "Text body to send"
+          },
+          "quoteToken": {
+            "type": "string",
+            "description": "Quote token for quoted replies when supported"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ImageMessage": {
+        "type": "object",
+        "required": [
+          "type",
+          "originalContentUrl",
+          "previewImageUrl"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "image"
+            ]
+          },
+          "originalContentUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "previewImageUrl": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "additionalProperties": false
+      },
+      "VideoMessage": {
+        "type": "object",
+        "required": [
+          "type",
+          "originalContentUrl",
+          "previewImageUrl"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "video"
+            ]
+          },
+          "originalContentUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "previewImageUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "trackingId": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AudioMessage": {
+        "type": "object",
+        "required": [
+          "type",
+          "originalContentUrl",
+          "duration"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "audio"
+            ]
+          },
+          "originalContentUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "duration": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Playback duration in milliseconds"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LocationMessage": {
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "address",
+          "latitude",
+          "longitude"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "location"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double"
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StickerMessage": {
+        "type": "object",
+        "required": [
+          "type",
+          "packageId",
+          "stickerId"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "sticker"
+            ]
+          },
+          "packageId": {
+            "type": "string"
+          },
+          "stickerId": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

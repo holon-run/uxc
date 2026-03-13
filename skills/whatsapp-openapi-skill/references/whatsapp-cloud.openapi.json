@@ -1,0 +1,668 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "WhatsApp Cloud API (Curated)",
+    "version": "1.0.0",
+    "description": "Curated WhatsApp Cloud API surface for UXC messaging and profile workflows."
+  },
+  "servers": [
+    {
+      "url": "https://graph.facebook.com/v25.0"
+    }
+  ],
+  "security": [
+    {
+      "WhatsAppBearerAuth": []
+    }
+  ],
+  "paths": {
+    "/{waba_id}/phone_numbers": {
+      "get": {
+        "summary": "List phone numbers attached to a WhatsApp Business Account",
+        "parameters": [
+          {
+            "name": "waba_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "WhatsApp Business Account identifier"
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional Graph fields selector for phone number records"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "description": "Maximum number of phone numbers to return"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Phone number list response"
+          }
+        }
+      }
+    },
+    "/{phone_number_id}": {
+      "get": {
+        "summary": "Get metadata for one WhatsApp phone number",
+        "parameters": [
+          {
+            "name": "phone_number_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "WhatsApp phone number identifier"
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "display_phone_number,verified_name,quality_rating,code_verification_status"
+            },
+            "description": "Optional Graph fields selector for phone number metadata"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Phone number metadata response"
+          }
+        }
+      }
+    },
+    "/{phone_number_id}/messages": {
+      "post": {
+        "summary": "Send a WhatsApp message from one phone number",
+        "parameters": [
+          {
+            "name": "phone_number_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "WhatsApp phone number identifier used to send the message"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Send message response"
+          }
+        }
+      }
+    },
+    "/{phone_number_id}/whatsapp_business_profile": {
+      "get": {
+        "summary": "Get the WhatsApp business profile for a phone number",
+        "parameters": [
+          {
+            "name": "phone_number_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "WhatsApp phone number identifier"
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "about,address,description,email,profile_picture_url,vertical,websites"
+            },
+            "description": "Optional Graph fields selector for business profile fields"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Business profile response"
+          }
+        }
+      },
+      "post": {
+        "summary": "Update the WhatsApp business profile for a phone number",
+        "parameters": [
+          {
+            "name": "phone_number_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "WhatsApp phone number identifier"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BusinessProfileUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Business profile update response"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "WhatsAppBearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "system user or permanent access token"
+      }
+    },
+    "schemas": {
+      "SendMessageRequest": {
+        "type": "object",
+        "required": [
+          "messaging_product",
+          "to",
+          "type"
+        ],
+        "properties": {
+          "messaging_product": {
+            "type": "string",
+            "enum": [
+              "whatsapp"
+            ],
+            "description": "Messaging product identifier"
+          },
+          "to": {
+            "type": "string",
+            "description": "Destination WhatsApp user phone number in international format"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "template",
+              "interactive",
+              "document",
+              "image"
+            ],
+            "description": "Message type to send"
+          },
+          "recipient_type": {
+            "type": "string",
+            "enum": [
+              "individual"
+            ],
+            "description": "Recipient type for Cloud API sends"
+          },
+          "context": {
+            "$ref": "#/components/schemas/MessageContext"
+          },
+          "text": {
+            "$ref": "#/components/schemas/TextMessage"
+          },
+          "template": {
+            "$ref": "#/components/schemas/TemplateMessage"
+          },
+          "interactive": {
+            "$ref": "#/components/schemas/InteractiveMessage"
+          },
+          "document": {
+            "$ref": "#/components/schemas/DocumentMessage"
+          },
+          "image": {
+            "$ref": "#/components/schemas/ImageMessage"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MessageContext": {
+        "type": "object",
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "description": "Message ID to reply to"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TextMessage": {
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "preview_url": {
+            "type": "boolean",
+            "description": "Whether to generate a link preview"
+          },
+          "body": {
+            "type": "string",
+            "description": "Text message body"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TemplateMessage": {
+        "type": "object",
+        "required": [
+          "name",
+          "language"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Template name"
+          },
+          "language": {
+            "type": "object",
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Template language code such as en_US"
+              }
+            },
+            "additionalProperties": false
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateComponent"
+            },
+            "description": "Optional template parameter components"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TemplateComponent": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "header",
+              "body",
+              "button"
+            ]
+          },
+          "sub_type": {
+            "type": "string",
+            "description": "Button subtype when type=button"
+          },
+          "index": {
+            "type": "string",
+            "description": "Button index when type=button"
+          },
+          "parameters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateParameter"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "TemplateParameter": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "currency",
+              "date_time",
+              "image",
+              "document"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "object",
+            "properties": {
+              "fallback_value": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "amount_1000": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          },
+          "date_time": {
+            "type": "object",
+            "properties": {
+              "fallback_value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "image": {
+            "$ref": "#/components/schemas/ImageMediaObject"
+          },
+          "document": {
+            "$ref": "#/components/schemas/DocumentMediaObject"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InteractiveMessage": {
+        "type": "object",
+        "required": [
+          "type",
+          "body",
+          "action"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "button",
+              "list"
+            ],
+            "description": "Interactive message type"
+          },
+          "header": {
+            "$ref": "#/components/schemas/InteractiveHeader"
+          },
+          "body": {
+            "$ref": "#/components/schemas/InteractiveBody"
+          },
+          "footer": {
+            "$ref": "#/components/schemas/InteractiveFooter"
+          },
+          "action": {
+            "$ref": "#/components/schemas/InteractiveAction"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InteractiveHeader": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "image",
+              "document"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "image": {
+            "$ref": "#/components/schemas/ImageMediaObject"
+          },
+          "document": {
+            "$ref": "#/components/schemas/DocumentMediaObject"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InteractiveBody": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InteractiveFooter": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InteractiveAction": {
+        "type": "object",
+        "properties": {
+          "buttons": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+              "$ref": "#/components/schemas/ReplyButton"
+            },
+            "description": "Reply buttons for interactive button messages"
+          },
+          "button": {
+            "type": "string",
+            "description": "Call-to-action text for interactive list messages"
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InteractiveSection"
+            },
+            "description": "Sections for interactive list messages"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReplyButton": {
+        "type": "object",
+        "required": [
+          "type",
+          "reply"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "reply"
+            ]
+          },
+          "reply": {
+            "type": "object",
+            "required": [
+              "id",
+              "title"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "InteractiveSection": {
+        "type": "object",
+        "required": [
+          "rows"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InteractiveRow"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "InteractiveRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DocumentMessage": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DocumentMediaObject"
+          }
+        ],
+        "description": "Document message payload"
+      },
+      "ImageMessage": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ImageMediaObject"
+          }
+        ],
+        "description": "Image message payload"
+      },
+      "DocumentMediaObject": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Previously uploaded media ID"
+          },
+          "link": {
+            "type": "string",
+            "format": "uri",
+            "description": "Publicly reachable media URL"
+          },
+          "caption": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ImageMediaObject": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Previously uploaded media ID"
+          },
+          "link": {
+            "type": "string",
+            "format": "uri",
+            "description": "Publicly reachable media URL"
+          },
+          "caption": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BusinessProfileUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "about": {
+            "type": "string",
+            "description": "Business about text"
+          },
+          "address": {
+            "type": "string",
+            "description": "Business street address"
+          },
+          "description": {
+            "type": "string",
+            "description": "Longer business description"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "description": "Business support email"
+          },
+          "profile_picture_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Business profile image URL"
+          },
+          "vertical": {
+            "type": "string",
+            "description": "Business category or vertical value"
+          },
+          "websites": {
+            "type": "array",
+            "maxItems": 2,
+            "items": {
+              "type": "string",
+              "format": "uri"
+            },
+            "description": "Business websites"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}
