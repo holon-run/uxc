@@ -172,6 +172,8 @@ bash skills/dingtalk-openapi-skill/scripts/validate.sh
 
 ```bash
 bash skills/defillama-openapi-skill/scripts/validate.sh
+```
+
 - Validate CoinGecko wrapper docs when touched:
 
 ```bash
