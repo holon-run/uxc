@@ -42,7 +42,6 @@ Use the official Crypto.com MCP endpoint:
    - `command -v crypto-com-mcp-cli`
    - If missing, create it:
      `uxc link crypto-com-mcp-cli https://mcp.crypto.com/market-data/mcp`
-   - `crypto-com-mcp-cli -h`
 2. Inspect tool and argument help before execution:
    - `crypto-com-mcp-cli -h`
    - `crypto-com-mcp-cli get_ticker -h`
