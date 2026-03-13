@@ -61,7 +61,7 @@ coinbase-openapi-cli get:/api/v3/brokerage/orders/historical/{order_id} order_id
 ## Write Examples
 
 ```bash
-# Create a limit order preview or live order according to your Coinbase order configuration
+# Create a live limit order
 coinbase-openapi-cli post:/api/v3/brokerage/orders \
   '{"client_order_id":"uxc-demo-order-1","product_id":"BTC-USD","side":"BUY","order_configuration":{"limit_limit_gtc":{"base_size":"0.001","limit_price":"25000.00","post_only":true}}}'
 
