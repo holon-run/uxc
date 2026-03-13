@@ -1,0 +1,61 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Kraken Public API",
+    "version": "v1",
+    "description": "Curated Kraken public market-data surface for UXC."
+  },
+  "servers": [
+    { "url": "https://api.kraken.com" }
+  ],
+  "components": {
+    "schemas": {}
+  },
+  "paths": {
+    "/0/public/Time": {
+      "get": {
+        "operationId": "getServerTime",
+        "responses": { "200": { "description": "Server time returned" } }
+      }
+    },
+    "/0/public/AssetPairs": {
+      "get": {
+        "operationId": "listAssetPairs",
+        "parameters": [
+          { "name": "pair", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Asset pairs returned" } }
+      }
+    },
+    "/0/public/Ticker": {
+      "get": {
+        "operationId": "getTicker",
+        "parameters": [
+          { "name": "pair", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Ticker returned" } }
+      }
+    },
+    "/0/public/OHLC": {
+      "get": {
+        "operationId": "getOhlc",
+        "parameters": [
+          { "name": "pair", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "interval", "in": "query", "schema": { "type": "integer" } },
+          { "name": "since", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "OHLC returned" } }
+      }
+    },
+    "/0/public/Depth": {
+      "get": {
+        "operationId": "getDepth",
+        "parameters": [
+          { "name": "pair", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "count", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Depth returned" } }
+      }
+    }
+  }
+}

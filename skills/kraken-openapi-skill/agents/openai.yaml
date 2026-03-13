@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kraken REST"
+  short_description: "Kraken public market data via curated REST endpoints"
+  default_prompt: "Use $kraken-openapi-skill to discover and execute Kraken public market-data operations through UXC with help-first schema inspection, pair-aware reads, and explicit private-auth boundary notes."
