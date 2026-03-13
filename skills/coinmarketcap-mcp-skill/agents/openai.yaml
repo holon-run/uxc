@@ -1,0 +1,4 @@
+interface:
+  display_name: "CoinMarketCap MCP"
+  short_description: "Crypto quotes, metrics, narratives, and news via CoinMarketCap MCP"
+  default_prompt: "Use $coinmarketcap-mcp-skill to query CoinMarketCap MCP for crypto market quotes, technical analysis, on-chain metrics, global market overview, narratives, macro events, news, and semantic search with help-first inspection and API-key auth."
