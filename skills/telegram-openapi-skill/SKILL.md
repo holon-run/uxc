@@ -1,0 +1,126 @@
+---
+name: telegram-openapi-skill
+description: Operate Telegram Bot API through UXC with a curated OpenAPI schema, bot-token path auth, polling-based reads, and webhook management guardrails.
+---
+
+# Telegram Bot API Skill
+
+Use this skill to run Telegram Bot API operations through `uxc` + OpenAPI.
+
+Reuse the `uxc` skill for shared execution, auth, and error-handling guidance.
+
+## Prerequisites
+
+- `uxc` is installed and available in `PATH`.
+- Network access to `https://api.telegram.org`.
+- Access to the curated OpenAPI schema URL:
+  - `https://raw.githubusercontent.com/holon-run/uxc/main/skills/telegram-openapi-skill/references/telegram-bot.openapi.json`
+- A Telegram bot token from BotFather.
+
+## Scope
+
+This skill covers a lean bot core surface:
+
+- bot identity and chat lookup
+- text sends
+- media sends by `file_id` or HTTP URL
+- polling via `getUpdates`
+- webhook setup/status/delete operations
+
+This skill does **not** cover:
+
+- multipart new-file uploads
+- self-signed webhook certificate upload
+- generic webhook ingestion/runtime hosting
+- the full Telegram Bot API surface
+
+## Authentication
+
+Telegram Bot API requires the bot token in the request path: `https://api.telegram.org/bot<TOKEN>/METHOD_NAME`.
+
+Configure the credential with a request path prefix template:
+
+```bash
+uxc auth credential set telegram-bot \
+  --auth-type api_key \
+  --secret-env TELEGRAM_BOT_TOKEN \
+  --path-prefix-template "/bot{{secret}}"
+
+uxc auth binding add \
+  --id telegram-bot \
+  --host api.telegram.org \
+  --scheme https \
+  --credential telegram-bot \
+  --priority 100
+```
+
+Validate the local mapping when auth looks wrong:
+
+```bash
+uxc auth binding match https://api.telegram.org
+```
+
+## Core Workflow
+
+1. Use the fixed link command by default:
+   - `command -v telegram-openapi-cli`
+   - If missing, create it:
+     `uxc link telegram-openapi-cli https://api.telegram.org --schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/telegram-openapi-skill/references/telegram-bot.openapi.json`
+   - `telegram-openapi-cli -h`
+
+2. Inspect operation schema first:
+   - `telegram-openapi-cli get:/getMe -h`
+   - `telegram-openapi-cli post:/sendMessage -h`
+   - `telegram-openapi-cli post:/getUpdates -h`
+
+3. Prefer read/setup validation before writes:
+   - `telegram-openapi-cli get:/getMe`
+   - `telegram-openapi-cli get:/getWebhookInfo`
+   - `telegram-openapi-cli get:/getChat chat_id=@channel_or_chat_id`
+
+4. Execute operations with key/value or positional JSON:
+   - key/value:
+     `telegram-openapi-cli post:/sendMessage chat_id=CHAT_ID text="Hello from uxc"`
+   - positional JSON:
+     `telegram-openapi-cli post:/sendMessage '{"chat_id":"CHAT_ID","text":"Hello from uxc"}'`
+
+## Operation Groups
+
+### Read / Lookup
+
+- `get:/getMe`
+- `get:/getChat`
+- `get:/getChatMember`
+- `get:/getWebhookInfo`
+
+### Messaging
+
+- `post:/sendMessage`
+- `post:/sendPhoto`
+- `post:/sendDocument`
+- `post:/sendMediaGroup`
+
+### Update Delivery
+
+- `post:/getUpdates`
+- `post:/setWebhook`
+- `post:/deleteWebhook`
+
+## Guardrails
+
+- Keep automation on the JSON output envelope; do not use `--text`.
+- Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
+- `getUpdates` and webhook delivery are mutually exclusive:
+  - if a webhook is configured, call `post:/deleteWebhook` before polling with `post:/getUpdates`
+  - if polling is active, do not treat webhook operations as background subscription support
+- `sendPhoto`, `sendDocument`, and `sendMediaGroup` in this skill accept existing `file_id` values or HTTP URLs only; they do not upload new local files.
+- `setWebhook` in this skill does not support certificate upload for self-signed certs.
+- Treat `post:/sendMessage`, all `send*` operations, and webhook-changing operations as write/high-risk actions; require explicit user confirmation before execution.
+- `telegram-openapi-cli <operation> ...` is equivalent to `uxc https://api.telegram.org --schema-url <telegram_openapi_schema> <operation> ...`.
+
+## References
+
+- Usage patterns: `references/usage-patterns.md`
+- Curated OpenAPI schema: `references/telegram-bot.openapi.json`
+- Telegram Bot API docs: https://core.telegram.org/bots/api
+- Local Bot API server: https://github.com/tdlib/telegram-bot-api

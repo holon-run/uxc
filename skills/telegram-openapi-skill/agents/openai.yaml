@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telegram Bot API"
+  short_description: "Operate Telegram Bot API via UXC + curated OpenAPI schema"
+  default_prompt: "Use $telegram-openapi-skill to discover and execute Telegram Bot API operations through UXC with bot-token path auth and polling/webhook guardrails."

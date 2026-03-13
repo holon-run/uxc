@@ -112,6 +112,13 @@ impl OpenAPIAdapter {
         }
     }
 
+    fn apply_auth_profile_to_operation_url(url: &str, profile: Option<&Profile>) -> Result<String> {
+        match profile {
+            Some(profile) => crate::auth::apply_profile_auth_to_operation_url(url, profile),
+            None => Ok(url.to_string()),
+        }
+    }
+
     fn apply_schema_auth_profile(
         &self,
         req: reqwest::RequestBuilder,
@@ -1395,7 +1402,7 @@ impl Adapter for OpenAPIAdapter {
                     }
                     let with_args = parsed.to_string();
                     if should_apply_auth {
-                        Self::apply_auth_profile_to_url(&with_args, profile)?
+                        Self::apply_auth_profile_to_operation_url(&with_args, profile)?
                     } else {
                         with_args
                     }

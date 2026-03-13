@@ -385,6 +385,10 @@ pub struct Profile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_query_params: Option<Vec<AuthQueryParam>>,
 
+    /// Optional request path prefix template used by api_key auth type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_path_prefix: Option<String>,
+
     /// Optional binding-level signer attached at runtime.
     #[serde(skip)]
     pub signer: Option<AuthSignerConfig>,
@@ -411,6 +415,7 @@ impl Profile {
             fields: HashMap::new(),
             auth_headers: None,
             auth_query_params: None,
+            auth_path_prefix: None,
             signer: None,
         }
     }
@@ -551,13 +556,24 @@ impl Profile {
                 .is_some_and(|params| !params.is_empty())
     }
 
+    pub fn has_custom_api_key_path_prefix(&self) -> bool {
+        self.auth_type == AuthType::ApiKey
+            && self
+                .auth_path_prefix
+                .as_ref()
+                .is_some_and(|prefix| !prefix.trim().is_empty())
+    }
+
     pub fn api_key_injections_require_secret(&self) -> bool {
         self.auth_type == AuthType::ApiKey
             && (self.auth_headers.as_ref().is_some_and(|headers| {
                 !headers.is_empty() && headers.iter().any(AuthHeader::requires_primary_secret)
             }) || self.auth_query_params.as_ref().is_some_and(|params| {
                 !params.is_empty() && params.iter().any(AuthQueryParam::requires_primary_secret)
-            }))
+            }) || self
+                .auth_path_prefix
+                .as_ref()
+                .is_some_and(|prefix| !prefix.trim().is_empty() && template_has_secret(prefix)))
     }
 
     pub fn field_source_kinds(&self) -> Vec<(String, String)> {
@@ -622,6 +638,22 @@ impl Profile {
 
         Ok(Vec::new())
     }
+
+    pub fn resolved_api_key_path_prefix(&self) -> Result<Option<String>> {
+        if self.auth_type != AuthType::ApiKey {
+            return Ok(None);
+        }
+
+        let Some(prefix) = &self.auth_path_prefix else {
+            return Ok(None);
+        };
+        if prefix.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let rendered = render_template(prefix, self, "auth path prefix")?;
+        Ok(Some(normalize_auth_path_prefix(&rendered)?))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -655,6 +687,8 @@ struct StoredCredential {
     auth_headers: Option<Vec<AuthHeader>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auth_query_params: Option<Vec<AuthQueryParam>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_path_prefix: Option<String>,
 }
 
 impl StoredCredential {
@@ -687,6 +721,7 @@ impl StoredCredential {
             fields: profile.fields.clone(),
             auth_headers: profile.auth_headers.clone(),
             auth_query_params: profile.auth_query_params.clone(),
+            auth_path_prefix: profile.auth_path_prefix.clone(),
         }
     }
 
@@ -711,6 +746,7 @@ impl StoredCredential {
             fields: self.fields.clone(),
             auth_headers: self.auth_headers.clone(),
             auth_query_params: self.auth_query_params.clone(),
+            auth_path_prefix: self.auth_path_prefix.clone(),
             signer: None,
         };
 
@@ -1150,6 +1186,7 @@ fn validate_ready(profile: &Profile) -> Result<()> {
         AuthType::ApiKey => {
             let requires_primary_secret = if profile.has_custom_api_key_headers()
                 || profile.has_custom_api_key_query_params()
+                || profile.has_custom_api_key_path_prefix()
             {
                 profile.api_key_injections_require_secret()
             } else {
@@ -1288,6 +1325,11 @@ pub fn validate_auth_query_params(params: &[AuthQueryParam]) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_auth_path_prefix_template(template: &str) -> Result<String> {
+    validate_template(template)?;
+    normalize_auth_path_prefix(template)
+}
+
 fn validate_header_name(name: &str) -> Result<String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -1316,6 +1358,31 @@ fn validate_query_param_name(name: &str) -> Result<String> {
         anyhow::bail!("Invalid query param name '{}'", trimmed);
     }
     Ok(trimmed.to_string())
+}
+
+fn normalize_auth_path_prefix(prefix: &str) -> Result<String> {
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Auth path prefix template cannot be empty");
+    }
+
+    let with_leading = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed)
+    };
+
+    let normalized = if with_leading.len() > 1 {
+        with_leading.trim_end_matches('/').to_string()
+    } else {
+        with_leading
+    };
+
+    if normalized == "/" {
+        anyhow::bail!("Auth path prefix template cannot be '/'");
+    }
+
+    Ok(normalized)
 }
 
 pub fn validate_field_name(name: &str) -> Result<String> {
@@ -1936,7 +2003,7 @@ fn resolved_profile_auth_headers(profile: &Profile) -> Result<Vec<(String, Strin
 
 pub fn resolve_profile_request_auth(url: &str, profile: &Profile) -> Result<ResolvedRequestAuth> {
     Ok(ResolvedRequestAuth {
-        url: apply_profile_auth_to_url(url, profile)?,
+        url: apply_profile_auth_to_operation_url(url, profile)?,
         headers: resolved_profile_auth_headers(profile)?,
     })
 }
@@ -1951,6 +2018,11 @@ pub fn apply_profile_auth_to_request(
     }
 
     Ok(request_builder)
+}
+
+pub fn apply_profile_auth_to_operation_url(url: &str, profile: &Profile) -> Result<String> {
+    let url = apply_profile_auth_path_prefix(url, profile)?;
+    apply_profile_auth_to_url(&url, profile)
 }
 
 pub fn apply_profile_auth_to_url(url: &str, profile: &Profile) -> Result<String> {
@@ -1973,6 +2045,27 @@ pub fn apply_profile_auth_to_url(url: &str, profile: &Profile) -> Result<String>
     }
 
     apply_signer_to_url(&authed_url, profile)
+}
+
+fn apply_profile_auth_path_prefix(url: &str, profile: &Profile) -> Result<String> {
+    let Some(prefix) = profile.resolved_api_key_path_prefix()? else {
+        return Ok(url.to_string());
+    };
+
+    let mut parsed = url::Url::parse(url)
+        .with_context(|| format!("Invalid endpoint URL for auth path prefix: {}", url))?;
+    let path = parsed.path();
+    if path == prefix || path.starts_with(&format!("{}/", prefix)) {
+        return Ok(parsed.to_string());
+    }
+
+    let suffix = if path == "/" {
+        String::new()
+    } else {
+        path.to_string()
+    };
+    parsed.set_path(&format!("{}{}", prefix, suffix));
+    Ok(parsed.to_string())
 }
 
 pub fn auth_profile_to_metadata(
@@ -2582,6 +2675,34 @@ mod tests {
             resolved.headers,
             vec![("X-Test-Key".to_string(), "token-123".to_string())]
         );
+    }
+
+    #[test]
+    fn resolve_profile_request_auth_applies_path_prefix_before_query_params() {
+        let mut profile = Profile::new("123:abc".to_string(), AuthType::ApiKey);
+        profile.auth_query_params =
+            Some(vec![AuthQueryParam::new("api_key", "{{secret}}").unwrap()]);
+        profile.auth_path_prefix = Some("/bot{{secret}}".to_string());
+
+        let resolved =
+            resolve_profile_request_auth("https://api.telegram.org/getMe?existing=1", &profile)
+                .unwrap();
+
+        assert_eq!(
+            resolved.url,
+            "https://api.telegram.org/bot123:abc/getMe?existing=1&api_key=123%3Aabc"
+        );
+    }
+
+    #[test]
+    fn apply_profile_auth_to_url_does_not_apply_path_prefix() {
+        let mut profile = Profile::new("123:abc".to_string(), AuthType::ApiKey);
+        profile.auth_path_prefix = Some("/bot{{secret}}".to_string());
+
+        let resolved =
+            apply_profile_auth_to_url("https://api.telegram.org/openapi.json", &profile).unwrap();
+
+        assert_eq!(resolved, "https://api.telegram.org/openapi.json");
     }
 
     #[test]

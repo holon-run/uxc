@@ -542,6 +542,29 @@ fn auth_credential_without_subcommand_outputs_subcommand_help_json() {
 
 #[test]
 #[serial]
+fn auth_credential_set_help_mentions_path_prefix_template() {
+    let output = uxc_command()
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("--help")
+        .output()
+        .expect("failed to run uxc auth credential set --help");
+
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc auth credential set");
+    assert!(json["data"]["usage"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("--path-prefix-template <template>"));
+}
+
+#[test]
+#[serial]
 fn host_help_keyword_is_treated_as_operation_literal() {
     let mut server = mockito::Server::new();
     let _schema = server

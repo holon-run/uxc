@@ -651,6 +651,41 @@ fn auth_credential_set_supports_query_param_template() {
 }
 
 #[test]
+fn auth_credential_set_supports_path_prefix_template() {
+    let files = AuthFiles::new();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("telegram-bot")
+        .arg("--auth-type")
+        .arg("api_key")
+        .arg("--secret")
+        .arg("123:abc")
+        .arg("--path-prefix-template")
+        .arg("/bot{{secret}}")
+        .output()
+        .expect("credential set should run");
+    assert!(output.status.success(), "credential set should succeed");
+
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["auth_path_prefix"]["value_masked"], "***");
+
+    let info = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("info")
+        .arg("telegram-bot")
+        .output()
+        .expect("credential info should run");
+    assert!(info.status.success(), "credential info should succeed");
+    let info_json = parse_stdout_json(&info);
+    assert_eq!(info_json["data"]["auth_path_prefix"]["value_masked"], "***");
+}
+
+#[test]
 fn auth_credential_set_rejects_query_param_for_non_api_key() {
     let files = AuthFiles::new();
 
@@ -665,6 +700,30 @@ fn auth_credential_set_rejects_query_param_for_non_api_key() {
         .arg("token")
         .arg("--query-param")
         .arg("apiKey={{secret}}")
+        .output()
+        .expect("credential set should run");
+
+    assert!(!output.status.success(), "command should fail");
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+}
+
+#[test]
+fn auth_credential_set_rejects_path_prefix_template_for_non_api_key() {
+    let files = AuthFiles::new();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("bad-path")
+        .arg("--auth-type")
+        .arg("bearer")
+        .arg("--secret")
+        .arg("token")
+        .arg("--path-prefix-template")
+        .arg("/bot{{secret}}")
         .output()
         .expect("credential set should run");
 
