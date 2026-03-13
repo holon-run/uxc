@@ -18,10 +18,15 @@ need_cmd() {
 }
 
 need_cmd rg
+need_cmd jq
 
 for file in "${SKILL_FILE}" "${OPENAI_FILE}" "${USAGE_FILE}" "${SCHEMA_FILE}"; do
   [[ -f "${file}" ]] || fail "missing required file: ${file}"
 done
+
+# Sanity-check the Slack Web API OpenAPI schema
+jq -e '.openapi and .paths' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'invalid OpenAPI schema JSON or missing .openapi/.paths'
+jq -e '.paths["/auth.test"]' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'OpenAPI schema missing /auth.test path'
 
 rg -q '^name:\s*slack-openapi-skill\s*$' "${SKILL_FILE}" || fail 'invalid skill name'
 rg -q '^description:\s*.+' "${SKILL_FILE}" || fail 'missing description'
