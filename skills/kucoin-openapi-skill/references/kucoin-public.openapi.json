@@ -1,0 +1,49 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "KuCoin Public API",
+    "version": "v1",
+    "description": "Curated KuCoin public market-data surface for UXC."
+  },
+  "servers": [
+    { "url": "https://api.kucoin.com" }
+  ],
+  "components": {
+    "schemas": {}
+  },
+  "paths": {
+    "/api/v1/symbols": {
+      "get": {
+        "operationId": "listSymbols",
+        "responses": { "200": { "description": "Symbols returned" } }
+      }
+    },
+    "/api/v1/market/allTickers": {
+      "get": {
+        "operationId": "listAllTickers",
+        "responses": { "200": { "description": "Tickers returned" } }
+      }
+    },
+    "/api/v1/market/orderbook/level2_20": {
+      "get": {
+        "operationId": "getOrderbook20",
+        "parameters": [
+          { "name": "symbol", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Orderbook returned" } }
+      }
+    },
+    "/api/v1/market/candles": {
+      "get": {
+        "operationId": "getCandles",
+        "parameters": [
+          { "name": "symbol", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "type", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "startAt", "in": "query", "schema": { "type": "integer" } },
+          { "name": "endAt", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Candles returned" } }
+      }
+    }
+  }
+}
