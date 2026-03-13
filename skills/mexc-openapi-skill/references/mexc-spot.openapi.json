@@ -1,0 +1,129 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "MEXC Spot API",
+    "version": "v1",
+    "description": "Curated MEXC Spot REST surface for public market data and core signed account/order workflows."
+  },
+  "servers": [
+    { "url": "https://api.mexc.com" }
+  ],
+  "components": {
+    "schemas": {
+      "CreateOrderRequest": {
+        "type": "object",
+        "required": ["symbol", "side", "type"],
+        "properties": {
+          "symbol": { "type": "string" },
+          "side": { "type": "string", "enum": ["BUY", "SELL"] },
+          "type": { "type": "string" },
+          "quantity": { "type": "number" },
+          "quoteOrderQty": { "type": "number" },
+          "price": { "type": "number" },
+          "timeInForce": { "type": "string" },
+          "recvWindow": { "type": "integer" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/v3/ping": {
+      "get": {
+        "operationId": "ping",
+        "responses": { "200": { "description": "Ping returned" } }
+      }
+    },
+    "/api/v3/exchangeInfo": {
+      "get": {
+        "operationId": "getExchangeInfo",
+        "parameters": [
+          { "name": "symbol", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Exchange info returned" } }
+      }
+    },
+    "/api/v3/ticker/price": {
+      "get": {
+        "operationId": "getTickerPrice",
+        "parameters": [
+          { "name": "symbol", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Price ticker returned" } }
+      }
+    },
+    "/api/v3/ticker/24hr": {
+      "get": {
+        "operationId": "getTicker24h",
+        "parameters": [
+          { "name": "symbol", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "24h ticker returned" } }
+      }
+    },
+    "/api/v3/depth": {
+      "get": {
+        "operationId": "getDepth",
+        "parameters": [
+          { "name": "symbol", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Depth returned" } }
+      }
+    },
+    "/api/v3/account": {
+      "get": {
+        "operationId": "getAccount",
+        "parameters": [
+          { "name": "recvWindow", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Account returned" } }
+      }
+    },
+    "/api/v3/openOrders": {
+      "get": {
+        "operationId": "getOpenOrders",
+        "parameters": [
+          { "name": "symbol", "in": "query", "schema": { "type": "string" } },
+          { "name": "recvWindow", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Open orders returned" } }
+      }
+    },
+    "/api/v3/order": {
+      "get": {
+        "operationId": "getOrder",
+        "parameters": [
+          { "name": "symbol", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "orderId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "origClientOrderId", "in": "query", "schema": { "type": "string" } },
+          { "name": "recvWindow", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Order returned" } }
+      },
+      "post": {
+        "operationId": "createOrder",
+        "parameters": [
+          { "name": "symbol", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "side", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "type", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "quantity", "in": "query", "schema": { "type": "number" } },
+          { "name": "quoteOrderQty", "in": "query", "schema": { "type": "number" } },
+          { "name": "price", "in": "query", "schema": { "type": "number" } },
+          { "name": "timeInForce", "in": "query", "schema": { "type": "string" } },
+          { "name": "recvWindow", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Order created" } }
+      },
+      "delete": {
+        "operationId": "cancelOrder",
+        "parameters": [
+          { "name": "symbol", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "orderId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "origClientOrderId", "in": "query", "schema": { "type": "string" } },
+          { "name": "recvWindow", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Order canceled" } }
+      }
+    }
+  }
+}

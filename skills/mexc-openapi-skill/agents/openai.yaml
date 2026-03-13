@@ -1,0 +1,4 @@
+interface:
+  display_name: "MEXC Spot"
+  short_description: "MEXC public market, account, and order endpoints via curated Spot REST mapping"
+  default_prompt: "Use $mexc-openapi-skill to discover and execute MEXC Spot REST operations through UXC with public-market reads, HMAC query signer bindings for signed account/order flows, and explicit write guardrails."
