@@ -1,0 +1,4 @@
+interface:
+  display_name: "Blockscout Explorer API"
+  short_description: "Operate Blockscout explorer reads via UXC + curated OpenAPI schema"
+  default_prompt: "Use $blockscout-openapi-skill to discover and execute Blockscout explorer read operations through UXC with instance-specific host selection and read-first guardrails."
