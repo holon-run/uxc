@@ -1,0 +1,4 @@
+interface:
+  display_name: "GoldRush MCP"
+  short_description: "Multichain wallet, portfolio, NFT, and transaction data via GoldRush MCP"
+  default_prompt: "Use $goldrush-mcp-skill to query GoldRush MCP for multichain wallet balances, transfers, portfolio history, NFT ownership, token approvals, prices, and chain metadata with help-first inspection and injected API-key auth."

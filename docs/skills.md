@@ -21,6 +21,8 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Unified wrapper for The Graph Token API MCP workflows (token metadata, wallet balances, transfers, holders, pools, market data).
 - `skills/etherscan-mcp-skill`
   - Unified wrapper for Etherscan MCP workflows (address portfolio, token holders, contract lookup).
+- `skills/goldrush-mcp-skill`
+  - Unified wrapper for GoldRush MCP workflows (multichain wallet, portfolio, NFT, transaction, and chain metadata).
 - `skills/notion-mcp-skill`
   - Wrapper for Notion MCP workflows with OAuth two-step login guidance and guarded-write guidance.
 - `skills/discord-openapi-skill`
@@ -69,8 +71,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/goldrush-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -103,6 +104,12 @@ bash skills/notion-mcp-skill/scripts/validate.sh
 
 ```bash
 bash skills/etherscan-mcp-skill/scripts/validate.sh
+```
+
+- Validate GoldRush wrapper docs when touched:
+
+```bash
+bash skills/goldrush-mcp-skill/scripts/validate.sh
 ```
 
 - Validate Dune wrapper docs when touched:
