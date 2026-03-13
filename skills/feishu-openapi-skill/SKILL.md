@@ -50,10 +50,18 @@ Feishu and Lark service-side APIs use `Authorization: Bearer <tenant_access_toke
 
 Tenant access tokens are typically fetched from the internal app token endpoint using `app_id` and `app_secret`, and the official auth docs state they are valid for 2 hours. Keep that bootstrap outside this skill, then bind the resulting token into `uxc auth`.
 
-Example bootstrap:
+Feishu bootstrap example:
 
 ```bash
 curl -sS https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"app_id":"cli_xxx","app_secret":"xxxx"}'
+```
+
+Lark uses the same path shape on the Lark host:
+
+```bash
+curl -sS https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{"app_id":"cli_xxx","app_secret":"xxxx"}'
 ```

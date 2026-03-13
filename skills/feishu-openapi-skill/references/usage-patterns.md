@@ -13,8 +13,18 @@ For international Lark tenants, use the same schema against `https://open.larksu
 
 ## Token Bootstrap
 
+For Feishu tenants:
+
 ```bash
 curl -sS https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d '{"app_id":"cli_xxx","app_secret":"xxxx"}'
+```
+
+For Lark tenants, call the same path on the Lark host:
+
+```bash
+curl -sS https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d '{"app_id":"cli_xxx","app_secret":"xxxx"}'
 ```

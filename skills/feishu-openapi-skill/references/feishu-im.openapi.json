@@ -8,6 +8,9 @@
   "servers": [
     {
       "url": "https://open.feishu.cn/open-apis"
+    },
+    {
+      "url": "https://open.larksuite.com/open-apis"
     }
   ],
   "security": [
