@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bitget Exchange"
+  short_description: "Bitget public spot market data via curated V2 REST endpoints"
+  default_prompt: "Use $bitget-openapi-skill to discover and execute Bitget public spot market-data operations through UXC with help-first schema inspection, narrow symbol reads, and explicit private-auth boundary notes."
