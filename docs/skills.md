@@ -35,6 +35,8 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Wrapper for Feishu or Lark IM workflows via UXC + curated OpenAPI schema and tenant-token bearer auth.
 - `skills/whatsapp-openapi-skill`
   - Wrapper for WhatsApp Business Platform Cloud API workflows via UXC + curated OpenAPI schema and bearer-token auth.
+- `skills/dingtalk-openapi-skill`
+  - Wrapper for DingTalk v1.0 messaging workflows via UXC + curated OpenAPI schema and app-token bearer auth.
 - `skills/binance-web3-openapi-skill`
   - Wrapper for Binance Web3 public market/research workflows via UXC + curated OpenAPI schema.
 - `skills/binance-spot-openapi-skill`
@@ -68,6 +70,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
 ```
 
 Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -154,6 +157,12 @@ bash skills/feishu-openapi-skill/scripts/validate.sh
 
 ```bash
 bash skills/whatsapp-openapi-skill/scripts/validate.sh
+```
+
+- Validate DingTalk wrapper docs when touched:
+
+```bash
+bash skills/dingtalk-openapi-skill/scripts/validate.sh
 ```
 
 - Validate Binance Web3 wrapper docs when touched:

@@ -1,0 +1,4 @@
+interface:
+  display_name: "DingTalk Messaging"
+  short_description: "Operate DingTalk v1.0 messaging APIs via UXC + curated OpenAPI schema"
+  default_prompt: "Use $dingtalk-openapi-skill to discover and execute DingTalk messaging operations through UXC with app-token bearer auth, robot/service-group send scope, and msgParam string guardrails."
