@@ -1,0 +1,454 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Telegram Bot API (Curated Lean Core)",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.telegram.org"
+    }
+  ],
+  "paths": {
+    "/getMe": {
+      "get": {
+        "summary": "Get basic bot identity information",
+        "responses": {
+          "200": {
+            "description": "Bot identity response"
+          }
+        }
+      }
+    },
+    "/getChat": {
+      "get": {
+        "summary": "Get information about a chat the bot can access",
+        "parameters": [
+          {
+            "name": "chat_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Unique identifier for the target chat or username of the target supergroup/channel"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat info response"
+          }
+        }
+      }
+    },
+    "/getChatMember": {
+      "get": {
+        "summary": "Get information about a member of a chat",
+        "parameters": [
+          {
+            "name": "chat_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat member response"
+          }
+        }
+      }
+    },
+    "/getWebhookInfo": {
+      "get": {
+        "summary": "Get current webhook status",
+        "responses": {
+          "200": {
+            "description": "Webhook info response"
+          }
+        }
+      }
+    },
+    "/sendMessage": {
+      "post": {
+        "summary": "Send a text message",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent message response"
+          }
+        }
+      }
+    },
+    "/sendPhoto": {
+      "post": {
+        "summary": "Send a photo by file_id or HTTP URL",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendPhotoRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent photo response"
+          }
+        }
+      }
+    },
+    "/sendDocument": {
+      "post": {
+        "summary": "Send a document by file_id or HTTP URL",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendDocumentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent document response"
+          }
+        }
+      }
+    },
+    "/sendMediaGroup": {
+      "post": {
+        "summary": "Send a group of photos or documents by file_id or HTTP URL",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMediaGroupRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent media group response"
+          }
+        }
+      }
+    },
+    "/getUpdates": {
+      "post": {
+        "summary": "Poll for incoming updates",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetUpdatesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updates response"
+          }
+        }
+      }
+    },
+    "/setWebhook": {
+      "post": {
+        "summary": "Configure webhook delivery without certificate upload",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetWebhookRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Webhook set response"
+          }
+        }
+      }
+    },
+    "/deleteWebhook": {
+      "post": {
+        "summary": "Delete webhook configuration",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteWebhookRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Webhook delete response"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChatId": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer",
+            "format": "int64"
+          }
+        ]
+      },
+      "ReplyMarkup": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Telegram reply markup object passed as JSON"
+      },
+      "SendMessageRequest": {
+        "type": "object",
+        "required": [
+          "chat_id",
+          "text"
+        ],
+        "properties": {
+          "chat_id": {
+            "$ref": "#/components/schemas/ChatId"
+          },
+          "text": {
+            "type": "string"
+          },
+          "parse_mode": {
+            "type": "string"
+          },
+          "disable_notification": {
+            "type": "boolean"
+          },
+          "protect_content": {
+            "type": "boolean"
+          },
+          "reply_markup": {
+            "$ref": "#/components/schemas/ReplyMarkup"
+          }
+        },
+        "additionalProperties": true
+      },
+      "SendPhotoRequest": {
+        "type": "object",
+        "required": [
+          "chat_id",
+          "photo"
+        ],
+        "properties": {
+          "chat_id": {
+            "$ref": "#/components/schemas/ChatId"
+          },
+          "photo": {
+            "type": "string",
+            "description": "Existing file_id or HTTP URL only in this curated schema"
+          },
+          "caption": {
+            "type": "string"
+          },
+          "parse_mode": {
+            "type": "string"
+          },
+          "disable_notification": {
+            "type": "boolean"
+          },
+          "protect_content": {
+            "type": "boolean"
+          },
+          "reply_markup": {
+            "$ref": "#/components/schemas/ReplyMarkup"
+          }
+        },
+        "additionalProperties": true
+      },
+      "SendDocumentRequest": {
+        "type": "object",
+        "required": [
+          "chat_id",
+          "document"
+        ],
+        "properties": {
+          "chat_id": {
+            "$ref": "#/components/schemas/ChatId"
+          },
+          "document": {
+            "type": "string",
+            "description": "Existing file_id or HTTP URL only in this curated schema"
+          },
+          "caption": {
+            "type": "string"
+          },
+          "parse_mode": {
+            "type": "string"
+          },
+          "disable_notification": {
+            "type": "boolean"
+          },
+          "protect_content": {
+            "type": "boolean"
+          },
+          "reply_markup": {
+            "$ref": "#/components/schemas/ReplyMarkup"
+          }
+        },
+        "additionalProperties": true
+      },
+      "InputMediaItem": {
+        "type": "object",
+        "required": [
+          "type",
+          "media"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "photo",
+              "document"
+            ]
+          },
+          "media": {
+            "type": "string",
+            "description": "Existing file_id or HTTP URL only in this curated schema"
+          },
+          "caption": {
+            "type": "string"
+          },
+          "parse_mode": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "SendMediaGroupRequest": {
+        "type": "object",
+        "required": [
+          "chat_id",
+          "media"
+        ],
+        "properties": {
+          "chat_id": {
+            "$ref": "#/components/schemas/ChatId"
+          },
+          "media": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "$ref": "#/components/schemas/InputMediaItem"
+            }
+          },
+          "disable_notification": {
+            "type": "boolean"
+          },
+          "protect_content": {
+            "type": "boolean"
+          },
+          "reply_to_message_id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": true
+      },
+      "GetUpdatesRequest": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "timeout": {
+            "type": "integer"
+          },
+          "allowed_updates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "SetWebhookRequest": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "ip_address": {
+            "type": "string"
+          },
+          "max_connections": {
+            "type": "integer"
+          },
+          "allowed_updates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "drop_pending_updates": {
+            "type": "boolean"
+          },
+          "secret_token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "DeleteWebhookRequest": {
+        "type": "object",
+        "properties": {
+          "drop_pending_updates": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

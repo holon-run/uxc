@@ -325,6 +325,11 @@ enum AuthCredentialCommands {
         #[arg(long)]
         query_param: Vec<String>,
 
+        /// Request path prefix template: <template>
+        /// Template supports {{secret}}, {{field:name}}, {{env:VAR}}, {{op://...}}
+        #[arg(long)]
+        path_prefix_template: Option<String>,
+
         /// Named auth field source (repeatable): <field-name>=<source>
         /// Source supports literal:<value>, env:<VAR>, op://...
         #[arg(long)]
@@ -628,6 +633,7 @@ struct AuthProfileView {
     fields: Option<Vec<AuthFieldView>>,
     auth_headers: Option<Vec<AuthHeaderView>>,
     auth_query_params: Option<Vec<AuthQueryParamView>>,
+    auth_path_prefix: Option<AuthPathPrefixView>,
     description: Option<String>,
     oauth: Option<AuthOAuthView>,
 }
@@ -653,6 +659,11 @@ struct AuthFieldView {
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthQueryParamView {
     name: String,
+    value_masked: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthPathPrefixView {
     value_masked: String,
 }
 
@@ -1701,11 +1712,12 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth", "credential", "set"] => HelpData {
             path: "uxc auth credential set".to_string(),
             about: "Set or update a credential".to_string(),
-            usage: "uxc auth credential set <credential_id> [--auth-type <type>] [--secret <value>|--secret-env <key>|--secret-op <op://...>] [--field <name>=<literal:...|env:...|op://...>]... [--api-key-header <name>|--header <name>=<template>] [--query-param <name>=<template>] [--description <text>]".to_string(),
+            usage: "uxc auth credential set <credential_id> [--auth-type <type>] [--secret <value>|--secret-env <key>|--secret-op <op://...>] [--field <name>=<literal:...|env:...|op://...>]... [--api-key-header <name>|--header <name>=<template>] [--query-param <name>=<template>] [--path-prefix-template <template>] [--description <text>]".to_string(),
             commands: vec![],
             notes: vec![
                 "--field is repeatable and stores additional named auth fields on the credential.".to_string(),
                 "{{secret}} remains available and is equivalent to {{field:secret}} for compatible credentials.".to_string(),
+                "--path-prefix-template is for APIs that place credentials in the request path, such as Telegram Bot API.".to_string(),
             ],
             examples: vec![
                 "uxc auth credential set deepwiki --secret-env DEEPWIKI_TOKEN".to_string(),
@@ -1713,6 +1725,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                     .to_string(),
                 "uxc auth credential set flipside --auth-type api_key --query-param \"apiKey={{secret}}\" --secret-env FLIPSIDE_API_KEY".to_string(),
                 "uxc auth credential set binance --auth-type api_key --field api_key=env:BINANCE_API_KEY --field secret_key=env:BINANCE_SECRET_KEY --header \"X-API-Key={{field:api_key}}\"".to_string(),
+                "uxc auth credential set telegram-bot --auth-type api_key --secret-env TELEGRAM_BOT_TOKEN --path-prefix-template \"/bot{{secret}}\"".to_string(),
             ],
         },
         ["auth", "credential", "remove"] => HelpData {
@@ -3587,6 +3600,7 @@ async fn handle_auth_credential_command(
             api_key_header,
             header,
             query_param,
+            path_prefix_template,
             field,
             description,
         } => {
@@ -3624,10 +3638,13 @@ async fn handle_auth_credential_command(
             }
 
             if resolved_auth_type != AuthType::ApiKey
-                && (api_key_header.is_some() || !header.is_empty() || !query_param.is_empty())
+                && (api_key_header.is_some()
+                    || !header.is_empty()
+                    || !query_param.is_empty()
+                    || path_prefix_template.is_some())
             {
                 return Err(UxcError::InvalidArguments(
-                    "--api-key-header/--header/--query-param can only be used with --auth-type api_key"
+                    "--api-key-header/--header/--query-param/--path-prefix-template can only be used with --auth-type api_key"
                         .to_string(),
                 )
                 .into());
@@ -3676,6 +3693,11 @@ async fn handle_auth_credential_command(
                     .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
                 profile_obj.auth_query_params = Some(auth_query_params);
             }
+            if let Some(template) = path_prefix_template {
+                let normalized = crate::auth::validate_auth_path_prefix_template(template)
+                    .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+                profile_obj.auth_path_prefix = Some(normalized);
+            }
 
             if resolved_auth_type == AuthType::OAuth {
                 profile_obj.clear_fields();
@@ -3708,6 +3730,7 @@ async fn handle_auth_credential_command(
                 let requires_secret = if resolved_auth_type == AuthType::ApiKey {
                     if profile_obj.has_custom_api_key_headers()
                         || profile_obj.has_custom_api_key_query_params()
+                        || profile_obj.has_custom_api_key_path_prefix()
                     {
                         profile_obj.api_key_injections_require_secret()
                     } else {
@@ -3753,11 +3776,13 @@ async fn handle_auth_credential_command(
                 profile_obj.secret_source = None;
                 profile_obj.auth_headers = None;
                 profile_obj.auth_query_params = None;
+                profile_obj.auth_path_prefix = None;
             } else {
                 profile_obj.oauth = None;
                 if resolved_auth_type != AuthType::ApiKey {
                     profile_obj.auth_headers = None;
                     profile_obj.auth_query_params = None;
+                    profile_obj.auth_path_prefix = None;
                 } else if profile_obj
                     .auth_headers
                     .as_ref()
@@ -3780,6 +3805,12 @@ async fn handle_auth_credential_command(
                             .expect("checked is_some"),
                     )
                     .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+                }
+                if let Some(prefix) = profile_obj.auth_path_prefix.as_ref() {
+                    profile_obj.auth_path_prefix = Some(
+                        crate::auth::validate_auth_path_prefix_template(prefix)
+                            .map_err(|e| UxcError::InvalidArguments(e.to_string()))?,
+                    );
                 }
             }
 
@@ -4416,6 +4447,12 @@ fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
                 })
                 .collect()
         }),
+        auth_path_prefix: profile
+            .auth_path_prefix
+            .as_ref()
+            .map(|_| AuthPathPrefixView {
+                value_masked: "***".to_string(),
+            }),
         description: profile.description.clone(),
         oauth,
     }

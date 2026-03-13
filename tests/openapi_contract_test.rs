@@ -18,7 +18,7 @@ where
     F: FnOnce(mockito::ServerGuard) -> R,
     R: Send + 'static,
 {
-    let mut server = mockito::Server::new();
+    let server = mockito::Server::new();
     f(server)
 }
 
@@ -1349,6 +1349,74 @@ fn test_execute_handles_401_unauthorized() {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("HTTP error 401"));
         assert!(err_msg.contains("Unauthorized"));
+    });
+}
+
+#[test]
+fn test_execute_applies_auth_path_prefix_only_to_operation_url() {
+    run_async(|mut server| {
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Telegram Bot API", "version": "1.0" },
+            "paths": {
+                "/sendMessage": {
+                    "post": {
+                        "operationId": "sendMessage",
+                        "requestBody": {
+                            "required": true,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["chat_id", "text"],
+                                        "properties": {
+                                            "chat_id": { "type": "string" },
+                                            "text": { "type": "string" }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema_mock = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let _mock = server
+            .mock("POST", "/bot123:abc/sendMessage")
+            .match_header(
+                "content-type",
+                mockito::Matcher::Regex("application/json".into()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true,"result":{"message_id":1}}"#)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut profile = Profile::new("123:abc".to_string(), AuthType::ApiKey);
+        profile.auth_path_prefix = Some("/bot{{secret}}".to_string());
+        let adapter = OpenAPIAdapter::new().with_auth(profile);
+
+        let mut args = HashMap::new();
+        args.insert("chat_id".to_string(), json!("123456"));
+        args.insert("text".to_string(), json!("hello"));
+
+        let result = rt.block_on(async {
+            adapter
+                .execute(&server.url(), "post:/sendMessage", args)
+                .await
+        });
+
+        assert!(result.is_ok(), "execution should succeed: {result:?}");
     });
 }
 

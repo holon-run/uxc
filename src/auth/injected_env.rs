@@ -207,6 +207,7 @@ mod tests {
             fields: std::collections::HashMap::new(),
             auth_headers: None,
             auth_query_params: None,
+            auth_path_prefix: None,
             signer: None,
         };
         let rendered = InjectEnvSpec::parse("TOKEN=Bearer {{secret}}")
