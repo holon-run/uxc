@@ -28,11 +28,18 @@ jq -e '.openapi and .paths and .components' "${SCHEMA_FILE}" >/dev/null 2>&1 || 
 jq -e '.paths["/api/v1/symbols"] and .paths["/api/v1/market/allTickers"]' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'OpenAPI schema missing expected KuCoin paths'
 
 rg -q '^name:\s*kucoin-openapi-skill\s*$' "${SKILL_FILE}" || fail 'invalid skill name'
+rg -q '^description:\s*.+' "${SKILL_FILE}" || fail 'missing description'
 rg -q 'command -v kucoin-openapi-cli' "${SKILL_FILE}" || fail 'missing link-first command check'
 rg -q 'uxc link kucoin-openapi-cli https://api.kucoin.com --schema-url ' "${SKILL_FILE}" || fail 'missing fixed link create command with schema-url'
 rg -q 'provider-specific headers and signing rules' "${SKILL_FILE}" "${USAGE_FILE}" || fail 'missing private auth boundary note'
 rg -q 'read-only' "${SKILL_FILE}" || fail 'missing read-only guardrail'
+
+if rg -q -- "--args\\s+'\\{" "${SKILL_FILE}" "${USAGE_FILE}"; then
+  fail 'found banned legacy JSON argument pattern'
+fi
+
 rg -q '^\s*display_name:\s*"KuCoin Unified API"\s*$' "${OPENAI_FILE}" || fail 'missing display_name'
+rg -q '^\s*short_description:\s*".+"\s*$' "${OPENAI_FILE}" || fail 'missing short_description'
 rg -q '^\s*default_prompt:\s*".*\$kucoin-openapi-skill.*"\s*$' "${OPENAI_FILE}" || fail 'default_prompt must mention $kucoin-openapi-skill'
 
 echo "skills/kucoin-openapi-skill validation passed"
