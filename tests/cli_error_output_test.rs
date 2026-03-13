@@ -4,9 +4,22 @@
 
 use assert_cmd::Command;
 use mockito::Server;
+use tempfile::TempDir;
 
 fn uxc() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("uxc"))
+}
+
+fn isolated_uxc() -> (Command, TempDir) {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    let runtime_dir = temp_home.path().join("runtime");
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+
+    let mut cmd = uxc();
+    cmd.env("HOME", temp_home.path())
+        .env("USERPROFILE", temp_home.path())
+        .env("XDG_RUNTIME_DIR", &runtime_dir);
+    (cmd, temp_home)
 }
 
 #[test]
@@ -150,4 +163,23 @@ fn invalid_positional_arg_returns_invalid_argument_with_helpful_hint() {
     assert!(message.contains("JSON object as a positional argument"));
     assert!(message.contains(r#"key1":"value1"#));
     assert!(message.contains(r#"key2":"value2"#));
+}
+
+#[test]
+fn mcp_stdio_startup_failure_surfaces_child_exit_instead_of_timeout() {
+    let endpoint = "sh -c 'read line; echo TARGET_UNREACHABLE >&2; exit 7'";
+
+    let (mut cmd, _temp_home) = isolated_uxc();
+    let output = cmd.arg(endpoint).arg("-h").assert().failure();
+
+    let stdout = output.get_output().stdout.clone();
+    let json: serde_json::Value =
+        serde_json::from_slice(&stdout).expect("stdout should be valid JSON");
+
+    assert_eq!(json["ok"], false, "ok should be false");
+    let message = json["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("child exited before response to initialize"));
+    assert!(message.contains("exit code 7"));
+    assert!(message.contains("TARGET_UNREACHABLE"));
+    assert!(!message.contains("timed out"), "message was: {}", message);
 }

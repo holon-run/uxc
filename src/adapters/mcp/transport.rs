@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, Mutex};
 
 const DEFAULT_STDIO_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const MAX_BUFFERED_NOTIFICATIONS: usize = 64;
+const MAX_BUFFERED_STDERR_LINES: usize = 32;
 
 /// Trait for executing MCP stdio processes (abstracted for testing)
 #[async_trait]
@@ -41,6 +42,8 @@ pub struct SpawnedProcess {
     pub stdin: tokio::process::ChildStdin,
     /// The stdout handle
     pub stdout: tokio::process::ChildStdout,
+    /// The stderr handle
+    pub stderr: tokio::process::ChildStderr,
 }
 
 /// Default stdio process executor using tokio::process::Command
@@ -85,18 +88,20 @@ impl StdioProcessExecutor for DefaultStdioProcessExecutor {
             .envs(options.env_overrides.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .context("Failed to spawn MCP server process")?;
 
         // Get stdin and stdout handles
         let stdin = child.stdin.take().context("Failed to get stdin handle")?;
         let stdout = child.stdout.take().context("Failed to get stdout handle")?;
+        let stderr = child.stderr.take().context("Failed to get stderr handle")?;
 
         Ok(SpawnedProcess {
             child,
             stdin,
             stdout,
+            stderr,
         })
     }
 }
@@ -186,11 +191,13 @@ impl StdioProcessExecutor for MockStdioExecutor {
 
         let stdin = child.stdin.take().context("Failed to get stdin handle")?;
         let stdout = child.stdout.take().context("Failed to get stdout handle")?;
+        let stderr = child.stderr.take().context("Failed to get stderr handle")?;
 
         Ok(SpawnedProcess {
             child,
             stdin,
             stdout,
+            stderr,
         })
     }
 }
@@ -209,6 +216,8 @@ pub struct McpStdioTransport {
     >,
     /// Buffered server notifications received outside the request/response flow.
     notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>>,
+    /// Recent child stderr lines for surfacing startup failures.
+    stderr_lines: Arc<Mutex<VecDeque<String>>>,
     /// Process executor (abstracted for testing)
     _executor: Arc<dyn StdioProcessExecutor>,
 }
@@ -221,6 +230,7 @@ impl std::fmt::Debug for McpStdioTransport {
             .field("request_tx", &self.request_tx)
             .field("response_channels", &self.response_channels)
             .field("notifications", &self.notifications)
+            .field("stderr_lines", &self.stderr_lines)
             .finish()
     }
 }
@@ -263,6 +273,7 @@ impl McpStdioTransport {
             child,
             stdin,
             stdout,
+            stderr,
         } = executor.spawn(command, args, &options).await?;
 
         // Create channels for sending requests
@@ -274,6 +285,7 @@ impl McpStdioTransport {
             tokio::sync::oneshot::Sender<JsonRpcResponse>,
         >::new()));
         let notifications = Arc::new(Mutex::new(VecDeque::<JsonRpcNotification>::new()));
+        let stderr_lines = Arc::new(Mutex::new(VecDeque::<String>::new()));
 
         // Spawn a task to handle writing to stdin
         let mut stdin_writer = stdin;
@@ -358,12 +370,28 @@ impl McpStdioTransport {
             }
         });
 
+        let stderr_lines_clone = stderr_lines.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::warn!("MCP stdio child stderr: {}", line);
+                let mut buffer = stderr_lines_clone.lock().await;
+                if buffer.len() >= MAX_BUFFERED_STDERR_LINES {
+                    buffer.pop_front();
+                }
+                buffer.push_back(line);
+            }
+        });
+
         Ok(Self {
             child,
             next_id,
             request_tx,
             response_channels,
             notifications,
+            stderr_lines,
             _executor: executor,
         })
     }
@@ -425,10 +453,33 @@ impl McpStdioTransport {
         // Wait for the response with timeout so a stuck MCP server/tool call
         // does not block the caller indefinitely.
         let timeout = stdio_request_timeout();
-        let response = match tokio::time::timeout(timeout, response_rx).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(_)) => return Err(anyhow!("Response channel closed")),
-            Err(_) => {
+        let response = match tokio::select! {
+            response = response_rx => StdioRequestOutcome::Response(response),
+            exit_status = self.child.wait() => StdioRequestOutcome::ChildExited(exit_status),
+            _ = tokio::time::sleep(timeout) => StdioRequestOutcome::TimedOut,
+        } {
+            StdioRequestOutcome::Response(Ok(response)) => response,
+            StdioRequestOutcome::Response(Err(_)) => {
+                return Err(anyhow!("Response channel closed"))
+            }
+            StdioRequestOutcome::ChildExited(Ok(status)) => {
+                let mut channels = self.response_channels.lock().await;
+                channels.remove(&id);
+                return Err(anyhow!(
+                    "{}",
+                    self.child_exit_error(method, status.code()).await
+                ));
+            }
+            StdioRequestOutcome::ChildExited(Err(err)) => {
+                let mut channels = self.response_channels.lock().await;
+                channels.remove(&id);
+                return Err(anyhow!(
+                    "Failed waiting for MCP stdio child process while handling {}: {}",
+                    method,
+                    err
+                ));
+            }
+            StdioRequestOutcome::TimedOut => {
                 let mut channels = self.response_channels.lock().await;
                 channels.remove(&id);
                 return Err(anyhow!(
@@ -497,6 +548,36 @@ impl McpStdioTransport {
         let mut queue = self.notifications.lock().await;
         queue.drain(..).collect()
     }
+
+    async fn child_exit_error(&self, method: &str, exit_code: Option<i32>) -> String {
+        let stderr = {
+            let lines = self.stderr_lines.lock().await;
+            lines
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
+        };
+
+        let exit_detail = match exit_code {
+            Some(code) => format!("exit code {}", code),
+            None => "signal".to_string(),
+        };
+
+        if stderr.is_empty() {
+            format!(
+                "MCP stdio child exited before response to {} ({})",
+                method, exit_detail
+            )
+        } else {
+            format!(
+                "MCP stdio child exited before response to {} ({}). stderr: {}",
+                method, exit_detail, stderr
+            )
+        }
+    }
 }
 
 impl Drop for McpStdioTransport {
@@ -512,6 +593,12 @@ fn stdio_request_timeout() -> Duration {
         .filter(|v| *v > 0)
         .unwrap_or(DEFAULT_STDIO_REQUEST_TIMEOUT_MS);
     Duration::from_millis(ms)
+}
+
+enum StdioRequestOutcome {
+    Response(std::result::Result<JsonRpcResponse, tokio::sync::oneshot::error::RecvError>),
+    ChildExited(std::io::Result<std::process::ExitStatus>),
+    TimedOut,
 }
 
 fn expand_tilde_args(args: &mut [String]) {
@@ -1131,6 +1218,45 @@ mod tests {
 
         // Either timeout or error is acceptable
         assert!(result.is_err() || result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn initialize_fails_fast_when_child_exits_before_responding() {
+        let script = r#"
+            read line
+            echo "TARGET_UNREACHABLE: failed to connect" >&2
+            exit 7
+        "#;
+        let mut transport =
+            McpStdioTransport::connect("sh", &["-c".to_string(), script.to_string()])
+                .await
+                .unwrap();
+
+        let client_info = ClientInfo {
+            name: "uxc".to_string(),
+            version: "1.0.0".to_string(),
+        };
+
+        let start = tokio::time::Instant::now();
+        let err = transport
+            .initialize(client_info)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "initialize should fail fast, got {:?}",
+            start.elapsed()
+        );
+        assert!(err.contains("child exited before response to initialize"));
+        assert!(err.contains("exit code 7"));
+        assert!(err.contains("TARGET_UNREACHABLE"));
+        assert!(
+            !err.contains("timed out"),
+            "unexpected timeout error: {}",
+            err
+        );
     }
 
     #[tokio::test]
