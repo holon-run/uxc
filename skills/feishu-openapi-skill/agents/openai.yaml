@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feishu / Lark IM"
+  short_description: "Operate Feishu or Lark IM APIs via UXC + curated OpenAPI schema"
+  default_prompt: "Use $feishu-openapi-skill to discover and execute Feishu or Lark IM operations through UXC with tenant-token bearer auth, chat/message scope, and content-string guardrails."
