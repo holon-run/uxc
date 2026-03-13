@@ -174,6 +174,8 @@ bash skills/dingtalk-openapi-skill/scripts/validate.sh
 
 ```bash
 bash skills/blockscout-openapi-skill/scripts/validate.sh
+```
+
 - Validate DefiLlama wrapper docs when touched:
 
 ```bash
@@ -184,7 +186,6 @@ bash skills/defillama-openapi-skill/scripts/validate.sh
 
 ```bash
 bash skills/coingecko-openapi-skill/scripts/validate.sh
->>>>>>> origin/main
 ```
 
 - Validate Binance Web3 wrapper docs when touched:
