@@ -105,6 +105,7 @@ uxc auth binding match https://pro-api.llama.fi
 - Treat this v1 skill as read-only. Do not imply wallet, trading, or admin support.
 - This skill assumes the Pro host and key-in-path auth model. Do not bind the same credential to a different path shape without checking the upstream docs first.
 - API keys are sensitive because they appear in the request path. Use `--secret-env` or `--secret-op`, not shell history literals, when possible.
+- Avoid sharing raw daemon logs when troubleshooting this integration. The key is part of the request path, so if you inspect `~/.uxc/daemon/daemon.log`, sanitize, rotate, or delete the log after debugging and avoid verbose logging unless necessary.
 - `defillama-openapi-cli <operation> ...` is equivalent to `uxc https://pro-api.llama.fi --schema-url <defillama_openapi_schema> <operation> ...`.
 
 ## References
