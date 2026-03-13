@@ -29,6 +29,8 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Wrapper for Slack Web API messaging-core workflows via UXC + curated OpenAPI schema and bearer-token auth.
 - `skills/matrix-openapi-skill`
   - Wrapper for Matrix Client-Server workflows via UXC + curated OpenAPI schema, homeserver-specific base URL, and bearer-token auth.
+- `skills/whatsapp-openapi-skill`
+  - Wrapper for WhatsApp Business Platform Cloud API workflows via UXC + curated OpenAPI schema and bearer-token auth.
 - `skills/binance-web3-openapi-skill`
   - Wrapper for Binance Web3 public market/research workflows via UXC + curated OpenAPI schema.
 - `skills/binance-spot-openapi-skill`
@@ -61,7 +63,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -130,6 +132,12 @@ bash skills/slack-openapi-skill/scripts/validate.sh
 
 ```bash
 bash skills/matrix-openapi-skill/scripts/validate.sh
+```
+
+- Validate WhatsApp wrapper docs when touched:
+
+```bash
+bash skills/whatsapp-openapi-skill/scripts/validate.sh
 ```
 
 - Validate Binance Web3 wrapper docs when touched:
