@@ -2,6 +2,8 @@
 
 **通用 X 协议命令行工具（Universal X-Protocol CLI）**
 
+为 Agent 提供稳定的执行界面。
+
 [English](README.md) | 简体中文
 
 [![CI](https://github.com/holon-run/uxc/workflows/CI/badge.svg)](https://github.com/holon-run/uxc/actions)
@@ -9,43 +11,39 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.83%2B-orange.svg)](https://www.rust-lang.org)
 
-UXC 是一个通用 X 协议 CLI，可直接通过 URL 发现并调用 OpenAPI、gRPC、GraphQL、MCP 和 JSON-RPC 接口。
+UXC 为 Agent 提供一种稳定的方式，用来发现、认证并调用跨 OpenAPI、gRPC、GraphQL、MCP 和 JSON-RPC 的远端工具。
 
-它可以把远端“可由 schema 描述”的接口，转成可执行的命令行操作，不需要 SDK、代码生成，也不需要预注册 endpoint。
-
-## 什么是 UXC
-
-现代服务越来越多地暴露机器可读的接口元数据。
-UXC 把这些 schema 当作运行时执行契约：
-
-- 从主机发现操作
-- 查看操作输入/输出
-- 使用结构化输入执行调用
-- 默认返回确定性的 JSON envelope
-
-如果目标能描述自己，UXC 通常就能调用它。
+它不要求你为每种协议、每个 SDK 或每套本地 MCP 配置各写一层胶水代码，而是把这些远端接口统一成一个可预测的命令契约，支持 help-first discovery、结构化执行和确定性的 JSON 输出。
 
 ## 为什么要做 UXC
 
-团队和 agent 经常要处理多种协议风格：
-OpenAPI、GraphQL、gRPC、MCP、JSON-RPC。
+Agent 的工具调用通常会在同几个地方变得很痛苦：
 
-传统方式会带来重复成本：
+- 认证信息散落在 prompt、脚本和本地配置里
+- 每种协议都有不同的调用方式
+- 本地 MCP server 名称和配置不能跨机器复用
+- 大体量工具清单或 schema 被直接塞进上下文
+- 为每个 endpoint 单独写的 wrapper 很快就会和上游接口漂移
 
-- 语言相关的 SDK 初始化
-- 与服务端真实能力逐渐漂移的生成客户端
-- 每个 endpoint 单独写一层 wrapper
-- 在 agent prompt 中嵌入很大的工具 schema
+UXC 的目标，是让远端能力对 Agent 和自动化任务来说，都表现成一个稳定的执行界面。
 
-UXC 提供了一个跨协议、URL-first 的统一 CLI 契约。
+## UXC 做什么
 
-## 为什么 UXC 适合 Skill
+- 按需从 endpoint 发现操作
+- 在执行前查看输入和输出形状
+- 用结构化参数执行操作
+- 默认返回确定性的 JSON envelope
+- 复用 auth 绑定、signer 配置和 link 快捷命令
 
-UXC 对 skill-based agent 很实用：
+如果一个目标能描述自己，UXC 通常就能调用它。
 
-- 按需发现与调用，不需要把大体量 MCP 工具定义预加载进 prompt
-- 通过 endpoint URL + auth 绑定实现可移植，不依赖每个用户本地 MCP server 名称
-- 作为共享执行层，可被多个 skill 复用
+## 为什么它适合 Agent 和 Skill
+
+- 渐进式发现可以保持上下文更小：先 `<host> -h`，再 `<host> <operation_id> -h`，最后执行
+- URL-first 的方式不依赖机器相关的 MCP alias 或本地 wrapper 名称
+- Auth binding 把凭证匹配规则从 prompt 中剥离出来
+- `uxc link` 可以把远端 endpoint 固化成稳定的本地命令
+- 同一套命令契约可以被多个 skill 和 workflow 复用
 
 ## 核心能力
 
@@ -54,8 +52,11 @@ UXC 对 skill-based agent 很实用：
 - 基于 schema 的操作发现（`<host> -h`, `<host> <operation_id> -h`）
 - 结构化调用（位置 JSON、key=value）
 - 面向自动化与 agent 的确定性 JSON envelope
-- 可复用凭证与 endpoint 绑定的认证模型
+- 可复用凭证、binding 和 signer profile 的认证模型
 - 通过 `uxc link` 提供 host 快捷命令
+- 通过 `uxc link --schema-url` 为 OpenAPI link 持久化默认 schema 地址
+- 通过 `uxc subscribe` 提供 daemon 驱动的后台订阅能力
+- 通过 `--inject-env NAME={{secret}}` 为 stdio 子进程注入认证环境变量
 
 支持协议：
 
@@ -98,7 +99,7 @@ flowchart LR
     D1 --> D2[Reused stdio MCP Process]
 ```
 
-这个设计保持调用体验稳定，同时允许各协议内部实现独立演进。
+这个设计让 discovery、auth 和 execution 的使用方式保持稳定，同时允许各协议内部实现独立演进。
 
 ## 目标使用场景
 
@@ -115,7 +116,7 @@ UXC 不是：
 - SDK 框架
 - API 网关或反向代理
 
-UXC 的定位是：schema 暴露能力的执行接口。
+UXC 的定位是：为可自描述的远端能力提供稳定的执行界面。
 
 ## 安装
 

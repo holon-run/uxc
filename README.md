@@ -2,6 +2,8 @@
 
 **Universal X-Protocol CLI**
 
+A stable execution surface for agents.
+
 English | [简体中文](README.zh-CN.md)
 
 [![CI](https://github.com/holon-run/uxc/workflows/CI/badge.svg)](https://github.com/holon-run/uxc/actions)
@@ -9,45 +11,43 @@ English | [简体中文](README.zh-CN.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.83%2B-orange.svg)](https://www.rust-lang.org)
 
-UXC is a universal X-protocol CLI that lets you discover and invoke OpenAPI, gRPC, GraphQL,
-MCP, and JSON-RPC interfaces directly from a URL.
+UXC gives agents one stable way to discover, authenticate, and call remote tools across
+OpenAPI, gRPC, GraphQL, MCP, and JSON-RPC.
 
-It turns remote schema-exposed interfaces into executable command-line operations without SDKs,
-code generation, or endpoint pre-registration.
+Instead of writing separate glue for each protocol, SDK, or local MCP setup, UXC turns
+remote interfaces into one predictable command contract with help-first discovery,
+structured execution, and deterministic JSON output.
 
-## What Is UXC
+## Why UXC Exists
 
-Modern services increasingly expose machine-readable interface metadata.
-UXC treats those schemas as runtime execution contracts:
+Agent tool use usually breaks down in the same places:
 
-- Discover operations from a host
-- Inspect operation inputs/outputs
-- Execute operations with structured input
+- auth scattered across prompts, scripts, and local setup
+- different invocation models for each protocol
+- local MCP server names and config that are not portable across machines
+- large tool manifests or schemas pushed into prompt context
+- one-off wrappers that drift from upstream interfaces
+
+UXC exists to make remote capabilities feel like one stable execution surface for agents
+and automation.
+
+## What UXC Does
+
+- Discover operations from an endpoint on demand
+- Inspect input and output shape before execution
+- Execute operations with structured arguments
 - Return deterministic JSON envelopes by default
+- Reuse auth bindings, signer profiles, and linked shortcuts
 
 If a target can describe itself, UXC can usually call it.
 
-## Why It Exists
+## Why It Works Well With Agents and Skills
 
-Teams and agents often need to interact with many protocol styles:
-OpenAPI, GraphQL, gRPC, MCP, and JSON-RPC.
-
-Traditional workflows create repeated overhead:
-
-- language-specific SDK setup
-- generated clients that drift from server reality
-- one-off wrappers for each endpoint
-- large embedded tool schemas in agent prompts
-
-UXC provides one URL-first CLI contract across protocols.
-
-## Why UXC Works Well With Skills
-
-UXC is a practical fit for skill-based agents:
-
-- On-demand discovery and invocation, without preloading large MCP tool definitions into prompt context
-- Portable by endpoint URL and auth binding, not tied to per-user local MCP server names
-- Reusable as one shared calling interface across many skills
+- Progressive discovery keeps context small: `<host> -h`, `<host> <operation_id> -h`, then execute
+- URL-first usage avoids dependency on machine-specific MCP aliases or local wrapper names
+- Auth bindings externalize credential matching instead of burying it in prompts
+- Linked shortcuts (`uxc link`) turn remote endpoints into stable local commands
+- The same command contract can be reused across many skills and workflows
 
 ## Core Capabilities
 
@@ -56,9 +56,10 @@ UXC is a practical fit for skill-based agents:
 - Schema-driven operation discovery (`<host> -h`, `<host> <operation_id> -h`)
 - Structured invocation (positional JSON, key-value args)
 - Deterministic JSON envelopes for automation and agents
-- Auth model with reusable credentials and endpoint bindings
+- Auth model with reusable credentials, bindings, and signer profiles
 - Host shortcut commands via `uxc link`
 - Link-level default OpenAPI schema persistence via `uxc link --schema-url`
+- Daemon-backed background subscriptions via `uxc subscribe`
 - Stdio child-process auth injection via `--inject-env NAME={{secret}}`
 
 Supported protocols:
@@ -102,7 +103,8 @@ flowchart LR
     D1 --> D2[Reused stdio MCP Process]
 ```
 
-This design keeps invocation UX stable while allowing protocol-specific internals.
+This design keeps discovery, auth, and execution stable while allowing protocol-specific
+internals.
 
 ## Target Use Cases
 
@@ -119,7 +121,7 @@ UXC is not:
 - an SDK framework
 - an API gateway or reverse proxy
 
-UXC is an execution interface for schema-exposed remote capabilities.
+UXC is a stable execution surface for remote capabilities that can describe themselves.
 
 ## Install
 
