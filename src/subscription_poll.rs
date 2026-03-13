@@ -198,15 +198,21 @@ impl PollSubscriptionRunner {
         };
 
         if let Some(pointer) = self.config.response_cursor_pointer.as_ref() {
-            self.checkpoint.cursor = pointer_required(&response, pointer).ok().cloned();
+            self.checkpoint.cursor = Some(
+                pointer_required(&response, pointer)
+                    .with_context(|| {
+                        format!("poll response_cursor_pointer '{}' did not resolve", pointer)
+                    })?
+                    .clone(),
+            );
         }
 
         let skipped_items = fetched_items.saturating_sub(emitted_items.len());
         let checkpoint_meta = (self.checkpoint != previous_checkpoint).then(|| {
             json!({
-                "cursor": self.checkpoint.cursor,
-                "watermark": self.checkpoint.watermark,
-                "tie_breaker": self.checkpoint.tie_breaker,
+                "cursor": self.checkpoint.cursor.clone(),
+                "watermark": self.checkpoint.watermark.clone(),
+                "tie_breaker": self.checkpoint.tie_breaker.clone(),
                 "seen_window_len": self.checkpoint.seen_keys.len(),
             })
         });
@@ -275,6 +281,15 @@ impl PollSubscriptionRunner {
                 }
                 None => None,
             };
+            let seen_key = match tiebreaker.as_ref() {
+                Some(tie) => Some(canonical_pair(&watermark, tie)?),
+                None => None,
+            };
+            if let Some(key) = seen_key.as_ref() {
+                if self.checkpoint.seen_keys.contains(key) {
+                    continue;
+                }
+            }
 
             if is_newer_item(
                 &watermark,
@@ -283,12 +298,8 @@ impl PollSubscriptionRunner {
                 self.checkpoint.tie_breaker.as_ref(),
             ) {
                 emitted.push(item.clone());
-                if let Some(tie) = tiebreaker.as_ref() {
-                    push_seen_key(
-                        &mut self.checkpoint.seen_keys,
-                        canonical_pair(&watermark, tie)?,
-                        seen_window,
-                    );
+                if let Some(key) = seen_key {
+                    push_seen_key(&mut self.checkpoint.seen_keys, key, seen_window);
                 }
             }
 
@@ -352,6 +363,7 @@ pub async fn run_poll_subscription_runtime<C: PollRuntimeContext, O: PollRuntime
             Ok(result) => {
                 let output = runner.process_response(result.data, result.duration_ms)?;
                 observer.update_status(Some("running"), None, false).await?;
+                let emitted_items = output.emitted_items.len();
                 for item in output.emitted_items {
                     observer.emit("data", Some(item), None).await?;
                 }
@@ -361,7 +373,7 @@ pub async fn run_poll_subscription_runtime<C: PollRuntimeContext, O: PollRuntime
                         None,
                         Some(json!({
                             "fetched_items": output.fetched_items,
-                            "emitted_items": output.fetched_items.saturating_sub(output.skipped_items),
+                            "emitted_items": emitted_items,
                             "skipped_items": output.skipped_items,
                             "duration_ms": output.duration_ms,
                         })),
@@ -601,5 +613,58 @@ mod tests {
             .process_response(json!({"items":[{"v":1},{"v":1}]}), None)
             .unwrap();
         assert_eq!(first.emitted_items.len(), 1);
+    }
+
+    #[test]
+    fn cursor_only_requires_response_cursor_in_payload() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("cursor".to_string()),
+            response_cursor_pointer: Some("/next_cursor".to_string()),
+            checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
+        })
+        .unwrap();
+
+        let err = runner
+            .process_response(json!({"items":[{"id":1}]}), None)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("response_cursor_pointer"));
+    }
+
+    #[test]
+    fn watermark_strategy_dedupes_repeated_pair_within_seen_window() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: None,
+            response_cursor_pointer: None,
+            checkpoint_strategy: PollCheckpointStrategy::Watermark {
+                item_watermark_pointer: "/updated_at".to_string(),
+                item_tiebreaker_pointer: Some("/id".to_string()),
+                seen_window: Some(8),
+            },
+        })
+        .unwrap();
+
+        let first = runner
+            .process_response(
+                json!({"items":[
+                    {"id":"a","updated_at":"2025-01-01T00:00:00Z"},
+                    {"id":"a","updated_at":"2025-01-01T00:00:00Z"},
+                    {"id":"b","updated_at":"2025-01-01T00:00:00Z"}
+                ]}),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            first.emitted_items,
+            vec![
+                json!({"id":"a","updated_at":"2025-01-01T00:00:00Z"}),
+                json!({"id":"b","updated_at":"2025-01-01T00:00:00Z"})
+            ]
+        );
     }
 }
