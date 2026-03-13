@@ -1,0 +1,4 @@
+interface:
+  display_name: "Birdeye MCP"
+  short_description: "Token market, discovery, and DEX context via Birdeye MCP"
+  default_prompt: "Use $birdeye-mcp-skill to query Birdeye MCP for token market data, trending and discovery workflows, price monitoring, and DEX-related reads with help-first live tool discovery and API-key auth."
