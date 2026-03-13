@@ -189,10 +189,7 @@ async fn handle_stop_requested<H: WebSocketSessionHandler, O: WebSocketRuntimeOb
     }
     close_as_stopped(
         observer,
-        stop_output
-            .stop_reason
-            .as_deref()
-            .unwrap_or(default_reason),
+        stop_output.stop_reason.as_deref().unwrap_or(default_reason),
     )
     .await
     .map_err(WebSocketRunError::Fatal)
