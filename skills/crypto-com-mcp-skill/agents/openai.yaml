@@ -1,0 +1,4 @@
+interface:
+  display_name: "Crypto.com MCP"
+  short_description: "Exchange market data via the official Crypto.com MCP surface"
+  default_prompt: "Use $crypto-com-mcp-skill to inspect and run Crypto.com MCP market-data workflows through UXC with help-first discovery and read-only guardrails."
