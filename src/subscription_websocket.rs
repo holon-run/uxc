@@ -41,6 +41,12 @@ pub struct WebSocketHandlerOutput {
     pub stop_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct WebSocketStopOutput {
+    pub outbound_text_frames: Vec<String>,
+    pub stop_reason: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WebSocketOpenMeta {
     pub redacted_url: String,
@@ -66,6 +72,10 @@ pub trait WebSocketSessionHandler: Send {
 
     async fn on_close(&mut self, _meta: WebSocketCloseMeta) -> Result<WebSocketHandlerAction> {
         Ok(WebSocketHandlerAction::Reconnect)
+    }
+
+    async fn on_stop_requested(&mut self) -> Result<WebSocketStopOutput> {
+        Ok(WebSocketStopOutput::default())
     }
 }
 
@@ -245,9 +255,16 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
     stop_rx: &mut watch::Receiver<bool>,
 ) -> std::result::Result<(), WebSocketRunError> {
     if stop_requested(stop_rx) {
-        close_as_stopped(observer, "stopped")
+        let stop_output = handler
+            .on_stop_requested()
             .await
             .map_err(WebSocketRunError::Fatal)?;
+        close_as_stopped(
+            observer,
+            stop_output.stop_reason.as_deref().unwrap_or("stopped"),
+        )
+        .await
+        .map_err(WebSocketRunError::Fatal)?;
         return Ok(());
     }
 
@@ -302,18 +319,44 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
 
     loop {
         if stop_requested(stop_rx) {
-            close_as_stopped(observer, "stopped")
+            let stop_output = handler
+                .on_stop_requested()
                 .await
                 .map_err(WebSocketRunError::Fatal)?;
+            for frame in &stop_output.outbound_text_frames {
+                if let Err(err) = stream.send(Message::Text(frame.clone())).await {
+                    tracing::debug!("websocket cleanup send failed: {}", err);
+                    break;
+                }
+            }
+            close_as_stopped(
+                observer,
+                stop_output.stop_reason.as_deref().unwrap_or("stopped"),
+            )
+            .await
+            .map_err(WebSocketRunError::Fatal)?;
             return Ok(());
         }
 
         tokio::select! {
             changed = stop_rx.changed() => {
                 if changed.is_ok() && *stop_rx.borrow() {
-                    close_as_stopped(observer, "stopped")
+                    let stop_output = handler
+                        .on_stop_requested()
                         .await
                         .map_err(WebSocketRunError::Fatal)?;
+                    for frame in &stop_output.outbound_text_frames {
+                        if let Err(err) = stream.send(Message::Text(frame.clone())).await {
+                            tracing::debug!("websocket cleanup send failed: {}", err);
+                            break;
+                        }
+                    }
+                    close_as_stopped(
+                        observer,
+                        stop_output.stop_reason.as_deref().unwrap_or("stopped"),
+                    )
+                    .await
+                    .map_err(WebSocketRunError::Fatal)?;
                     return Ok(());
                 }
                 return Err(WebSocketRunError::Retry(anyhow!("subscription stop channel closed unexpectedly")));

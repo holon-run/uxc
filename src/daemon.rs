@@ -12,6 +12,9 @@ use crate::subscription_graphql::{
     derive_graphql_websocket_endpoint, graphql_transport_init_message, GraphQLSubscriptionConfig,
     GraphQLSubscriptionHandler,
 };
+use crate::subscription_jsonrpc::{
+    derive_jsonrpc_unsubscribe_operation, JsonRpcSubscriptionConfig, JsonRpcSubscriptionHandler,
+};
 use crate::subscription_websocket::{
     self, RawFrameHandler, WebSocketRuntimeConfig, WebSocketRuntimeObserver,
 };
@@ -716,18 +719,22 @@ impl SubscriptionManager {
             }
             "websocket".to_string()
         } else if let Some(operation_id) = request.operation_id.as_deref() {
-            if !operation_id.starts_with("subscription/") {
-                bail!(
-                    "subscribe start currently supports only GraphQL subscription/<field> operation IDs"
-                );
-            }
             let lower = request.endpoint.to_ascii_lowercase();
-            if !lower.starts_with("http://") && !lower.starts_with("https://") {
+            if operation_id.starts_with("subscription/") {
+                if !lower.starts_with("http://") && !lower.starts_with("https://") {
+                    bail!(
+                        "GraphQL subscriptions require an http:// or https:// endpoint for schema discovery"
+                    );
+                }
+                "graphql".to_string()
+            } else if lower.starts_with("ws://") || lower.starts_with("wss://") {
+                derive_jsonrpc_unsubscribe_operation(operation_id)?;
+                "jsonrpc".to_string()
+            } else {
                 bail!(
-                    "GraphQL subscriptions require an http:// or https:// endpoint for schema discovery"
+                    "JSON-RPC subscriptions require a ws:// or wss:// endpoint; GraphQL subscriptions require subscription/<field> on an http:// or https:// endpoint"
                 );
             }
-            "graphql".to_string()
         } else if request.resource_uri.is_some() {
             if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint)
                 && !adapters::mcp::McpAdapter::is_http_url(&request.endpoint)
@@ -786,14 +793,29 @@ impl SubscriptionManager {
                 )
                 .await
             } else if request_clone.operation_id.is_some() {
-                run_graphql_subscription_job(
-                    &job_id_clone,
-                    &request_clone,
-                    sink_path,
-                    view_clone.clone(),
-                    stop_rx,
-                )
-                .await
+                if request_clone
+                    .operation_id
+                    .as_deref()
+                    .is_some_and(|operation_id| operation_id.starts_with("subscription/"))
+                {
+                    run_graphql_subscription_job(
+                        &job_id_clone,
+                        &request_clone,
+                        sink_path,
+                        view_clone.clone(),
+                        stop_rx,
+                    )
+                    .await
+                } else {
+                    run_jsonrpc_subscription_job(
+                        &job_id_clone,
+                        &request_clone,
+                        sink_path,
+                        view_clone.clone(),
+                        stop_rx,
+                    )
+                    .await
+                }
             } else if request_clone.resource_uri.is_some() {
                 run_mcp_subscription_job(
                     &job_id_clone,
@@ -1902,6 +1924,33 @@ async fn run_websocket_subscription_job(
     .await
 }
 
+fn resolve_jsonrpc_subscription_config(
+    request: &SubscribeStartRequest,
+) -> Result<JsonRpcSubscriptionConfig> {
+    let operation_id = request
+        .operation_id
+        .as_ref()
+        .ok_or_else(|| anyhow!("operation_id is required for JSON-RPC subscriptions"))?;
+    let unsubscribe_operation_id = derive_jsonrpc_unsubscribe_operation(operation_id)?;
+    let params = match request.args.clone().unwrap_or_default().remove("params") {
+        Some(params) => params,
+        None => Value::Null,
+    };
+    let has_extra_args = request
+        .args
+        .as_ref()
+        .is_some_and(|args| args.keys().any(|key| key != "params"));
+    if has_extra_args {
+        bail!("JSON-RPC subscriptions accept only a top-level 'params' argument");
+    }
+
+    Ok(JsonRpcSubscriptionConfig {
+        operation_id: operation_id.clone(),
+        unsubscribe_operation_id,
+        params: if params.is_null() { None } else { Some(params) },
+    })
+}
+
 async fn resolve_graphql_subscription_prepared_operation(
     request: &SubscribeStartRequest,
 ) -> Result<(
@@ -2022,6 +2071,63 @@ async fn run_graphql_subscription_job(
             Some(json!({
                 "message": err.to_string(),
                 "operation_id": operation_id,
+            })),
+        )
+        .await?;
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+async fn run_jsonrpc_subscription_job(
+    _job_id: &str,
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let config = resolve_jsonrpc_subscription_config(request)?;
+    let auth_profile =
+        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+    let mut sink = open_subscription_sink(&sink_path).await?;
+    let mut seq = 0u64;
+    let subscribe_message = JsonRpcSubscriptionHandler::new(config.clone()).subscribe_message();
+    let mut handler = JsonRpcSubscriptionHandler::new(config.clone());
+    let mut observer = DaemonWebSocketObserver {
+        sink: &mut sink,
+        view: &view,
+        seq: &mut seq,
+        source_kind: "jsonrpc_pubsub",
+    };
+
+    let result = subscription_websocket::run_websocket_subscription_runtime(
+        WebSocketRuntimeConfig {
+            endpoint: request.endpoint.clone(),
+            auth_profile,
+            subprotocols: Vec::new(),
+            initial_text_frames: vec![subscribe_message],
+            first_message_timeout_secs: Some(5),
+            initial_reconnect_delay_secs: SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS,
+            max_reconnect_delay_secs: SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS,
+        },
+        &mut handler,
+        &mut observer,
+        &mut stop_rx,
+    )
+    .await;
+
+    if let Err(err) = result {
+        append_subscription_event(
+            &mut sink,
+            &view,
+            &mut seq,
+            "jsonrpc_pubsub",
+            "error",
+            None,
+            Some(json!({
+                "message": err.to_string(),
+                "operation_id": config.operation_id,
             })),
         )
         .await?;
