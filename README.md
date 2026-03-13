@@ -74,34 +74,7 @@ Supported protocols:
 
 UXC keeps protocol diversity behind one execution contract:
 
-```mermaid
-flowchart LR
-    A[User / Skill / Agent] --> B[UXC CLI]
-    B --> C[Command Router]
-    C --> D[Protocol Detector]
-    D --> E[Adapter Layer]
-
-    E --> E1[OpenAPI Adapter]
-    E --> E2[gRPC Adapter]
-    E --> E3[GraphQL Adapter]
-    E --> E4[MCP Adapter]
-    E --> E5[JSON-RPC Adapter]
-
-    C --> F[Auth Resolver]
-    F --> F1[Credential Sources<br/>literal / env / 1Password]
-    C --> G[Schema + Response Cache]
-    C --> H[JSON Envelope Output]
-
-    E1 --> R[Remote Endpoints]
-    E2 --> R
-    E3 --> R
-    E5 --> R
-    E4 --> M1[MCP HTTP Endpoint]
-    E4 --> M2[MCP stdio via Daemon]
-
-    M2 --> D1[Daemon Process Registry]
-    D1 --> D2[Reused stdio MCP Process]
-```
+![UXC architecture snapshot](docs/images/uxc-architecture-full.png)
 
 This design keeps discovery, auth, and execution stable while allowing protocol-specific
 internals.

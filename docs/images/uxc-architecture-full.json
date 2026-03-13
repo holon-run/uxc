@@ -1,0 +1,340 @@
+{
+  "edges": [
+    {
+      "id": "e1",
+      "label": "discover + call",
+      "sourceNodeId": "agents",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2,
+        "textColor": "#334155"
+      },
+      "targetNodeId": "uxc"
+    },
+    {
+      "id": "e2",
+      "label": "help / invoke",
+      "sourceNodeId": "uxc",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2,
+        "textColor": "#334155"
+      },
+      "targetNodeId": "router"
+    },
+    {
+      "id": "e3",
+      "label": "auth / link / signer",
+      "sourceNodeId": "uxc",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2,
+        "textColor": "#334155"
+      },
+      "targetNodeId": "auth"
+    },
+    {
+      "id": "e4",
+      "label": "sessions / subscribe",
+      "sourceNodeId": "uxc",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2,
+        "textColor": "#334155"
+      },
+      "targetNodeId": "daemon"
+    },
+    {
+      "id": "e5",
+      "label": "route by protocol",
+      "sourceNodeId": "router",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2,
+        "textColor": "#334155"
+      },
+      "targetNodeId": "adapters"
+    },
+    {
+      "id": "e6",
+      "label": "credentials + bindings",
+      "sourceNodeId": "auth",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2,
+        "textColor": "#334155"
+      },
+      "targetNodeId": "adapters"
+    },
+    {
+      "id": "e7",
+      "label": "long-lived runtime",
+      "sourceNodeId": "daemon",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2,
+        "textColor": "#334155"
+      },
+      "targetNodeId": "adapters"
+    },
+    {
+      "id": "e8",
+      "sourceNodeId": "adapters",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2
+      },
+      "targetNodeId": "openapi"
+    },
+    {
+      "id": "e9",
+      "sourceNodeId": "adapters",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2
+      },
+      "targetNodeId": "graphql"
+    },
+    {
+      "id": "e10",
+      "sourceNodeId": "adapters",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2
+      },
+      "targetNodeId": "mcp"
+    },
+    {
+      "id": "e11",
+      "sourceNodeId": "adapters",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2
+      },
+      "targetNodeId": "jsonrpc"
+    },
+    {
+      "id": "e12",
+      "sourceNodeId": "adapters",
+      "style": {
+        "opacity": 100,
+        "strokeColor": "#0f172a",
+        "strokeStyle": "solid",
+        "strokeWidth": 2
+      },
+      "targetNodeId": "grpc"
+    }
+  ],
+  "nodes": [
+    {
+      "height": 120,
+      "id": "agents",
+      "kind": "actor",
+      "label": "Agents + Workflows",
+      "style": {
+        "backgroundColor": "#f3e8ff",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#7c3aed",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 640,
+      "y": 60
+    },
+    {
+      "height": 120,
+      "id": "uxc",
+      "kind": "service",
+      "label": "UXC",
+      "style": {
+        "backgroundColor": "#ccfbf1",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#0f766e",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 640,
+      "y": 210
+    },
+    {
+      "height": 120,
+      "id": "router",
+      "kind": "service",
+      "label": "Discovery",
+      "style": {
+        "backgroundColor": "#ccfbf1",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#0f766e",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 180,
+      "y": 390
+    },
+    {
+      "height": 120,
+      "id": "auth",
+      "kind": "service",
+      "label": "Auth",
+      "style": {
+        "backgroundColor": "#ccfbf1",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#0f766e",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 640,
+      "y": 390
+    },
+    {
+      "height": 120,
+      "id": "daemon",
+      "kind": "service",
+      "label": "Sessions",
+      "style": {
+        "backgroundColor": "#ccfbf1",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#0f766e",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 1100,
+      "y": 390
+    },
+    {
+      "height": 120,
+      "id": "adapters",
+      "kind": "service",
+      "label": "Adapters",
+      "style": {
+        "backgroundColor": "#ccfbf1",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#0f766e",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 640,
+      "y": 570
+    },
+    {
+      "height": 120,
+      "id": "openapi",
+      "kind": "external",
+      "label": "OpenAPI",
+      "style": {
+        "backgroundColor": "#e2e8f0",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#475569",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 40,
+      "y": 780
+    },
+    {
+      "height": 120,
+      "id": "graphql",
+      "kind": "external",
+      "label": "GraphQL",
+      "style": {
+        "backgroundColor": "#e2e8f0",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#475569",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 340,
+      "y": 780
+    },
+    {
+      "height": 120,
+      "id": "mcp",
+      "kind": "external",
+      "label": "MCP",
+      "style": {
+        "backgroundColor": "#e2e8f0",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#475569",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 640,
+      "y": 780
+    },
+    {
+      "height": 120,
+      "id": "jsonrpc",
+      "kind": "external",
+      "label": "JSON-RPC",
+      "style": {
+        "backgroundColor": "#e2e8f0",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#475569",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 940,
+      "y": 780
+    },
+    {
+      "height": 120,
+      "id": "grpc",
+      "kind": "external",
+      "label": "gRPC",
+      "style": {
+        "backgroundColor": "#e2e8f0",
+        "fillStyle": "solid",
+        "opacity": 100,
+        "roughness": 1,
+        "strokeColor": "#475569",
+        "textColor": "#0f172a"
+      },
+      "width": 260,
+      "x": 1240,
+      "y": 780
+    }
+  ],
+  "version": 1
+}

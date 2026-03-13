@@ -70,34 +70,7 @@ UXC 的目标，是让远端能力对 Agent 和自动化任务来说，都表现
 
 UXC 将协议差异统一到一个执行契约之下：
 
-```mermaid
-flowchart LR
-    A[User / Skill / Agent] --> B[UXC CLI]
-    B --> C[Command Router]
-    C --> D[Protocol Detector]
-    D --> E[Adapter Layer]
-
-    E --> E1[OpenAPI Adapter]
-    E --> E2[gRPC Adapter]
-    E --> E3[GraphQL Adapter]
-    E --> E4[MCP Adapter]
-    E --> E5[JSON-RPC Adapter]
-
-    C --> F[Auth Resolver]
-    F --> F1[Credential Sources<br/>literal / env / 1Password]
-    C --> G[Schema + Response Cache]
-    C --> H[JSON Envelope Output]
-
-    E1 --> R[Remote Endpoints]
-    E2 --> R
-    E3 --> R
-    E5 --> R
-    E4 --> M1[MCP HTTP Endpoint]
-    E4 --> M2[MCP stdio via Daemon]
-
-    M2 --> D1[Daemon Process Registry]
-    D1 --> D2[Reused stdio MCP Process]
-```
+![UXC 架构快照](docs/images/uxc-architecture-full.png)
 
 这个设计让 discovery、auth 和 execution 的使用方式保持稳定，同时允许各协议内部实现独立演进。
 
