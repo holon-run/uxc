@@ -1,0 +1,218 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Blockscout V2 Curated API",
+    "version": "1.0.0",
+    "description": "Curated read-only Blockscout explorer surface for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://eth.blockscout.com/api/v2"
+    }
+  ],
+  "paths": {
+    "/addresses/{address_hash}": {
+      "get": {
+        "operationId": "getAddress",
+        "summary": "Get an address summary",
+        "parameters": [
+          {
+            "name": "address_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Address response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/addresses/{address_hash}/token-balances": {
+      "get": {
+        "operationId": "getAddressTokenBalances",
+        "summary": "Get token balances for an address",
+        "parameters": [
+          {
+            "name": "address_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token balances response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/addresses/{address_hash}/transactions": {
+      "get": {
+        "operationId": "getAddressTransactions",
+        "summary": "Get transactions for an address",
+        "parameters": [
+          {
+            "name": "address_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Address transactions response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tokens/{address_hash}": {
+      "get": {
+        "operationId": "getToken",
+        "summary": "Get token metadata",
+        "parameters": [
+          {
+            "name": "address_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tokens/{address_hash}/holders": {
+      "get": {
+        "operationId": "getTokenHolders",
+        "summary": "Get token holders",
+        "parameters": [
+          {
+            "name": "address_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token holders response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transactions/{hash}": {
+      "get": {
+        "operationId": "getTransaction",
+        "summary": "Get a transaction by hash",
+        "parameters": [
+          {
+            "name": "hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/blocks/{block_number_or_hash}": {
+      "get": {
+        "operationId": "getBlock",
+        "summary": "Get a block by number or hash",
+        "parameters": [
+          {
+            "name": "block_number_or_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Block response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

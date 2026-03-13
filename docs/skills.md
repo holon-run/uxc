@@ -37,6 +37,14 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Wrapper for WhatsApp Business Platform Cloud API workflows via UXC + curated OpenAPI schema and bearer-token auth.
 - `skills/dingtalk-openapi-skill`
   - Wrapper for DingTalk v1.0 messaging workflows via UXC + curated OpenAPI schema and app-token bearer auth.
+- `skills/chainbase-openapi-skill`
+  - Wrapper for Chainbase indexed wallet and token reads via UXC + curated OpenAPI schema and API-key auth.
+- `skills/blockscout-openapi-skill`
+  - Wrapper for Blockscout explorer read workflows via UXC + curated OpenAPI schema and instance-specific host selection.
+- `skills/defillama-openapi-skill`
+  - Wrapper for DefiLlama Pro read-first analytics workflows via UXC + curated OpenAPI schema and path-templated API-key auth.
+- `skills/coingecko-openapi-skill`
+  - Wrapper for CoinGecko and GeckoTerminal read-first market data workflows via UXC + curated OpenAPI schema and API-key auth.
 - `skills/moralis-openapi-skill`
   - Wrapper for Moralis EVM wallet and token reads via UXC + curated OpenAPI schema and API-key auth.
 - `skills/binance-web3-openapi-skill`
@@ -71,7 +79,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/moralis-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/coingecko-openapi-skill`, `skills/defillama-openapi-skill`, `skills/blockscout-openapi-skill`, `skills/chainbase-openapi-skill`, `skills/moralis-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -164,6 +172,30 @@ bash skills/whatsapp-openapi-skill/scripts/validate.sh
 
 ```bash
 bash skills/dingtalk-openapi-skill/scripts/validate.sh
+```
+
+- Validate Chainbase wrapper docs when touched:
+
+```bash
+bash skills/chainbase-openapi-skill/scripts/validate.sh
+```
+
+- Validate Blockscout wrapper docs when touched:
+
+```bash
+bash skills/blockscout-openapi-skill/scripts/validate.sh
+```
+
+- Validate DefiLlama wrapper docs when touched:
+
+```bash
+bash skills/defillama-openapi-skill/scripts/validate.sh
+```
+
+- Validate CoinGecko wrapper docs when touched:
+
+```bash
+bash skills/coingecko-openapi-skill/scripts/validate.sh
 ```
 
 - Validate Moralis wrapper docs when touched:
