@@ -6,16 +6,20 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::VecDeque;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{path::PathBuf, str::FromStr};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 
 const DEFAULT_STDIO_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const MAX_BUFFERED_NOTIFICATIONS: usize = 64;
+// Buffer enough stderr for startup diagnostics without keeping an unbounded history.
 const MAX_BUFFERED_STDERR_LINES: usize = 32;
+const MAX_BUFFERED_STDERR_LINE_BYTES: usize = 2048;
+const STDERR_DRAIN_GRACE_PERIOD_MS: u64 = 50;
 
 /// Trait for executing MCP stdio processes (abstracted for testing)
 #[async_trait]
@@ -218,6 +222,10 @@ pub struct McpStdioTransport {
     notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>>,
     /// Recent child stderr lines for surfacing startup failures.
     stderr_lines: Arc<Mutex<VecDeque<String>>>,
+    /// Signals when the stderr reader has reached EOF.
+    stderr_eof: Arc<Notify>,
+    /// Tracks whether the stderr reader has fully drained.
+    stderr_drained: Arc<AtomicBool>,
     /// Process executor (abstracted for testing)
     _executor: Arc<dyn StdioProcessExecutor>,
 }
@@ -231,6 +239,10 @@ impl std::fmt::Debug for McpStdioTransport {
             .field("response_channels", &self.response_channels)
             .field("notifications", &self.notifications)
             .field("stderr_lines", &self.stderr_lines)
+            .field(
+                "stderr_drained",
+                &self.stderr_drained.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }
@@ -286,6 +298,8 @@ impl McpStdioTransport {
         >::new()));
         let notifications = Arc::new(Mutex::new(VecDeque::<JsonRpcNotification>::new()));
         let stderr_lines = Arc::new(Mutex::new(VecDeque::<String>::new()));
+        let stderr_eof = Arc::new(Notify::new());
+        let stderr_drained = Arc::new(AtomicBool::new(false));
 
         // Spawn a task to handle writing to stdin
         let mut stdin_writer = stdin;
@@ -371,18 +385,23 @@ impl McpStdioTransport {
         });
 
         let stderr_lines_clone = stderr_lines.clone();
+        let stderr_eof_clone = stderr_eof.clone();
+        let stderr_drained_clone = stderr_drained.clone();
         tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
 
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!("MCP stdio child stderr: {}", line);
+                tracing::debug!("MCP stdio child stderr: {}", line);
                 let mut buffer = stderr_lines_clone.lock().await;
                 if buffer.len() >= MAX_BUFFERED_STDERR_LINES {
                     buffer.pop_front();
                 }
-                buffer.push_back(line);
+                buffer.push_back(truncate_for_stderr_buffer(line));
             }
+
+            stderr_drained_clone.store(true, Ordering::Release);
+            stderr_eof_clone.notify_waiters();
         });
 
         Ok(Self {
@@ -392,6 +411,8 @@ impl McpStdioTransport {
             response_channels,
             notifications,
             stderr_lines,
+            stderr_eof,
+            stderr_drained,
             _executor: executor,
         })
     }
@@ -453,8 +474,10 @@ impl McpStdioTransport {
         // Wait for the response with timeout so a stuck MCP server/tool call
         // does not block the caller indefinitely.
         let timeout = stdio_request_timeout();
+        let mut response_rx = response_rx;
         let response = match tokio::select! {
-            response = response_rx => StdioRequestOutcome::Response(response),
+            biased;
+            response = &mut response_rx => StdioRequestOutcome::Response(response),
             exit_status = self.child.wait() => StdioRequestOutcome::ChildExited(exit_status),
             _ = tokio::time::sleep(timeout) => StdioRequestOutcome::TimedOut,
         } {
@@ -463,12 +486,20 @@ impl McpStdioTransport {
                 return Err(anyhow!("Response channel closed"))
             }
             StdioRequestOutcome::ChildExited(Ok(status)) => {
-                let mut channels = self.response_channels.lock().await;
-                channels.remove(&id);
-                return Err(anyhow!(
-                    "{}",
-                    self.child_exit_error(method, status.code()).await
-                ));
+                match self
+                    .drain_response_after_child_exit(method, &mut response_rx)
+                    .await?
+                {
+                    Some(response) => response,
+                    None => {
+                        let mut channels = self.response_channels.lock().await;
+                        channels.remove(&id);
+                        return Err(anyhow!(
+                            "{}",
+                            self.child_exit_error(method, status.code()).await
+                        ));
+                    }
+                }
             }
             StdioRequestOutcome::ChildExited(Err(err)) => {
                 let mut channels = self.response_channels.lock().await;
@@ -549,6 +580,26 @@ impl McpStdioTransport {
         queue.drain(..).collect()
     }
 
+    async fn drain_response_after_child_exit(
+        &self,
+        method: &str,
+        response_rx: &mut tokio::sync::oneshot::Receiver<JsonRpcResponse>,
+    ) -> Result<Option<JsonRpcResponse>> {
+        tokio::task::yield_now().await;
+
+        if let Ok(Ok(response)) = tokio::time::timeout(Duration::from_millis(1), response_rx).await
+        {
+            tracing::debug!(
+                "Received MCP stdio response for {} just after child exit; treating request as successful",
+                method
+            );
+            return Ok(Some(response));
+        }
+
+        self.wait_for_stderr_drain().await;
+        Ok(None)
+    }
+
     async fn child_exit_error(&self, method: &str, exit_code: Option<i32>) -> String {
         let stderr = {
             let lines = self.stderr_lines.lock().await;
@@ -577,6 +628,18 @@ impl McpStdioTransport {
                 method, exit_detail, stderr
             )
         }
+    }
+
+    async fn wait_for_stderr_drain(&self) {
+        if self.stderr_drained.load(Ordering::Acquire) {
+            return;
+        }
+
+        let _ = tokio::time::timeout(
+            Duration::from_millis(STDERR_DRAIN_GRACE_PERIOD_MS),
+            self.stderr_eof.notified(),
+        )
+        .await;
     }
 }
 
@@ -660,6 +723,18 @@ fn expand_tilde_token(token: &str, home: &str) -> Option<String> {
     }
 
     None
+}
+
+fn truncate_for_stderr_buffer(mut line: String) -> String {
+    if line.len() <= MAX_BUFFERED_STDERR_LINE_BYTES {
+        return line;
+    }
+
+    while line.len() > MAX_BUFFERED_STDERR_LINE_BYTES && !line.is_empty() {
+        line.pop();
+    }
+    line.push_str("...");
+    line
 }
 
 /// Parse a command string into parts (handles quoted strings)
@@ -1227,6 +1302,8 @@ mod tests {
             echo "TARGET_UNREACHABLE: failed to connect" >&2
             exit 7
         "#;
+        let timeout_ms = 10_000u64;
+        std::env::set_var("UXC_MCP_STDIO_TIMEOUT_MS", timeout_ms.to_string());
         let mut transport =
             McpStdioTransport::connect("sh", &["-c".to_string(), script.to_string()])
                 .await
@@ -1243,10 +1320,12 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
+        std::env::remove_var("UXC_MCP_STDIO_TIMEOUT_MS");
 
         assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "initialize should fail fast, got {:?}",
+            start.elapsed() < Duration::from_millis(timeout_ms / 4),
+            "initialize should fail well before timeout {}, got {:?}",
+            timeout_ms,
             start.elapsed()
         );
         assert!(err.contains("child exited before response to initialize"));
