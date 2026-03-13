@@ -1,0 +1,4 @@
+interface:
+  display_name: "Matrix Client-Server API"
+  short_description: "Operate Matrix Client-Server API via UXC + curated OpenAPI schema"
+  default_prompt: "Use $matrix-openapi-skill to discover and execute Matrix Client-Server API operations through UXC with bearer-token auth, homeserver-aware setup, and read-first messaging guardrails."
