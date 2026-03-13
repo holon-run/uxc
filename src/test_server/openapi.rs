@@ -4,7 +4,7 @@ use super::common::{bind_available, write_addr_file, Scenario, ServerHandle};
 use anyhow::Result;
 use axum::{
     body::{Body, Bytes},
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -19,6 +19,11 @@ use tracing::info;
 #[derive(Clone)]
 struct ServerState {
     scenario: Scenario,
+}
+
+#[derive(serde::Deserialize)]
+struct PollEventsQuery {
+    cursor: Option<String>,
 }
 
 /// Create the OpenAPI test router
@@ -137,6 +142,43 @@ fn create_router(state: ServerState) -> Router {
                             "id": {"type": "integer"},
                             "name": {"type": "string"},
                             "email": {"type": "string"}
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "/poll/events": {
+              "get": {
+                "operationId": "poll_events",
+                "summary": "Cursor-driven polling endpoint",
+                "parameters": [{
+                  "name": "cursor",
+                  "in": "query",
+                  "required": false,
+                  "schema": {"type": "string"}
+                }],
+                "responses": {
+                  "200": {
+                    "description": "Polling batch",
+                    "content": {
+                      "application/json": {
+                        "schema": {
+                          "type": "object",
+                          "properties": {
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "id": {"type": "integer"},
+                                  "body": {"type": "string"}
+                                }
+                              }
+                            },
+                            "next_cursor": {"type": "string"}
                           }
                         }
                       }
@@ -312,10 +354,54 @@ fn create_router(state: ServerState) -> Router {
         }
     }
 
+    async fn poll_events(
+        State(state): State<ServerState>,
+        Query(query): Query<PollEventsQuery>,
+    ) -> Result<Response, StatusCode> {
+        match state.scenario {
+            Scenario::Ok
+            | Scenario::ToolsListFailAfterFirst
+            | Scenario::ToolCallTimeout
+            | Scenario::StructuredContent
+            | Scenario::DynamicToolset => {
+                let response = match query.cursor.as_deref() {
+                    None => json!({
+                        "items": [
+                            {"id": 1, "body": "alpha"},
+                            {"id": 2, "body": "beta"}
+                        ],
+                        "next_cursor": "cursor-2"
+                    }),
+                    Some("cursor-2") => json!({
+                        "items": [
+                            {"id": 3, "body": "gamma"}
+                        ],
+                        "next_cursor": "cursor-3"
+                    }),
+                    _ => json!({
+                        "items": [],
+                        "next_cursor": "cursor-3"
+                    }),
+                };
+                Ok(Json(response).into_response())
+            }
+            Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
+            Scenario::Malformed => Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body("{poll".into())
+                .unwrap()),
+            Scenario::Timeout => {
+                tokio::time::sleep(super::common::timeout_duration()).await;
+                Ok(Json(json!({"items":[],"next_cursor":"cursor-timeout"})).into_response())
+            }
+        }
+    }
+
     Router::new()
         .route("/openapi.json", get(serve_schema))
         .route("/health", get(health_check))
         .route("/stream", get(stream_json))
+        .route("/poll/events", get(poll_events))
         .route("/users", get(list_users).post(create_user))
         .route("/users/:id", get(get_user))
         .with_state(state)
