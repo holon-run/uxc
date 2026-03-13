@@ -1,0 +1,71 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Bybit V5 API",
+    "version": "v1",
+    "description": "Curated Bybit V5 public market surface for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://api.bybit.com"
+    }
+  ],
+  "components": {
+    "schemas": {}
+  },
+  "paths": {
+    "/v5/market/time": {
+      "get": {
+        "operationId": "getServerTime",
+        "responses": { "200": { "description": "Server time returned" } }
+      }
+    },
+    "/v5/market/instruments-info": {
+      "get": {
+        "operationId": "listInstruments",
+        "parameters": [
+          { "name": "category", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "symbol", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Instrument metadata returned" } }
+      }
+    },
+    "/v5/market/tickers": {
+      "get": {
+        "operationId": "getTickers",
+        "parameters": [
+          { "name": "category", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "symbol", "in": "query", "schema": { "type": "string" } },
+          { "name": "baseCoin", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Tickers returned" } }
+      }
+    },
+    "/v5/market/orderbook": {
+      "get": {
+        "operationId": "getOrderbook",
+        "parameters": [
+          { "name": "category", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "symbol", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Order book returned" } }
+      }
+    },
+    "/v5/market/kline": {
+      "get": {
+        "operationId": "getKlines",
+        "parameters": [
+          { "name": "category", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "symbol", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "interval", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "start", "in": "query", "schema": { "type": "integer" } },
+          { "name": "end", "in": "query", "schema": { "type": "integer" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Klines returned" } }
+      }
+    }
+  }
+}
