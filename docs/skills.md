@@ -39,6 +39,8 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Wrapper for DingTalk v1.0 messaging workflows via UXC + curated OpenAPI schema and app-token bearer auth.
 - `skills/defillama-openapi-skill`
   - Wrapper for DefiLlama Pro read-first analytics workflows via UXC + curated OpenAPI schema and path-templated API-key auth.
+- `skills/coingecko-openapi-skill`
+  - Wrapper for CoinGecko and GeckoTerminal read-first market data workflows via UXC + curated OpenAPI schema and API-key auth.
 - `skills/binance-web3-openapi-skill`
   - Wrapper for Binance Web3 public market/research workflows via UXC + curated OpenAPI schema.
 - `skills/binance-spot-openapi-skill`
@@ -71,7 +73,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/defillama-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/coingecko-openapi-skill`, `skills/defillama-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -170,6 +172,10 @@ bash skills/dingtalk-openapi-skill/scripts/validate.sh
 
 ```bash
 bash skills/defillama-openapi-skill/scripts/validate.sh
+- Validate CoinGecko wrapper docs when touched:
+
+```bash
+bash skills/coingecko-openapi-skill/scripts/validate.sh
 ```
 
 - Validate Binance Web3 wrapper docs when touched:
