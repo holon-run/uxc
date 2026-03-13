@@ -25,7 +25,7 @@ for file in "${SKILL_FILE}" "${OPENAI_FILE}" "${USAGE_FILE}" "${SCHEMA_FILE}"; d
 done
 
 jq -e '.openapi and .paths' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'invalid OpenAPI schema JSON or missing .openapi/.paths'
-jq -e '.paths["/tokens/by-symbol"] and .paths["/tokens/historical"]' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'OpenAPI schema missing expected Alchemy paths'
+jq -e '.paths["/tokens/by-symbol"] and .paths["/tokens/by-address"] and .paths["/tokens/historical"]' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'OpenAPI schema missing expected Alchemy paths'
 
 rg -q '^name:\s*alchemy-openapi-skill\s*$' "${SKILL_FILE}" || fail 'invalid skill name'
 rg -q '^description:\s*.+' "${SKILL_FILE}" || fail 'missing description'
