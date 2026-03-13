@@ -1,0 +1,4 @@
+interface:
+  display_name: "CoinAPI REST"
+  short_description: "Operate CoinAPI market data reads via UXC + curated OpenAPI schema"
+  default_prompt: "Use $coinapi-openapi-skill to discover and execute CoinAPI REST market data reads through UXC with X-CoinAPI-Key auth and read-first guardrails."

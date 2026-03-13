@@ -1,0 +1,230 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CoinAPI Market Curated API",
+    "version": "1.0.0",
+    "description": "Curated read-only CoinAPI market data surface for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://rest.coinapi.io"
+    }
+  ],
+  "security": [
+    {
+      "coinApiKey": []
+    }
+  ],
+  "paths": {
+    "/v1/exchangerate/{asset_id_base}/{asset_id_quote}": {
+      "get": {
+        "operationId": "getExchangeRate",
+        "summary": "Get current exchange rate",
+        "parameters": [
+          {
+            "name": "asset_id_base",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "asset_id_quote",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exchange rate response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/quotes/current": {
+      "get": {
+        "operationId": "getCurrentQuotes",
+        "summary": "Get current quote snapshots",
+        "parameters": [
+          {
+            "name": "filter_symbol_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current quotes response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ohlcv/{symbol_id}/latest": {
+      "get": {
+        "operationId": "getLatestOhlcv",
+        "summary": "Get latest OHLCV candles",
+        "parameters": [
+          {
+            "name": "symbol_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "period_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Latest OHLCV response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/trades/{symbol_id}/latest": {
+      "get": {
+        "operationId": "getLatestTrades",
+        "summary": "Get latest trades",
+        "parameters": [
+          {
+            "name": "symbol_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Latest trades response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/orderbooks/{symbol_id}/latest": {
+      "get": {
+        "operationId": "getLatestOrderbook",
+        "summary": "Get latest order book snapshot",
+        "parameters": [
+          {
+            "name": "symbol_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit_levels",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Latest orderbook response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "coinApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-CoinAPI-Key"
+      }
+    }
+  }
+}
