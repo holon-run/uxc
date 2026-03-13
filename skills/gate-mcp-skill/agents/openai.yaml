@@ -1,0 +1,4 @@
+interface:
+  display_name: "Gate MCP"
+  short_description: "Public spot and futures market data via Gate MCP"
+  default_prompt: "Use $gate-mcp-skill to inspect and execute Gate MCP public market-data tools with help-first discovery and read-only guardrails."
