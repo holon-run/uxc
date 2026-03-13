@@ -32,7 +32,13 @@ rg -q 'command -v bitget-openapi-cli' "${SKILL_FILE}" || fail 'missing link-firs
 rg -q 'uxc link bitget-openapi-cli https://api.bitget.com --schema-url ' "${SKILL_FILE}" || fail 'missing fixed link create command with schema-url'
 rg -q 'provider-specific header signing' "${SKILL_FILE}" "${USAGE_FILE}" || fail 'missing private auth boundary note'
 rg -q 'read-only' "${SKILL_FILE}" || fail 'missing read-only guardrail'
+
+if rg -q -- "--args\\s+'\\{" "${SKILL_FILE}" "${USAGE_FILE}"; then
+  fail 'found banned legacy JSON argument pattern'
+fi
+
 rg -q '^\s*display_name:\s*"Bitget Exchange"\s*$' "${OPENAI_FILE}" || fail 'missing display_name'
+rg -q '^\s*short_description:\s*".+"\s*$' "${OPENAI_FILE}" || fail 'missing short_description'
 rg -q '^\s*default_prompt:\s*".*\$bitget-openapi-skill.*"\s*$' "${OPENAI_FILE}" || fail 'default_prompt must mention $bitget-openapi-skill'
 
 echo "skills/bitget-openapi-skill validation passed"

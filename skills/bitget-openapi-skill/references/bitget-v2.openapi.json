@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Bitget Spot API",
-    "version": "v1",
+    "version": "v2",
     "description": "Curated Bitget V2 public spot market surface for UXC."
   },
   "servers": [
