@@ -3,6 +3,7 @@
 use super::common::{bind_available, write_addr_file, Scenario, ServerHandle};
 use anyhow::Result;
 use axum::{
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -12,6 +13,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::signal::ctrl_c;
+use tokio::time::{sleep, Duration};
 use tracing::info;
 
 /// Server state
@@ -46,6 +48,75 @@ struct JsonRpcResponse {
 struct JsonRpcError {
     code: i32,
     message: String,
+}
+
+async fn handle_jsonrpc_websocket(mut socket: WebSocket, state: ServerState) {
+    let mut next_subscription_id = 1u64;
+
+    while let Some(Ok(message)) = socket.recv().await {
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let method = value
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+
+        if method.ends_with("_subscribe") {
+            let subscription_id = format!("sub-{}", next_subscription_id);
+            next_subscription_id += 1;
+            let _ = socket
+                .send(Message::Text(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": subscription_id,
+                    })
+                    .to_string(),
+                ))
+                .await;
+
+            if matches!(state.scenario, Scenario::Ok) {
+                sleep(Duration::from_millis(50)).await;
+                let _ = socket
+                    .send(Message::Text(
+                        json!({
+                            "jsonrpc": "2.0",
+                            "method": "eth_subscription",
+                            "params": {
+                                "subscription": subscription_id,
+                                "result": {
+                                    "number": "0x1",
+                                    "hash": "0xabc"
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+            }
+            continue;
+        }
+
+        if method.ends_with("_unsubscribe") {
+            let _ = socket
+                .send(Message::Text(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": true,
+                    })
+                    .to_string(),
+                ))
+                .await;
+            let _ = socket.close().await;
+            return;
+        }
+    }
 }
 
 /// Serve OpenRPC schema
@@ -253,6 +324,18 @@ async fn execute_method(
 
 /// Create the JSON-RPC test router
 fn create_router(state: ServerState) -> Router {
+    async fn jsonrpc_get(
+        ws: Option<WebSocketUpgrade>,
+        State(state): State<ServerState>,
+    ) -> Response {
+        if let Some(ws) = ws {
+            return ws
+                .on_upgrade(move |socket| handle_jsonrpc_websocket(socket, state))
+                .into_response();
+        }
+        serve_schema().await.into_response()
+    }
+
     async fn jsonrpc_handler(
         State(state): State<ServerState>,
         Json(req): Json<JsonRpcRequest>,
@@ -278,7 +361,7 @@ fn create_router(state: ServerState) -> Router {
     }
 
     Router::new()
-        .route("/", get(serve_schema).post(jsonrpc_handler))
+        .route("/", get(jsonrpc_get).post(jsonrpc_handler))
         .route("/openrpc.json", get(serve_schema))
         .route("/.well-known/openrpc.json", get(serve_schema))
         .route("/.well-known/mcp", get(not_found).post(not_found))
