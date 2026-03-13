@@ -1,0 +1,987 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Slack Web API (Curated)",
+    "version": "1.0.0",
+    "description": "Curated Slack Web API schema for common messaging workflows in UXC."
+  },
+  "servers": [
+    {
+      "url": "https://slack.com/api"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/auth.test": {
+      "get": {
+        "operationId": "get:/auth.test",
+        "summary": "Validate the active token and return workspace identity.",
+        "description": "Checks authentication and basic identity details for the active token.",
+        "responses": {
+          "200": {
+            "description": "Authentication test response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AuthTestSuccess"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/conversations.list": {
+      "get": {
+        "operationId": "get:/conversations.list",
+        "summary": "List channels and conversations visible to the token.",
+        "parameters": [
+          {
+            "name": "exclude_archived",
+            "in": "query",
+            "description": "Exclude archived channels from the result set.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of conversations to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 999
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor returned by a previous call.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "team_id",
+            "in": "query",
+            "description": "Workspace ID for org-level tokens when required.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "types",
+            "in": "query",
+            "description": "Comma-separated conversation types such as public_channel, private_channel, mpim, im.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conversation list response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ConversationsListSuccess"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/conversations.info": {
+      "get": {
+        "operationId": "get:/conversations.info",
+        "summary": "Fetch metadata for a conversation by ID.",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": true,
+            "description": "Conversation ID such as C123 or G123.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_locale",
+            "in": "query",
+            "description": "Include locale details when available.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "include_num_members",
+            "in": "query",
+            "description": "Include member count when available.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conversation info response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ConversationInfoSuccess"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/conversations.history": {
+      "get": {
+        "operationId": "get:/conversations.history",
+        "summary": "Read message history from a conversation.",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": true,
+            "description": "Conversation ID to fetch history for.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "latest",
+            "in": "query",
+            "description": "End of the time range to include.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "oldest",
+            "in": "query",
+            "description": "Start of the time range to include.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inclusive",
+            "in": "query",
+            "description": "Include messages matching latest or oldest exactly.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of messages to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 999
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor returned by a previous call.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_all_metadata",
+            "in": "query",
+            "description": "Request additional metadata when available.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conversation history response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ConversationHistorySuccess"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/conversations.replies": {
+      "get": {
+        "operationId": "get:/conversations.replies",
+        "summary": "Read replies in a thread.",
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": true,
+            "description": "Conversation ID that contains the parent message.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ts",
+            "in": "query",
+            "required": true,
+            "description": "Parent message timestamp for the thread root.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "latest",
+            "in": "query",
+            "description": "End of the time range to include.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "oldest",
+            "in": "query",
+            "description": "Start of the time range to include.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inclusive",
+            "in": "query",
+            "description": "Include messages matching latest or oldest exactly.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of replies to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 999
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Pagination cursor returned by a previous call.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_all_metadata",
+            "in": "query",
+            "description": "Request additional metadata when available.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conversation replies response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ConversationRepliesSuccess"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/chat.postMessage": {
+      "post": {
+        "operationId": "post:/chat.postMessage",
+        "summary": "Post a message to a channel or thread.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatPostMessageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message post response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ChatPostMessageSuccess"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/reactions.add": {
+      "post": {
+        "operationId": "post:/reactions.add",
+        "summary": "Add an emoji reaction to a message.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReactionsAddRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reaction add response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/OkOnlySuccess"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "reactions"
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Slack token"
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "error"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "error": {
+            "type": "string",
+            "description": "Slack error code such as invalid_auth, channel_not_found, or missing_scope."
+          },
+          "needed": {
+            "type": "string",
+            "description": "Scope needed when the failure is scope-related."
+          },
+          "provided": {
+            "type": "string",
+            "description": "Scope set currently present on the token when reported."
+          },
+          "warning": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "OkOnlySuccess": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "ResponseMetadata": {
+        "type": "object",
+        "properties": {
+          "next_cursor": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ConversationTopic": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          },
+          "creator": {
+            "type": "string"
+          },
+          "last_set": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ConversationPurpose": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string"
+          },
+          "creator": {
+            "type": "string"
+          },
+          "last_set": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "Conversation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "is_channel": {
+            "type": "boolean"
+          },
+          "is_group": {
+            "type": "boolean"
+          },
+          "is_im": {
+            "type": "boolean"
+          },
+          "is_mpim": {
+            "type": "boolean"
+          },
+          "is_private": {
+            "type": "boolean"
+          },
+          "is_archived": {
+            "type": "boolean"
+          },
+          "is_member": {
+            "type": "boolean"
+          },
+          "is_general": {
+            "type": "boolean"
+          },
+          "num_members": {
+            "type": "integer"
+          },
+          "user": {
+            "type": "string"
+          },
+          "topic": {
+            "$ref": "#/components/schemas/ConversationTopic"
+          },
+          "purpose": {
+            "$ref": "#/components/schemas/ConversationPurpose"
+          }
+        },
+        "additionalProperties": true
+      },
+      "BlockTextObject": {
+        "type": "object",
+        "required": [
+          "type",
+          "text"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "plain_text",
+              "mrkdwn"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "emoji": {
+            "type": "boolean"
+          },
+          "verbatim": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "BlockElement": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "text": {
+            "$ref": "#/components/schemas/BlockTextObject"
+          }
+        },
+        "additionalProperties": true
+      },
+      "BlockObject": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "text": {
+            "$ref": "#/components/schemas/BlockTextObject"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlockTextObject"
+            }
+          },
+          "elements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlockElement"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "AttachmentField": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "short": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "AttachmentObject": {
+        "type": "object",
+        "properties": {
+          "fallback": {
+            "type": "string"
+          },
+          "color": {
+            "type": "string"
+          },
+          "pretext": {
+            "type": "string"
+          },
+          "author_name": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "footer": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttachmentField"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "Message": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          },
+          "bot_id": {
+            "type": "string"
+          },
+          "subtype": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string"
+          },
+          "thread_ts": {
+            "type": "string"
+          },
+          "reply_count": {
+            "type": "integer"
+          },
+          "reply_users_count": {
+            "type": "integer"
+          },
+          "latest_reply": {
+            "type": "string"
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlockObject"
+            }
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttachmentObject"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "AuthTestSuccess": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "url": {
+            "type": "string"
+          },
+          "team": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          },
+          "team_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "bot_id": {
+            "type": "string"
+          },
+          "enterprise_id": {
+            "type": "string"
+          },
+          "is_enterprise_install": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ConversationsListSuccess": {
+        "type": "object",
+        "required": [
+          "ok",
+          "channels"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Conversation"
+            }
+          },
+          "response_metadata": {
+            "$ref": "#/components/schemas/ResponseMetadata"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ConversationInfoSuccess": {
+        "type": "object",
+        "required": [
+          "ok",
+          "channel"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "channel": {
+            "$ref": "#/components/schemas/Conversation"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ConversationHistorySuccess": {
+        "type": "object",
+        "required": [
+          "ok",
+          "messages"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "pin_count": {
+            "type": "integer"
+          },
+          "response_metadata": {
+            "$ref": "#/components/schemas/ResponseMetadata"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ConversationRepliesSuccess": {
+        "type": "object",
+        "required": [
+          "ok",
+          "messages"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            }
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "response_metadata": {
+            "$ref": "#/components/schemas/ResponseMetadata"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ChatPostMessageRequest": {
+        "type": "object",
+        "required": [
+          "channel"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "Conversation ID where the message will be posted."
+          },
+          "text": {
+            "type": "string",
+            "description": "Fallback text and message body for simple messages."
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlockObject"
+            }
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttachmentObject"
+            }
+          },
+          "thread_ts": {
+            "type": "string",
+            "description": "Parent message timestamp to post into a thread."
+          },
+          "reply_broadcast": {
+            "type": "boolean",
+            "description": "Broadcast a threaded reply into the channel timeline."
+          },
+          "mrkdwn": {
+            "type": "boolean"
+          },
+          "unfurl_links": {
+            "type": "boolean"
+          },
+          "unfurl_media": {
+            "type": "boolean"
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Optional Slack metadata object.",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ChatPostMessageSuccess": {
+        "type": "object",
+        "required": [
+          "ok",
+          "channel",
+          "ts",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "channel": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string"
+          },
+          "message": {
+            "$ref": "#/components/schemas/Message"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ReactionsAddRequest": {
+        "type": "object",
+        "required": [
+          "channel",
+          "name",
+          "timestamp"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "Conversation ID that contains the target message."
+          },
+          "name": {
+            "type": "string",
+            "description": "Emoji name without surrounding colons."
+          },
+          "timestamp": {
+            "type": "string",
+            "description": "Timestamp of the message receiving the reaction."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

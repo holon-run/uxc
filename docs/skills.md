@@ -25,6 +25,8 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Wrapper for Notion MCP workflows with OAuth two-step login guidance and guarded-write guidance.
 - `skills/discord-openapi-skill`
   - Wrapper for Discord REST workflows via UXC + link-persisted OpenAPI schema mapping (`uxc link --schema-url`).
+- `skills/slack-openapi-skill`
+  - Wrapper for Slack Web API messaging-core workflows via UXC + curated OpenAPI schema and bearer-token auth.
 - `skills/binance-web3-openapi-skill`
   - Wrapper for Binance Web3 public market/research workflows via UXC + curated OpenAPI schema.
 - `skills/binance-spot-openapi-skill`
@@ -57,7 +59,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -114,6 +116,12 @@ bash skills/thegraph-token-mcp-skill/scripts/validate.sh
 
 ```bash
 bash skills/discord-openapi-skill/scripts/validate.sh
+```
+
+- Validate Slack wrapper docs when touched:
+
+```bash
+bash skills/slack-openapi-skill/scripts/validate.sh
 ```
 
 - Validate Binance Web3 wrapper docs when touched:

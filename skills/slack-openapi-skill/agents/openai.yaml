@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slack Web API"
+  short_description: "Operate Slack Web API via UXC + curated OpenAPI schema"
+  default_prompt: "Use $slack-openapi-skill to discover and execute Slack Web API operations through UXC with bearer-token auth, messaging-core scope, and bot/user token guardrails."
