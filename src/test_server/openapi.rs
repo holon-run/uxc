@@ -24,6 +24,7 @@ struct ServerState {
 #[derive(serde::Deserialize)]
 struct PollEventsQuery {
     cursor: Option<String>,
+    offset: Option<u64>,
 }
 
 /// Create the OpenAPI test router
@@ -179,6 +180,48 @@ fn create_router(state: ServerState) -> Router {
                               }
                             },
                             "next_cursor": {"type": "string"}
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "/poll/telegram-updates": {
+              "get": {
+                "operationId": "poll_telegram_updates",
+                "summary": "Telegram-style offset polling endpoint",
+                "parameters": [{
+                  "name": "offset",
+                  "in": "query",
+                  "required": false,
+                  "schema": {"type": "integer"}
+                }],
+                "responses": {
+                  "200": {
+                    "description": "Telegram polling batch",
+                    "content": {
+                      "application/json": {
+                        "schema": {
+                          "type": "object",
+                          "properties": {
+                            "ok": {"type": "boolean"},
+                            "result": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "update_id": {"type": "integer"},
+                                  "message": {
+                                    "type": "object",
+                                    "properties": {
+                                      "text": {"type": "string"}
+                                    }
+                                  }
+                                }
+                              }
+                            }
                           }
                         }
                       }
@@ -397,11 +440,62 @@ fn create_router(state: ServerState) -> Router {
         }
     }
 
+    async fn poll_telegram_updates(
+        State(state): State<ServerState>,
+        Query(query): Query<PollEventsQuery>,
+    ) -> Result<Response, StatusCode> {
+        match state.scenario {
+            Scenario::Ok
+            | Scenario::ToolsListFailAfterFirst
+            | Scenario::ToolCallTimeout
+            | Scenario::StructuredContent
+            | Scenario::DynamicToolset => {
+                let response = match query.offset {
+                    None | Some(0) => json!({
+                        "ok": true,
+                        "result": [
+                            {"update_id": 100, "message": {"text": "first"}},
+                            {"update_id": 101, "message": {"text": "second"}}
+                        ]
+                    }),
+                    Some(102) => json!({
+                        "ok": true,
+                        "result": [
+                            {"update_id": 102, "message": {"text": "third"}}
+                        ]
+                    }),
+                    Some(offset) if offset > 102 => json!({
+                        "ok": true,
+                        "result": []
+                    }),
+                    _ => json!({
+                        "ok": true,
+                        "result": [
+                            {"update_id": 101, "message": {"text": "second"}},
+                            {"update_id": 102, "message": {"text": "third"}}
+                        ]
+                    }),
+                };
+                Ok(Json(response).into_response())
+            }
+            Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
+            Scenario::Malformed => Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body("{telegram".into())
+                .unwrap()),
+            Scenario::Timeout => {
+                tokio::time::sleep(super::common::timeout_duration()).await;
+                Ok(Json(json!({"ok": true, "result": []})).into_response())
+            }
+        }
+    }
+
     Router::new()
         .route("/openapi.json", get(serve_schema))
         .route("/health", get(health_check))
         .route("/stream", get(stream_json))
         .route("/poll/events", get(poll_events))
+        .route("/poll/telegram-updates", get(poll_telegram_updates))
         .route("/users", get(list_users).post(create_user))
         .route("/users/:id", get(get_user))
         .with_state(state)

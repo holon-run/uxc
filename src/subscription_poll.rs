@@ -16,7 +16,17 @@ pub struct PollSubscriptionConfig {
     pub request_cursor_arg: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_cursor_pointer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_from_item_pointer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_transform: Option<PollCursorTransform>,
     pub checkpoint_strategy: PollCheckpointStrategy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PollCursorTransform {
+    Increment,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,14 +112,51 @@ impl PollSubscriptionConfig {
         if self.interval_secs == 0 {
             bail!("poll interval_secs must be greater than 0");
         }
+        if self.extract_items_pointer.is_empty() {
+            bail!("poll extract_items_pointer cannot be empty");
+        }
+        if self
+            .request_cursor_arg
+            .as_deref()
+            .is_some_and(|arg| arg.is_empty())
+        {
+            bail!("poll request_cursor_arg cannot be empty");
+        }
+        if self
+            .response_cursor_pointer
+            .as_deref()
+            .is_some_and(|pointer| pointer.is_empty())
+        {
+            bail!("poll response_cursor_pointer cannot be empty");
+        }
+        if self
+            .cursor_from_item_pointer
+            .as_deref()
+            .is_some_and(|pointer| pointer.is_empty())
+        {
+            bail!("poll cursor_from_item_pointer cannot be empty");
+        }
+        if self.cursor_from_item_pointer.is_some() && self.request_cursor_arg.is_none() {
+            bail!("poll cursor_from_item_pointer requires request_cursor_arg");
+        }
+        if self.cursor_transform.is_some() && self.cursor_from_item_pointer.is_none() {
+            bail!("poll cursor_transform requires cursor_from_item_pointer");
+        }
+        if self.response_cursor_pointer.is_some() && self.cursor_from_item_pointer.is_some() {
+            bail!(
+                "poll response_cursor_pointer and cursor_from_item_pointer are mutually exclusive"
+            );
+        }
 
         match &self.checkpoint_strategy {
             PollCheckpointStrategy::CursorOnly => {
-                if self.request_cursor_arg.as_deref().is_none()
-                    || self.response_cursor_pointer.as_deref().is_none()
+                if self.request_cursor_arg.as_deref().is_none() {
+                    bail!("cursor_only polling requires request_cursor_arg");
+                }
+                if self.response_cursor_pointer.is_none() && self.cursor_from_item_pointer.is_none()
                 {
                     bail!(
-                        "cursor_only polling requires request_cursor_arg and response_cursor_pointer"
+                        "cursor_only polling requires response_cursor_pointer or cursor_from_item_pointer"
                     );
                 }
             }
@@ -205,6 +252,10 @@ impl PollSubscriptionRunner {
                     })?
                     .clone(),
             );
+        } else if let Some(pointer) = self.config.cursor_from_item_pointer.as_ref() {
+            if let Some(cursor) = self.derive_cursor_from_items(items, pointer)? {
+                self.checkpoint.cursor = Some(self.transform_cursor_value(cursor)?);
+            }
         }
 
         let skipped_items = fetched_items.saturating_sub(emitted_items.len());
@@ -335,6 +386,32 @@ impl PollSubscriptionRunner {
         }
         Ok(emitted)
     }
+
+    fn derive_cursor_from_items(&self, items: &[Value], pointer: &str) -> Result<Option<Value>> {
+        let mut cursor = None;
+        for item in items {
+            let candidate = pointer_required(item, pointer).cloned().with_context(|| {
+                format!(
+                    "poll cursor_from_item_pointer '{}' did not resolve",
+                    pointer
+                )
+            })?;
+            if cursor
+                .as_ref()
+                .is_none_or(|current| compare_json_values(&candidate, current) == Ordering::Greater)
+            {
+                cursor = Some(candidate);
+            }
+        }
+        Ok(cursor)
+    }
+
+    fn transform_cursor_value(&self, value: Value) -> Result<Value> {
+        match self.config.cursor_transform.as_ref() {
+            None => Ok(value),
+            Some(PollCursorTransform::Increment) => increment_cursor_value(value),
+        }
+    }
 }
 
 pub async fn run_poll_subscription_runtime<C: PollRuntimeContext, O: PollRuntimeObserver>(
@@ -426,6 +503,28 @@ fn content_hash(value: &Value) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn increment_cursor_value(value: Value) -> Result<Value> {
+    match value {
+        Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                return Ok(json!(value.checked_add(1).ok_or_else(|| anyhow!(
+                    "poll increment cursor transform overflowed i64"
+                ))?));
+            }
+            if let Some(value) = number.as_u64() {
+                return Ok(json!(value.checked_add(1).ok_or_else(|| anyhow!(
+                    "poll increment cursor transform overflowed u64"
+                ))?));
+            }
+            bail!("poll increment cursor transform requires an integer number");
+        }
+        other => bail!(
+            "poll increment cursor transform requires a numeric cursor, got {}",
+            value_type_name(&other)
+        ),
+    }
+}
+
 fn push_seen_key(buffer: &mut VecDeque<String>, key: String, seen_window: usize) {
     buffer.push_back(key);
     while buffer.len() > seen_window {
@@ -435,16 +534,41 @@ fn push_seen_key(buffer: &mut VecDeque<String>, key: String, seen_window: usize)
 
 fn compare_json_values(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
-        (Value::Number(a), Value::Number(b)) => a
-            .as_f64()
-            .zip(b.as_f64())
-            .and_then(|(a, b)| a.partial_cmp(&b))
-            .unwrap_or(Ordering::Equal),
+        (Value::Number(a), Value::Number(b)) => compare_json_numbers(a, b),
         (Value::String(a), Value::String(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         _ => serde_json::to_string(left)
             .unwrap_or_default()
             .cmp(&serde_json::to_string(right).unwrap_or_default()),
+    }
+}
+
+fn compare_json_numbers(left: &serde_json::Number, right: &serde_json::Number) -> Ordering {
+    match (left.as_i64(), right.as_i64()) {
+        (Some(a), Some(b)) => return a.cmp(&b),
+        (Some(a), None) if a < 0 => return Ordering::Less,
+        (None, Some(b)) if b < 0 => return Ordering::Greater,
+        _ => {}
+    }
+
+    if let (Some(a), Some(b)) = (left.as_u64(), right.as_u64()) {
+        return a.cmp(&b);
+    }
+
+    left.as_f64()
+        .zip(right.as_f64())
+        .and_then(|(a, b)| a.partial_cmp(&b))
+        .unwrap_or(Ordering::Equal)
+}
+
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 
@@ -515,6 +639,8 @@ mod tests {
             extract_items_pointer: "/items".to_string(),
             request_cursor_arg: None,
             response_cursor_pointer: None,
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/id".to_string(),
                 seen_window: Some(4),
@@ -529,6 +655,8 @@ mod tests {
             extract_items_pointer: "/items".to_string(),
             request_cursor_arg: None,
             response_cursor_pointer: None,
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         }
         .validate()
@@ -558,6 +686,8 @@ mod tests {
             extract_items_pointer: "/items".to_string(),
             request_cursor_arg: Some("since".to_string()),
             response_cursor_pointer: None,
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
             checkpoint_strategy: PollCheckpointStrategy::Watermark {
                 item_watermark_pointer: "/updated_at".to_string(),
                 item_tiebreaker_pointer: Some("/id".to_string()),
@@ -603,6 +733,8 @@ mod tests {
             extract_items_pointer: "/items".to_string(),
             request_cursor_arg: None,
             response_cursor_pointer: None,
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
             checkpoint_strategy: PollCheckpointStrategy::ContentHash {
                 seen_window: Some(4),
             },
@@ -622,6 +754,8 @@ mod tests {
             extract_items_pointer: "/items".to_string(),
             request_cursor_arg: Some("cursor".to_string()),
             response_cursor_pointer: Some("/next_cursor".to_string()),
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         })
         .unwrap();
@@ -640,6 +774,8 @@ mod tests {
             extract_items_pointer: "/items".to_string(),
             request_cursor_arg: None,
             response_cursor_pointer: None,
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
             checkpoint_strategy: PollCheckpointStrategy::Watermark {
                 item_watermark_pointer: "/updated_at".to_string(),
                 item_tiebreaker_pointer: Some("/id".to_string()),
@@ -666,5 +802,167 @@ mod tests {
                 json!({"id":"b","updated_at":"2025-01-01T00:00:00Z"})
             ]
         );
+    }
+
+    #[test]
+    fn cursor_transform_requires_item_derived_cursor() {
+        let err = PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("offset".to_string()),
+            response_cursor_pointer: None,
+            cursor_from_item_pointer: None,
+            cursor_transform: Some(PollCursorTransform::Increment),
+            checkpoint_strategy: PollCheckpointStrategy::ItemKey {
+                item_key_pointer: "/id".to_string(),
+                seen_window: Some(4),
+            },
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("cursor_transform requires cursor_from_item_pointer"));
+    }
+
+    #[test]
+    fn poll_config_rejects_multiple_cursor_sources() {
+        let err = PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("cursor".to_string()),
+            response_cursor_pointer: Some("/next_cursor".to_string()),
+            cursor_from_item_pointer: Some("/update_id".to_string()),
+            cursor_transform: None,
+            checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn item_derived_cursor_updates_next_request_with_increment() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("offset".to_string()),
+            response_cursor_pointer: None,
+            cursor_from_item_pointer: Some("/update_id".to_string()),
+            cursor_transform: Some(PollCursorTransform::Increment),
+            checkpoint_strategy: PollCheckpointStrategy::ItemKey {
+                item_key_pointer: "/update_id".to_string(),
+                seen_window: Some(8),
+            },
+        })
+        .unwrap();
+
+        runner
+            .process_response(
+                json!({"items":[
+                    {"update_id": 1002, "message": "older"},
+                    {"update_id": 1004, "message": "newest"},
+                    {"update_id": 1003, "message": "middle"}
+                ]}),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(runner.build_request_args(&HashMap::new())["offset"], 1005);
+    }
+
+    #[test]
+    fn item_derived_cursor_preserves_large_integer_ordering() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("offset".to_string()),
+            response_cursor_pointer: None,
+            cursor_from_item_pointer: Some("/update_id".to_string()),
+            cursor_transform: Some(PollCursorTransform::Increment),
+            checkpoint_strategy: PollCheckpointStrategy::ItemKey {
+                item_key_pointer: "/update_id".to_string(),
+                seen_window: Some(8),
+            },
+        })
+        .unwrap();
+
+        runner
+            .process_response(
+                json!({"items":[
+                    {"update_id": 9007199254740992_u64},
+                    {"update_id": 9007199254740994_u64}
+                ]}),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runner.build_request_args(&HashMap::new())["offset"],
+            json!(9007199254740995_u64)
+        );
+    }
+
+    #[test]
+    fn item_derived_cursor_uses_last_seen_batch_even_when_items_are_deduped() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("offset".to_string()),
+            response_cursor_pointer: None,
+            cursor_from_item_pointer: Some("/update_id".to_string()),
+            cursor_transform: Some(PollCursorTransform::Increment),
+            checkpoint_strategy: PollCheckpointStrategy::ItemKey {
+                item_key_pointer: "/update_id".to_string(),
+                seen_window: Some(8),
+            },
+        })
+        .unwrap();
+
+        runner
+            .process_response(
+                json!({"items":[
+                    {"update_id": 10},
+                    {"update_id": 11}
+                ]}),
+                None,
+            )
+            .unwrap();
+        runner
+            .process_response(
+                json!({"items":[
+                    {"update_id": 11},
+                    {"update_id": 12}
+                ]}),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(runner.build_request_args(&HashMap::new())["offset"], 13);
+    }
+
+    #[test]
+    fn item_derived_cursor_increment_requires_integer_number() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("offset".to_string()),
+            response_cursor_pointer: None,
+            cursor_from_item_pointer: Some("/update_id".to_string()),
+            cursor_transform: Some(PollCursorTransform::Increment),
+            checkpoint_strategy: PollCheckpointStrategy::ItemKey {
+                item_key_pointer: "/update_id".to_string(),
+                seen_window: Some(8),
+            },
+        })
+        .unwrap();
+
+        let err = runner
+            .process_response(json!({"items":[{"update_id":"100"}]}), None)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("requires a numeric cursor"));
     }
 }
