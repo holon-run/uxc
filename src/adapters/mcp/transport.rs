@@ -467,6 +467,12 @@ impl McpStdioTransport {
         let request_json = serde_json::to_string(&request)?;
         tracing::debug!("Sending request: {}", request_json);
 
+        let request_tx = self
+            .request_tx
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow!("Request channel closed"))?;
+
         // Create a response channel
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -477,10 +483,7 @@ impl McpStdioTransport {
         }
 
         // Send the request
-        if self
-            .request_tx
-            .as_ref()
-            .ok_or_else(|| anyhow!("Request channel closed"))?
+        if request_tx
             .send(OutboundMessage {
                 request_id: Some(id.clone()),
                 message: request_json,
@@ -1316,6 +1319,22 @@ mod tests {
 
         // Either timeout or error is acceptable
         assert!(result.is_err() || result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn send_request_does_not_leave_pending_channel_when_request_tx_is_closed() {
+        let script = "sleep 10";
+        let mut transport =
+            McpStdioTransport::connect("sh", &["-c".to_string(), script.to_string()])
+                .await
+                .unwrap();
+        transport.request_tx.take();
+
+        let err = transport.send_request("echo", None).await.unwrap_err();
+        assert!(err.to_string().contains("Request channel closed"));
+
+        let channels = transport.response_channels.lock().await;
+        assert!(channels.is_empty(), "response_channels should be empty");
     }
 
     #[tokio::test]
