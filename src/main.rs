@@ -4063,8 +4063,10 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
         } => {
             auth::oauth_sessions::purge_expired_sessions(current_unix_timestamp())?;
             let endpoint = normalize_endpoint_url(endpoint);
-            let scopes =
-                auth::oauth::resolve_oauth_scopes_for_endpoint(&endpoint, &auth::oauth::parse_scopes(scope))?;
+            let scopes = auth::oauth::resolve_oauth_scopes_for_endpoint(
+                &endpoint,
+                &auth::oauth::parse_scopes(scope),
+            )?;
             let client = build_resilient_http_client(
                 std::time::Duration::from_secs(30),
                 "OAuth start command",
@@ -4197,8 +4199,10 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
         } => {
             let flow = parse_oauth_flow(flow)?;
             let endpoint = normalize_endpoint_url(endpoint);
-            let scopes =
-                auth::oauth::resolve_oauth_scopes_for_endpoint(&endpoint, &auth::oauth::parse_scopes(scope))?;
+            let scopes = auth::oauth::resolve_oauth_scopes_for_endpoint(
+                &endpoint,
+                &auth::oauth::parse_scopes(scope),
+            )?;
             let client = build_resilient_http_client(
                 std::time::Duration::from_secs(30),
                 "OAuth login command",
