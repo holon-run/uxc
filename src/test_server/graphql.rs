@@ -327,6 +327,7 @@ async fn execute_query(
 
     match state.scenario {
         Scenario::Ok
+        | Scenario::Legacy
         | Scenario::AuthRequired
         | Scenario::ToolsListFailAfterFirst
         | Scenario::ToolCallTimeout
@@ -497,8 +498,22 @@ async fn handle_graphql_websocket(mut socket: WebSocket, state: ServerState) {
                 let _ = socket
                     .send(Message::Text(json!({"type":"connection_ack"}).to_string()))
                     .await;
+                if matches!(state.scenario, Scenario::Legacy) {
+                    let _ = socket
+                        .send(Message::Text(json!({"type":"ka"}).to_string()))
+                        .await;
+                }
             }
             "subscribe" => {
+                if matches!(state.scenario, Scenario::Legacy) {
+                    let _ = socket
+                        .send(Message::Text(
+                            json!({"type":"error","payload":{"message":"legacy server expects start"}})
+                                .to_string(),
+                        ))
+                        .await;
+                    return;
+                }
                 let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("1");
                 let room_id = value
                     .get("payload")
@@ -524,6 +539,51 @@ async fn handle_graphql_websocket(mut socket: WebSocket, state: ServerState) {
                         json!({
                             "id": id,
                             "type":"next",
+                            "payload":{
+                                "data":{"messageAdded":{"id":"m2","roomId":room_id,"body":"world"}},
+                                "extensions":{"trace":"ok"}
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                let _ = socket
+                    .send(Message::Text(
+                        json!({"id":id,"type":"complete"}).to_string(),
+                    ))
+                    .await;
+                let _ = socket.close().await;
+                return;
+            }
+            "start" => {
+                if !matches!(state.scenario, Scenario::Legacy) {
+                    continue;
+                }
+                let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("1");
+                let room_id = value
+                    .get("payload")
+                    .and_then(|v| v.get("variables"))
+                    .and_then(|v| v.get("roomId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("room-1");
+
+                let _ = socket
+                    .send(Message::Text(
+                        json!({
+                            "id": id,
+                            "type":"data",
+                            "payload":{
+                                "data":{"messageAdded":{"id":"m1","roomId":room_id,"body":"hello"}}
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                let _ = socket
+                    .send(Message::Text(
+                        json!({
+                            "id": id,
+                            "type":"data",
                             "payload":{
                                 "data":{"messageAdded":{"id":"m2","roomId":room_id,"body":"world"}},
                                 "extensions":{"trace":"ok"}
@@ -578,6 +638,12 @@ fn create_router(state: ServerState) -> Router {
         State(state): State<ServerState>,
     ) -> Response {
         if let Some(ws) = ws {
+            if matches!(state.scenario, Scenario::Legacy) {
+                return ws
+                    .protocols(["graphql-ws"])
+                    .on_upgrade(move |socket| handle_graphql_websocket(socket, state))
+                    .into_response();
+            }
             return ws
                 .protocols(["graphql-transport-ws"])
                 .on_upgrade(move |socket| handle_graphql_websocket(socket, state))

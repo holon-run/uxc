@@ -48,7 +48,8 @@ Bitquery uses bearer access tokens. The most stable agent path is OAuth `client_
 4. Execute with positional JSON and explicit GraphQL selection sets:
    - `bitquery-graphql-cli query/EVM '{"network":"base","dataset":"combined","_select":"DEXTrades(limit: {count: 1}) { Transaction { Hash } }"}'`
 5. Prefer `query/*` operations first.
-   - Use `subscription/*` only after runtime validation in the current environment.
+   - `uxc subscribe` now auto-negotiates modern `graphql-transport-ws` and legacy `graphql-ws` compatibility profiles for `subscription/*`.
+   - Treat provider-specific auth or payload quirks as the remaining validation surface.
 
 ## Capability Map
 
@@ -124,7 +125,7 @@ The verified query shape was:
 - `bitquery-graphql-cli <operation> ...` is equivalent to `uxc https://streaming.bitquery.io/graphql <operation> ...`.
 - Prefer positional JSON for GraphQL calls because `_select` is usually required.
 - Keep `_select` small on first pass and add explicit filters before expanding scope.
-- Prefer `query/*` for stable agent workflows. Treat `subscription/*` as advanced and validate runtime behavior before depending on it.
+- Prefer `query/*` for stable agent workflows. `subscription/*` now has built-in GraphQL websocket profile fallback, but still depends on provider auth and server-side subscription behavior.
 - If auth fails:
   - confirm `uxc auth binding match https://streaming.bitquery.io/graphql` resolves to `bitquery-graphql`
   - inspect token state with `uxc auth oauth info bitquery-graphql`

@@ -238,6 +238,7 @@ fn create_router(state: ServerState) -> Router {
     async fn health_check(State(state): State<ServerState>) -> Result<Response, StatusCode> {
         match state.scenario {
             Scenario::Ok
+            | Scenario::Legacy
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -261,6 +262,7 @@ fn create_router(state: ServerState) -> Router {
     async fn list_users(State(state): State<ServerState>) -> Result<Response, StatusCode> {
         match state.scenario {
             Scenario::Ok
+            | Scenario::Legacy
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -290,6 +292,7 @@ fn create_router(state: ServerState) -> Router {
     ) -> Result<Response, StatusCode> {
         match state.scenario {
             Scenario::Ok
+            | Scenario::Legacy
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -327,6 +330,7 @@ fn create_router(state: ServerState) -> Router {
     ) -> Result<Response, StatusCode> {
         match state.scenario {
             Scenario::Ok
+            | Scenario::Legacy
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -360,6 +364,7 @@ fn create_router(state: ServerState) -> Router {
     async fn stream_json(State(state): State<ServerState>) -> Result<Response, StatusCode> {
         match state.scenario {
             Scenario::Ok
+            | Scenario::Legacy
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -403,6 +408,7 @@ fn create_router(state: ServerState) -> Router {
     ) -> Result<Response, StatusCode> {
         match state.scenario {
             Scenario::Ok
+            | Scenario::Legacy
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -446,6 +452,7 @@ fn create_router(state: ServerState) -> Router {
     ) -> Result<Response, StatusCode> {
         match state.scenario {
             Scenario::Ok
+            | Scenario::Legacy
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent

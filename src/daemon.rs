@@ -9,15 +9,15 @@ use crate::daemon_log::{redact_endpoint, redact_sensitive};
 use crate::daemon_log::{DaemonEventType, DaemonLogEntry, DaemonLogger};
 use crate::error::UxcError;
 use crate::subscription_graphql::{
-    derive_graphql_websocket_endpoint, graphql_transport_init_message, GraphQLSubscriptionConfig,
-    GraphQLSubscriptionHandler,
+    derive_graphql_websocket_endpoint, graphql_transport_init_message, GraphQLProfileFallback,
+    GraphQLSubscriptionConfig, GraphQLSubscriptionHandler, GraphQLWebSocketProfile,
 };
 use crate::subscription_jsonrpc::{
     derive_jsonrpc_unsubscribe_operation, JsonRpcSubscriptionConfig, JsonRpcSubscriptionHandler,
 };
 use crate::subscription_poll::{PollRuntimeContext, PollRuntimeObserver, PollSubscriptionConfig};
 use crate::subscription_websocket::{
-    self, RawFrameHandler, WebSocketRuntimeConfig, WebSocketRuntimeObserver,
+    self, RawFrameHandler, WebSocketRunError, WebSocketRuntimeConfig, WebSocketRuntimeObserver,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use futures::StreamExt;
@@ -2006,6 +2006,53 @@ impl PollRuntimeObserver for DaemonWebSocketObserver<'_> {
     }
 }
 
+struct GraphQLFallbackObserver<'a, O> {
+    inner: &'a mut O,
+    saw_data: bool,
+}
+
+#[async_trait::async_trait]
+impl<O: WebSocketRuntimeObserver + Send> WebSocketRuntimeObserver
+    for GraphQLFallbackObserver<'_, O>
+{
+    async fn emit(
+        &mut self,
+        event_kind: &str,
+        data: Option<Value>,
+        meta: Option<Value>,
+    ) -> Result<()> {
+        if event_kind == "data" {
+            self.saw_data = true;
+        }
+        self.inner.emit(event_kind, data, meta).await
+    }
+
+    async fn update_status(
+        &mut self,
+        status: Option<&str>,
+        last_error: Option<String>,
+        increment_reconnect: bool,
+    ) -> Result<()> {
+        self.inner
+            .update_status(status, last_error, increment_reconnect)
+            .await
+    }
+}
+
+fn graphql_retry_supports_fallback(profile: GraphQLWebSocketProfile, err: &anyhow::Error) -> bool {
+    if profile != GraphQLWebSocketProfile::Modern {
+        return false;
+    }
+    let message = err.to_string();
+    message.contains("websocket connection failed")
+        || message.contains("tls handshake eof")
+        || message.contains("http error")
+        || message.contains("handshake not finished")
+        || message.contains("websocket closed by remote peer")
+        || message.contains("websocket stream ended")
+        || message.contains("protocol error")
+}
+
 async fn run_stream_subscription_job(
     job_id: &str,
     request: &SubscribeStartRequest,
@@ -2201,11 +2248,11 @@ async fn run_graphql_subscription_job(
         auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
     let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
-    let mut handler = GraphQLSubscriptionHandler::new(GraphQLSubscriptionConfig {
+    let handler_config = GraphQLSubscriptionConfig {
         operation_id: operation_id.clone(),
         query: prepared.query,
         variables: prepared.variables,
-    });
+    };
     let mut observer = DaemonWebSocketObserver {
         sink: &mut sink,
         view: &view,
@@ -2213,21 +2260,113 @@ async fn run_graphql_subscription_job(
         source_kind: "graphql",
     };
 
-    let result = subscription_websocket::run_websocket_subscription_runtime(
-        WebSocketRuntimeConfig {
-            endpoint,
-            auth_profile,
-            subprotocols: vec!["graphql-transport-ws".to_string()],
+    let mut profile = GraphQLWebSocketProfile::Modern;
+    let mut profile_locked = false;
+    let mut delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
+
+    let result: Result<()> = loop {
+        let mut handler = GraphQLSubscriptionHandler::new(handler_config.clone(), profile);
+        let config = WebSocketRuntimeConfig {
+            endpoint: endpoint.clone(),
+            auth_profile: auth_profile.clone(),
+            subprotocols: vec![profile.subprotocol().to_string()],
             initial_text_frames: vec![graphql_transport_init_message()],
             first_message_timeout_secs: Some(5),
             initial_reconnect_delay_secs: SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS,
             max_reconnect_delay_secs: SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS,
-        },
-        &mut handler,
-        &mut observer,
-        &mut stop_rx,
-    )
-    .await;
+        };
+        let mut attempt_observer = GraphQLFallbackObserver {
+            inner: &mut observer,
+            saw_data: false,
+        };
+
+        match subscription_websocket::run_websocket_subscription_session_once(
+            &config,
+            &mut handler,
+            &mut attempt_observer,
+            &mut stop_rx,
+        )
+        .await
+        {
+            Ok(()) => break Ok(()),
+            Err(WebSocketRunError::Fatal(err)) => {
+                if !profile_locked {
+                    if let Some(fallback) = err.downcast_ref::<GraphQLProfileFallback>() {
+                        WebSocketRuntimeObserver::emit(
+                            &mut observer,
+                            "reconnect",
+                            None,
+                            Some(json!({
+                                "reason": fallback.reason,
+                                "from_profile": fallback.from.protocol_label(),
+                                "to_profile": fallback.to.protocol_label(),
+                                "compatibility_fallback": true,
+                                "delay_secs": 0,
+                            })),
+                        )
+                        .await?;
+                        profile = fallback.to;
+                        continue;
+                    }
+                }
+                break Err(err);
+            }
+            Err(WebSocketRunError::Retry(err)) => {
+                if attempt_observer.saw_data || handler.has_received_data() {
+                    profile_locked = true;
+                    delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
+                } else if !profile_locked && graphql_retry_supports_fallback(profile, &err) {
+                    WebSocketRuntimeObserver::emit(
+                        &mut observer,
+                        "reconnect",
+                        None,
+                        Some(json!({
+                            "reason": err.to_string(),
+                            "from_profile": profile.protocol_label(),
+                            "to_profile": GraphQLWebSocketProfile::Legacy.protocol_label(),
+                            "compatibility_fallback": true,
+                            "delay_secs": 0,
+                        })),
+                    )
+                    .await?;
+                    profile = GraphQLWebSocketProfile::Legacy;
+                    continue;
+                }
+
+                let message = err.to_string();
+                WebSocketRuntimeObserver::emit(
+                    &mut observer,
+                    "error",
+                    None,
+                    Some(json!({ "message": message })),
+                )
+                .await?;
+                WebSocketRuntimeObserver::update_status(
+                    &mut observer,
+                    Some("reconnecting"),
+                    Some(message.clone()),
+                    true,
+                )
+                .await?;
+                WebSocketRuntimeObserver::emit(
+                    &mut observer,
+                    "reconnect",
+                    None,
+                    Some(json!({
+                        "delay_secs": delay_secs,
+                        "graphql_profile": profile.protocol_label(),
+                    })),
+                )
+                .await?;
+                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
+                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "graphql").await?;
+                    break Ok(());
+                }
+                delay_secs =
+                    (delay_secs.saturating_mul(2)).min(SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS);
+            }
+        }
+    };
 
     if let Err(err) = result {
         append_subscription_event(

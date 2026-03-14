@@ -227,6 +227,7 @@ async fn execute_method(
 ) -> Result<JsonRpcResponse, StatusCode> {
     match state.scenario {
         Scenario::Ok
+        | Scenario::Legacy
         | Scenario::ToolsListFailAfterFirst
         | Scenario::ToolCallTimeout
         | Scenario::StructuredContent

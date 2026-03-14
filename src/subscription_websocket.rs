@@ -136,7 +136,7 @@ impl WebSocketSessionHandler for RawFrameHandler {
     }
 }
 
-enum WebSocketRunError {
+pub enum WebSocketRunError {
     Retry(anyhow::Error),
     Fatal(anyhow::Error),
 }
@@ -477,6 +477,18 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
             }
         }
     }
+}
+
+pub async fn run_websocket_subscription_session_once<
+    H: WebSocketSessionHandler,
+    O: WebSocketRuntimeObserver,
+>(
+    config: &WebSocketRuntimeConfig,
+    handler: &mut H,
+    observer: &mut O,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> std::result::Result<(), WebSocketRunError> {
+    run_session_once(config, handler, observer, stop_rx).await
 }
 
 pub async fn run_websocket_subscription_runtime<
