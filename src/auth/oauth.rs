@@ -176,6 +176,17 @@ struct ResourceMetadataDocument {
 }
 
 #[derive(Debug, Deserialize)]
+struct MatrixAuthMetadataDocument {
+    issuer: String,
+    authorization_endpoint: String,
+    #[serde(default)]
+    registration_endpoint: Option<String>,
+    token_endpoint: String,
+    #[serde(default)]
+    device_authorization_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct OpenIdConfiguration {
     #[serde(default)]
     issuer: Option<String>,
@@ -329,6 +340,48 @@ pub async fn discover_provider_metadata_with_requirements(
         if authorization_server.is_none() {
             authorization_server = endpoint_origin(endpoint);
         }
+        return Ok(OAuthProviderMetadata {
+            provider_issuer,
+            resource_metadata_url: overrides.resource_metadata_url.clone(),
+            authorization_server,
+            authorization_endpoint,
+            registration_endpoint,
+            token_endpoint: token_endpoint
+                .expect("token endpoint is validated by requirements.is_satisfied"),
+            device_authorization_endpoint,
+        });
+    }
+
+    if overrides.issuer.is_none() && overrides.token_endpoint.is_none() {
+        if let Some(matrix_metadata) = discover_matrix_auth_metadata(endpoint, client).await? {
+            if authorization_server.is_none() {
+                authorization_server = matrix_metadata.authorization_server.clone();
+            }
+            if provider_issuer.is_none() {
+                provider_issuer = matrix_metadata.provider_issuer.clone();
+            }
+            if authorization_endpoint.is_none() {
+                authorization_endpoint = matrix_metadata.authorization_endpoint.clone();
+            }
+            if registration_endpoint.is_none() {
+                registration_endpoint = matrix_metadata.registration_endpoint.clone();
+            }
+            if token_endpoint.is_none() {
+                token_endpoint = Some(matrix_metadata.token_endpoint.clone());
+            }
+            if device_authorization_endpoint.is_none() {
+                device_authorization_endpoint =
+                    matrix_metadata.device_authorization_endpoint.clone();
+            }
+        }
+    }
+
+    if requirements.is_satisfied(
+        &token_endpoint,
+        &authorization_endpoint,
+        &device_authorization_endpoint,
+        &registration_endpoint,
+    ) {
         return Ok(OAuthProviderMetadata {
             provider_issuer,
             resource_metadata_url: overrides.resource_metadata_url.clone(),
@@ -945,6 +998,52 @@ pub fn parse_resource_metadata_from_www_authenticate(header: &str) -> Option<Str
     parse_parameter_value(header, "resource_metadata")
 }
 
+async fn discover_matrix_auth_metadata(
+    endpoint: &str,
+    client: &Client,
+) -> Result<Option<OAuthProviderMetadata>> {
+    let Some(metadata_url) = matrix_auth_metadata_url(endpoint) else {
+        return Ok(None);
+    };
+
+    let response = match client
+        .get(&metadata_url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return Ok(None),
+    };
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let metadata = response
+        .json::<MatrixAuthMetadataDocument>()
+        .await
+        .context("Failed to decode Matrix auth metadata")?;
+
+    Ok(Some(OAuthProviderMetadata {
+        provider_issuer: Some(metadata.issuer.clone()),
+        resource_metadata_url: None,
+        authorization_server: Some(metadata.issuer),
+        authorization_endpoint: Some(metadata.authorization_endpoint),
+        registration_endpoint: metadata.registration_endpoint,
+        token_endpoint: metadata.token_endpoint,
+        device_authorization_endpoint: metadata.device_authorization_endpoint,
+    }))
+}
+
+fn matrix_auth_metadata_url(endpoint: &str) -> Option<String> {
+    let url = Url::parse(endpoint).ok()?;
+    if !url.path().starts_with("/_matrix/client/") {
+        return None;
+    }
+    endpoint_origin(endpoint).map(|origin| format!("{origin}/_matrix/client/v1/auth_metadata"))
+}
+
 async fn discover_resource_metadata_url(endpoint: &str, client: &Client) -> Result<Option<String>> {
     let request = serde_json::json!({
         "jsonrpc": "2.0",
@@ -1404,6 +1503,7 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::Matcher;
 
     #[test]
     fn parse_resource_metadata_header() {
@@ -1499,6 +1599,19 @@ mod tests {
     fn endpoint_origin_preserves_non_standard_port() {
         let origin = endpoint_origin("https://mcp.example.com:8443/mcp").unwrap();
         assert_eq!(origin, "https://mcp.example.com:8443");
+    }
+
+    #[test]
+    fn matrix_auth_metadata_url_requires_matrix_client_path() {
+        assert_eq!(
+            matrix_auth_metadata_url("https://matrix.org/_matrix/client/v3"),
+            Some("https://matrix.org/_matrix/client/v1/auth_metadata".to_string())
+        );
+        assert_eq!(
+            matrix_auth_metadata_url("https://matrix.org/_matrix/client/r0"),
+            Some("https://matrix.org/_matrix/client/v1/auth_metadata".to_string())
+        );
+        assert!(matrix_auth_metadata_url("https://matrix.org").is_none());
     }
 
     #[test]
@@ -1621,5 +1734,53 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Could not determine token_endpoint"));
+    }
+
+    #[tokio::test]
+    async fn discover_provider_metadata_supports_matrix_auth_metadata() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = format!("{}/_matrix/client/v3", server.url());
+
+        let _auth_metadata = server
+            .mock("GET", "/_matrix/client/v1/auth_metadata")
+            .match_header("accept", Matcher::Exact("application/json".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{
+                    "issuer": "{0}/issuer",
+                    "authorization_endpoint": "{0}/authorize",
+                    "registration_endpoint": "{0}/register",
+                    "token_endpoint": "{0}/token",
+                    "device_authorization_endpoint": "{0}/device"
+                }}"#,
+                server.url()
+            ))
+            .create_async()
+            .await;
+
+        let metadata = discover_provider_metadata(&endpoint, &Client::new())
+            .await
+            .expect("matrix auth metadata should resolve oauth provider metadata");
+        let issuer = format!("{}/issuer", server.url());
+        let authorization_endpoint = format!("{}/authorize", server.url());
+        let registration_endpoint = format!("{}/register", server.url());
+        let device_authorization_endpoint = format!("{}/device", server.url());
+
+        assert_eq!(metadata.provider_issuer.as_deref(), Some(issuer.as_str()));
+        assert_eq!(
+            metadata.authorization_endpoint.as_deref(),
+            Some(authorization_endpoint.as_str())
+        );
+        assert_eq!(
+            metadata.registration_endpoint.as_deref(),
+            Some(registration_endpoint.as_str())
+        );
+        assert_eq!(metadata.token_endpoint, format!("{}/token", server.url()));
+        assert_eq!(
+            metadata.device_authorization_endpoint.as_deref(),
+            Some(device_authorization_endpoint.as_str())
+        );
+        assert!(metadata.resource_metadata_url.is_none());
     }
 }

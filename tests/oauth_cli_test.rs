@@ -83,6 +83,56 @@ fn oauth_start_returns_authorization_url_and_session() {
 }
 
 #[test]
+fn oauth_start_discovers_matrix_auth_metadata() {
+    let files = AuthFiles::new();
+    let mut server = mockito::Server::new();
+
+    let _auth_metadata = server
+        .mock("GET", "/_matrix/client/v1/auth_metadata")
+        .match_header("accept", "application/json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "issuer": "{0}/issuer",
+                "authorization_endpoint": "{0}/authorize",
+                "registration_endpoint": "{0}/register",
+                "token_endpoint": "{0}/token",
+                "device_authorization_endpoint": "{0}/device"
+            }}"#,
+            server.url()
+        ))
+        .create();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("oauth")
+        .arg("start")
+        .arg("matrix")
+        .arg("--endpoint")
+        .arg(format!("{}/_matrix/client/v3", server.url()))
+        .arg("--redirect-uri")
+        .arg("http://127.0.0.1:11111/callback")
+        .arg("--client-id")
+        .arg("client-1")
+        .output()
+        .expect("oauth start should run");
+
+    assert!(output.status.success(), "oauth start should succeed");
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "auth_oauth_start_result");
+    assert_eq!(json["data"]["credential"], "matrix");
+    assert!(
+        json["data"]["authorization_url"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with(&format!("{}/authorize?", server.url())),
+        "authorization URL should be derived from Matrix auth metadata"
+    );
+}
+
+#[test]
 fn oauth_complete_success_persists_profile_and_removes_session() {
     let files = AuthFiles::new();
     let mut server = mockito::Server::new();

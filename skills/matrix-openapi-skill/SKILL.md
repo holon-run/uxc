@@ -48,7 +48,28 @@ Do not link only the homeserver origin without `/_matrix/client/v3`.
 
 Matrix Client-Server API uses `Authorization: Bearer <access_token>`.
 
-Configure one bearer credential and bind it to your chosen homeserver base path:
+Preferred path for OAuth-aware homeservers:
+
+```bash
+uxc auth oauth start matrix-oauth \
+  --endpoint https://matrix.org/_matrix/client/v3 \
+  --redirect-uri http://127.0.0.1:8788/callback \
+  --client-id <client_id>
+
+uxc auth oauth complete matrix-oauth \
+  --session-id <session_id> \
+  --authorization-response 'http://127.0.0.1:8788/callback?code=...'
+
+uxc auth binding add \
+  --id matrix-oauth \
+  --host matrix.org \
+  --path-prefix /_matrix/client/v3 \
+  --scheme https \
+  --credential matrix-oauth \
+  --priority 100
+```
+
+Fallback path when you already have an access token:
 
 ```bash
 uxc auth credential set matrix-access \
@@ -69,6 +90,10 @@ If your homeserver is not `matrix.org`, replace the host while keeping the same 
 ```bash
 uxc auth binding match https://matrix.org/_matrix/client/v3
 ```
+
+Notes:
+- `uxc auth oauth` works only for homeservers that expose Matrix OAuth metadata.
+- Legacy Matrix login and SSO fallback flows are not covered by this skill yet.
 
 ## Core Workflow
 
