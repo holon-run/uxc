@@ -262,20 +262,17 @@ impl McpHttpTransport {
     async fn send_jsonrpc_request(&self, request: &JsonRpcRequest) -> Result<reqwest::Response> {
         let profile = self.auth_profile.lock().await.clone();
         let session_id = self.session_id.lock().await.clone();
-        let authed_url = Self::apply_profile_auth_to_url(&self.server_url, profile.as_ref())?;
+        let resolved = Self::resolve_request_auth("POST", &self.server_url, profile.as_ref())?;
 
         let mut req = self
             .client
-            .post(&authed_url)
+            .post(&resolved.url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream");
         if let Some(session_id) = session_id {
             req = req.header("mcp-session-id", session_id);
         }
-
-        if let Some(profile) = profile {
-            req = Self::apply_profile_auth(req, &profile)?;
-        }
+        req = Self::apply_resolved_request_auth(req, &resolved);
 
         req.json(request).send().await.map_err(Into::into)
     }
@@ -331,29 +328,45 @@ impl McpHttpTransport {
         Ok(())
     }
 
-    fn apply_profile_auth(
-        req: reqwest::RequestBuilder,
-        profile: &Profile,
-    ) -> Result<reqwest::RequestBuilder> {
-        match profile.auth_type {
-            AuthType::OAuth => {
-                if let Some(token) = profile.bearer_token() {
-                    let mut token_profile = profile.clone();
-                    token_profile.api_key = token.to_string();
-                    crate::auth::apply_profile_auth_to_request(req, &token_profile)
-                } else {
-                    Ok(req)
-                }
+    fn effective_request_profile(profile: &Profile) -> Profile {
+        if profile.auth_type == AuthType::OAuth {
+            if let Some(token) = profile.bearer_token() {
+                let mut token_profile = profile.clone();
+                token_profile.api_key = token.to_string();
+                return token_profile;
             }
-            _ => crate::auth::apply_profile_auth_to_request(req, profile),
+        }
+        profile.clone()
+    }
+
+    fn resolve_request_auth(
+        method: &str,
+        url: &str,
+        profile: Option<&Profile>,
+    ) -> Result<crate::auth::ResolvedRequestAuth> {
+        match profile {
+            Some(profile) => {
+                let profile = Self::effective_request_profile(profile);
+                crate::auth::resolve_profile_request_auth_with_context(
+                    &crate::auth::AuthRequestContext::new(method, url),
+                    &profile,
+                )
+            }
+            None => Ok(crate::auth::ResolvedRequestAuth {
+                url: url.to_string(),
+                headers: Vec::new(),
+            }),
         }
     }
 
-    fn apply_profile_auth_to_url(url: &str, profile: Option<&Profile>) -> Result<String> {
-        match profile {
-            Some(profile) => crate::auth::apply_profile_auth_to_url(url, profile),
-            None => Ok(url.to_string()),
+    fn apply_resolved_request_auth(
+        mut req: reqwest::RequestBuilder,
+        resolved: &crate::auth::ResolvedRequestAuth,
+    ) -> reqwest::RequestBuilder {
+        for (name, value) in &resolved.headers {
+            req = req.header(name, value);
         }
+        req
     }
 
     fn map_http_error(
@@ -753,31 +766,20 @@ impl McpHttpTransport {
         request: &JsonRpcRequest,
         auth_profile: Option<&Profile>,
     ) -> ProbeAttemptResult {
-        let mut req = client
-            .post(match Self::apply_profile_auth_to_url(url, auth_profile) {
-                Ok(url) => url,
-                Err(err) => {
-                    return ProbeAttemptResult::NotMcp(format!(
-                        "failed to apply auth profile to url: {}",
-                        err
-                    ));
-                }
-            })
+        let resolved = match Self::resolve_request_auth("POST", url, auth_profile) {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                return ProbeAttemptResult::NotMcp(format!(
+                    "failed to apply auth profile to url: {}",
+                    err
+                ));
+            }
+        };
+        let req = client
+            .post(&resolved.url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream");
-
-        if let Some(profile) = auth_profile {
-            req = match Self::apply_profile_auth(req, profile) {
-                Ok(req) => req,
-                Err(err) => {
-                    return ProbeAttemptResult::NotMcp(format!(
-                        "failed to apply auth profile: {}",
-                        err
-                    ));
-                }
-            };
-        }
-
+        let req = Self::apply_resolved_request_auth(req, &resolved);
         let mut response = match req.json(request).send().await {
             Ok(response) => response,
             Err(err) => {
@@ -848,8 +850,8 @@ impl McpHttpTransport {
         client: &Client,
         auth_profile: Option<&Profile>,
     ) -> ProbeAttemptResult {
-        let authed_url = match Self::apply_profile_auth_to_url(url, auth_profile) {
-            Ok(url) => url,
+        let resolved = match Self::resolve_request_auth("GET", url, auth_profile) {
+            Ok(resolved) => resolved,
             Err(err) => {
                 return ProbeAttemptResult::NotMcp(format!(
                     "failed to apply auth profile to url: {}",
@@ -857,21 +859,10 @@ impl McpHttpTransport {
                 ));
             }
         };
-        let mut req = client
-            .get(&authed_url)
+        let req = client
+            .get(&resolved.url)
             .header("Accept", "text/event-stream");
-
-        if let Some(profile) = auth_profile {
-            req = match Self::apply_profile_auth(req, profile) {
-                Ok(req) => req,
-                Err(err) => {
-                    return ProbeAttemptResult::NotMcp(format!(
-                        "failed to apply auth profile: {}",
-                        err
-                    ));
-                }
-            };
-        }
+        let req = Self::apply_resolved_request_auth(req, &resolved);
 
         let mut response = match req.send().await {
             Ok(response) => response,
@@ -1176,18 +1167,16 @@ impl McpHttpTransport {
     async fn send_get_event_stream_request(&self) -> Result<reqwest::Response> {
         let profile = self.auth_profile.lock().await.clone();
         let session_id = self.session_id.lock().await.clone();
-        let authed_url = Self::apply_profile_auth_to_url(&self.server_url, profile.as_ref())?;
+        let resolved = Self::resolve_request_auth("GET", &self.server_url, profile.as_ref())?;
 
         let mut req = self
             .client
-            .get(&authed_url)
+            .get(&resolved.url)
             .header("Accept", "text/event-stream");
         if let Some(session_id) = session_id {
             req = req.header("mcp-session-id", session_id);
         }
-        if let Some(profile) = profile {
-            req = Self::apply_profile_auth(req, &profile)?;
-        }
+        req = Self::apply_resolved_request_auth(req, &resolved);
 
         req.send().await.map_err(Into::into)
     }
@@ -1346,16 +1335,13 @@ impl LegacySseTransport {
 
     async fn send_bootstrap_request(&self) -> Result<reqwest::Response> {
         let profile = self.auth_profile.lock().await.clone();
-        let connect_url =
-            McpHttpTransport::apply_profile_auth_to_url(&self.connect_url, profile.as_ref())?;
+        let resolved =
+            McpHttpTransport::resolve_request_auth("GET", &self.connect_url, profile.as_ref())?;
         let mut req = self
             .client
-            .get(&connect_url)
+            .get(&resolved.url)
             .header("Accept", "text/event-stream");
-
-        if let Some(profile) = profile {
-            req = McpHttpTransport::apply_profile_auth(req, &profile)?;
-        }
+        req = McpHttpTransport::apply_resolved_request_auth(req, &resolved);
 
         req.send().await.map_err(Into::into)
     }
@@ -1445,17 +1431,14 @@ impl LegacySseTransport {
         request: &JsonRpcRequest,
     ) -> Result<reqwest::Response> {
         let profile = self.auth_profile.lock().await.clone();
-        let messages_url =
-            McpHttpTransport::apply_profile_auth_to_url(messages_url, profile.as_ref())?;
+        let resolved =
+            McpHttpTransport::resolve_request_auth("POST", messages_url, profile.as_ref())?;
         let mut req = self
             .client
-            .post(&messages_url)
+            .post(&resolved.url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream");
-
-        if let Some(profile) = profile {
-            req = McpHttpTransport::apply_profile_auth(req, &profile)?;
-        }
+        req = McpHttpTransport::apply_resolved_request_auth(req, &resolved);
 
         req.json(request).send().await.map_err(Into::into)
     }

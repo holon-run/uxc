@@ -361,6 +361,71 @@ fn auth_binding_add_supports_ed25519_signer_json() {
 }
 
 #[test]
+fn auth_binding_add_supports_jwt_bearer_signer_json() {
+    let files = AuthFiles::new();
+
+    let set_output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("coinbase")
+        .arg("--auth-type")
+        .arg("api_key")
+        .arg("--field")
+        .arg("key_id=env:COINBASE_KEY_ID")
+        .arg("--field")
+        .arg("private_key=env:COINBASE_PRIVATE_KEY")
+        .output()
+        .expect("credential set should run");
+    assert!(set_output.status.success(), "credential set should succeed");
+
+    let signer = r#"{"kind":"jwt_bearer_v1","algorithm":"es256","private_key_field":"private_key","header_typ":"JWT","header_kid_field":"key_id","expires_in_seconds":120,"claims":{"static":{"iss":"cdp"},"from_fields":{"sub":"key_id"},"time":{"nbf":"now","exp":"now_plus_ttl"}},"request_claim":{"name":"uri","format":"string","value_template":"{{request.method}} {{request.host}}{{request.path}}"}}"#;
+    let add_output = uxc_command(&files)
+        .arg("auth")
+        .arg("binding")
+        .arg("add")
+        .arg("--id")
+        .arg("coinbase-advanced-trade")
+        .arg("--host")
+        .arg("api.coinbase.com")
+        .arg("--path-prefix")
+        .arg("/api/v3/brokerage")
+        .arg("--scheme")
+        .arg("https")
+        .arg("--credential")
+        .arg("coinbase")
+        .arg("--signer-json")
+        .arg(signer)
+        .output()
+        .expect("binding add should run");
+    assert!(add_output.status.success(), "binding add should succeed");
+
+    let add_json = parse_stdout_json(&add_output);
+    assert_eq!(add_json["data"]["signer"]["kind"], "jwt_bearer_v1");
+    assert_eq!(
+        add_json["data"]["signer"]["private_key_field"],
+        "private_key"
+    );
+
+    let match_output = uxc_command(&files)
+        .arg("auth")
+        .arg("binding")
+        .arg("match")
+        .arg("https://api.coinbase.com/api/v3/brokerage/accounts")
+        .output()
+        .expect("binding match should run");
+    assert!(
+        match_output.status.success(),
+        "binding match should succeed"
+    );
+    let match_json = parse_stdout_json(&match_output);
+    assert_eq!(
+        match_json["data"]["binding"]["signer"]["kind"],
+        "jwt_bearer_v1"
+    );
+}
+
+#[test]
 fn auth_binding_add_rejects_invalid_signer_json() {
     let files = AuthFiles::new();
     create_test_credential(&files, "binance");

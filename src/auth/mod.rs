@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -191,6 +192,12 @@ pub enum SignerAlgorithm {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum JwtSignerAlgorithm {
+    Es256,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum SignerValuePlacement {
     Header,
     Query,
@@ -271,10 +278,72 @@ pub struct Ed25519QuerySignerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JwtTimeClaimValue {
+    Now,
+    NowPlusTtl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JwtRequestClaimFormat {
+    String,
+    SingleElementArray,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct JwtBearerClaimsConfig {
+    #[serde(default, rename = "static", skip_serializing_if = "HashMap::is_empty")]
+    pub static_claims: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub from_fields: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub time: HashMap<String, JwtTimeClaimValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JwtRequestClaimConfig {
+    pub name: String,
+    pub format: JwtRequestClaimFormat,
+    pub value_template: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JwtBearerSignerConfig {
+    pub algorithm: JwtSignerAlgorithm,
+    pub private_key_field: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_typ: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_kid_field: Option<String>,
+    pub expires_in_seconds: u64,
+    #[serde(default)]
+    pub claims: JwtBearerClaimsConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_claim: Option<JwtRequestClaimConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthSignerConfig {
     HmacQueryV1(HmacQuerySignerConfig),
     Ed25519QueryV1(Ed25519QuerySignerConfig),
+    JwtBearerV1(JwtBearerSignerConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthRequestContext {
+    pub method: String,
+    pub url: String,
+}
+
+impl AuthRequestContext {
+    pub fn new(method: &str, url: &str) -> Self {
+        Self {
+            method: method.to_ascii_uppercase(),
+            url: url.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1287,6 +1356,65 @@ pub fn validate_signer_config(config: &AuthSignerConfig) -> Result<()> {
                 anyhow::bail!("ed25519_query_v1 signer requires signature_encoding=base64");
             }
         }
+        AuthSignerConfig::JwtBearerV1(jwt) => {
+            if jwt.algorithm != JwtSignerAlgorithm::Es256 {
+                anyhow::bail!("jwt_bearer_v1 signer requires algorithm=es256");
+            }
+            validate_field_name(&jwt.private_key_field)?;
+            if jwt.expires_in_seconds == 0 {
+                anyhow::bail!("jwt_bearer_v1 signer requires expires_in_seconds > 0");
+            }
+            if jwt
+                .header_typ
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                anyhow::bail!("jwt_bearer_v1 signer header_typ cannot be empty");
+            }
+            if let Some(field) = jwt.header_kid_field.as_deref() {
+                validate_field_name(field)?;
+            }
+
+            let mut claim_names = HashSet::new();
+            for name in jwt.claims.static_claims.keys() {
+                validate_jwt_claim_name(name)?;
+                claim_names.insert(name.as_str());
+            }
+            for (name, field_name) in &jwt.claims.from_fields {
+                validate_jwt_claim_name(name)?;
+                validate_field_name(field_name)?;
+                if !claim_names.insert(name.as_str()) {
+                    anyhow::bail!(
+                        "jwt_bearer_v1 signer defines claim '{}' more than once",
+                        name
+                    );
+                }
+            }
+            for name in jwt.claims.time.keys() {
+                validate_jwt_claim_name(name)?;
+                if !claim_names.insert(name.as_str()) {
+                    anyhow::bail!(
+                        "jwt_bearer_v1 signer defines claim '{}' more than once",
+                        name
+                    );
+                }
+            }
+            if let Some(request_claim) = &jwt.request_claim {
+                validate_jwt_claim_name(&request_claim.name)?;
+                if !claim_names.insert(request_claim.name.as_str()) {
+                    anyhow::bail!(
+                        "jwt_bearer_v1 signer defines claim '{}' more than once",
+                        request_claim.name
+                    );
+                }
+                if request_claim.value_template.trim().is_empty() {
+                    anyhow::bail!(
+                        "jwt_bearer_v1 signer request_claim value_template cannot be empty"
+                    );
+                }
+                parse_request_template_tokens(&request_claim.value_template)?;
+            }
+        }
     }
 
     Ok(())
@@ -1356,6 +1484,17 @@ fn validate_query_param_name(name: &str) -> Result<String> {
     }
     if trimmed.contains('=') {
         anyhow::bail!("Invalid query param name '{}'", trimmed);
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_jwt_claim_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("JWT claim name cannot be empty");
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        anyhow::bail!("JWT claim name '{}' cannot contain whitespace", trimmed);
     }
     Ok(trimmed.to_string())
 }
@@ -1457,9 +1596,23 @@ enum TemplateToken {
     Field(String),
     Env(String),
     Op(String),
+    RequestMethod,
+    RequestHost,
+    RequestPath,
 }
 
 fn parse_template_tokens(template: &str) -> Result<Vec<TemplateToken>> {
+    parse_template_tokens_with_request(template, false)
+}
+
+fn parse_request_template_tokens(template: &str) -> Result<Vec<TemplateToken>> {
+    parse_template_tokens_with_request(template, true)
+}
+
+fn parse_template_tokens_with_request(
+    template: &str,
+    allow_request_tokens: bool,
+) -> Result<Vec<TemplateToken>> {
     let mut tokens = Vec::new();
     let mut cursor = 0usize;
     while let Some(start_rel) = template[cursor..].find("{{") {
@@ -1475,6 +1628,12 @@ fn parse_template_tokens(template: &str) -> Result<Vec<TemplateToken>> {
             TemplateToken::Secret
         } else if let Some(field_name) = raw.strip_prefix("field:") {
             TemplateToken::Field(validate_field_name(field_name.trim())?)
+        } else if allow_request_tokens && raw == "request.method" {
+            TemplateToken::RequestMethod
+        } else if allow_request_tokens && raw == "request.host" {
+            TemplateToken::RequestHost
+        } else if allow_request_tokens && raw == "request.path" {
+            TemplateToken::RequestPath
         } else if let Some(env_key) = raw.strip_prefix("env:") {
             let env_key = env_key.trim();
             if env_key.is_empty() {
@@ -1496,8 +1655,29 @@ fn parse_template_tokens(template: &str) -> Result<Vec<TemplateToken>> {
 }
 
 fn render_template(template: &str, profile: &Profile, target: &str) -> Result<String> {
-    let _ = parse_template_tokens(template)?;
+    render_template_with_context(template, profile, None, target)
+}
 
+fn render_request_template(
+    template: &str,
+    profile: &Profile,
+    request_context: &AuthRequestContext,
+    target: &str,
+) -> Result<String> {
+    render_template_with_context(template, profile, Some(request_context), target)
+}
+
+fn render_template_with_context(
+    template: &str,
+    profile: &Profile,
+    request_context: Option<&AuthRequestContext>,
+    target: &str,
+) -> Result<String> {
+    let _ = parse_template_tokens_with_request(template, request_context.is_some())?;
+
+    let resolved_request = request_context
+        .map(ResolvedRequestTemplateContext::from_request_context)
+        .transpose()?;
     let mut rendered = String::new();
     let mut cursor = 0usize;
     while let Some(start_rel) = template[cursor..].find("{{") {
@@ -1552,6 +1732,21 @@ fn render_template(template: &str, profile: &Profile, target: &str) -> Result<St
         } else if raw.starts_with("op://") {
             let value = resolve_op_secret(raw, profile.name.as_deref())?;
             rendered.push_str(&value);
+        } else if raw == "request.method" {
+            let Some(request) = resolved_request.as_ref() else {
+                anyhow::bail!("Unsupported template token '{{{{{}}}}}'", raw);
+            };
+            rendered.push_str(&request.method);
+        } else if raw == "request.host" {
+            let Some(request) = resolved_request.as_ref() else {
+                anyhow::bail!("Unsupported template token '{{{{{}}}}}'", raw);
+            };
+            rendered.push_str(&request.host);
+        } else if raw == "request.path" {
+            let Some(request) = resolved_request.as_ref() else {
+                anyhow::bail!("Unsupported template token '{{{{{}}}}}'", raw);
+            };
+            rendered.push_str(&request.path);
         } else {
             anyhow::bail!("Unsupported template token '{{{{{}}}}}'", raw);
         }
@@ -1560,6 +1755,32 @@ fn render_template(template: &str, profile: &Profile, target: &str) -> Result<St
     }
     rendered.push_str(&template[cursor..]);
     Ok(rendered)
+}
+
+struct ResolvedRequestTemplateContext {
+    method: String,
+    host: String,
+    path: String,
+}
+
+impl ResolvedRequestTemplateContext {
+    fn from_request_context(context: &AuthRequestContext) -> Result<Self> {
+        let parsed = url::Url::parse(&context.url).with_context(|| {
+            format!("Invalid endpoint URL for request template: {}", context.url)
+        })?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("Request URL '{}' is missing host", context.url))?;
+        let host = match parsed.port() {
+            Some(port) => format!("{}:{}", host, port),
+            None => host.to_string(),
+        };
+        Ok(Self {
+            method: context.method.to_ascii_uppercase(),
+            host,
+            path: parsed.path().to_string(),
+        })
+    }
 }
 
 fn resolve_op_secret(reference: &str, credential_name: Option<&str>) -> Result<String> {
@@ -1801,6 +2022,102 @@ fn encode_signature(bytes: &[u8], encoding: &SignatureEncoding) -> String {
     }
 }
 
+fn upsert_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
+    headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+    headers.push((name.to_string(), value));
+}
+
+fn unix_timestamp_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn sign_jwt_bearer_token(
+    config: &JwtBearerSignerConfig,
+    request_context: &AuthRequestContext,
+    profile: &Profile,
+) -> Result<String> {
+    use jsonwebtoken::{Algorithm, EncodingKey, Header};
+
+    let Some(private_key) = profile.resolve_field_value(&config.private_key_field)? else {
+        anyhow::bail!(
+            "Credential '{}' is missing field '{}' required by jwt_bearer_v1 signer",
+            profile.name.as_deref().unwrap_or("unknown"),
+            config.private_key_field
+        );
+    };
+    let encoding_key = EncodingKey::from_ec_pem(private_key.trim().as_bytes()).map_err(|err| {
+        anyhow::anyhow!(
+            "Failed to parse ES256 private key as PEM for jwt_bearer_v1 signer: {}",
+            err
+        )
+    })?;
+
+    let mut header = Header::new(Algorithm::ES256);
+    header.typ = Some(
+        config
+            .header_typ
+            .clone()
+            .unwrap_or_else(|| "JWT".to_string()),
+    );
+    if let Some(field_name) = config.header_kid_field.as_deref() {
+        let Some(value) = profile.resolve_field_value(field_name)? else {
+            anyhow::bail!(
+                "Credential '{}' is missing field '{}' required by jwt_bearer_v1 signer",
+                profile.name.as_deref().unwrap_or("unknown"),
+                field_name
+            );
+        };
+        header.kid = Some(value);
+    }
+
+    let now = unix_timestamp_seconds();
+    let mut claims = JsonMap::new();
+    for (name, value) in &config.claims.static_claims {
+        claims.insert(name.clone(), JsonValue::String(value.clone()));
+    }
+    for (name, field_name) in &config.claims.from_fields {
+        let Some(value) = profile.resolve_field_value(field_name)? else {
+            anyhow::bail!(
+                "Credential '{}' is missing field '{}' required by jwt_bearer_v1 signer",
+                profile.name.as_deref().unwrap_or("unknown"),
+                field_name
+            );
+        };
+        claims.insert(name.clone(), JsonValue::String(value));
+    }
+    for (name, value) in &config.claims.time {
+        let claim_value = match value {
+            JwtTimeClaimValue::Now => now,
+            JwtTimeClaimValue::NowPlusTtl => now + config.expires_in_seconds,
+        };
+        claims.insert(
+            name.clone(),
+            JsonValue::Number(serde_json::Number::from(claim_value)),
+        );
+    }
+    if let Some(request_claim) = &config.request_claim {
+        let value = render_request_template(
+            &request_claim.value_template,
+            profile,
+            request_context,
+            "jwt_bearer_v1 request claim",
+        )?;
+        let value = match request_claim.format {
+            JwtRequestClaimFormat::String => JsonValue::String(value),
+            JwtRequestClaimFormat::SingleElementArray => {
+                JsonValue::Array(vec![JsonValue::String(value)])
+            }
+        };
+        claims.insert(request_claim.name.clone(), value);
+    }
+
+    jsonwebtoken::encode(&header, &JsonValue::Object(claims), &encoding_key)
+        .context("Failed to encode JWT for jwt_bearer_v1 signer")
+}
+
 fn signer_key_header(
     key_field: Option<&String>,
     key_placement: Option<&SignerValuePlacement>,
@@ -1823,7 +2140,10 @@ fn signer_key_header(
     Ok(Some((header_name.clone(), value)))
 }
 
-fn signer_header(profile: &Profile) -> Result<Option<(String, String)>> {
+fn signer_header(
+    request_context: Option<&AuthRequestContext>,
+    profile: &Profile,
+) -> Result<Option<(String, String)>> {
     match profile.signer.as_ref() {
         Some(AuthSignerConfig::HmacQueryV1(config)) => signer_key_header(
             config.key_field.as_ref(),
@@ -1837,17 +2157,33 @@ fn signer_header(profile: &Profile) -> Result<Option<(String, String)>> {
             config.key_name.as_ref(),
             profile,
         ),
+        Some(AuthSignerConfig::JwtBearerV1(config)) => {
+            let request_context = request_context.ok_or_else(|| {
+                anyhow::anyhow!("jwt_bearer_v1 signer requires request method and URL context")
+            })?;
+            Ok(Some((
+                "authorization".to_string(),
+                format!(
+                    "Bearer {}",
+                    sign_jwt_bearer_token(config, request_context, profile)?
+                ),
+            )))
+        }
         None => Ok(None),
     }
 }
 
-fn apply_signer_to_url(url: &str, profile: &Profile) -> Result<String> {
+fn apply_signer_to_url(request_context: &AuthRequestContext, profile: &Profile) -> Result<String> {
     let Some(config) = profile.signer.as_ref() else {
-        return Ok(url.to_string());
+        return Ok(request_context.url.clone());
     };
 
-    let mut parsed = url::Url::parse(url)
-        .with_context(|| format!("Invalid endpoint URL for signer: {}", url))?;
+    if matches!(config, AuthSignerConfig::JwtBearerV1(_)) {
+        return Ok(request_context.url.clone());
+    }
+
+    let mut parsed = url::Url::parse(&request_context.url)
+        .with_context(|| format!("Invalid endpoint URL for signer: {}", request_context.url))?;
     let mut pairs: Vec<(String, String)> = parsed
         .query_pairs()
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
@@ -1892,6 +2228,7 @@ fn apply_signer_to_url(url: &str, profile: &Profile) -> Result<String> {
             &config.signature_encoding,
             &config.canonicalization.mode,
         ),
+        AuthSignerConfig::JwtBearerV1(_) => unreachable!("jwt_bearer_v1 does not modify URL"),
     };
 
     pairs.retain(|(name, _)| name != signature_param);
@@ -1933,6 +2270,7 @@ fn apply_signer_to_url(url: &str, profile: &Profile) -> Result<String> {
         AuthSignerConfig::Ed25519QueryV1(_) => {
             ed25519_sign(&signing_secret, canonical_query.as_bytes())?
         }
+        AuthSignerConfig::JwtBearerV1(_) => unreachable!("jwt_bearer_v1 does not sign URL"),
     };
     let signature = encode_signature(&signature_bytes, signature_encoding);
 
@@ -1971,6 +2309,7 @@ pub struct ResolvedRequestAuth {
     pub headers: Vec<(String, String)>,
 }
 
+#[allow(dead_code)]
 fn resolved_profile_auth_headers(profile: &Profile) -> Result<Vec<(String, String)>> {
     let mut headers = match profile.auth_type {
         AuthType::Bearer | AuthType::OAuth => {
@@ -1994,25 +2333,89 @@ fn resolved_profile_auth_headers(profile: &Profile) -> Result<Vec<(String, Strin
         }
     };
 
-    if let Some((name, value)) = signer_header(profile)? {
+    if let Some((name, value)) = signer_header(None, profile)? {
         headers.push((name, value));
     }
 
     Ok(headers)
 }
 
+fn resolved_profile_auth_headers_for_request(
+    request_context: &AuthRequestContext,
+    profile: &Profile,
+) -> Result<Vec<(String, String)>> {
+    let mut headers = match profile.auth_type {
+        AuthType::Bearer | AuthType::OAuth => {
+            vec![(
+                "authorization".to_string(),
+                format!("Bearer {}", profile.api_key),
+            )]
+        }
+        AuthType::ApiKey => profile.resolved_api_key_headers()?,
+        AuthType::Basic => {
+            use base64::Engine;
+
+            let parts: Vec<&str> = profile.api_key.splitn(2, ':').collect();
+            let basic_cred = if parts.len() == 2 {
+                format!("{}:{}", parts[0], parts[1])
+            } else {
+                format!("{}:", parts[0])
+            };
+            let encoded = base64::engine::general_purpose::STANDARD.encode(basic_cred);
+            vec![("authorization".to_string(), format!("Basic {}", encoded))]
+        }
+    };
+
+    if let Some((name, value)) = signer_header(Some(request_context), profile)? {
+        upsert_header(&mut headers, &name, value);
+    }
+
+    Ok(headers)
+}
+
 pub fn resolve_profile_request_auth(url: &str, profile: &Profile) -> Result<ResolvedRequestAuth> {
+    resolve_profile_request_auth_with_context(&AuthRequestContext::new("GET", url), profile)
+}
+
+pub fn resolve_profile_request_auth_with_context(
+    request_context: &AuthRequestContext,
+    profile: &Profile,
+) -> Result<ResolvedRequestAuth> {
     Ok(ResolvedRequestAuth {
-        url: apply_profile_auth_to_operation_url(url, profile)?,
-        headers: resolved_profile_auth_headers(profile)?,
+        url: apply_profile_auth_to_url_internal(
+            &request_context.url,
+            profile,
+            Some(request_context),
+        )?,
+        headers: resolved_profile_auth_headers_for_request(request_context, profile)?,
+    })
+}
+
+pub fn resolve_profile_operation_request_auth(
+    request_context: &AuthRequestContext,
+    profile: &Profile,
+) -> Result<ResolvedRequestAuth> {
+    let url = apply_profile_auth_path_prefix(&request_context.url, profile)?;
+    let request_context = AuthRequestContext::new(&request_context.method, &url);
+    Ok(ResolvedRequestAuth {
+        url: apply_profile_auth_to_url_internal(
+            &request_context.url,
+            profile,
+            Some(&request_context),
+        )?,
+        headers: resolved_profile_auth_headers_for_request(&request_context, profile)?,
     })
 }
 
 /// Apply authentication from a credential profile to a reqwest request builder.
+#[allow(dead_code)]
 pub fn apply_profile_auth_to_request(
     mut request_builder: reqwest::RequestBuilder,
     profile: &Profile,
 ) -> Result<reqwest::RequestBuilder> {
+    if matches!(profile.signer, Some(AuthSignerConfig::JwtBearerV1(_))) {
+        anyhow::bail!("jwt_bearer_v1 signer requires request method and URL context");
+    }
     for (name, value) in resolved_profile_auth_headers(profile)? {
         request_builder = request_builder.header(name, value);
     }
@@ -2020,12 +2423,22 @@ pub fn apply_profile_auth_to_request(
     Ok(request_builder)
 }
 
+#[allow(dead_code)]
 pub fn apply_profile_auth_to_operation_url(url: &str, profile: &Profile) -> Result<String> {
     let url = apply_profile_auth_path_prefix(url, profile)?;
-    apply_profile_auth_to_url(&url, profile)
+    apply_profile_auth_to_url_internal(&url, profile, Some(&AuthRequestContext::new("GET", &url)))
 }
 
+#[allow(dead_code)]
 pub fn apply_profile_auth_to_url(url: &str, profile: &Profile) -> Result<String> {
+    apply_profile_auth_to_url_internal(url, profile, Some(&AuthRequestContext::new("GET", url)))
+}
+
+fn apply_profile_auth_to_url_internal(
+    url: &str,
+    profile: &Profile,
+    request_context: Option<&AuthRequestContext>,
+) -> Result<String> {
     let mut authed_url = url.to_string();
     if profile.auth_type == AuthType::ApiKey && profile.has_custom_api_key_query_params() {
         let mut parsed = url::Url::parse(&authed_url)
@@ -2044,7 +2457,11 @@ pub fn apply_profile_auth_to_url(url: &str, profile: &Profile) -> Result<String>
         }
     }
 
-    apply_signer_to_url(&authed_url, profile)
+    let request_context = request_context
+        .cloned()
+        .unwrap_or_else(|| AuthRequestContext::new("GET", &authed_url));
+    let request_context = AuthRequestContext::new(&request_context.method, &authed_url);
+    apply_signer_to_url(&request_context, profile)
 }
 
 fn apply_profile_auth_path_prefix(url: &str, profile: &Profile) -> Result<String> {
@@ -2072,6 +2489,10 @@ pub fn auth_profile_to_metadata(
     profile: &Profile,
 ) -> Result<tonic::metadata::MetadataMap, anyhow::Error> {
     use base64::Engine;
+
+    if matches!(profile.signer, Some(AuthSignerConfig::JwtBearerV1(_))) {
+        anyhow::bail!("jwt_bearer_v1 signer is only supported for HTTP-style requests");
+    }
 
     let mut metadata = tonic::metadata::MetadataMap::new();
 
@@ -2161,10 +2582,25 @@ mod dirs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use std::str::FromStr;
 
     // Test-only Ed25519 key for signer unit tests. Never used in production.
     const TEST_ED25519_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIFM839r6dC+FQ4zIFCwogFaLq3ugAG4cxQWjSZZu6Cxl\n-----END PRIVATE KEY-----";
+    const TEST_ES256_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgpWsEiqimFdiYZyDP\n0tyAOpMx4W4YpC/fsqAtcj90yquhRANCAASH6pTYTxls0Sj9ZeyT1RIaTdpQFSsf\nNwUHJreaOvjUNfMRbRCN0+lUg8lRhc2RlDMLoi5VNVGaTtZ3CTe/U0I4\n-----END PRIVATE KEY-----";
+
+    fn decode_jwt_part(part: &str) -> JsonValue {
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(part)
+            .expect("jwt part should be base64url");
+        serde_json::from_slice(&bytes).expect("jwt part should be valid json")
+    }
+
+    fn decode_jwt(token: &str) -> (JsonValue, JsonValue) {
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "jwt should have 3 parts");
+        (decode_jwt_part(parts[0]), decode_jwt_part(parts[1]))
+    }
 
     #[test]
     fn test_profile_default() {
@@ -2641,6 +3077,44 @@ mod tests {
     }
 
     #[test]
+    fn validate_signer_config_rejects_jwt_bearer_zero_ttl() {
+        let err = validate_signer_config(&AuthSignerConfig::JwtBearerV1(JwtBearerSignerConfig {
+            algorithm: JwtSignerAlgorithm::Es256,
+            private_key_field: "private_key".to_string(),
+            header_typ: None,
+            header_kid_field: None,
+            expires_in_seconds: 0,
+            claims: JwtBearerClaimsConfig::default(),
+            request_claim: None,
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("expires_in_seconds > 0"));
+    }
+
+    #[test]
+    fn validate_signer_config_rejects_duplicate_jwt_claim_names() {
+        let err = validate_signer_config(&AuthSignerConfig::JwtBearerV1(JwtBearerSignerConfig {
+            algorithm: JwtSignerAlgorithm::Es256,
+            private_key_field: "private_key".to_string(),
+            header_typ: None,
+            header_kid_field: None,
+            expires_in_seconds: 120,
+            claims: JwtBearerClaimsConfig {
+                static_claims: HashMap::from([("iss".to_string(), "cdp".to_string())]),
+                from_fields: HashMap::from([("iss".to_string(), "key_id".to_string())]),
+                time: HashMap::new(),
+            },
+            request_claim: None,
+        }))
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("defines claim 'iss' more than once"));
+    }
+
+    #[test]
     fn resolved_api_key_headers_skip_default_when_ed25519_signer_is_present() {
         let mut profile = Profile::new(String::new(), AuthType::ApiKey);
         profile.signer = Some(AuthSignerConfig::Ed25519QueryV1(Ed25519QuerySignerConfig {
@@ -2746,6 +3220,136 @@ mod tests {
             resolved.headers,
             vec![("X-MBX-APIKEY".to_string(), "key-123".to_string())]
         );
+    }
+
+    #[test]
+    fn resolve_profile_request_auth_with_context_includes_request_scoped_jwt_bearer() {
+        let mut profile = Profile::new(String::new(), AuthType::ApiKey);
+        profile
+            .set_field_source(
+                "private_key".to_string(),
+                SecretSource::Literal {
+                    value: TEST_ES256_PRIVATE_KEY_PEM.to_string(),
+                },
+            )
+            .unwrap();
+        profile
+            .set_field_source(
+                "key_id".to_string(),
+                SecretSource::Literal {
+                    value: "organizations/test/apiKeys/key-1".to_string(),
+                },
+            )
+            .unwrap();
+        profile.signer = Some(AuthSignerConfig::JwtBearerV1(JwtBearerSignerConfig {
+            algorithm: JwtSignerAlgorithm::Es256,
+            private_key_field: "private_key".to_string(),
+            header_typ: Some("JWT".to_string()),
+            header_kid_field: Some("key_id".to_string()),
+            expires_in_seconds: 120,
+            claims: JwtBearerClaimsConfig {
+                static_claims: HashMap::from([("iss".to_string(), "cdp".to_string())]),
+                from_fields: HashMap::from([("sub".to_string(), "key_id".to_string())]),
+                time: HashMap::from([
+                    ("nbf".to_string(), JwtTimeClaimValue::Now),
+                    ("exp".to_string(), JwtTimeClaimValue::NowPlusTtl),
+                ]),
+            },
+            request_claim: Some(JwtRequestClaimConfig {
+                name: "uri".to_string(),
+                format: JwtRequestClaimFormat::String,
+                value_template: "{{request.method}} {{request.host}}{{request.path}}".to_string(),
+            }),
+        }));
+
+        let resolved = resolve_profile_request_auth_with_context(
+            &AuthRequestContext::new("post", "https://api.coinbase.com/api/v3/brokerage/accounts"),
+            &profile,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved.url,
+            "https://api.coinbase.com/api/v3/brokerage/accounts"
+        );
+        let token = resolved
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization")
+            .map(|(_, value)| value.strip_prefix("Bearer ").unwrap().to_string())
+            .unwrap();
+        let (header, claims) = decode_jwt(&token);
+        assert_eq!(header["alg"], "ES256");
+        assert_eq!(header["typ"], "JWT");
+        assert_eq!(header["kid"], "organizations/test/apiKeys/key-1");
+        assert_eq!(claims["iss"], "cdp");
+        assert_eq!(claims["sub"], "organizations/test/apiKeys/key-1");
+        assert_eq!(
+            claims["uri"],
+            "POST api.coinbase.com/api/v3/brokerage/accounts"
+        );
+        let nbf = claims["nbf"].as_u64().unwrap();
+        let exp = claims["exp"].as_u64().unwrap();
+        assert_eq!(exp - nbf, 120);
+    }
+
+    #[test]
+    fn resolve_profile_request_auth_with_context_supports_array_request_claim() {
+        let mut profile = Profile::new(String::new(), AuthType::ApiKey);
+        profile
+            .set_field_source(
+                "private_key".to_string(),
+                SecretSource::Literal {
+                    value: TEST_ES256_PRIVATE_KEY_PEM.to_string(),
+                },
+            )
+            .unwrap();
+        profile.signer = Some(AuthSignerConfig::JwtBearerV1(JwtBearerSignerConfig {
+            algorithm: JwtSignerAlgorithm::Es256,
+            private_key_field: "private_key".to_string(),
+            header_typ: None,
+            header_kid_field: None,
+            expires_in_seconds: 60,
+            claims: JwtBearerClaimsConfig::default(),
+            request_claim: Some(JwtRequestClaimConfig {
+                name: "uris".to_string(),
+                format: JwtRequestClaimFormat::SingleElementArray,
+                value_template: "{{request.method}} {{request.host}}{{request.path}}".to_string(),
+            }),
+        }));
+
+        let resolved = resolve_profile_request_auth_with_context(
+            &AuthRequestContext::new("get", "https://api.coinbase.com/api/v3/brokerage/accounts"),
+            &profile,
+        )
+        .unwrap();
+        let token = resolved.headers[0].1.strip_prefix("Bearer ").unwrap();
+        let (_, claims) = decode_jwt(token);
+        assert_eq!(
+            claims["uris"],
+            JsonValue::Array(vec![JsonValue::String(
+                "GET api.coinbase.com/api/v3/brokerage/accounts".to_string()
+            )])
+        );
+    }
+
+    #[test]
+    fn auth_profile_to_metadata_rejects_jwt_bearer_signer() {
+        let mut profile = Profile::new(String::new(), AuthType::ApiKey);
+        profile.signer = Some(AuthSignerConfig::JwtBearerV1(JwtBearerSignerConfig {
+            algorithm: JwtSignerAlgorithm::Es256,
+            private_key_field: "private_key".to_string(),
+            header_typ: None,
+            header_kid_field: None,
+            expires_in_seconds: 60,
+            claims: JwtBearerClaimsConfig::default(),
+            request_claim: None,
+        }));
+
+        let err = auth_profile_to_metadata(&profile).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("jwt_bearer_v1 signer is only supported for HTTP-style requests"));
     }
 
     #[test]

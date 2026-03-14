@@ -1726,24 +1726,33 @@ async fn execute_http_stream_once(
     let auth_profile =
         auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())
             .map_err(SubscriptionRunError::Fatal)?;
-    let authed_url = auth_profile
+    let resolved_auth = auth_profile
         .as_ref()
-        .map(|profile| auth::apply_profile_auth_to_url(&request.endpoint, profile))
+        .map(|profile| {
+            auth::resolve_profile_request_auth_with_context(
+                &auth::AuthRequestContext::new("GET", &request.endpoint),
+                profile,
+            )
+        })
         .transpose()
-        .map_err(SubscriptionRunError::Fatal)?
-        .unwrap_or_else(|| request.endpoint.clone());
+        .map_err(SubscriptionRunError::Fatal)?;
     let client = crate::http_client::build_resilient_http_client(
         Duration::from_secs(SUBSCRIPTION_HTTP_TIMEOUT_SECS),
         "subscription http stream",
     )
     .map_err(SubscriptionRunError::Retry)?;
-    let mut req = client.get(&authed_url).header(
+    let target_url = resolved_auth
+        .as_ref()
+        .map(|resolved| resolved.url.as_str())
+        .unwrap_or(request.endpoint.as_str());
+    let mut req = client.get(target_url).header(
         reqwest::header::ACCEPT,
         "application/json, application/x-ndjson, text/event-stream",
     );
-    if let Some(profile) = auth_profile.as_ref() {
-        req = auth::apply_profile_auth_to_request(req, profile)
-            .map_err(SubscriptionRunError::Fatal)?;
+    if let Some(resolved) = resolved_auth.as_ref() {
+        for (name, value) in &resolved.headers {
+            req = req.header(name, value);
+        }
     }
     if *stop_rx.borrow() {
         close_subscription_as_stopped(sink, view, seq, "http")
@@ -1789,7 +1798,7 @@ async fn execute_http_stream_once(
         source_kind,
         "open",
         None,
-        Some(json!({ "content_type": content_type, "url": redact_endpoint(&authed_url) })),
+        Some(json!({ "content_type": content_type, "url": redact_endpoint(target_url) })),
     )
     .await
     .map_err(SubscriptionRunError::Fatal)?;
