@@ -1,0 +1,176 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Coinbase Advanced Trade API",
+    "version": "v1",
+    "description": "Curated Coinbase Advanced Trade REST surface for product discovery, account summaries, and core order workflows."
+  },
+  "servers": [
+    {
+      "url": "https://api.coinbase.com"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "OrderConfiguration": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "CreateOrderRequest": {
+        "type": "object",
+        "required": [
+          "client_order_id",
+          "product_id",
+          "side",
+          "order_configuration"
+        ],
+        "properties": {
+          "client_order_id": { "type": "string" },
+          "product_id": { "type": "string" },
+          "side": { "type": "string", "enum": ["BUY", "SELL"] },
+          "order_configuration": { "$ref": "#/components/schemas/OrderConfiguration" }
+        }
+      },
+      "BatchCancelRequest": {
+        "type": "object",
+        "required": ["order_ids"],
+        "properties": {
+          "order_ids": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/v3/brokerage/products": {
+      "get": {
+        "operationId": "listProducts",
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer" } },
+          { "name": "product_type", "in": "query", "schema": { "type": "string" } },
+          { "name": "product_ids", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Products listed" }
+        }
+      }
+    },
+    "/api/v3/brokerage/products/{product_id}": {
+      "get": {
+        "operationId": "getProduct",
+        "parameters": [
+          { "name": "product_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Product returned" }
+        }
+      }
+    },
+    "/api/v3/brokerage/best_bid_ask": {
+      "get": {
+        "operationId": "getBestBidAsk",
+        "parameters": [
+          { "name": "product_ids", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Best bid ask returned" }
+        }
+      }
+    },
+    "/api/v3/brokerage/accounts": {
+      "get": {
+        "operationId": "listAccounts",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Accounts listed" }
+        }
+      }
+    },
+    "/api/v3/brokerage/accounts/{account_uuid}": {
+      "get": {
+        "operationId": "getAccount",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "account_uuid", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Account returned" }
+        }
+      }
+    },
+    "/api/v3/brokerage/orders": {
+      "post": {
+        "operationId": "createOrder",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateOrderRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Order created" }
+        }
+      }
+    },
+    "/api/v3/brokerage/orders/batch_cancel": {
+      "post": {
+        "operationId": "cancelOrders",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/BatchCancelRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Cancel submitted" }
+        }
+      }
+    },
+    "/api/v3/brokerage/orders/historical/{order_id}": {
+      "get": {
+        "operationId": "getOrder",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "order_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Order returned" }
+        }
+      }
+    },
+    "/api/v3/brokerage/orders/historical/batch": {
+      "get": {
+        "operationId": "listOrders",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "product_id", "in": "query", "schema": { "type": "string" } },
+          { "name": "order_status", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Orders listed" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Bitget Spot API",
+    "version": "v2",
+    "description": "Curated Bitget V2 public spot market surface for UXC."
+  },
+  "servers": [
+    { "url": "https://api.bitget.com" }
+  ],
+  "components": {
+    "schemas": {}
+  },
+  "paths": {
+    "/api/v2/spot/public/symbols": {
+      "get": {
+        "operationId": "listSymbols",
+        "parameters": [
+          { "name": "symbol", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Symbols returned" } }
+      }
+    },
+    "/api/v2/spot/market/tickers": {
+      "get": {
+        "operationId": "getTickers",
+        "parameters": [
+          { "name": "symbol", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Tickers returned" } }
+      }
+    },
+    "/api/v2/spot/market/candles": {
+      "get": {
+        "operationId": "getCandles",
+        "parameters": [
+          { "name": "symbol", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "granularity", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "startTime", "in": "query", "schema": { "type": "integer" } },
+          { "name": "endTime", "in": "query", "schema": { "type": "integer" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Candles returned" } }
+      }
+    },
+    "/api/v2/spot/market/orderbook": {
+      "get": {
+        "operationId": "getOrderbook",
+        "parameters": [
+          { "name": "symbol", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Orderbook returned" } }
+      }
+    }
+  }
+}

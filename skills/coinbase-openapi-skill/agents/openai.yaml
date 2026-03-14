@@ -1,0 +1,4 @@
+interface:
+  display_name: "Coinbase Advanced Trade"
+  short_description: "Products, accounts, and orders via Coinbase Advanced Trade through UXC"
+  default_prompt: "Use $coinbase-openapi-skill to discover and execute Coinbase Advanced Trade REST operations through UXC with products-first discovery, externally generated JWT bearer auth, and explicit write guardrails."

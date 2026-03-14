@@ -1,0 +1,311 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Kraken Spot REST Core",
+    "version": "1.0.0",
+    "description": "Curated Kraken Spot REST schema for market data, balances, orders, and open positions."
+  },
+  "servers": [
+    {
+      "url": "https://api.kraken.com"
+    }
+  ],
+  "paths": {
+    "/0/public/Time": {
+      "get": {
+        "operationId": "getServerTime",
+        "summary": "Get server time",
+        "responses": {
+          "200": {
+            "description": "Server time response"
+          }
+        }
+      }
+    },
+    "/0/public/AssetPairs": {
+      "get": {
+        "operationId": "getAssetPairs",
+        "summary": "Get tradeable asset pairs",
+        "parameters": [
+          {
+            "name": "pair",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Asset pairs response"
+          }
+        }
+      }
+    },
+    "/0/public/Ticker": {
+      "get": {
+        "operationId": "getTicker",
+        "summary": "Get ticker information",
+        "parameters": [
+          {
+            "name": "pair",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ticker response"
+          }
+        }
+      }
+    },
+    "/0/public/OHLC": {
+      "get": {
+        "operationId": "getOhlc",
+        "summary": "Get OHLC candles",
+        "parameters": [
+          {
+            "name": "pair",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "interval",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OHLC response"
+          }
+        }
+      }
+    },
+    "/0/private/Balance": {
+      "post": {
+        "operationId": "getBalances",
+        "summary": "Get account balances",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/NonceOnlyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Balance response"
+          }
+        }
+      }
+    },
+    "/0/private/OpenOrders": {
+      "post": {
+        "operationId": "getOpenOrders",
+        "summary": "Get open orders",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/NonceOnlyRequest"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "trades": {
+                        "type": "boolean"
+                      },
+                      "userref": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Open orders response"
+          }
+        }
+      }
+    },
+    "/0/private/OpenPositions": {
+      "post": {
+        "operationId": "getOpenPositions",
+        "summary": "Get open positions",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/NonceOnlyRequest"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "txid": {
+                        "type": "string"
+                      },
+                      "docalcs": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Open positions response"
+          }
+        }
+      }
+    },
+    "/0/private/AddOrder": {
+      "post": {
+        "operationId": "addOrder",
+        "summary": "Place an order",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/NonceOnlyRequest"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "pair",
+                      "type",
+                      "ordertype",
+                      "volume"
+                    ],
+                    "properties": {
+                      "pair": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "buy",
+                          "sell"
+                        ]
+                      },
+                      "ordertype": {
+                        "type": "string",
+                        "enum": [
+                          "market",
+                          "limit"
+                        ]
+                      },
+                      "price": {
+                        "type": "string"
+                      },
+                      "volume": {
+                        "type": "string"
+                      },
+                      "validate": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Add order response"
+          }
+        }
+      }
+    },
+    "/0/private/CancelOrder": {
+      "post": {
+        "operationId": "cancelOrder",
+        "summary": "Cancel an order",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/NonceOnlyRequest"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "txid"
+                    ],
+                    "properties": {
+                      "txid": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cancel order response"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "NonceOnlyRequest": {
+        "type": "object",
+        "required": [
+          "nonce"
+        ],
+        "properties": {
+          "nonce": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  }
+}

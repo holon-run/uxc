@@ -1,0 +1,205 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "DefiLlama Pro Curated API",
+    "version": "1.0.0",
+    "description": "Curated read-only DefiLlama Pro analytics surface for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://pro-api.llama.fi"
+    }
+  ],
+  "paths": {
+    "/api/protocols": {
+      "get": {
+        "operationId": "listProtocols",
+        "summary": "List protocol TVL entries",
+        "responses": {
+          "200": {
+            "description": "Protocols response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/protocol/{protocol}": {
+      "get": {
+        "operationId": "getProtocol",
+        "summary": "Get one protocol by slug",
+        "parameters": [
+          {
+            "name": "protocol",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Protocol detail response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/chains": {
+      "get": {
+        "operationId": "listChains",
+        "summary": "List chain overview entries",
+        "responses": {
+          "200": {
+            "description": "Chains response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/coins/prices/current/{coins}": {
+      "get": {
+        "operationId": "getCurrentPrices",
+        "summary": "Get current prices for one or more assets",
+        "parameters": [
+          {
+            "name": "coins",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated asset identifiers such as chain:address or coingecko:bitcoin."
+          },
+          {
+            "name": "searchWidth",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current prices response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/yields/pools": {
+      "get": {
+        "operationId": "listYieldPools",
+        "summary": "List yield pools",
+        "responses": {
+          "200": {
+            "description": "Yield pools response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/yields/chart/{pool}": {
+      "get": {
+        "operationId": "getYieldChart",
+        "summary": "Get a yield chart for one pool",
+        "parameters": [
+          {
+            "name": "pool",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Yield chart response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stablecoins/stablecoindominance/{chain}": {
+      "get": {
+        "operationId": "getStablecoinDominance",
+        "summary": "Get stablecoin dominance for one chain",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stablecoin dominance response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
