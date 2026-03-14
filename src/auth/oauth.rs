@@ -13,6 +13,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+const MATRIX_OPENID_SCOPE: &str = "openid";
+const MATRIX_API_SCOPE: &str = "urn:matrix:org.matrix.msc2967.client:api:*";
+const MATRIX_DEVICE_SCOPE_PREFIX: &str = "urn:matrix:org.matrix.msc2967.client:device:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthProviderMetadata {
@@ -996,6 +999,47 @@ pub fn parse_scopes(scopes: &[String]) -> Vec<String> {
         .collect()
 }
 
+pub fn resolve_oauth_scopes_for_endpoint(endpoint: &str, scopes: &[String]) -> Result<Vec<String>> {
+    if !endpoint_is_matrix_client(endpoint) {
+        return Ok(scopes.to_vec());
+    }
+
+    let mut resolved = scopes.to_vec();
+    if !resolved.iter().any(|scope| scope == MATRIX_OPENID_SCOPE) {
+        resolved.push(MATRIX_OPENID_SCOPE.to_string());
+    }
+    if !resolved.iter().any(|scope| scope == MATRIX_API_SCOPE) {
+        resolved.push(MATRIX_API_SCOPE.to_string());
+    }
+    if !resolved
+        .iter()
+        .any(|scope| scope.starts_with(MATRIX_DEVICE_SCOPE_PREFIX))
+    {
+        resolved.push(format!(
+            "{}UXC{}",
+            MATRIX_DEVICE_SCOPE_PREFIX,
+            random_matrix_device_suffix(10)?
+        ));
+    }
+    Ok(resolved)
+}
+
+fn endpoint_is_matrix_client(endpoint: &str) -> bool {
+    Url::parse(endpoint)
+        .ok()
+        .is_some_and(|url| url.path().starts_with("/_matrix/client/"))
+}
+
+fn random_matrix_device_suffix(len: usize) -> Result<String> {
+    const ALPHANUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bytes = vec![0u8; len];
+    getrandom(&mut bytes).context("Failed to generate random Matrix device id")?;
+    Ok(bytes
+        .into_iter()
+        .map(|byte| ALPHANUM[(byte as usize) % ALPHANUM.len()] as char)
+        .collect())
+}
+
 pub fn parse_resource_metadata_from_www_authenticate(header: &str) -> Option<String> {
     parse_parameter_value(header, "resource_metadata")
 }
@@ -1614,6 +1658,33 @@ mod tests {
             Some("https://matrix.org/_matrix/client/v1/auth_metadata".to_string())
         );
         assert!(matrix_auth_metadata_url("https://matrix.org").is_none());
+    }
+
+    #[test]
+    fn resolve_oauth_scopes_for_matrix_endpoint_adds_defaults() {
+        let scopes =
+            resolve_oauth_scopes_for_endpoint("https://matrix.org/_matrix/client/v3", &[])
+                .expect("matrix scopes should resolve");
+        assert!(scopes.iter().any(|scope| scope == MATRIX_OPENID_SCOPE));
+        assert!(scopes.iter().any(|scope| scope == MATRIX_API_SCOPE));
+        let device_scope = scopes
+            .iter()
+            .find(|scope| scope.starts_with(MATRIX_DEVICE_SCOPE_PREFIX))
+            .expect("matrix device scope should be added");
+        assert!(device_scope.len() > MATRIX_DEVICE_SCOPE_PREFIX.len());
+    }
+
+    #[test]
+    fn resolve_oauth_scopes_for_matrix_endpoint_preserves_existing_device_scope() {
+        let existing = vec![
+            MATRIX_OPENID_SCOPE.to_string(),
+            MATRIX_API_SCOPE.to_string(),
+            format!("{MATRIX_DEVICE_SCOPE_PREFIX}EXISTINGDEV01"),
+        ];
+        let scopes =
+            resolve_oauth_scopes_for_endpoint("https://matrix.org/_matrix/client/v3", &existing)
+                .expect("matrix scopes should resolve");
+        assert_eq!(scopes, existing);
     }
 
     #[test]
