@@ -1818,19 +1818,6 @@ fn validate_subscription_sink_path(path: &Path) -> Result<()> {
     {
         bail!("subscribe sink path cannot contain '..'");
     }
-    if path.is_absolute() {
-        let allowed_roots = [
-            std::env::var_os("HOME").map(PathBuf::from),
-            Some(std::env::temp_dir()),
-        ];
-        let allowed = allowed_roots
-            .into_iter()
-            .flatten()
-            .any(|root| path.starts_with(&root));
-        if !allowed {
-            bail!("absolute subscribe sink path must be under HOME or temp directory");
-        }
-    }
     Ok(())
 }
 
@@ -4560,9 +4547,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_file_sink_rejects_absolute_path_outside_allowed_roots() {
-        let err = parse_file_sink("file:/etc/passwd").unwrap_err();
-        assert!(err.to_string().contains("under HOME or temp directory"));
+    fn parse_file_sink_accepts_arbitrary_absolute_path() {
+        let path = parse_file_sink("file:/etc/passwd").unwrap();
+        assert_eq!(path, PathBuf::from("/etc/passwd"));
     }
 
     #[test]

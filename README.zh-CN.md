@@ -279,6 +279,10 @@ UXC 提供一个标准 skill（`uxc`）和若干官方场景化 wrapper skill。
 ### Crypto 与链上数据
 
 - [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md)：通过 Bitquery GraphQL 查询链上交易、转账、持币人、余额与市场结构，使用 OAuth client credentials 鉴权
+- [`binance-web3-openapi-skill`](skills/binance-web3-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Binance Web3 的代币发现、榜单、聪明钱、审计与地址持仓
+- [`binance-spot-openapi-skill`](skills/binance-spot-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Binance Spot 公共市场数据与签名账户/订单接口
+- [`binance-spot-websocket-skill`](skills/binance-spot-websocket-skill/SKILL.md)：通过原始 WebSocket 订阅 Binance Spot 的成交、ticker、深度与最优买卖盘流
+- [`okx-exchange-websocket-skill`](skills/okx-exchange-websocket-skill/SKILL.md)：通过原始 WebSocket 订阅 OKX 公共交易所的 ticker、成交、盘口与 K 线频道
 - [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md)：通过 OKX MCP 执行 token、市场、钱包、换汇等流程
 - [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md)：通过 Dune MCP 发现链上表、执行 SQL、获取结果并生成图表
 - [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md)：通过 The Graph Subgraph MCP bridge 发现 subgraph、查看 schema 并执行 GraphQL
@@ -300,7 +304,7 @@ npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill cont
 npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill discord-openapi-skill --agent codex -y
 
 # 安装 Crypto 与链上类 skill
-npx -y skills@latest add holon-run/uxc --skill bitquery-graphql-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
+npx -y skills@latest add holon-run/uxc --skill bitquery-graphql-skill --skill binance-web3-openapi-skill --skill binance-spot-openapi-skill --skill binance-spot-websocket-skill --skill okx-exchange-websocket-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
 ```
 
 使用 ClawHub 安装已发布的 skill：
@@ -320,6 +324,10 @@ clawhub --workdir ~/.openclaw --dir skills install linear-graphql-skill
 clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
 
 # 安装 Crypto 与链上类 skill
+clawhub --workdir ~/.openclaw --dir skills install binance-web3-openapi-skill
+clawhub --workdir ~/.openclaw --dir skills install binance-spot-openapi-skill
+clawhub --workdir ~/.openclaw --dir skills install binance-spot-websocket-skill
+clawhub --workdir ~/.openclaw --dir skills install okx-exchange-websocket-skill
 clawhub --workdir ~/.openclaw --dir skills install okx-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install dune-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install thegraph-mcp-skill
