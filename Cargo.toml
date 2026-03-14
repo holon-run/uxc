@@ -111,6 +111,11 @@ name = "uxc-test-jsonrpc-server"
 path = "src/bin/uxc-test-jsonrpc-server.rs"
 required-features = ["test-server"]
 
+[[bin]]
+name = "uxc-test-websocket-server"
+path = "src/bin/uxc-test-websocket-server.rs"
+required-features = ["test-server"]
+
 [lib]
 name = "uxc"
 path = "src/lib.rs"

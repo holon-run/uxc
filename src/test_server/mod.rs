@@ -10,5 +10,6 @@ pub mod jsonrpc;
 pub mod mcp_http;
 pub mod mcp_stdio;
 pub mod openapi;
+pub mod websocket;
 
 pub use common::{Scenario, ServerHandle};

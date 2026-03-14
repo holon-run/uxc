@@ -79,3 +79,54 @@ fn subscribe_rejects_poll_config_without_poll_mode() {
         .as_str()
         .is_some_and(|msg| msg.contains("--poll-config is only valid with --mode poll")));
 }
+
+#[test]
+#[serial]
+fn subscribe_rejects_websocket_transport_with_operation_id() {
+    let (temp, mut command) = isolated_uxc_command();
+    let sink = format!("file:{}", temp.path().join("events.ndjson").display());
+    let output = command
+        .arg("subscribe")
+        .arg("start")
+        .arg("wss://example.com/feed")
+        .arg("eth_subscribe")
+        .arg("--transport")
+        .arg("websocket")
+        .arg("--sink")
+        .arg(&sink)
+        .output()
+        .expect("subscribe start should run");
+    assert!(!output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+    assert!(json["error"]["message"].as_str().is_some_and(
+        |msg| msg.contains("--transport websocket cannot be combined with an operation_id")
+    ));
+}
+
+#[test]
+#[serial]
+fn subscribe_rejects_websocket_options_without_transport() {
+    let (temp, mut command) = isolated_uxc_command();
+    let sink = format!("file:{}", temp.path().join("events.ndjson").display());
+    let output = command
+        .arg("subscribe")
+        .arg("start")
+        .arg("wss://example.com/feed")
+        .arg("--subprotocol")
+        .arg("market.v1")
+        .arg("--sink")
+        .arg(&sink)
+        .output()
+        .expect("subscribe start should run");
+    assert!(!output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+    assert!(json["error"]["message"].as_str().is_some_and(
+        |msg| msg.contains("--subprotocol and --init-frame require --transport websocket")
+    ));
+}

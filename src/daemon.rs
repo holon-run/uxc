@@ -136,6 +136,10 @@ pub struct SubscribeStartRequest {
     pub resource_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_hint: Option<SubscriptionTransportHint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subprotocols: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_text_frames: Vec<String>,
     pub mode: SubscriptionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_config: Option<Value>,
@@ -795,6 +799,22 @@ impl SubscriptionManager {
         let sink_spec = format!("file:{}", sink_path.display());
         if request.resource_uri.is_some() && request.operation_id.is_some() {
             bail!("subscribe start cannot combine --resource-uri with an operation_id");
+        }
+        if matches!(
+            request.transport_hint,
+            Some(SubscriptionTransportHint::Websocket)
+        ) {
+            if request.operation_id.is_some() {
+                bail!("websocket transport cannot be combined with an operation_id");
+            }
+            if request.resource_uri.is_some() {
+                bail!("websocket transport cannot be combined with --resource-uri");
+            }
+            if request.mode != SubscriptionMode::Stream {
+                bail!("websocket transport is only valid with stream mode");
+            }
+        } else if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
+            bail!("websocket subprotocols and init frames require websocket transport");
         }
         if request.args.is_some() && request.operation_id.is_none() {
             bail!("subscribe start cannot accept args without an operation_id");
@@ -2108,8 +2128,8 @@ async fn run_websocket_subscription_job(
         WebSocketRuntimeConfig {
             endpoint: request.endpoint.clone(),
             auth_profile,
-            subprotocols: Vec::new(),
-            initial_text_frames: Vec::new(),
+            subprotocols: request.subprotocols.clone(),
+            initial_text_frames: request.initial_text_frames.clone(),
             first_message_timeout_secs: None,
             initial_reconnect_delay_secs: SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS,
             max_reconnect_delay_secs: SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS,
@@ -4374,6 +4394,8 @@ mod tests {
             args: None,
             resource_uri: None,
             transport_hint: Some(SubscriptionTransportHint::Websocket),
+            subprotocols: Vec::new(),
+            initial_text_frames: Vec::new(),
             mode: SubscriptionMode::Stream,
             poll_config: None,
             options: RuntimeInvokeOptions {
