@@ -13,6 +13,31 @@ Replace `matrix.org` with your own homeserver when needed.
 
 ## Auth Setup
 
+OAuth-aware homeserver:
+
+```bash
+uxc auth oauth start matrix-oauth \
+  --endpoint https://matrix.org/_matrix/client/v3 \
+  --redirect-uri http://127.0.0.1:8788/callback \
+  --client-id <client_id>
+
+uxc auth oauth complete matrix-oauth \
+  --session-id <session_id> \
+  --authorization-response 'http://127.0.0.1:8788/callback?code=...'
+
+uxc auth binding add \
+  --id matrix-oauth \
+  --host matrix.org \
+  --path-prefix /_matrix/client/v3 \
+  --scheme https \
+  --credential matrix-oauth \
+  --priority 100
+```
+
+Use a loopback callback on an uncommon high port to avoid collisions with local services on common ports.
+
+Existing access token:
+
 ```bash
 uxc auth credential set matrix-access \
   --auth-type bearer \
