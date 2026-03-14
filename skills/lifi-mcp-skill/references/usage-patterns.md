@@ -28,7 +28,7 @@ lifi-mcp-cli get-chains chainTypes=EVM
 Resolve token metadata before building a quote:
 
 ```bash
-lifi-mcp-cli get-token chain=base token=USDC
+lifi-mcp-cli get-token chain=8453 token=USDC
 lifi-mcp-cli get-tokens chains=8453,42161
 ```
 
@@ -58,6 +58,7 @@ lifi-mcp-cli get-quote \
 
 Notes:
 
+- Chain discovery helpers accept names such as `base`, but live tool execution was more reliable with numeric chain IDs such as `8453`.
 - `fromAmount` is in the token's smallest unit.
 - `toAddress` is optional and defaults to `fromAddress`.
 - The response contains an unsigned `transactionRequest` object.
@@ -87,14 +88,14 @@ lifi-mcp-cli get-step-transaction '<step-json>'
 Check native gas balance:
 
 ```bash
-lifi-mcp-cli get-native-token-balance chain=base address=0xYourWallet
+lifi-mcp-cli get-native-token-balance chain=8453 address=0xYourWallet
 ```
 
 Check ERC20 balance:
 
 ```bash
 lifi-mcp-cli get-token-balance \
-  chain=base \
+  chain=8453 \
   tokenAddress=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 \
   walletAddress=0xYourWallet
 ```
@@ -103,7 +104,7 @@ Check allowance using the approval address from a quote:
 
 ```bash
 lifi-mcp-cli get-allowance \
-  chain=base \
+  chain=8453 \
   tokenAddress=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 \
   ownerAddress=0xYourWallet \
   spenderAddress=0xApprovalAddress

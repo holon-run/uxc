@@ -71,7 +71,7 @@ Always inspect host help and operation help in the current endpoint version befo
    - `lifi-mcp-cli get-chains`
    - `lifi-mcp-cli get-chain-by-name name=base`
 2. Resolve token addresses before quoting:
-   - `lifi-mcp-cli get-token chain=base token=USDC`
+   - `lifi-mcp-cli get-token chain=8453 token=USDC`
 3. Check whether a route exists before asking for a quote:
    - `lifi-mcp-cli get-connections fromChain=8453 toChain=42161`
 4. Generate the quote:
@@ -96,6 +96,7 @@ Always inspect host help and operation help in the current endpoint version befo
 - Do not present `get-quote` or `get-step-transaction` as executed trades; they are execution plans only.
 - Before suggesting an ERC20 route as ready to execute, check allowance if the route needs approval.
 - Prefer `get-routes` only when the user explicitly wants multiple alternatives; default to `get-quote` for the best route.
+- In live testing, chain lookup tools accepted names, but token/balance/allowance tools were more reliable with numeric chain IDs. Prefer numeric IDs after discovery.
 
 ## Tested Real Scenario
 
