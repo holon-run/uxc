@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// MCP stdio client
 pub struct McpStdioClient {
@@ -120,8 +121,8 @@ impl McpStdioClient {
         self.instructions.as_deref()
     }
 
-    pub fn start_kill(&mut self) {
-        self.transport.start_kill();
+    pub async fn kill_and_wait(&mut self, timeout: Duration) -> Result<()> {
+        self.transport.kill_and_wait(timeout).await
     }
 
     pub async fn take_tool_list_changed(&mut self) -> bool {

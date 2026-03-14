@@ -4,6 +4,8 @@ use assert_cmd::Command;
 use common::test_server_binary;
 use serial_test::serial;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -32,6 +34,16 @@ fn daemon_stop_best_effort_with_home(home: &Path) {
         .arg("daemon")
         .arg("stop")
         .output();
+}
+
+#[cfg(unix)]
+fn write_executable_script(path: &Path, body: &str) {
+    fs::write(path, body).expect("script should be written");
+    let mut perms = fs::metadata(path)
+        .expect("script metadata should exist")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).expect("script should be executable");
 }
 
 #[test]
@@ -659,4 +671,179 @@ fn mcp_stdio_exclusive_key_refuses_to_evict_busy_session() {
 
     let _busy_out = busy.join().expect("busy thread should join");
     daemon_stop_best_effort();
+}
+
+#[test]
+#[cfg(unix)]
+#[serial]
+fn mcp_stdio_exclusive_key_waits_for_evicted_child_exit() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let scripts_dir = temp_home.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("scripts dir should exist");
+    let lock_path = temp_home.path().join("profile.lock");
+    let script_a = scripts_dir.join("mcp_a.sh");
+    let script_b = scripts_dir.join("mcp_b.sh");
+
+    write_executable_script(
+        &script_a,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+import time
+from pathlib import Path
+
+lock_path = Path(sys.argv[1])
+lock_path.write_text("owner-a\n")
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    req_id = req.get("id")
+    if method == "initialize":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "wait-a", "version": "1.0.0"}
+            }
+        }), flush=True)
+    elif method == "tools/list":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "tools": [{
+                    "name": "echo",
+                    "description": "Echo text back",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string"}},
+                        "required": ["message"]
+                    }
+                }]
+            }
+        }), flush=True)
+    elif method == "tools/call":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"content": [{"type": "text", "text": "a"}]}
+        }), flush=True)
+
+time.sleep(1)
+lock_path.unlink(missing_ok=True)
+"#,
+    );
+
+    write_executable_script(
+        &script_b,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+lock_path = Path(sys.argv[1])
+if lock_path.exists():
+    print("lock still present", file=sys.stderr, flush=True)
+    sys.exit(23)
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    req_id = req.get("id")
+    if method == "initialize":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "wait-b", "version": "1.0.0"}
+            }
+        }), flush=True)
+    elif method == "tools/list":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "tools": [{
+                    "name": "echo",
+                    "description": "Echo text back",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string"}},
+                        "required": ["message"]
+                    }
+                }]
+            }
+        }), flush=True)
+    elif method == "tools/call":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"content": [{"type": "text", "text": "b"}]}
+        }), flush=True)
+"#,
+    );
+
+    let start = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let endpoint_a = format!("{} {}", script_a.display(), lock_path.display());
+    let endpoint_b = format!("{} {}", script_b.display(), lock_path.display());
+
+    let first = uxc_command_with_home(temp_home.path())
+        .env(
+            "UXC_DAEMON_EXCLUSIVE",
+            lock_path.to_string_lossy().to_string(),
+        )
+        .arg(&endpoint_a)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"first"}"#)
+        .output()
+        .expect("first call should run");
+    assert!(
+        first.status.success(),
+        "first call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        lock_path.exists(),
+        "first session should hold the shared lock"
+    );
+
+    let second = uxc_command_with_home(temp_home.path())
+        .env(
+            "UXC_DAEMON_EXCLUSIVE",
+            lock_path.to_string_lossy().to_string(),
+        )
+        .arg(&endpoint_b)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"second"}"#)
+        .output()
+        .expect("second call should run");
+    assert!(
+        second.status.success(),
+        "second call should succeed after waiting for evicted child exit\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second stdout should be valid json");
+    assert_eq!(second_json["ok"], true);
+    assert_eq!(second_json["data"]["content"][0]["text"], "b");
+
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
