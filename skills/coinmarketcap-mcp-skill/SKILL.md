@@ -64,7 +64,7 @@ Inspect `coinmarketcap-mcp-cli -h` after auth setup for the current full tool li
    - global market and derivatives snapshot
    - latest news or semantic lookup on a project/topic
 2. Run `-h` on the specific tool before the first real call.
-3. Prefer symbol-, slug-, or keyword-scoped reads before broad market sweeps.
+3. Prefer id-, slug-, or keyword-scoped reads before broad market sweeps.
 4. Parse the JSON envelope first, then inspect `data`.
 
 ## Guardrails

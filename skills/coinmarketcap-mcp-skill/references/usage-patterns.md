@@ -38,7 +38,7 @@ coinmarketcap-mcp-cli get_crypto_latest_news -h
 Get the latest quote for BTC:
 
 ```bash
-coinmarketcap-mcp-cli get_crypto_quotes_latest symbol=BTC convert=USD
+coinmarketcap-mcp-cli get_crypto_quotes_latest id=1
 ```
 
 Search for projects by keyword:

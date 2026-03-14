@@ -57,7 +57,7 @@ uxc auth binding add \
 Validate the local mapping when auth looks wrong:
 
 ```bash
-uxc auth binding match https://api.telegram.org
+uxc auth binding match https://api.telegram.org/getMe
 ```
 
 ## Core Workflow
@@ -84,7 +84,24 @@ uxc auth binding match https://api.telegram.org
    - positional JSON:
      `telegram-openapi-cli post:/sendMessage '{"chat_id":"CHAT_ID","text":"Hello from uxc"}'`
    - daemon-backed polling subscribe:
-     `uxc subscribe start https://api.telegram.org post:/getUpdates --mode poll --poll-config '{"interval_secs":2,"extract_items_pointer":"/result","request_cursor_arg":"offset","cursor_from_item_pointer":"/update_id","cursor_transform":"increment","checkpoint_strategy":{"type":"item_key","item_key_pointer":"/update_id"}}' --sink file:/tmp/telegram-updates.ndjson`
+     `uxc subscribe start https://api.telegram.org post:/getUpdates '{"timeout":5,"allowed_updates":["message","callback_query"]}' --mode poll --poll-config '{"interval_secs":2,"extract_items_pointer":"/result","request_cursor_arg":"offset","cursor_from_item_pointer":"/update_id","cursor_transform":"increment","checkpoint_strategy":{"type":"item_key","item_key_pointer":"/update_id"}}' --sink file:/tmp/telegram-updates.ndjson`
+
+## Runtime Validation
+
+The following Telegram polling flow has been validated against the real Bot API through `uxc`:
+
+- `get:/getMe`
+- `get:/getWebhookInfo`
+- daemon-backed `uxc subscribe --mode poll` on `post:/getUpdates`
+- item-derived offset progression from `update_id + 1`
+- dedupe/checkpoint behavior for repeated polls
+
+Observed runtime behavior:
+
+- `data` events are emitted for real Telegram updates
+- `poll` events record fetched/emitted/skipped counts
+- `checkpoint` events are emitted after new updates are seen
+- repeated polls skip already-consumed updates after checkpoint advancement
 
 ## Operation Groups
 
@@ -115,12 +132,16 @@ uxc auth binding match https://api.telegram.org
 - `getUpdates` and webhook delivery are mutually exclusive:
   - if a webhook is configured, call `post:/deleteWebhook` before polling with `post:/getUpdates`
   - if polling is active, do not treat webhook operations as background subscription support
+- Telegram allows only one active `getUpdates` consumer per bot token:
+  - if another bot process or script is polling at the same time, Telegram returns HTTP 409
+  - stop the other consumer before relying on daemon-backed polling subscribe
 - For daemon-backed polling subscribe, prefer item-derived offset progression:
   - `extract_items_pointer` should be `/result`
   - `request_cursor_arg` should be `offset`
   - `cursor_from_item_pointer` should be `/update_id`
   - `cursor_transform` should be `increment`
   - `checkpoint_strategy.type` should usually be `item_key` with `item_key_pointer=/update_id`
+- `uxc auth binding match` should be checked against a concrete Telegram method URL such as `https://api.telegram.org/getMe`, because auth is applied through a path-prefix template that expands to `/bot<TOKEN>/...`.
 - `sendPhoto`, `sendDocument`, and `sendMediaGroup` in this skill accept existing `file_id` values or HTTP URLs only; they do not upload new local files.
 - `setWebhook` in this skill does not support certificate upload for self-signed certs.
 - Treat `post:/sendMessage`, all `send*` operations, and webhook-changing operations as write/high-risk actions; require explicit user confirmation before execution.

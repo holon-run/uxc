@@ -23,6 +23,8 @@ uxc auth binding add \
   --scheme https \
   --credential telegram-bot \
   --priority 100
+
+uxc auth binding match https://api.telegram.org/getMe
 ```
 
 ## Read Examples
@@ -48,7 +50,9 @@ telegram-openapi-cli post:/deleteWebhook '{"drop_pending_updates":false}'
 telegram-openapi-cli post:/getUpdates '{"timeout":30,"allowed_updates":["message","callback_query"]}'
 
 # Run background polling through uxc subscribe with offset derived from update_id + 1
+# Only one getUpdates consumer can be active for the bot token at a time.
 uxc subscribe start https://api.telegram.org post:/getUpdates \
+  '{"timeout":5,"allowed_updates":["message","callback_query"]}' \
   --mode poll \
   --poll-config '{"interval_secs":2,"extract_items_pointer":"/result","request_cursor_arg":"offset","cursor_from_item_pointer":"/update_id","cursor_transform":"increment","checkpoint_strategy":{"type":"item_key","item_key_pointer":"/update_id"}}' \
   --sink file:/tmp/telegram-updates.ndjson
