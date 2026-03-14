@@ -1,0 +1,4 @@
+interface:
+  display_name: "LI.FI MCP"
+  short_description: "Cross-chain discovery, quote, allowance, gas, and status via LI.FI MCP"
+  default_prompt: "Use $lifi-mcp-skill to run LI.FI MCP workflows for cross-chain route discovery, token and chain lookup, quote generation, balance/allowance/gas checks, and transfer status tracking without signing or broadcasting transactions."
