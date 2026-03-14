@@ -213,7 +213,7 @@ pub struct McpStdioTransport {
     /// Request ID counter
     next_id: Arc<Mutex<i64>>,
     /// Request sender
-    request_tx: mpsc::UnboundedSender<OutboundMessage>,
+    request_tx: Option<mpsc::UnboundedSender<OutboundMessage>>,
     /// Pending response channels keyed by request id
     response_channels: Arc<
         Mutex<std::collections::HashMap<RequestId, tokio::sync::oneshot::Sender<JsonRpcResponse>>>,
@@ -235,7 +235,7 @@ impl std::fmt::Debug for McpStdioTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpStdioTransport")
             .field("next_id", &self.next_id)
-            .field("request_tx", &self.request_tx)
+            .field("request_tx_open", &self.request_tx.is_some())
             .field("response_channels", &self.response_channels)
             .field("notifications", &self.notifications)
             .field("stderr_lines", &self.stderr_lines)
@@ -407,7 +407,7 @@ impl McpStdioTransport {
         Ok(Self {
             child,
             next_id,
-            request_tx,
+            request_tx: Some(request_tx),
             response_channels,
             notifications,
             stderr_lines,
@@ -422,6 +422,25 @@ impl McpStdioTransport {
         // Many MCP servers (including Node-based) will exit when their stdio is closed, but
         // explicitly killing here avoids profile dir locks and long-lived orphans.
         let _ = self.child.start_kill();
+    }
+
+    pub async fn kill_and_wait(&mut self, timeout: Duration) -> Result<()> {
+        self.request_tx.take();
+
+        match tokio::time::timeout(timeout, self.child.wait()).await {
+            Ok(status) => {
+                status.context("Failed waiting for MCP stdio child to exit after stdin close")?;
+                Ok(())
+            }
+            Err(_) => {
+                self.start_kill();
+                tokio::time::timeout(timeout, self.child.wait())
+                    .await
+                    .context("Timed out waiting for MCP stdio child to exit after kill")?
+                    .context("Failed waiting for MCP stdio child to exit after kill")?;
+                Ok(())
+            }
+        }
     }
 
     /// Send a request and wait for the response
@@ -448,6 +467,12 @@ impl McpStdioTransport {
         let request_json = serde_json::to_string(&request)?;
         tracing::debug!("Sending request: {}", request_json);
 
+        let request_tx = self
+            .request_tx
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow!("Request channel closed"))?;
+
         // Create a response channel
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -458,8 +483,7 @@ impl McpStdioTransport {
         }
 
         // Send the request
-        if self
-            .request_tx
+        if request_tx
             .send(OutboundMessage {
                 request_id: Some(id.clone()),
                 message: request_json,
@@ -544,6 +568,8 @@ impl McpStdioTransport {
         tracing::debug!("Sending notification: {}", notification_json);
 
         self.request_tx
+            .as_ref()
+            .ok_or_else(|| anyhow!("Request channel closed"))?
             .send(OutboundMessage {
                 request_id: None,
                 message: notification_json,
@@ -1293,6 +1319,22 @@ mod tests {
 
         // Either timeout or error is acceptable
         assert!(result.is_err() || result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn send_request_does_not_leave_pending_channel_when_request_tx_is_closed() {
+        let script = "sleep 10";
+        let mut transport =
+            McpStdioTransport::connect("sh", &["-c".to_string(), script.to_string()])
+                .await
+                .unwrap();
+        transport.request_tx.take();
+
+        let err = transport.send_request("echo", None).await.unwrap_err();
+        assert!(err.to_string().contains("Request channel closed"));
+
+        let channels = transport.response_channels.lock().await;
+        assert!(channels.is_empty(), "response_channels should be empty");
     }
 
     #[tokio::test]

@@ -48,6 +48,9 @@ const STOP_POLL_INTERVAL_MS: u64 = 100;
 const START_LOCK_STALE_SECS: u64 = 30;
 const STDIO_INIT_LOCK_STALE_SECS: u64 = 30;
 const MCP_IDLE_TTL_SECS: u64 = 600;
+// Five seconds is long enough for cooperative stdio servers to notice stdin EOF
+// and release external resources, while still bounding daemon-side eviction stalls.
+const MCP_STDIO_EXIT_TIMEOUT_SECS: u64 = 5;
 const CONNECT_TIMEOUT_SECS: u64 = 2;
 const FRAME_IO_TIMEOUT_SECS: u64 = 120;
 const MAX_FRAME_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -361,7 +364,19 @@ impl McpSessionManager {
             // If a session is busy, we'll check it again in the next cleanup cycle.
             if let Ok(mut guard) = session.try_lock() {
                 if guard.last_used < cutoff {
-                    guard.client.start_kill();
+                    // Idle cleanup is best-effort: even if shutdown waiting fails, we still drop
+                    // the cached session so cleanup can make forward progress on the next cycle.
+                    if let Err(err) = guard
+                        .client
+                        .kill_and_wait(Duration::from_secs(MCP_STDIO_EXIT_TIMEOUT_SECS))
+                        .await
+                    {
+                        tracing::warn!(
+                            session_key = %key,
+                            error = %err,
+                            "Failed waiting for idle MCP stdio session to exit after kill"
+                        );
+                    }
                     stdio_remove.push(key.clone());
                 }
             }
@@ -568,7 +583,16 @@ impl McpSessionManager {
 
             match session.try_lock() {
                 Ok(mut guard) => {
-                    guard.client.start_kill();
+                    guard
+                        .client
+                        .kill_and_wait(Duration::from_secs(MCP_STDIO_EXIT_TIMEOUT_SECS))
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Failed waiting for conflicting MCP stdio session {} to exit",
+                                redact_sensitive(&owner_session_key)
+                            )
+                        })?;
                     // Remove session + exclusive registry entries.
                     {
                         let mut map = self.stdio.lock().await;
