@@ -1,4 +1,4 @@
 interface:
-  display_name: "DefiLlama Pro API"
-  short_description: "Operate DefiLlama Pro analytics reads via UXC + curated OpenAPI schema"
-  default_prompt: "Use $defillama-openapi-skill to discover and execute DefiLlama Pro analytics operations through UXC with path-templated API-key auth and read-first guardrails."
+  display_name: "DefiLlama Public API"
+  short_description: "Operate DefiLlama public protocol and chain analytics reads via UXC"
+  default_prompt: "Use $defillama-openapi-skill to discover and execute DefiLlama public analytics operations through UXC with read-first guardrails."

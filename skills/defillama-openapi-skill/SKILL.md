@@ -1,116 +1,78 @@
 ---
 name: defillama-openapi-skill
-description: Operate DefiLlama Pro analytics APIs through UXC with a curated OpenAPI schema, path-templated API-key auth, and read-first guardrails.
+description: Operate DefiLlama public analytics APIs through UXC with a curated OpenAPI schema and read-first guardrails.
 ---
 
-# DefiLlama Pro API Skill
+# DefiLlama Public API Skill
 
-Use this skill to run DefiLlama Pro API operations through `uxc` + OpenAPI.
+Use this skill to run DefiLlama public API operations through `uxc` + OpenAPI.
 
 Reuse the `uxc` skill for shared execution, auth, and error-handling guidance.
 
 ## Prerequisites
 
 - `uxc` is installed and available in `PATH`.
-- Network access to `https://pro-api.llama.fi`.
+- Network access to `https://api.llama.fi`.
 - Access to the curated OpenAPI schema URL:
-  - `https://raw.githubusercontent.com/holon-run/uxc/main/skills/defillama-openapi-skill/references/defillama-pro.openapi.json`
-- A DefiLlama Pro API key.
+  - `https://raw.githubusercontent.com/holon-run/uxc/main/skills/defillama-openapi-skill/references/defillama-public.openapi.json`
 
 ## Scope
 
-This skill covers a read-first analytics surface:
+This skill covers a public read-only analytics surface on `api.llama.fi`:
 
-- protocol TVL list and per-protocol detail
+- protocol TVL list
+- per-protocol detail
 - chain overview reads
-- current token price lookups
-- yield pool discovery
-- yield chart history
-- stablecoin dominance reads
 
 This skill does **not** cover:
 
 - write operations or account management
-- the public unauthenticated API host variants
-- the full DefiLlama Pro endpoint surface
+- DefiLlama Pro key-in-path auth
+- split-host public services such as `coins.llama.fi` and `yields.llama.fi`
+- the full DefiLlama public API surface
 
 ## Authentication
 
-DefiLlama Pro places the API key in the request path, between the host and the endpoint path.
-
-Configure one API-key credential with a request path prefix template:
-
-```bash
-uxc auth credential set defillama-pro \
-  --auth-type api_key \
-  --secret-env DEFILLAMA_PRO_API_KEY \
-  --path-prefix-template "/{{secret}}"
-
-uxc auth binding add \
-  --id defillama-pro \
-  --host pro-api.llama.fi \
-  --scheme https \
-  --credential defillama-pro \
-  --priority 100
-```
-
-Validate the active mapping when auth looks wrong:
-
-```bash
-uxc auth binding match https://pro-api.llama.fi
-```
+This public skill does not require authentication.
 
 ## Core Workflow
 
 1. Use the fixed link command by default:
    - `command -v defillama-openapi-cli`
    - If missing, create it:
-     `uxc link defillama-openapi-cli https://pro-api.llama.fi --schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/defillama-openapi-skill/references/defillama-pro.openapi.json`
+     `uxc link defillama-openapi-cli https://api.llama.fi --schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/defillama-openapi-skill/references/defillama-public.openapi.json`
    - `defillama-openapi-cli -h`
 
 2. Inspect operation schema first:
-   - `defillama-openapi-cli get:/api/protocols -h`
-   - `defillama-openapi-cli get:/coins/prices/current/{coins} -h`
-   - `defillama-openapi-cli get:/yields/chart/{pool} -h`
+   - `defillama-openapi-cli get:/protocols -h`
+   - `defillama-openapi-cli get:/protocol/{protocol} -h`
+   - `defillama-openapi-cli get:/v2/chains -h`
 
 3. Prefer narrow read validation before broader reads:
-   - `defillama-openapi-cli get:/api/v2/chains`
-   - `defillama-openapi-cli get:/api/protocol/{protocol} protocol=aave`
-   - `defillama-openapi-cli get:/yields/pools`
+   - `defillama-openapi-cli get:/v2/chains`
+   - `defillama-openapi-cli get:/protocols`
+   - `defillama-openapi-cli get:/protocol/{protocol} protocol=aave`
 
 4. Execute with key/value parameters:
-   - `defillama-openapi-cli get:/api/protocol/{protocol} protocol=aave`
-   - `defillama-openapi-cli get:/coins/prices/current/{coins} coins=ethereum:0x0000000000000000000000000000000000000000 searchWidth=4h`
-   - `defillama-openapi-cli get:/stablecoins/stablecoindominance/{chain} chain=ethereum`
+   - `defillama-openapi-cli get:/protocol/{protocol} protocol=aave`
+   - `defillama-openapi-cli get:/v2/chains`
 
-## Operation Groups
+## Operations
 
-### Protocol And Chain Analytics
-
-- `get:/api/protocols`
-- `get:/api/protocol/{protocol}`
-- `get:/api/v2/chains`
-
-### Prices, Yields, And Stablecoins
-
-- `get:/coins/prices/current/{coins}`
-- `get:/yields/pools`
-- `get:/yields/chart/{pool}`
-- `get:/stablecoins/stablecoindominance/{chain}`
+- `get:/protocols`
+- `get:/protocol/{protocol}`
+- `get:/v2/chains`
 
 ## Guardrails
 
 - Keep automation on the JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Treat this v1 skill as read-only. Do not imply wallet, trading, or admin support.
-- This skill assumes the Pro host and key-in-path auth model. Do not bind the same credential to a different path shape without checking the upstream docs first.
-- API keys are sensitive because they appear in the request path. Use `--secret-env` or `--secret-op`, not shell history literals, when possible.
-- Avoid sharing raw daemon logs when troubleshooting this integration. The key is part of the request path, so if you inspect `~/.uxc/daemon/daemon.log`, sanitize, rotate, or delete the log after debugging and avoid verbose logging unless necessary.
-- `defillama-openapi-cli <operation> ...` is equivalent to `uxc https://pro-api.llama.fi --schema-url <defillama_openapi_schema> <operation> ...`.
+- Public DefiLlama data is split across multiple hosts. This skill intentionally stays on `api.llama.fi`; use the separate Pro skill when you need the unified Pro host.
+- `defillama-openapi-cli <operation> ...` is equivalent to `uxc https://api.llama.fi --schema-url <defillama_openapi_schema> <operation> ...`.
 
 ## References
 
 - Usage patterns: `references/usage-patterns.md`
-- Curated OpenAPI schema: `references/defillama-pro.openapi.json`
+- Curated OpenAPI schema: `references/defillama-public.openapi.json`
 - DefiLlama API docs: https://defillama.com/docs/api
-- DefiLlama Pro docs: https://defillama.com/pro-api/docs

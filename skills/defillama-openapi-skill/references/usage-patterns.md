@@ -1,64 +1,30 @@
-# DefiLlama Pro API Skill - Usage Patterns
+# DefiLlama Public API Skill - Usage Patterns
 
 ## Link Setup
 
 ```bash
 command -v defillama-openapi-cli
-uxc link defillama-openapi-cli https://pro-api.llama.fi \
-  --schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/defillama-openapi-skill/references/defillama-pro.openapi.json
+uxc link defillama-openapi-cli https://api.llama.fi \
+  --schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/defillama-openapi-skill/references/defillama-public.openapi.json
 defillama-openapi-cli -h
 ```
 
-## Auth Setup
-
-```bash
-uxc auth credential set defillama-pro \
-  --auth-type api_key \
-  --secret-env DEFILLAMA_PRO_API_KEY \
-  --path-prefix-template "/{{secret}}"
-
-uxc auth binding add \
-  --id defillama-pro \
-  --host pro-api.llama.fi \
-  --scheme https \
-  --credential defillama-pro \
-  --priority 100
-```
-
-Validate the binding:
-
-```bash
-uxc auth binding match https://pro-api.llama.fi
-```
+This public skill does not require auth.
 
 ## Read Examples
 
 ```bash
 # List tracked protocols and their top-level TVL metrics
-defillama-openapi-cli get:/api/protocols
+defillama-openapi-cli get:/protocols
 
 # Read one protocol in detail
-defillama-openapi-cli get:/api/protocol/{protocol} protocol=aave
+defillama-openapi-cli get:/protocol/{protocol} protocol=aave
 
 # Read chain overview metrics
-defillama-openapi-cli get:/api/v2/chains
-
-# Read current prices for one or more chain-prefixed assets
-defillama-openapi-cli get:/coins/prices/current/{coins} \
-  coins=ethereum:0x0000000000000000000000000000000000000000,coingecko:bitcoin \
-  searchWidth=4h
-
-# Discover yield pools
-defillama-openapi-cli get:/yields/pools
-
-# Read one pool's yield chart history
-defillama-openapi-cli get:/yields/chart/{pool} pool=747c1d2a-c668-4682-b9f9-296708a3dd90
-
-# Read stablecoin dominance for one chain
-defillama-openapi-cli get:/stablecoins/stablecoindominance/{chain} chain=ethereum
+defillama-openapi-cli get:/v2/chains
 ```
 
 ## Fallback Equivalence
 
 - `defillama-openapi-cli <operation> ...` is equivalent to
-  `uxc https://pro-api.llama.fi --schema-url <defillama_openapi_schema> <operation> ...`.
+  `uxc https://api.llama.fi --schema-url <defillama_openapi_schema> <operation> ...`.

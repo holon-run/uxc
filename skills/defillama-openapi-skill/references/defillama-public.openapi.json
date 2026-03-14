@@ -1,0 +1,88 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "DefiLlama Public Curated API",
+    "version": "1.0.0",
+    "description": "Curated read-only DefiLlama public analytics surface for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://api.llama.fi"
+    }
+  ],
+  "paths": {
+    "/protocols": {
+      "get": {
+        "operationId": "listProtocols",
+        "summary": "List protocol TVL entries",
+        "responses": {
+          "200": {
+            "description": "Protocols response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/protocol/{protocol}": {
+      "get": {
+        "operationId": "getProtocol",
+        "summary": "Get one protocol by slug",
+        "parameters": [
+          {
+            "name": "protocol",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Protocol detail response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/chains": {
+      "get": {
+        "operationId": "listChains",
+        "summary": "List chain overview entries",
+        "responses": {
+          "200": {
+            "description": "Chains response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
