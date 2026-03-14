@@ -2056,7 +2056,9 @@ fn unix_timestamp_seconds() -> u64 {
         .as_secs()
 }
 
-fn encoding_key_from_es256_private_key_pem(private_key_pem: &str) -> Result<jsonwebtoken::EncodingKey> {
+fn encoding_key_from_es256_private_key_pem(
+    private_key_pem: &str,
+) -> Result<jsonwebtoken::EncodingKey> {
     use jsonwebtoken::EncodingKey;
     use p256::pkcs8::EncodePrivateKey;
 
@@ -2071,12 +2073,14 @@ fn encoding_key_from_es256_private_key_pem(private_key_pem: &str) -> Result<json
             err
         )
     })?;
-    let pkcs8_pem = secret_key.to_pkcs8_pem(p256::pkcs8::LineEnding::LF).map_err(|err| {
-        anyhow::anyhow!(
+    let pkcs8_pem = secret_key
+        .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
+        .map_err(|err| {
+            anyhow::anyhow!(
             "Failed to normalize SEC1 ES256 private key to PKCS#8 PEM for jwt_bearer_v1 signer: {}",
             err
         )
-    })?;
+        })?;
     EncodingKey::from_ec_pem(pkcs8_pem.as_bytes()).map_err(|err| {
         anyhow::anyhow!(
             "Failed to parse normalized PKCS#8 ES256 private key as PEM for jwt_bearer_v1 signer: {}",
