@@ -39,7 +39,7 @@ async fn handle_websocket_socket(kind: String, mut socket: WebSocket) {
             let mut received_frames = Vec::new();
             for _ in 0..2 {
                 match timeout(Duration::from_secs(2), socket.recv()).await {
-                    Ok(Some(Ok(Message::Text(text)))) => received_frames.push(text.to_string()),
+                    Ok(Some(Ok(Message::Text(text)))) => received_frames.push(text),
                     Ok(Some(Ok(_))) => break,
                     Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
                 }
@@ -127,7 +127,8 @@ pub async fn main() -> Result<()> {
         .with_env_filter("uxc_test_server=info,axum=info")
         .init();
 
-    let _handle = run(scenario).await?;
+    let handle = run(scenario).await?;
     ctrl_c().await?;
+    let _ = handle.shutdown.send(());
     Ok(())
 }

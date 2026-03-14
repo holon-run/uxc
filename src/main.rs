@@ -1605,6 +1605,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             notes: vec![
                 "For raw HTTP streams, omit <operation_id> and use <endpoint> as the final stream URL.".to_string(),
                 "For generic raw WebSocket streams, pass --transport websocket plus a ws:// or wss:// endpoint; --subprotocol and --init-frame are optional and can be repeated independently.".to_string(),
+                "Raw WebSocket sink events preserve frame type in meta: JSON text frames populate data, plain text frames populate meta.text, and binary frames populate meta.base64.".to_string(),
                 "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint, reuses auth/cache behavior, and automatically falls back between modern and legacy GraphQL websocket profiles.".to_string(),
                 "For JSON-RPC pubsub, pass a ws:// or wss:// endpoint plus a method ending in _subscribe; send raw JSON-RPC params through '{\"params\":...}'.".to_string(),
                 "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>.".to_string(),
@@ -3500,7 +3501,8 @@ async fn handle_subscribe_command(
             });
             if transport_hint.is_none() && (!subprotocols.is_empty() || !init_frames.is_empty()) {
                 return Err(UxcError::InvalidArguments(
-                    "--subprotocol and --init-frame require --transport websocket".to_string(),
+                    "--subprotocol and --init-frame require explicit --transport websocket"
+                        .to_string(),
                 )
                 .into());
             }

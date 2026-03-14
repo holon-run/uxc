@@ -126,7 +126,8 @@ fn subscribe_rejects_websocket_options_without_transport() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
-    assert!(json["error"]["message"].as_str().is_some_and(
-        |msg| msg.contains("--subprotocol and --init-frame require --transport websocket")
-    ));
+    assert!(json["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| msg
+            .contains("--subprotocol and --init-frame require explicit --transport websocket")));
 }
