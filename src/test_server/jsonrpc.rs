@@ -80,7 +80,7 @@ async fn handle_jsonrpc_websocket(mut socket: WebSocket, state: ServerState) {
                 ))
                 .await;
 
-            if matches!(state.scenario, Scenario::Ok) {
+            if matches!(state.scenario, Scenario::Ok | Scenario::Legacy) {
                 sleep(Duration::from_millis(50)).await;
                 let _ = socket
                     .send(Message::Text(
@@ -227,6 +227,7 @@ async fn execute_method(
 ) -> Result<JsonRpcResponse, StatusCode> {
     match state.scenario {
         Scenario::Ok
+        | Scenario::Legacy
         | Scenario::ToolsListFailAfterFirst
         | Scenario::ToolCallTimeout
         | Scenario::StructuredContent

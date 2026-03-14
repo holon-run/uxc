@@ -1586,7 +1586,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: vec![],
             notes: vec![
                 "For raw HTTP streams, omit <operation_id> and use <endpoint> as the final stream URL.".to_string(),
-                "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint and reuses auth/cache behavior.".to_string(),
+                "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint, reuses auth/cache behavior, and automatically falls back between modern and legacy GraphQL websocket profiles.".to_string(),
                 "For JSON-RPC pubsub, pass a ws:// or wss:// endpoint plus a method ending in _subscribe; send raw JSON-RPC params through '{\"params\":...}'.".to_string(),
                 "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>.".to_string(),
                 "For poll mode, pass a normal operation ID plus --mode poll and --poll-config '{...}'; poll config controls interval, extraction, checkpoint strategy, and optional item-derived request cursors.".to_string(),
@@ -3671,14 +3671,18 @@ async fn handle_auth_credential_command(
                 .into());
             }
 
+            if resolved_auth_type != AuthType::ApiKey && path_prefix_template.is_some() {
+                return Err(UxcError::InvalidArguments(
+                    "--path-prefix-template can only be used with --auth-type api_key".to_string(),
+                )
+                .into());
+            }
             if resolved_auth_type != AuthType::ApiKey
-                && (api_key_header.is_some()
-                    || !header.is_empty()
-                    || !query_param.is_empty()
-                    || path_prefix_template.is_some())
+                && resolved_auth_type != AuthType::OAuth
+                && (api_key_header.is_some() || !header.is_empty() || !query_param.is_empty())
             {
                 return Err(UxcError::InvalidArguments(
-                    "--api-key-header/--header/--query-param/--path-prefix-template can only be used with --auth-type api_key"
+                    "--api-key-header/--header/--query-param can only be used with --auth-type api_key or oauth"
                         .to_string(),
                 )
                 .into());
@@ -3808,8 +3812,6 @@ async fn handle_auth_credential_command(
 
             if resolved_auth_type == AuthType::OAuth {
                 profile_obj.secret_source = None;
-                profile_obj.auth_headers = None;
-                profile_obj.auth_query_params = None;
                 profile_obj.auth_path_prefix = None;
             } else {
                 profile_obj.oauth = None;

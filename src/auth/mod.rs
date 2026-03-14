@@ -690,6 +690,17 @@ impl Profile {
         Ok(vec![("x-api-key".to_string(), self.api_key.clone())])
     }
 
+    pub fn resolved_auth_headers(&self) -> Result<Vec<(String, String)>> {
+        let Some(headers) = &self.auth_headers else {
+            return Ok(Vec::new());
+        };
+        let mut values = Vec::with_capacity(headers.len());
+        for header in headers {
+            values.push((header.name.clone(), header.render_value(self)?));
+        }
+        Ok(values)
+    }
+
     pub fn resolved_api_key_query_params(&self) -> Result<Vec<(String, String)>> {
         if self.auth_type != AuthType::ApiKey {
             return Ok(Vec::new());
@@ -706,6 +717,17 @@ impl Profile {
         }
 
         Ok(Vec::new())
+    }
+
+    pub fn resolved_auth_query_params(&self) -> Result<Vec<(String, String)>> {
+        let Some(params) = &self.auth_query_params else {
+            return Ok(Vec::new());
+        };
+        let mut values = Vec::with_capacity(params.len());
+        for param in params {
+            values.push((param.name.clone(), param.render_value(self)?));
+        }
+        Ok(values)
     }
 
     pub fn resolved_api_key_path_prefix(&self) -> Result<Option<String>> {
@@ -2345,12 +2367,22 @@ fn resolved_profile_auth_headers_for_request(
     profile: &Profile,
 ) -> Result<Vec<(String, String)>> {
     let mut headers = match profile.auth_type {
-        AuthType::Bearer | AuthType::OAuth => {
+        AuthType::Bearer | AuthType::OAuth
+            if profile
+                .auth_headers
+                .as_ref()
+                .is_none_or(|headers| headers.is_empty())
+                && profile
+                    .auth_query_params
+                    .as_ref()
+                    .is_none_or(|params| params.is_empty()) =>
+        {
             vec![(
                 "authorization".to_string(),
                 format!("Bearer {}", profile.api_key),
             )]
         }
+        AuthType::Bearer | AuthType::OAuth => profile.resolved_auth_headers()?,
         AuthType::ApiKey => profile.resolved_api_key_headers()?,
         AuthType::Basic => {
             use base64::Engine;
@@ -2440,10 +2472,15 @@ fn apply_profile_auth_to_url_internal(
     request_context: Option<&AuthRequestContext>,
 ) -> Result<String> {
     let mut authed_url = url.to_string();
-    if profile.auth_type == AuthType::ApiKey && profile.has_custom_api_key_query_params() {
+    if (profile.auth_type == AuthType::ApiKey || profile.auth_type == AuthType::OAuth)
+        && profile
+            .auth_query_params
+            .as_ref()
+            .is_some_and(|params| !params.is_empty())
+    {
         let mut parsed = url::Url::parse(&authed_url)
             .with_context(|| format!("Invalid endpoint URL for auth query params: {}", url))?;
-        let rendered = profile.resolved_api_key_query_params()?;
+        let rendered = profile.resolved_auth_query_params()?;
         if !rendered.is_empty() {
             let mut pairs: Vec<(String, String)> = parsed
                 .query_pairs()
@@ -3165,6 +3202,44 @@ mod tests {
         assert_eq!(
             resolved.url,
             "https://api.telegram.org/bot123:abc/getMe?existing=1&api_key=123%3Aabc"
+        );
+    }
+
+    #[test]
+    fn resolve_profile_request_auth_supports_oauth_query_token_without_default_header() {
+        let mut profile = Profile::new("token-123".to_string(), AuthType::OAuth);
+        profile.oauth = Some(OAuthProfile {
+            access_token: Some("token-123".to_string()),
+            ..Default::default()
+        });
+        profile.auth_query_params = Some(vec![AuthQueryParam::new("token", "{{secret}}").unwrap()]);
+
+        let resolved =
+            resolve_profile_request_auth("wss://streaming.bitquery.io/graphql", &profile).unwrap();
+
+        assert_eq!(
+            resolved.url,
+            "wss://streaming.bitquery.io/graphql?token=token-123"
+        );
+        assert!(resolved.headers.is_empty());
+    }
+
+    #[test]
+    fn resolve_profile_request_auth_supports_oauth_custom_headers() {
+        let mut profile = Profile::new("token-123".to_string(), AuthType::OAuth);
+        profile.oauth = Some(OAuthProfile {
+            access_token: Some("token-123".to_string()),
+            ..Default::default()
+        });
+        profile.auth_headers = Some(vec![AuthHeader::new("X-Token", "{{secret}}").unwrap()]);
+
+        let resolved =
+            resolve_profile_request_auth("https://example.com/graphql", &profile).unwrap();
+
+        assert_eq!(resolved.url, "https://example.com/graphql");
+        assert_eq!(
+            resolved.headers,
+            vec![("X-Token".to_string(), "token-123".to_string())]
         );
     }
 

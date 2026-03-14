@@ -1113,6 +1113,75 @@ fn test_graphql_subscribe_start_status_stop_writes_file() {
 
 #[test]
 #[serial_test::serial]
+fn test_graphql_subscribe_falls_back_to_legacy_profile() {
+    let server = start_test_server("graphql", "legacy");
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("graphql-legacy-subscribe.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+    let endpoint = format!("http://{}/", server.addr);
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "subscription/messageAdded",
+            r#"{"roomId":"room-legacy","_select":"id roomId body"}"#,
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(
+        start.is_ok(),
+        "GraphQL legacy subscribe start failed: {:?}",
+        start
+    );
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    assert_eq!(start_json["ok"], true);
+    assert_eq!(start_json["data"]["protocol"], "graphql");
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(
+            &sink_path,
+            r#""graphql_profile":"graphql_ws_legacy""#,
+            Duration::from_secs(5)
+        ),
+        "GraphQL legacy subscribe sink did not record legacy profile data"
+    );
+    assert!(
+        wait_for_file_contains(
+            &sink_path,
+            r#""compatibility_fallback":true"#,
+            Duration::from_secs(5)
+        ),
+        "GraphQL legacy subscribe sink did not record compatibility fallback"
+    );
+
+    let status = run_uxc_in_home(&["subscribe", "status", &job_id], &test_home);
+    assert!(
+        status.is_ok(),
+        "GraphQL legacy subscribe status failed: {:?}",
+        status
+    );
+    let status_json: serde_json::Value = serde_json::from_str(&status.unwrap()).unwrap();
+    assert_eq!(status_json["ok"], true);
+    assert_eq!(status_json["data"]["protocol"], "graphql");
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(
+        stop.is_ok(),
+        "GraphQL legacy subscribe stop failed: {:?}",
+        stop
+    );
+    let stop_json: serde_json::Value = serde_json::from_str(&stop.unwrap()).unwrap();
+    assert_eq!(stop_json["ok"], true);
+    assert_eq!(stop_json["data"]["stopped"], true);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_jsonrpc_subscribe_start_status_stop_writes_file() {
     let server = start_test_server("jsonrpc", "ok");
     let test_home = fresh_test_home_dir();

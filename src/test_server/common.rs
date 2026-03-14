@@ -15,6 +15,8 @@ pub enum Scenario {
     Malformed,
     /// Simulate timeout
     Timeout,
+    /// GraphQL legacy websocket subscription protocol
+    Legacy,
     /// Only tools/call sleeps then returns an error (used for daemon busy-session testing)
     ToolCallTimeout,
     /// tools/list succeeds once, then fails (used to verify cache-first help behavior)
@@ -34,12 +36,13 @@ impl Scenario {
             "auth_required" => Ok(Self::AuthRequired),
             "malformed" => Ok(Self::Malformed),
             "timeout" => Ok(Self::Timeout),
+            "legacy" => Ok(Self::Legacy),
             "tool_call_timeout" => Ok(Self::ToolCallTimeout),
             "tools_list_fail_after_first" => Ok(Self::ToolsListFailAfterFirst),
             "structured_content" => Ok(Self::StructuredContent),
             "dynamic_toolset" => Ok(Self::DynamicToolset),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, tool_call_timeout, tools_list_fail_after_first, structured_content, dynamic_toolset",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, dynamic_toolset",
                 s
             ),
         }

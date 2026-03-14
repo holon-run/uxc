@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::sync::Once;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_tungstenite::connect_async;
@@ -12,6 +13,7 @@ use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
 
 const WEBSOCKET_CONNECT_TIMEOUT_SECS: u64 = 2;
+static RUSTLS_PROVIDER_INIT: Once = Once::new();
 
 #[derive(Debug, Clone)]
 pub struct WebSocketRuntimeConfig {
@@ -136,7 +138,7 @@ impl WebSocketSessionHandler for RawFrameHandler {
     }
 }
 
-enum WebSocketRunError {
+pub enum WebSocketRunError {
     Retry(anyhow::Error),
     Fatal(anyhow::Error),
 }
@@ -208,6 +210,12 @@ fn resolved_request_auth(
     }
 }
 
+fn ensure_rustls_crypto_provider() {
+    RUSTLS_PROVIDER_INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 async fn connect_once(
     config: &WebSocketRuntimeConfig,
     stop_rx: &mut watch::Receiver<bool>,
@@ -220,6 +228,7 @@ async fn connect_once(
     ),
     WebSocketRunError,
 > {
+    ensure_rustls_crypto_provider();
     let resolved = resolved_request_auth(&config.endpoint, config.auth_profile.as_ref())
         .map_err(WebSocketRunError::Fatal)?;
     let mut request = resolved
@@ -479,6 +488,18 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
     }
 }
 
+pub async fn run_websocket_subscription_session_once<
+    H: WebSocketSessionHandler,
+    O: WebSocketRuntimeObserver,
+>(
+    config: &WebSocketRuntimeConfig,
+    handler: &mut H,
+    observer: &mut O,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> std::result::Result<(), WebSocketRunError> {
+    run_session_once(config, handler, observer, stop_rx).await
+}
+
 pub async fn run_websocket_subscription_runtime<
     H: WebSocketSessionHandler,
     O: WebSocketRuntimeObserver,
@@ -549,5 +570,11 @@ mod tests {
         assert_eq!(output.action, WebSocketHandlerAction::Continue);
         assert!(output.data.is_none());
         assert_eq!(output.meta.unwrap()["base64"], "AQID");
+    }
+
+    #[test]
+    fn ensure_rustls_crypto_provider_installs_default() {
+        ensure_rustls_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 }
