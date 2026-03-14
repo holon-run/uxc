@@ -1,0 +1,66 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "DefiLlama Yields Curated API",
+    "version": "1.0.0",
+    "description": "Curated read-only DefiLlama public yields surface for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://yields.llama.fi"
+    }
+  ],
+  "paths": {
+    "/pools": {
+      "get": {
+        "operationId": "listYieldPools",
+        "summary": "List yield pools",
+        "responses": {
+          "200": {
+            "description": "Yield pools response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/chart/{pool}": {
+      "get": {
+        "operationId": "getYieldChart",
+        "summary": "Get a yield chart for one pool",
+        "parameters": [
+          {
+            "name": "pool",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Yield chart response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "DefiLlama Prices Curated API",
+    "version": "1.0.0",
+    "description": "Curated read-only DefiLlama public price surface for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://coins.llama.fi"
+    }
+  ],
+  "paths": {
+    "/prices/current/{coins}": {
+      "get": {
+        "operationId": "getCurrentPrices",
+        "summary": "Get current prices for one or more assets",
+        "parameters": [
+          {
+            "name": "coins",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated asset identifiers such as chain:address or coingecko:bitcoin."
+          },
+          {
+            "name": "searchWidth",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current prices response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

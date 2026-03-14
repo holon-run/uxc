@@ -1,0 +1,4 @@
+interface:
+  display_name: "DefiLlama Yields API"
+  short_description: "Operate DefiLlama public yield reads via UXC"
+  default_prompt: "Use $defillama-yields-openapi-skill to discover and execute DefiLlama public yield operations through UXC with read-first guardrails."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "DefiLlama Prices API"
+  short_description: "Operate DefiLlama public asset price reads via UXC"
+  default_prompt: "Use $defillama-prices-openapi-skill to discover and execute DefiLlama public price operations through UXC with read-first guardrails."
