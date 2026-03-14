@@ -11,6 +11,8 @@ slack-openapi-cli -h
 
 ## Auth Setup (Bot Token Default)
 
+Use the Slack `Bot User OAuth Token` (`xoxb-...`) here.
+
 ```bash
 uxc auth credential set slack-bot \
   --auth-type bearer \
@@ -27,6 +29,8 @@ uxc auth binding add \
 
 ## Auth Setup (User Token Override)
 
+Use the Slack `User OAuth Token` (`xoxp-...`) here. Do not use `xapp-...` app-level tokens with this skill.
+
 ```bash
 uxc auth credential set slack-user \
   --auth-type bearer \
@@ -39,6 +43,8 @@ Use `--auth slack-user` for reads that need user-token semantics:
 slack-openapi-cli --auth slack-user get:/conversations.replies channel=C1234567890 ts=1717171717.000100
 slack-openapi-cli --auth slack-user get:/conversations.history channel=C1234567890 limit=50
 ```
+
+Use `--auth slack-user` on write methods only when you intentionally want the message to be attributed to the user-token identity rather than the default bot path.
 
 ## Read Examples
 

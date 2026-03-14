@@ -14,7 +14,7 @@ discord-openapi-cli -h
 ```bash
 uxc auth credential set discord-openapi \
   --auth-type api_key \
-  --header "Authorization:Bot {{secret}}" \
+  --header "Authorization=Bot {{secret}}" \
   --secret-env DISCORD_BOT_TOKEN
 
 uxc auth binding add \

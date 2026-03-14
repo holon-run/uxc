@@ -39,9 +39,15 @@ This skill does **not** cover:
 
 Slack Web API uses `Authorization: Bearer <token>`.
 
+Token types used in practice:
+
+- `xoxb-...`: Bot User OAuth Token. This is the recommended default for this skill.
+- `xoxp-...`: User OAuth Token. Use this only when you explicitly want user-token semantics.
+- `xapp-...`: App-level token. Do **not** use this with Slack Web API methods in this skill.
+
 ### Option 1: Bot Token (Recommended Default)
 
-Use bot token auth for the default binding and for most messaging operations:
+Use the Slack `Bot User OAuth Token` (`xoxb-...`) for the default binding and for most messaging operations:
 
 ```bash
 uxc auth credential set slack-bot \
@@ -59,7 +65,7 @@ uxc auth binding add \
 
 ### Option 2: User Token (Explicit Override For Selected Reads)
 
-Use a separate user token when the Slack method requires user-token semantics, especially thread/history access outside bot-accessible conversations:
+Use a separate Slack `User OAuth Token` (`xoxp-...`) when the method requires user-token semantics, especially thread/history access outside bot-accessible conversations:
 
 ```bash
 uxc auth credential set slack-user \
@@ -73,6 +79,8 @@ Do **not** bind `slack-user` by default to the same host/path. Invoke it explici
 uxc auth binding match https://slack.com/api
 slack-openapi-cli --auth slack-user get:/conversations.replies channel=C1234567890 ts=1717171717.000100
 ```
+
+If you intentionally want writes to appear as the installing user rather than the bot, you can also invoke write methods with `--auth slack-user`, but treat that as an explicit override rather than the default path.
 
 ## Core Workflow
 
@@ -118,6 +126,8 @@ slack-openapi-cli --auth slack-user get:/conversations.replies channel=C12345678
 - Keep automation on the JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Bot token is the recommended default for send and basic read flows.
+- Bot token means Slack `Bot User OAuth Token` (`xoxb-...`); do not confuse it with `xapp-...` app-level tokens.
+- User token means Slack `User OAuth Token` (`xoxp-...`); use `--auth slack-user` when you intentionally need user identity or user-token-only reads.
 - `get:/conversations.replies` has token-type restrictions:
   - bot token works for IM and MPIM threads the bot can access
   - public/private channel thread reads should use `--auth slack-user`
