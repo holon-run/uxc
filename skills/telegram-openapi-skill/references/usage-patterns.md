@@ -46,6 +46,12 @@ telegram-openapi-cli post:/deleteWebhook '{"drop_pending_updates":false}'
 
 # Poll for updates with long-poll timeout
 telegram-openapi-cli post:/getUpdates '{"timeout":30,"allowed_updates":["message","callback_query"]}'
+
+# Run background polling through uxc subscribe with offset derived from update_id + 1
+uxc subscribe start https://api.telegram.org post:/getUpdates \
+  --mode poll \
+  --poll-config '{"interval_secs":2,"extract_items_pointer":"/result","request_cursor_arg":"offset","cursor_from_item_pointer":"/update_id","cursor_transform":"increment","checkpoint_strategy":{"type":"item_key","item_key_pointer":"/update_id"}}' \
+  --sink file:/tmp/telegram-updates.ndjson
 ```
 
 ## Write Examples (Confirm Intent First)

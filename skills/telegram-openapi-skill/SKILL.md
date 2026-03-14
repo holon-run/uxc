@@ -83,6 +83,8 @@ uxc auth binding match https://api.telegram.org
      `telegram-openapi-cli post:/sendMessage chat_id=CHAT_ID text="Hello from uxc"`
    - positional JSON:
      `telegram-openapi-cli post:/sendMessage '{"chat_id":"CHAT_ID","text":"Hello from uxc"}'`
+   - daemon-backed polling subscribe:
+     `uxc subscribe start https://api.telegram.org post:/getUpdates --mode poll --poll-config '{"interval_secs":2,"extract_items_pointer":"/result","request_cursor_arg":"offset","cursor_from_item_pointer":"/update_id","cursor_transform":"increment","checkpoint_strategy":{"type":"item_key","item_key_pointer":"/update_id"}}' --sink file:/tmp/telegram-updates.ndjson`
 
 ## Operation Groups
 
@@ -113,6 +115,12 @@ uxc auth binding match https://api.telegram.org
 - `getUpdates` and webhook delivery are mutually exclusive:
   - if a webhook is configured, call `post:/deleteWebhook` before polling with `post:/getUpdates`
   - if polling is active, do not treat webhook operations as background subscription support
+- For daemon-backed polling subscribe, prefer item-derived offset progression:
+  - `extract_items_pointer` should be `/result`
+  - `request_cursor_arg` should be `offset`
+  - `cursor_from_item_pointer` should be `/update_id`
+  - `cursor_transform` should be `increment`
+  - `checkpoint_strategy.type` should usually be `item_key` with `item_key_pointer=/update_id`
 - `sendPhoto`, `sendDocument`, and `sendMediaGroup` in this skill accept existing `file_id` values or HTTP URLs only; they do not upload new local files.
 - `setWebhook` in this skill does not support certificate upload for self-signed certs.
 - Treat `post:/sendMessage`, all `send*` operations, and webhook-changing operations as write/high-risk actions; require explicit user confirmation before execution.
