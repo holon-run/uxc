@@ -3671,14 +3671,18 @@ async fn handle_auth_credential_command(
                 .into());
             }
 
+            if resolved_auth_type != AuthType::ApiKey && path_prefix_template.is_some() {
+                return Err(UxcError::InvalidArguments(
+                    "--path-prefix-template can only be used with --auth-type api_key".to_string(),
+                )
+                .into());
+            }
             if resolved_auth_type != AuthType::ApiKey
-                && (api_key_header.is_some()
-                    || !header.is_empty()
-                    || !query_param.is_empty()
-                    || path_prefix_template.is_some())
+                && resolved_auth_type != AuthType::OAuth
+                && (api_key_header.is_some() || !header.is_empty() || !query_param.is_empty())
             {
                 return Err(UxcError::InvalidArguments(
-                    "--api-key-header/--header/--query-param/--path-prefix-template can only be used with --auth-type api_key"
+                    "--api-key-header/--header/--query-param can only be used with --auth-type api_key or oauth"
                         .to_string(),
                 )
                 .into());
@@ -3808,8 +3812,6 @@ async fn handle_auth_credential_command(
 
             if resolved_auth_type == AuthType::OAuth {
                 profile_obj.secret_source = None;
-                profile_obj.auth_headers = None;
-                profile_obj.auth_query_params = None;
                 profile_obj.auth_path_prefix = None;
             } else {
                 profile_obj.oauth = None;

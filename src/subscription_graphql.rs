@@ -46,6 +46,10 @@ impl GraphQLWebSocketProfile {
         }
     }
 
+    fn complete_message_type(self) -> &'static str {
+        "complete"
+    }
+
     fn data_message_type(self) -> &'static str {
         match self {
             Self::Modern => "next",
@@ -70,7 +74,7 @@ impl GraphQLWebSocketProfile {
     fn recognizes_message_type(self, message_type: &str) -> bool {
         message_type == "connection_ack"
             || message_type == self.data_message_type()
-            || message_type == self.stop_message_type()
+            || message_type == self.complete_message_type()
             || message_type == "error"
             || message_type == "ping"
             || message_type == "pong"
@@ -424,6 +428,20 @@ mod tests {
         let legacy_frame: Value =
             serde_json::from_str(&legacy_stop.outbound_text_frames[0]).unwrap();
         assert_eq!(legacy_frame["type"], "stop");
+    }
+
+    #[tokio::test]
+    async fn legacy_handler_accepts_complete_frame() {
+        let mut handler =
+            GraphQLSubscriptionHandler::new(config(), GraphQLWebSocketProfile::Legacy);
+
+        let output = handler
+            .on_text_frame(json!({"id":"1","type":"complete"}).to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(output.action, WebSocketHandlerAction::Stop);
+        assert_eq!(output.stop_reason.as_deref(), Some("complete"));
     }
 
     #[tokio::test]

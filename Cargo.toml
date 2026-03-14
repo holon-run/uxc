@@ -21,6 +21,7 @@ clap_complete = "4.4"
 
 # HTTP Client
 reqwest = { version = "0.11", features = ["json", "stream", "rustls-tls", "gzip", "brotli", "deflate"], default-features = false }
+rustls = { version = "0.23", features = ["ring"] }
 url = "2.4"
 
 # JSON/Serde

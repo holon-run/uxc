@@ -2288,8 +2288,12 @@ async fn run_graphql_subscription_job(
         )
         .await
         {
+            Ok(()) if attempt_observer.saw_data || handler.has_received_data() => break Ok(()),
             Ok(()) => break Ok(()),
             Err(WebSocketRunError::Fatal(err)) => {
+                if attempt_observer.saw_data || handler.has_received_data() {
+                    profile_locked = true;
+                }
                 if !profile_locked {
                     if let Some(fallback) = err.downcast_ref::<GraphQLProfileFallback>() {
                         WebSocketRuntimeObserver::emit(
