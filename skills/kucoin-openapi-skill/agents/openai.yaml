@@ -1,0 +1,4 @@
+interface:
+  display_name: "KuCoin Unified API"
+  short_description: "KuCoin public market data via curated REST endpoints"
+  default_prompt: "Use $kucoin-openapi-skill to discover and execute KuCoin public market-data operations through UXC with help-first schema inspection, symbol-aware reads, and explicit private-auth boundary notes."

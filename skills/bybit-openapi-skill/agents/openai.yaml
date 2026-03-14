@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bybit V5"
+  short_description: "Bybit public market data via the V5 REST API through UXC"
+  default_prompt: "Use $bybit-openapi-skill to discover and execute Bybit V5 public market-data operations through UXC with help-first schema inspection, narrow symbol reads, and explicit private-auth boundary notes."
