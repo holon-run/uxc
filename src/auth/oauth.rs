@@ -355,7 +355,10 @@ pub async fn discover_provider_metadata_with_requirements(
         });
     }
 
-    if overrides.issuer.is_none() && overrides.token_endpoint.is_none() {
+    if overrides.resource_metadata_url.is_none()
+        && overrides.issuer.is_none()
+        && overrides.token_endpoint.is_none()
+    {
         if let Some(matrix_metadata) = discover_matrix_auth_metadata(endpoint, client).await? {
             if authorization_server.is_none() {
                 authorization_server = matrix_metadata.authorization_server.clone();
@@ -1066,10 +1069,10 @@ async fn discover_matrix_auth_metadata(
         return Ok(None);
     }
 
-    let metadata = response
-        .json::<MatrixAuthMetadataDocument>()
-        .await
-        .context("Failed to decode Matrix auth metadata")?;
+    let metadata = match response.json::<MatrixAuthMetadataDocument>().await {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(None),
+    };
 
     Ok(Some(OAuthProviderMetadata {
         provider_issuer: Some(metadata.issuer.clone()),
@@ -1662,9 +1665,8 @@ mod tests {
 
     #[test]
     fn resolve_oauth_scopes_for_matrix_endpoint_adds_defaults() {
-        let scopes =
-            resolve_oauth_scopes_for_endpoint("https://matrix.org/_matrix/client/v3", &[])
-                .expect("matrix scopes should resolve");
+        let scopes = resolve_oauth_scopes_for_endpoint("https://matrix.org/_matrix/client/v3", &[])
+            .expect("matrix scopes should resolve");
         assert!(scopes.iter().any(|scope| scope == MATRIX_OPENID_SCOPE));
         assert!(scopes.iter().any(|scope| scope == MATRIX_API_SCOPE));
         let device_scope = scopes
@@ -1806,6 +1808,67 @@ mod tests {
             discover_provider_metadata_with_overrides("https://127.0.0.1:9", &client, &overrides)
                 .await
                 .expect_err("missing token endpoint should fail");
+        assert!(err
+            .to_string()
+            .contains("Could not determine token_endpoint"));
+    }
+
+    #[tokio::test]
+    async fn matrix_discovery_respects_explicit_resource_metadata_override() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = format!("{}/_matrix/client/v3", server.url());
+        let _matrix_metadata = server
+            .mock("GET", "/_matrix/client/v1/auth_metadata")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"issuer":"https://issuer.example.com","authorization_endpoint":"https://issuer.example.com/authorize","token_endpoint":"https://issuer.example.com/token"}"#,
+            )
+            .expect(0)
+            .create_async()
+            .await;
+
+        let overrides = OAuthDiscoveryOverrides {
+            resource_metadata_url: Some(
+                "https://resource.example.com/.well-known/oauth-protected-resource".to_string(),
+            ),
+            token_endpoint: Some("https://auth.example.com/token".to_string()),
+            authorization_endpoint: Some("https://auth.example.com/authorize".to_string()),
+            ..Default::default()
+        };
+
+        let metadata =
+            discover_provider_metadata_with_overrides(&endpoint, &Client::new(), &overrides)
+                .await
+                .expect("explicit overrides should bypass matrix discovery");
+        assert_eq!(
+            metadata.resource_metadata_url,
+            overrides.resource_metadata_url
+        );
+        assert_eq!(metadata.token_endpoint, "https://auth.example.com/token");
+    }
+
+    #[tokio::test]
+    async fn invalid_matrix_auth_metadata_falls_back_to_other_discovery() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = format!("{}/_matrix/client/v3", server.url());
+        let _matrix_metadata = server
+            .mock("GET", "/_matrix/client/v1/auth_metadata")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"issuer":true}"#)
+            .create_async()
+            .await;
+
+        let err = discover_provider_metadata_with_overrides(
+            &endpoint,
+            &Client::new(),
+            &OAuthDiscoveryOverrides::default(),
+        )
+        .await
+        .expect_err(
+            "invalid matrix metadata should fall back, then fail with normal discovery error",
+        );
         assert!(err
             .to_string()
             .contains("Could not determine token_endpoint"));

@@ -24,6 +24,14 @@ uxc auth oauth start matrix-oauth \
 uxc auth oauth complete matrix-oauth \
   --session-id <session_id> \
   --authorization-response 'http://127.0.0.1:8788/callback?code=...'
+
+uxc auth binding add \
+  --id matrix-oauth \
+  --host matrix.org \
+  --path-prefix /_matrix/client/v3 \
+  --scheme https \
+  --credential matrix-oauth \
+  --priority 100
 ```
 
 Use a loopback callback on an uncommon high port to avoid collisions with local services on common ports.
