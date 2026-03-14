@@ -35,18 +35,21 @@ This skill does **not** cover:
 
 Public product endpoints can be read without credentials.
 
-Private account and order endpoints require a Coinbase Advanced Trade bearer JWT. In practice, Coinbase expects short-lived JWTs generated from a Coinbase API key + private key pair outside `uxc`.
+Private account and order endpoints require a Coinbase Advanced Trade bearer JWT. `uxc` now supports Coinbase's request-scoped JWT flow directly through `jwt_bearer_v1`, so you can store the API key id and private key in a credential and let `uxc` mint the short-lived bearer token per request.
 
 Recommended v1 setup:
 
-1. Generate the Advanced Trade JWT externally using Coinbase's documented signing flow.
-2. Export the current token into an environment variable.
-3. Bind it as a bearer credential to `api.coinbase.com`.
+1. Download or copy the Coinbase API key material:
+   - `key_id`: `organizations/{org_id}/apiKeys/{key_id}`
+   - `private_key`: Coinbase exports either `-----BEGIN EC PRIVATE KEY-----` or `-----BEGIN PRIVATE KEY-----`; `uxc` accepts both PEM forms for ES256.
+2. Store those values in a local credential.
+3. Bind the credential to `api.coinbase.com` with a `jwt_bearer_v1` signer.
 
 ```bash
 uxc auth credential set coinbase-advanced-trade \
-  --auth-type bearer \
-  --secret-env COINBASE_ADVANCED_TRADE_JWT
+  --auth-type api_key \
+  --field key_id=env:COINBASE_KEY_ID \
+  --field private_key=env:COINBASE_PRIVATE_KEY
 
 uxc auth binding add \
   --id coinbase-advanced-trade \
@@ -54,6 +57,7 @@ uxc auth binding add \
   --path-prefix /api/v3/brokerage \
   --scheme https \
   --credential coinbase-advanced-trade \
+  --signer-json '{"kind":"jwt_bearer_v1","algorithm":"es256","private_key_field":"private_key","header_typ":"JWT","header_kid_field":"key_id","expires_in_seconds":120,"claims":{"static":{"iss":"cdp"},"from_fields":{"sub":"key_id"},"time":{"nbf":"now","exp":"now_plus_ttl"}},"request_claim":{"name":"uri","format":"string","value_template":"{{request.method}} {{request.host}}{{request.path}}"}}' \
   --priority 100
 ```
 
@@ -98,7 +102,8 @@ uxc auth binding match https://api.coinbase.com/api/v3/brokerage/accounts
 
 - Keep automation on the JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
-- Refresh `COINBASE_ADVANCED_TRADE_JWT` before private calls because Coinbase JWTs are short-lived.
+- `uxc` mints a fresh short-lived Coinbase JWT on each private request; do not try to bind a stale pre-generated bearer token when `jwt_bearer_v1` is available.
+- Coinbase exports ES256 private keys in more than one PEM form; this skill expects the raw downloaded PEM and does not require a manual PKCS#8 conversion step.
 - Treat `post:/api/v3/brokerage/orders` and `post:/api/v3/brokerage/orders/batch_cancel` as high-risk writes.
 - Keep initial product/account pulls narrow with small `limit` values.
 - `coinbase-openapi-cli <operation> ...` is equivalent to `uxc https://api.coinbase.com --schema-url <coinbase_advanced_trade_openapi_schema> <operation> ...`.

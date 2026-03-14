@@ -11,12 +11,13 @@ coinbase-openapi-cli -h
 
 ## Auth Setup
 
-Generate a short-lived Advanced Trade JWT externally, then bind it as bearer auth:
+Store the Coinbase API key id and private key, then let `uxc` mint the short-lived Advanced Trade JWT per request:
 
 ```bash
 uxc auth credential set coinbase-advanced-trade \
-  --auth-type bearer \
-  --secret-env COINBASE_ADVANCED_TRADE_JWT
+  --auth-type api_key \
+  --field key_id=env:COINBASE_KEY_ID \
+  --field private_key=env:COINBASE_PRIVATE_KEY
 
 uxc auth binding add \
   --id coinbase-advanced-trade \
@@ -24,8 +25,11 @@ uxc auth binding add \
   --path-prefix /api/v3/brokerage \
   --scheme https \
   --credential coinbase-advanced-trade \
+  --signer-json '{"kind":"jwt_bearer_v1","algorithm":"es256","private_key_field":"private_key","header_typ":"JWT","header_kid_field":"key_id","expires_in_seconds":120,"claims":{"static":{"iss":"cdp"},"from_fields":{"sub":"key_id"},"time":{"nbf":"now","exp":"now_plus_ttl"}},"request_claim":{"name":"uri","format":"string","value_template":"{{request.method}} {{request.host}}{{request.path}}"}}' \
   --priority 100
 ```
+
+`COINBASE_PRIVATE_KEY` may be either `-----BEGIN EC PRIVATE KEY-----` or `-----BEGIN PRIVATE KEY-----`.
 
 Validate the binding:
 

@@ -2056,12 +2056,41 @@ fn unix_timestamp_seconds() -> u64 {
         .as_secs()
 }
 
+fn encoding_key_from_es256_private_key_pem(private_key_pem: &str) -> Result<jsonwebtoken::EncodingKey> {
+    use jsonwebtoken::EncodingKey;
+    use p256::pkcs8::EncodePrivateKey;
+
+    let trimmed = private_key_pem.trim();
+    if let Ok(key) = EncodingKey::from_ec_pem(trimmed.as_bytes()) {
+        return Ok(key);
+    }
+
+    let secret_key = p256::SecretKey::from_sec1_pem(trimmed).map_err(|err| {
+        anyhow::anyhow!(
+            "Failed to parse ES256 private key as PEM for jwt_bearer_v1 signer: {}",
+            err
+        )
+    })?;
+    let pkcs8_pem = secret_key.to_pkcs8_pem(p256::pkcs8::LineEnding::LF).map_err(|err| {
+        anyhow::anyhow!(
+            "Failed to normalize SEC1 ES256 private key to PKCS#8 PEM for jwt_bearer_v1 signer: {}",
+            err
+        )
+    })?;
+    EncodingKey::from_ec_pem(pkcs8_pem.as_bytes()).map_err(|err| {
+        anyhow::anyhow!(
+            "Failed to parse normalized PKCS#8 ES256 private key as PEM for jwt_bearer_v1 signer: {}",
+            err
+        )
+    })
+}
+
 fn sign_jwt_bearer_token(
     config: &JwtBearerSignerConfig,
     request_context: &AuthRequestContext,
     profile: &Profile,
 ) -> Result<String> {
-    use jsonwebtoken::{Algorithm, EncodingKey, Header};
+    use jsonwebtoken::{Algorithm, Header};
 
     let Some(private_key) = profile.resolve_field_value(&config.private_key_field)? else {
         anyhow::bail!(
@@ -2070,12 +2099,7 @@ fn sign_jwt_bearer_token(
             config.private_key_field
         );
     };
-    let encoding_key = EncodingKey::from_ec_pem(private_key.trim().as_bytes()).map_err(|err| {
-        anyhow::anyhow!(
-            "Failed to parse ES256 private key as PEM for jwt_bearer_v1 signer: {}",
-            err
-        )
-    })?;
+    let encoding_key = encoding_key_from_es256_private_key_pem(&private_key)?;
 
     let mut header = Header::new(Algorithm::ES256);
     header.typ = Some(
@@ -2625,6 +2649,7 @@ mod tests {
     // Test-only Ed25519 key for signer unit tests. Never used in production.
     const TEST_ED25519_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIFM839r6dC+FQ4zIFCwogFaLq3ugAG4cxQWjSZZu6Cxl\n-----END PRIVATE KEY-----";
     const TEST_ES256_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgpWsEiqimFdiYZyDP\n0tyAOpMx4W4YpC/fsqAtcj90yquhRANCAASH6pTYTxls0Sj9ZeyT1RIaTdpQFSsf\nNwUHJreaOvjUNfMRbRCN0+lUg8lRhc2RlDMLoi5VNVGaTtZ3CTe/U0I4\n-----END PRIVATE KEY-----";
+    const TEST_ES256_PRIVATE_KEY_SEC1_PEM: &str = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIP6dPQK74/q+uTeZSe0h5uNWANmC2qIEGlGx/Lf3x3IzoAoGCCqGSM49\nAwEHoUQDQgAE6OM9q29cYG1/cqtNR63y/EXHz8DAbURsvlgmbqXfUvbEcF5FaDAo\nahW4EcG+6Jc2bkdWpiJtTT6hnoPpHok6KA==\n-----END EC PRIVATE KEY-----";
 
     fn decode_jwt_part(part: &str) -> JsonValue {
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -3405,6 +3430,63 @@ mod tests {
             JsonValue::Array(vec![JsonValue::String(
                 "GET api.coinbase.com/api/v3/brokerage/accounts".to_string()
             )])
+        );
+    }
+
+    #[test]
+    fn resolve_profile_request_auth_with_context_supports_sec1_ec_private_key_pem() {
+        let mut profile = Profile::new(String::new(), AuthType::ApiKey);
+        profile
+            .set_field_source(
+                "private_key".to_string(),
+                SecretSource::Literal {
+                    value: TEST_ES256_PRIVATE_KEY_SEC1_PEM.to_string(),
+                },
+            )
+            .unwrap();
+        profile
+            .set_field_source(
+                "key_id".to_string(),
+                SecretSource::Literal {
+                    value: "organizations/test/apiKeys/key-1".to_string(),
+                },
+            )
+            .unwrap();
+        profile.signer = Some(AuthSignerConfig::JwtBearerV1(JwtBearerSignerConfig {
+            algorithm: JwtSignerAlgorithm::Es256,
+            private_key_field: "private_key".to_string(),
+            header_typ: Some("JWT".to_string()),
+            header_kid_field: Some("key_id".to_string()),
+            expires_in_seconds: 120,
+            claims: JwtBearerClaimsConfig {
+                static_claims: HashMap::from([("iss".to_string(), "cdp".to_string())]),
+                from_fields: HashMap::from([("sub".to_string(), "key_id".to_string())]),
+                time: HashMap::from([
+                    ("nbf".to_string(), JwtTimeClaimValue::Now),
+                    ("exp".to_string(), JwtTimeClaimValue::NowPlusTtl),
+                ]),
+            },
+            request_claim: Some(JwtRequestClaimConfig {
+                name: "uri".to_string(),
+                format: JwtRequestClaimFormat::String,
+                value_template: "{{request.method}} {{request.host}}{{request.path}}".to_string(),
+            }),
+        }));
+
+        let resolved = resolve_profile_request_auth_with_context(
+            &AuthRequestContext::new("get", "https://api.coinbase.com/api/v3/brokerage/accounts"),
+            &profile,
+        )
+        .unwrap();
+        let token = resolved.headers[0].1.strip_prefix("Bearer ").unwrap();
+        let (header, claims) = decode_jwt(token);
+        assert_eq!(header["alg"], "ES256");
+        assert_eq!(header["kid"], "organizations/test/apiKeys/key-1");
+        assert_eq!(claims["iss"], "cdp");
+        assert_eq!(claims["sub"], "organizations/test/apiKeys/key-1");
+        assert_eq!(
+            claims["uri"],
+            "GET api.coinbase.com/api/v3/brokerage/accounts"
         );
     }
 

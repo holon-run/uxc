@@ -33,6 +33,7 @@ base64 = "0.21"
 ed25519-dalek = { version = "2.1", features = ["pkcs8", "pem"] }
 hmac = "0.12"
 jsonwebtoken = "9"
+p256 = { version = "0.13", features = ["pem", "pkcs8"] }
 percent-encoding = "2.3"
 sha2 = "0.10"
 
