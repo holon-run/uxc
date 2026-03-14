@@ -93,6 +93,7 @@ uxc auth binding match https://matrix.org/_matrix/client/v3
 
 Notes:
 - `uxc auth oauth` works only for homeservers that expose Matrix OAuth metadata.
+- Prefer a loopback redirect URI on an uncommon high port, such as `http://127.0.0.1:8788/callback`, to avoid conflicts with local services on common ports.
 - Legacy Matrix login and SSO fallback flows are not covered by this skill yet.
 
 ## Core Workflow

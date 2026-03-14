@@ -26,6 +26,8 @@ uxc auth oauth complete matrix-oauth \
   --authorization-response 'http://127.0.0.1:8788/callback?code=...'
 ```
 
+Use a loopback callback on an uncommon high port to avoid collisions with local services on common ports.
+
 Existing access token:
 
 ```bash

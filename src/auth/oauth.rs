@@ -708,6 +708,7 @@ struct DynamicClientRegistrationRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     client_uri: Option<String>,
     redirect_uris: Vec<String>,
+    application_type: String,
     grant_types: Vec<String>,
     response_types: Vec<String>,
     token_endpoint_auth_method: String,
@@ -739,6 +740,7 @@ async fn dynamic_client_registration(
         client_name: "uxc".to_string(),
         client_uri: Some(env!("CARGO_PKG_HOMEPAGE").to_string()),
         redirect_uris: vec![redirect_uri.to_string()],
+        application_type: "native".to_string(),
         grant_types: vec![
             "authorization_code".to_string(),
             "refresh_token".to_string(),
@@ -1620,6 +1622,7 @@ mod tests {
             client_name: "uxc".to_string(),
             client_uri: Some("https://example.com".to_string()),
             redirect_uris: vec!["http://127.0.0.1/callback".to_string()],
+            application_type: "native".to_string(),
             grant_types: vec![
                 "authorization_code".to_string(),
                 "refresh_token".to_string(),
@@ -1629,6 +1632,7 @@ mod tests {
             scope: Some("read write".to_string()),
         };
         let json = serde_json::to_value(req).unwrap();
+        assert_eq!(json["application_type"], "native");
         assert_eq!(json["token_endpoint_auth_method"], "none");
         assert_eq!(json["grant_types"][0], "authorization_code");
         assert_eq!(json["grant_types"][1], "refresh_token");
