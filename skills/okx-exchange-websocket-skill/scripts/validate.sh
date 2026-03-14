@@ -30,6 +30,10 @@ if rg -q -- '--input-json' "${SKILL_FILE}" "${USAGE_FILE}"; then
   fail 'found banned legacy or misleading command pattern'
 fi
 
+if rg -q -- "--args\\s+'\\{" "${SKILL_FILE}" "${USAGE_FILE}"; then
+  fail 'found banned legacy JSON argument pattern'
+fi
+
 rg -q '^\s*display_name:\s*"OKX Exchange WebSocket"\s*$' "${OPENAI_FILE}" || fail 'missing display_name'
 rg -q '^\s*short_description:\s*".+"\s*$' "${OPENAI_FILE}" || fail 'missing short_description'
 rg -q '^\s*default_prompt:\s*".*\$okx-exchange-websocket-skill.*"\s*$' "${OPENAI_FILE}" || fail 'default_prompt must mention $okx-exchange-websocket-skill'

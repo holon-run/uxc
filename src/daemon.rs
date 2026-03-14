@@ -4548,8 +4548,8 @@ mod tests {
 
     #[test]
     fn parse_file_sink_accepts_arbitrary_absolute_path() {
-        let path = parse_file_sink("file:/etc/passwd").unwrap();
-        assert_eq!(path, PathBuf::from("/etc/passwd"));
+        let path = parse_file_sink("file:/tmp/arbitrary/output.ndjson").unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/arbitrary/output.ndjson"));
     }
 
     #[test]
