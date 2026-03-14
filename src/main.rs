@@ -1786,12 +1786,13 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             usage: "uxc auth binding add --id <id> --host <host> --credential <credential> [--path-prefix <path>] [--scheme <scheme>] [--signer-json <json>] [--priority <n>] [--disabled]".to_string(),
             commands: vec![],
             notes: vec![
-                "--signer-json attaches a typed signer config to this binding, e.g. {\"kind\":\"hmac_query_v1\", ...} or {\"kind\":\"ed25519_query_v1\", ...}.".to_string(),
+                "--signer-json attaches a typed signer config to this binding, e.g. {\"kind\":\"hmac_query_v1\", ...}, {\"kind\":\"ed25519_query_v1\", ...}, or {\"kind\":\"jwt_bearer_v1\", ...}.".to_string(),
             ],
             examples: vec![
                 "uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mcp --scheme https --credential deepwiki --priority 100".to_string(),
                 "uxc auth binding add --id binance-account --host api.binance.com --path-prefix /api/v3 --scheme https --credential binance --signer-json '{\"kind\":\"hmac_query_v1\",\"algorithm\":\"hmac_sha256\",\"signing_field\":\"secret_key\",\"key_field\":\"api_key\",\"key_placement\":\"header\",\"key_name\":\"X-MBX-APIKEY\",\"signature_param\":\"signature\",\"signature_encoding\":\"hex\",\"timestamp_param\":\"timestamp\",\"timestamp_unit\":\"milliseconds\",\"canonicalization\":{\"mode\":\"preserve_order\"}}'".to_string(),
                 "uxc auth binding add --id binance-account-ed25519 --host api.binance.com --path-prefix /api/v3 --scheme https --credential binance-ed25519 --signer-json '{\"kind\":\"ed25519_query_v1\",\"algorithm\":\"ed25519\",\"signing_field\":\"private_key\",\"key_field\":\"api_key\",\"key_placement\":\"header\",\"key_name\":\"X-MBX-APIKEY\",\"signature_param\":\"signature\",\"signature_encoding\":\"base64\",\"timestamp_param\":\"timestamp\",\"timestamp_unit\":\"milliseconds\",\"canonicalization\":{\"mode\":\"preserve_order\"}}'".to_string(),
+                "uxc auth binding add --id coinbase-advanced-trade --host api.coinbase.com --path-prefix /api/v3/brokerage --scheme https --credential coinbase-advanced-trade --signer-json '{\"kind\":\"jwt_bearer_v1\",\"algorithm\":\"es256\",\"private_key_field\":\"private_key\",\"header_typ\":\"JWT\",\"header_kid_field\":\"key_id\",\"expires_in_seconds\":120,\"claims\":{\"static\":{\"iss\":\"cdp\"},\"from_fields\":{\"sub\":\"key_id\"},\"time\":{\"nbf\":\"now\",\"exp\":\"now_plus_ttl\"}},\"request_claim\":{\"name\":\"uri\",\"format\":\"string\",\"value_template\":\"{{request.method}} {{request.host}}{{request.path}}\"}}'".to_string(),
             ],
         },
         ["auth", "binding", "remove"] => HelpData {

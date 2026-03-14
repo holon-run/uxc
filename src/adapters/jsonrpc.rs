@@ -79,21 +79,31 @@ impl JsonRpcAdapter {
         *self.runtime_auth_profile.lock().await = Some(profile);
     }
 
-    fn apply_auth_profile(
-        mut req: reqwest::RequestBuilder,
+    fn resolve_auth_profile(
+        method: &str,
+        url: &str,
         profile: Option<&Profile>,
-    ) -> Result<reqwest::RequestBuilder> {
-        if let Some(profile) = profile {
-            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
+    ) -> Result<crate::auth::ResolvedRequestAuth> {
+        match profile {
+            Some(profile) => crate::auth::resolve_profile_request_auth_with_context(
+                &crate::auth::AuthRequestContext::new(method, url),
+                profile,
+            ),
+            None => Ok(crate::auth::ResolvedRequestAuth {
+                url: url.to_string(),
+                headers: Vec::new(),
+            }),
         }
-        Ok(req)
     }
 
-    fn apply_auth_profile_to_url(url: &str, profile: Option<&Profile>) -> Result<String> {
-        match profile {
-            Some(profile) => crate::auth::apply_profile_auth_to_url(url, profile),
-            None => Ok(url.to_string()),
+    fn apply_resolved_request_auth(
+        mut req: reqwest::RequestBuilder,
+        resolved: &crate::auth::ResolvedRequestAuth,
+    ) -> reqwest::RequestBuilder {
+        for (name, value) in &resolved.headers {
+            req = req.header(name, value);
         }
+        req
     }
 
     async fn refresh_effective_oauth_profile(&self, force: bool) -> Result<Option<Profile>> {
@@ -485,15 +495,15 @@ impl JsonRpcAdapter {
 
         let response = match self
             .send_with_oauth_retry(|profile| {
-                let url = Self::apply_auth_profile_to_url(url, profile)?;
+                let resolved = Self::resolve_auth_profile("POST", url, profile)?;
                 let req = self
                     .client
-                    .post(&url)
+                    .post(&resolved.url)
                     .timeout(std::time::Duration::from_secs(3))
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .json(&request);
-                Self::apply_auth_profile(req, profile)
+                Ok(Self::apply_resolved_request_auth(req, &resolved))
             })
             .await
         {
@@ -528,13 +538,13 @@ impl JsonRpcAdapter {
         for schema_url in Self::schema_candidates(url) {
             let response = match self
                 .send_with_oauth_retry(|profile| {
-                    let schema_url = Self::apply_auth_profile_to_url(&schema_url, profile)?;
+                    let resolved = Self::resolve_auth_profile("GET", &schema_url, profile)?;
                     let req = self
                         .client
-                        .get(&schema_url)
+                        .get(&resolved.url)
                         .timeout(std::time::Duration::from_secs(3))
                         .header("Accept", "application/json");
-                    Self::apply_auth_profile(req, profile)
+                    Ok(Self::apply_resolved_request_auth(req, &resolved))
                 })
                 .await
             {
@@ -637,14 +647,14 @@ impl JsonRpcAdapter {
 
         let response = self
             .send_with_oauth_retry(|profile| {
-                let rpc_url = Self::apply_auth_profile_to_url(rpc_url, profile)?;
+                let resolved = Self::resolve_auth_profile("POST", rpc_url, profile)?;
                 let req = self
                     .client
-                    .post(&rpc_url)
+                    .post(&resolved.url)
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .json(&request);
-                Self::apply_auth_profile(req, profile)
+                Ok(Self::apply_resolved_request_auth(req, &resolved))
             })
             .await
             .context("Failed to send JSON-RPC request")?;

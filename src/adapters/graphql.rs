@@ -80,21 +80,31 @@ impl GraphQLAdapter {
         *self.runtime_auth_profile.lock().await = Some(profile);
     }
 
-    fn apply_auth_profile(
-        mut req: reqwest::RequestBuilder,
+    fn resolve_auth_profile(
+        method: &str,
+        url: &str,
         profile: Option<&Profile>,
-    ) -> Result<reqwest::RequestBuilder> {
-        if let Some(profile) = profile {
-            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
+    ) -> Result<crate::auth::ResolvedRequestAuth> {
+        match profile {
+            Some(profile) => crate::auth::resolve_profile_request_auth_with_context(
+                &crate::auth::AuthRequestContext::new(method, url),
+                profile,
+            ),
+            None => Ok(crate::auth::ResolvedRequestAuth {
+                url: url.to_string(),
+                headers: Vec::new(),
+            }),
         }
-        Ok(req)
     }
 
-    fn apply_auth_profile_to_url(url: &str, profile: Option<&Profile>) -> Result<String> {
-        match profile {
-            Some(profile) => crate::auth::apply_profile_auth_to_url(url, profile),
-            None => Ok(url.to_string()),
+    fn apply_resolved_request_auth(
+        mut req: reqwest::RequestBuilder,
+        resolved: &crate::auth::ResolvedRequestAuth,
+    ) -> reqwest::RequestBuilder {
+        for (name, value) in &resolved.headers {
+            req = req.header(name, value);
         }
+        req
     }
 
     async fn refresh_effective_oauth_profile(&self, force: bool) -> Result<Option<Profile>> {
@@ -124,16 +134,16 @@ impl GraphQLAdapter {
         timeout: Option<Duration>,
     ) -> Result<reqwest::Response> {
         let mut profile = self.refresh_effective_oauth_profile(false).await?;
-        let authed_url = Self::apply_auth_profile_to_url(url, profile.as_ref())?;
+        let resolved = Self::resolve_auth_profile("POST", url, profile.as_ref())?;
 
         let mut req = self
             .client
-            .post(&authed_url)
+            .post(&resolved.url)
             .header("Content-Type", "application/json");
         if let Some(timeout) = timeout {
             req = req.timeout(timeout);
         }
-        req = Self::apply_auth_profile(req, profile.as_ref())?;
+        req = Self::apply_resolved_request_auth(req, &resolved);
 
         let mut resp = req.json(payload).send().await?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
@@ -142,15 +152,16 @@ impl GraphQLAdapter {
                 .is_some_and(|active| active.auth_type == AuthType::OAuth)
         {
             profile = self.refresh_effective_oauth_profile(true).await?;
+            let resolved = Self::resolve_auth_profile("POST", url, profile.as_ref())?;
 
             let mut retry_req = self
                 .client
-                .post(&authed_url)
+                .post(&resolved.url)
                 .header("Content-Type", "application/json");
             if let Some(timeout) = timeout {
                 retry_req = retry_req.timeout(timeout);
             }
-            retry_req = Self::apply_auth_profile(retry_req, profile.as_ref())?;
+            retry_req = Self::apply_resolved_request_auth(retry_req, &resolved);
             resp = retry_req.json(payload).send().await?;
         }
 

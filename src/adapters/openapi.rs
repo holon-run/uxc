@@ -95,51 +95,51 @@ impl OpenAPIAdapter {
         *self.runtime_auth_profile.lock().await = Some(profile);
     }
 
-    fn apply_auth_profile(
+    fn apply_resolved_request_auth(
         mut req: reqwest::RequestBuilder,
-        profile: Option<&Profile>,
-    ) -> Result<reqwest::RequestBuilder> {
-        if let Some(profile) = profile {
-            req = crate::auth::apply_profile_auth_to_request(req, profile)?;
+        resolved: &crate::auth::ResolvedRequestAuth,
+    ) -> reqwest::RequestBuilder {
+        for (name, value) in &resolved.headers {
+            req = req.header(name, value);
         }
-        Ok(req)
+        req
     }
 
-    fn apply_auth_profile_to_url(url: &str, profile: Option<&Profile>) -> Result<String> {
-        match profile {
-            Some(profile) => crate::auth::apply_profile_auth_to_url(url, profile),
-            None => Ok(url.to_string()),
-        }
-    }
-
-    fn apply_auth_profile_to_operation_url(url: &str, profile: Option<&Profile>) -> Result<String> {
-        match profile {
-            Some(profile) => crate::auth::apply_profile_auth_to_operation_url(url, profile),
-            None => Ok(url.to_string()),
-        }
-    }
-
-    fn apply_schema_auth_profile(
-        &self,
-        req: reqwest::RequestBuilder,
-        profile: Option<&Profile>,
-    ) -> Result<reqwest::RequestBuilder> {
-        if self.schema_requests_apply_auth() {
-            Self::apply_auth_profile(req, profile)
-        } else {
-            Ok(req)
-        }
-    }
-
-    fn apply_schema_auth_profile_to_url(
-        &self,
+    fn resolve_auth_profile(
+        method: &str,
         url: &str,
         profile: Option<&Profile>,
-    ) -> Result<String> {
+        is_operation: bool,
+    ) -> Result<crate::auth::ResolvedRequestAuth> {
+        match profile {
+            Some(profile) => {
+                let context = crate::auth::AuthRequestContext::new(method, url);
+                if is_operation {
+                    crate::auth::resolve_profile_operation_request_auth(&context, profile)
+                } else {
+                    crate::auth::resolve_profile_request_auth_with_context(&context, profile)
+                }
+            }
+            None => Ok(crate::auth::ResolvedRequestAuth {
+                url: url.to_string(),
+                headers: Vec::new(),
+            }),
+        }
+    }
+
+    fn resolve_schema_auth_profile(
+        &self,
+        method: &str,
+        url: &str,
+        profile: Option<&Profile>,
+    ) -> Result<crate::auth::ResolvedRequestAuth> {
         if self.schema_requests_apply_auth() {
-            Self::apply_auth_profile_to_url(url, profile)
+            Self::resolve_auth_profile(method, url, profile, false)
         } else {
-            Ok(url.to_string())
+            Ok(crate::auth::ResolvedRequestAuth {
+                url: url.to_string(),
+                headers: Vec::new(),
+            })
         }
     }
 
@@ -216,13 +216,13 @@ impl OpenAPIAdapter {
     async fn check_schema_url(&self, schema_url: &str) -> Result<bool> {
         let response = self
             .send_with_oauth_retry(|profile| {
-                let schema_url = self.apply_schema_auth_profile_to_url(schema_url, profile)?;
+                let resolved = self.resolve_schema_auth_profile("GET", schema_url, profile)?;
                 let req = self
                     .client
-                    .get(&schema_url)
+                    .get(&resolved.url)
                     .timeout(std::time::Duration::from_secs(10))
                     .header("Accept", "application/json");
-                self.apply_schema_auth_profile(req, profile)
+                Ok(Self::apply_resolved_request_auth(req, &resolved))
             })
             .await?;
 
@@ -330,13 +330,13 @@ impl OpenAPIAdapter {
         for full_url in Self::schema_candidates(&normalized) {
             let resp = match self
                 .send_with_oauth_retry(|profile| {
-                    let full_url = self.apply_schema_auth_profile_to_url(&full_url, profile)?;
+                    let resolved = self.resolve_schema_auth_profile("GET", &full_url, profile)?;
                     let req = self
                         .client
-                        .get(&full_url)
+                        .get(&resolved.url)
                         .timeout(std::time::Duration::from_secs(2))
                         .header("Accept", "application/json");
-                    self.apply_schema_auth_profile(req, profile)
+                    Ok(Self::apply_resolved_request_auth(req, &resolved))
                 })
                 .await
             {
@@ -1257,9 +1257,9 @@ impl Adapter for OpenAPIAdapter {
         // Fetch from remote
         let resp = self
             .send_with_oauth_retry(|profile| {
-                let schema_url = self.apply_schema_auth_profile_to_url(&schema_url, profile)?;
-                let req = self.client.get(&schema_url);
-                self.apply_schema_auth_profile(req, profile)
+                let resolved = self.resolve_schema_auth_profile("GET", &schema_url, profile)?;
+                let req = self.client.get(&resolved.url);
+                Ok(Self::apply_resolved_request_auth(req, &resolved))
             })
             .await?;
         let schema: Value = resp.json().await?;
@@ -1402,20 +1402,23 @@ impl Adapter for OpenAPIAdapter {
                     }
                     let with_args = parsed.to_string();
                     if should_apply_auth {
-                        Self::apply_auth_profile_to_operation_url(&with_args, profile)?
+                        Self::resolve_auth_profile(&method, &with_args, profile, true)?
                     } else {
-                        with_args
+                        crate::auth::ResolvedRequestAuth {
+                            url: with_args,
+                            headers: Vec::new(),
+                        }
                     }
                 };
                 let mut req = match method.as_str() {
-                    "get" => self.client.get(&full_url),
-                    "post" => self.client.post(&full_url),
-                    "put" => self.client.put(&full_url),
-                    "delete" => self.client.delete(&full_url),
-                    "patch" => self.client.patch(&full_url),
-                    "head" => self.client.head(&full_url),
-                    "options" => self.client.request(reqwest::Method::OPTIONS, &full_url),
-                    "trace" => self.client.request(reqwest::Method::TRACE, &full_url),
+                    "get" => self.client.get(&full_url.url),
+                    "post" => self.client.post(&full_url.url),
+                    "put" => self.client.put(&full_url.url),
+                    "delete" => self.client.delete(&full_url.url),
+                    "patch" => self.client.patch(&full_url.url),
+                    "head" => self.client.head(&full_url.url),
+                    "options" => self.client.request(reqwest::Method::OPTIONS, &full_url.url),
+                    "trace" => self.client.request(reqwest::Method::TRACE, &full_url.url),
                     _ => {
                         return Err(UxcError::InvalidArguments(format!(
                             "Unsupported HTTP method: {}",
@@ -1427,11 +1430,7 @@ impl Adapter for OpenAPIAdapter {
                 for (name, value) in &prepared_headers {
                     req = req.header(name, value);
                 }
-                let mut req = if should_apply_auth {
-                    Self::apply_auth_profile(req, profile)?
-                } else {
-                    req
-                };
+                let mut req = Self::apply_resolved_request_auth(req, &full_url);
                 if let Some(body) = &prepared_json_body {
                     req = req.json(body);
                 } else if let Some(body) = &prepared_form_body {
