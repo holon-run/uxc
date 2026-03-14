@@ -145,6 +145,17 @@ impl McpAdapter {
                 return Ok(Some(endpoint.clone()));
             }
         }
+        if !self.force_refresh_schema {
+            if let Some(cache) = &self.cache {
+                if let crate::cache::CacheResult::Hit(schema) = cache.get(url)? {
+                    if let Some(resolved) = Self::resolved_transport_from_schema(&schema) {
+                        let mut discovered = self.discovered_http_endpoints.write().await;
+                        discovered.insert(normalized, resolved.clone());
+                        return Ok(Some(resolved));
+                    }
+                }
+            }
+        }
 
         let mut reasons = Vec::new();
         for candidate in Self::http_endpoint_candidates(url) {
@@ -201,6 +212,28 @@ impl McpAdapter {
                 .filter_map(|tool| serde_json::from_value::<types::Tool>(tool.clone()).ok())
                 .collect::<Vec<_>>(),
         )
+    }
+
+    fn resolved_transport_from_schema(schema: &Value) -> Option<ResolvedMcpHttpTransport> {
+        let resolved = schema.get("resolvedTransport")?;
+        let mode = match resolved.get("mode")?.as_str()? {
+            "streamable_http" => http_transport::McpHttpMode::StreamableHttp,
+            "legacy_sse" => http_transport::McpHttpMode::LegacySse,
+            _ => return None,
+        };
+        let connect_url = resolved.get("connect_url")?.as_str()?.to_string();
+        Some(ResolvedMcpHttpTransport::new(mode, connect_url))
+    }
+
+    fn resolved_transport_json(resolved: &ResolvedMcpHttpTransport) -> Value {
+        let mode = match resolved.mode {
+            http_transport::McpHttpMode::StreamableHttp => "streamable_http",
+            http_transport::McpHttpMode::LegacySse => "legacy_sse",
+        };
+        serde_json::json!({
+            "mode": mode,
+            "connect_url": resolved.connect_url,
+        })
     }
 
     fn validate_required_args(
@@ -343,7 +376,8 @@ impl McpAdapter {
             let resolved = self.resolve_http_transport(url).await?.ok_or_else(|| {
                 anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
             })?;
-            let transport = McpRemoteTransport::with_auth(resolved, self.auth_profile.clone())?;
+            let transport =
+                McpRemoteTransport::with_auth(resolved.clone(), self.auth_profile.clone())?;
             let init_result = transport.initialize().await?;
             let tools = match transport.list_tools().await {
                 Ok(tools) => Some(tools),
@@ -358,6 +392,7 @@ impl McpAdapter {
                 "protocolVersion": "2024-11-05",
                 "transport": "http",
                 "url": url,
+                "resolvedTransport": Self::resolved_transport_json(&resolved),
                 "serverInfo": init_result.serverInfo,
                 "instructions": init_result.instructions,
                 "capabilities": init_result.capabilities
@@ -636,7 +671,68 @@ fn convert_tool_content_to_json(content: &[types::ToolContent]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::{Cache, CacheLookup, CacheReadPolicy, CacheResult, CacheStats};
     use serde_json::json;
+    use std::collections::HashMap as StdHashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct TestCache {
+        entries: Mutex<StdHashMap<String, Value>>,
+    }
+
+    impl Cache for TestCache {
+        fn get(&self, url: &str) -> Result<CacheResult> {
+            Ok(match self.entries.lock().unwrap().get(url) {
+                Some(v) => CacheResult::Hit(v.clone()),
+                None => CacheResult::Miss,
+            })
+        }
+
+        fn get_with_policy(&self, url: &str, _policy: CacheReadPolicy) -> Result<CacheLookup> {
+            Ok(match self.entries.lock().unwrap().get(url) {
+                Some(v) => CacheLookup::Hit(crate::cache::CacheHit {
+                    schema: v.clone(),
+                    fetched_at: 0,
+                    stale: false,
+                }),
+                None => CacheLookup::Miss,
+            })
+        }
+
+        fn put(&self, url: &str, schema: &Value) -> Result<()> {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(url.to_string(), schema.clone());
+            Ok(())
+        }
+
+        fn invalidate(&self, _url: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn invalidate_by_key(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<()> {
+            self.entries.lock().unwrap().clear();
+            Ok(())
+        }
+
+        fn list_entries(&self) -> Result<Vec<crate::cache::CacheListEntry>> {
+            Ok(Vec::new())
+        }
+
+        fn stats(&self) -> Result<CacheStats> {
+            Ok(CacheStats::default())
+        }
+
+        fn is_enabled(&self) -> bool {
+            true
+        }
+    }
 
     #[test]
     fn convert_tool_result_includes_structured_content_and_error_flag() {
@@ -703,6 +799,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(resolved.connect_url.ends_with("/mcp"));
+    }
+
+    #[tokio::test]
+    async fn resolve_http_transport_reuses_cached_resolved_transport() {
+        let cache = Arc::new(TestCache::default());
+        let url = "https://example.com";
+        cache
+            .put(
+                url,
+                &json!({
+                    "protocol": "MCP",
+                    "transport": "http",
+                    "resolvedTransport": {
+                        "mode": "legacy_sse",
+                        "connect_url": "https://example.com/mcp"
+                    }
+                }),
+            )
+            .unwrap();
+
+        let adapter = McpAdapter::new().with_cache(cache);
+        let resolved = adapter.resolve_http_transport(url).await.unwrap().unwrap();
+
+        assert_eq!(resolved.mode, http_transport::McpHttpMode::LegacySse);
+        assert_eq!(resolved.connect_url, "https://example.com/mcp");
     }
 
     #[test]
