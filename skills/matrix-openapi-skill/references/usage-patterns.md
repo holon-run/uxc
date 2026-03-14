@@ -73,6 +73,15 @@ matrix-openapi-cli get:/rooms/{roomId}/state/{eventType}/{stateKey} \
 # Poll /sync once
 matrix-openapi-cli get:/sync timeout=30000
 
+# Run room-scoped /sync as a background polling subscription
+uxc subscribe start https://matrix.org/_matrix/client/v3 get:/sync \
+  --auth matrix-oauth \
+  --mode poll \
+  --poll-config '{"interval_secs":2,"extract_items_pointer":"/rooms/join/!abc123:example.org/timeline/events","missing_extract_items_pointer_as_empty":true,"request_cursor_arg":"since","response_cursor_pointer":"/next_batch","checkpoint_strategy":{"type":"cursor_only"}}' \
+  --sink file:$HOME/.uxc/subscriptions/matrix-sync.ndjson \
+  timeout=1000 \
+  'filter={"room":{"rooms":["!abc123:example.org"],"timeline":{"limit":5}}}'
+
 # Inspect a user profile
 matrix-openapi-cli get:/profile/{userId} userId=@alice:example.org
 ```

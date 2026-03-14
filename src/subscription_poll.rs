@@ -12,6 +12,8 @@ use tokio::sync::watch;
 pub struct PollSubscriptionConfig {
     pub interval_secs: u64,
     pub extract_items_pointer: String,
+    #[serde(default)]
+    pub missing_extract_items_pointer_as_empty: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_cursor_arg: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,8 +216,17 @@ impl PollSubscriptionRunner {
         response: Value,
         duration_ms: Option<u64>,
     ) -> Result<PollCycleOutput> {
-        let items_value = pointer_required(&response, &self.config.extract_items_pointer)
-            .with_context(|| "poll extract_items_pointer did not resolve".to_string())?;
+        let empty_items = Value::Array(Vec::new());
+        let items_value = match response.pointer(&self.config.extract_items_pointer) {
+            Some(value) => value,
+            None if self.config.missing_extract_items_pointer_as_empty => &empty_items,
+            None => {
+                return Err(anyhow!(
+                    "poll extract_items_pointer did not resolve: missing JSON pointer '{}'",
+                    self.config.extract_items_pointer
+                ));
+            }
+        };
         let items = items_value
             .as_array()
             .ok_or_else(|| anyhow!("poll extract_items_pointer must resolve to an array"))?;
@@ -637,6 +648,7 @@ mod tests {
         PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: None,
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
@@ -653,6 +665,7 @@ mod tests {
         let err = PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: None,
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
@@ -684,6 +697,7 @@ mod tests {
         let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: Some("since".to_string()),
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
@@ -731,6 +745,7 @@ mod tests {
         let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: None,
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
@@ -752,6 +767,7 @@ mod tests {
         let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: Some("cursor".to_string()),
             response_cursor_pointer: Some("/next_cursor".to_string()),
             cursor_from_item_pointer: None,
@@ -772,6 +788,7 @@ mod tests {
         let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: None,
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
@@ -809,6 +826,7 @@ mod tests {
         let err = PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: Some("offset".to_string()),
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
@@ -831,6 +849,7 @@ mod tests {
         let err = PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: Some("cursor".to_string()),
             response_cursor_pointer: Some("/next_cursor".to_string()),
             cursor_from_item_pointer: Some("/update_id".to_string()),
@@ -848,6 +867,7 @@ mod tests {
         let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: Some("offset".to_string()),
             response_cursor_pointer: None,
             cursor_from_item_pointer: Some("/update_id".to_string()),
@@ -878,6 +898,7 @@ mod tests {
         let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: Some("offset".to_string()),
             response_cursor_pointer: None,
             cursor_from_item_pointer: Some("/update_id".to_string()),
@@ -910,6 +931,7 @@ mod tests {
         let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: Some("offset".to_string()),
             response_cursor_pointer: None,
             cursor_from_item_pointer: Some("/update_id".to_string()),
@@ -948,6 +970,7 @@ mod tests {
         let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
             interval_secs: 1,
             extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
             request_cursor_arg: Some("offset".to_string()),
             response_cursor_pointer: None,
             cursor_from_item_pointer: Some("/update_id".to_string()),
@@ -964,5 +987,49 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("requires a numeric cursor"));
+    }
+
+    #[test]
+    fn missing_extract_items_pointer_can_be_treated_as_empty_array() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/rooms/join/!room:example.org/timeline/events".to_string(),
+            missing_extract_items_pointer_as_empty: true,
+            request_cursor_arg: Some("since".to_string()),
+            response_cursor_pointer: Some("/next_batch".to_string()),
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
+            checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
+        })
+        .unwrap();
+
+        let output = runner
+            .process_response(json!({"next_batch":"s123"}), Some(9))
+            .unwrap();
+
+        assert!(output.emitted_items.is_empty());
+        assert_eq!(output.fetched_items, 0);
+        assert_eq!(runner.build_request_args(&HashMap::new())["since"], "s123");
+    }
+
+    #[test]
+    fn missing_extract_items_pointer_is_still_an_error_by_default() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/rooms/join/!room:example.org/timeline/events".to_string(),
+            missing_extract_items_pointer_as_empty: false,
+            request_cursor_arg: Some("since".to_string()),
+            response_cursor_pointer: Some("/next_batch".to_string()),
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
+            checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
+        })
+        .unwrap();
+
+        let err = runner
+            .process_response(json!({"next_batch":"s123"}), Some(9))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("extract_items_pointer did not resolve"));
     }
 }

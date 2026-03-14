@@ -200,31 +200,38 @@ Status:
 
 - **not yet validated for subscribe**
 
-### Waiting On Prerequisites
-
 #### Matrix Client-Server API
 
 Skill:
 
 - [skills/matrix-openapi-skill/SKILL.md](../skills/matrix-openapi-skill/SKILL.md)
 
-Target validation:
+Observed behavior:
 
-- poll subscribe using `get:/sync`
-- `since -> next_batch` cursor progression
+- OAuth-backed Matrix auth worked against `matrix.org`
+- poll subscribe using `get:/sync` succeeded with `since -> next_batch` cursor progression
+- sparse `/sync` responses that omit the room timeline path no longer fail when
+  `missing_extract_items_pointer_as_empty=true`
+- direct `uxc subscribe start https://matrix.org/_matrix/client/v3 ...` works for room-scoped polling
 
-Current blocker:
+Current limitation:
 
-- provider auth UX is not settled enough for smooth repeated validation
-- current question is whether Matrix can reuse `uxc`'s two-step auth/session mechanism
+- linked `matrix-openapi-cli subscribe ...` still does not work because link-generated `--schema-url`
+  flags are rejected by `subscribe`
+
+Current assessment:
+
+- Matrix is now a validated poll-subscribe provider when invoked directly through `uxc subscribe start`
+- `#283` fixed the sparse `/sync` response handling gap that previously stopped the job after the first poll cycle
 
 Status:
 
-- **waiting on auth path clarification**
+- **validated for direct poll subscribe**
 
 Related work:
 
 - [#274](https://github.com/holon-run/uxc/issues/274)
+- [#283](https://github.com/holon-run/uxc/issues/283)
 
 ## Interpretation
 
@@ -235,18 +242,18 @@ Current real-world status is uneven by provider:
 - Telegram proves that polling subscriptions are working against a real external API
 - Bitquery shows that GraphQL subscription schema discovery alone is not enough; provider-specific WebSocket compatibility matters
 - GoldRush shows that MCP tools and MCP resource subscriptions must be treated separately
-- Matrix remains the best next polling validation target once auth UX is settled
+- Matrix now validates the room-scoped `/sync` polling path; remaining UX work is mainly around linked-command ergonomics
 
 ## Recommended Next Validation Order
 
-1. Matrix `/sync` poll subscribe
-2. Bitquery GraphQL subscription compatibility after `#271`
-3. GoldRush only if the upstream MCP server later exposes `resources.subscribe`
+1. Bitquery GraphQL subscription compatibility after `#271`
+2. GoldRush only if the upstream MCP server later exposes `resources.subscribe`
 
 ## Skill Documentation Implications
 
 Current documentation status after validation work:
 
 - Telegram skill can now describe daemon-backed polling subscribe as validated behavior
+- Matrix skill can now describe direct daemon-backed `/sync` polling subscribe as validated behavior
 - Bitquery skill should continue to describe `subscription/*` as requiring runtime validation
 - GoldRush skill should not imply that current live MCP resources are subscribable unless upstream capability changes
