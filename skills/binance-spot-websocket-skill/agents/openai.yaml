@@ -1,0 +1,4 @@
+interface:
+  display_name: "Binance Spot WebSocket"
+  short_description: "Public Binance Spot market streams via raw WebSocket subscribe"
+  default_prompt: "Use $binance-spot-websocket-skill to subscribe to Binance Spot public market streams through UXC raw WebSocket mode with sink-based event handling."
