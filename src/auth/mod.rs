@@ -2374,7 +2374,7 @@ fn resolved_profile_auth_headers_for_request(
 }
 
 pub fn resolve_profile_request_auth(url: &str, profile: &Profile) -> Result<ResolvedRequestAuth> {
-    resolve_profile_request_auth_with_context(&AuthRequestContext::new("GET", url), profile)
+    resolve_profile_operation_request_auth(&AuthRequestContext::new("GET", url), profile)
 }
 
 pub fn resolve_profile_request_auth_with_context(
