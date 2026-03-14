@@ -55,6 +55,11 @@ enum SubscribeModeArg {
     Poll,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum SubscribeTransportArg {
+    Websocket,
+}
+
 #[derive(Parser)]
 #[command(name = "uxc")]
 #[command(about = "Universal X-Protocol CLI", long_about = None)]
@@ -214,6 +219,18 @@ enum SubscribeCommands {
         /// MCP resource URI to subscribe to
         #[arg(long = "resource-uri", value_name = "URI")]
         resource_uri: Option<String>,
+
+        /// Explicit stream transport hint
+        #[arg(long, value_enum)]
+        transport: Option<SubscribeTransportArg>,
+
+        /// WebSocket subprotocol to advertise during handshake (repeatable)
+        #[arg(long = "subprotocol", value_name = "VALUE")]
+        subprotocols: Vec<String>,
+
+        /// Initial WebSocket text frame to send after connect (repeatable)
+        #[arg(long = "init-frame", value_name = "TEXT_OR_JSON")]
+        init_frames: Vec<String>,
 
         /// Event acquisition mode
         #[arg(long, value_enum, default_value = "stream")]
@@ -1562,12 +1579,13 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "Supports stream subscriptions plus polling-based subscriptions under the same daemon-backed job model.".to_string(),
                 "Use --sink file:/path.ndjson to append normalized event envelopes to a file."
                     .to_string(),
-                "Stream mode covers raw HTTP JSON streams, GraphQL subscriptions, JSON-RPC pubsub over WebSocket, and MCP resource subscriptions; poll mode repeatedly executes a normal operation and emits only new items."
+                "Stream mode covers raw HTTP JSON streams, GraphQL subscriptions, JSON-RPC pubsub over WebSocket, explicit raw WebSocket streams, and MCP resource subscriptions; poll mode repeatedly executes a normal operation and emits only new items."
                     .to_string(),
             ],
             examples: vec![
                 "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
                     .to_string(),
+                "uxc subscribe start wss://stream.binance.com:9443/ws/btcusdt@trade --transport websocket --sink file:/tmp/binance.ndjson".to_string(),
                 "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"newHeads\"]}' --sink file:/tmp/heads.ndjson".to_string(),
                 "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"request_cursor_arg\":\"cursor\",\"response_cursor_pointer\":\"/next_cursor\",\"checkpoint_strategy\":{\"type\":\"cursor_only\"}}' --sink file:/tmp/poll.ndjson".to_string(),
@@ -1582,10 +1600,12 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["subscribe", "start"] => HelpData {
             path: "uxc subscribe start".to_string(),
             about: "Start a background subscription job".to_string(),
-            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>]".to_string(),
+            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--transport websocket] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>]".to_string(),
             commands: vec![],
             notes: vec![
                 "For raw HTTP streams, omit <operation_id> and use <endpoint> as the final stream URL.".to_string(),
+                "For generic raw WebSocket streams, pass --transport websocket plus a ws:// or wss:// endpoint; --subprotocol and --init-frame are optional and can be repeated independently.".to_string(),
+                "Raw WebSocket sink events preserve frame type in meta: JSON text frames populate data, plain text frames populate meta.text, and binary frames populate meta.base64.".to_string(),
                 "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint, reuses auth/cache behavior, and automatically falls back between modern and legacy GraphQL websocket profiles.".to_string(),
                 "For JSON-RPC pubsub, pass a ws:// or wss:// endpoint plus a method ending in _subscribe; send raw JSON-RPC params through '{\"params\":...}'.".to_string(),
                 "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>.".to_string(),
@@ -1594,6 +1614,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             examples: vec![
                 "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
                     .to_string(),
+                "uxc subscribe start wss://ws.okx.com:8443/ws/v5/public --transport websocket --init-frame '{\"op\":\"subscribe\",\"args\":[{\"channel\":\"tickers\",\"instId\":\"BTC-USDT\"}]}' --sink file:/tmp/okx.ndjson".to_string(),
                 "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\",\"_select\":\"id body\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"logs\",{\"address\":\"0xabc\"}]}' --sink file:/tmp/logs.ndjson".to_string(),
                 "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}' --sink file:/tmp/events.ndjson".to_string(),
@@ -3469,9 +3490,45 @@ async fn handle_subscribe_command(
             input_json,
             sink,
             resource_uri,
+            transport,
+            subprotocols,
+            init_frames,
             mode,
             poll_config,
         } => {
+            let transport_hint = transport.as_ref().map(|value| match value {
+                SubscribeTransportArg::Websocket => daemon::SubscriptionTransportHint::Websocket,
+            });
+            if transport_hint.is_none() && (!subprotocols.is_empty() || !init_frames.is_empty()) {
+                return Err(UxcError::InvalidArguments(
+                    "--subprotocol and --init-frame require explicit --transport websocket"
+                        .to_string(),
+                )
+                .into());
+            }
+            if matches!(
+                transport_hint,
+                Some(daemon::SubscriptionTransportHint::Websocket)
+            ) {
+                if operation_id.is_some() {
+                    return Err(UxcError::InvalidArguments(
+                        "--transport websocket cannot be combined with an operation_id".to_string(),
+                    )
+                    .into());
+                }
+                if resource_uri.is_some() {
+                    return Err(UxcError::InvalidArguments(
+                        "--transport websocket cannot be combined with --resource-uri".to_string(),
+                    )
+                    .into());
+                }
+                if !matches!(mode, SubscribeModeArg::Stream) {
+                    return Err(UxcError::InvalidArguments(
+                        "--transport websocket is only valid with --mode stream".to_string(),
+                    )
+                    .into());
+                }
+            }
             let (normalized_args, normalized_input_json) = match operation_id {
                 Some(op) => {
                     let mut explicit_args = Vec::new();
@@ -3527,7 +3584,9 @@ async fn handle_subscribe_command(
                 operation_id: operation_id.clone(),
                 args: args_map,
                 resource_uri: resource_uri.clone(),
-                transport_hint: None,
+                transport_hint,
+                subprotocols: subprotocols.clone(),
+                initial_text_frames: init_frames.clone(),
                 mode: match mode {
                     SubscribeModeArg::Stream => daemon::SubscriptionMode::Stream,
                     SubscribeModeArg::Poll => daemon::SubscriptionMode::Poll,

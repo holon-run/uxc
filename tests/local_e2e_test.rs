@@ -1182,6 +1182,159 @@ fn test_graphql_subscribe_falls_back_to_legacy_profile() {
 
 #[test]
 #[serial_test::serial]
+fn test_raw_websocket_subscribe_start_status_stop_writes_frames() {
+    let server = start_test_server("websocket", "ok");
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("websocket-subscribe.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+    let endpoint = format!("ws://{}/frames", server.addr);
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "--transport",
+            "websocket",
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(
+        start.is_ok(),
+        "raw websocket subscribe start failed: {:?}",
+        start
+    );
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    assert_eq!(start_json["ok"], true);
+    assert_eq!(start_json["data"]["protocol"], "websocket");
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""symbol":"BTCUSDT""#, Duration::from_secs(5)),
+        "raw websocket sink did not record json text frame"
+    );
+    assert!(
+        wait_for_file_contains(&sink_path, r#""text":"tick""#, Duration::from_secs(5)),
+        "raw websocket sink did not record plain text frame"
+    );
+    assert!(
+        wait_for_file_contains(&sink_path, r#""base64":"AQID""#, Duration::from_secs(5)),
+        "raw websocket sink did not record binary frame"
+    );
+
+    let status = run_uxc_in_home(&["subscribe", "status", &job_id], &test_home);
+    assert!(
+        status.is_ok(),
+        "raw websocket subscribe status failed: {:?}",
+        status
+    );
+    let status_json: serde_json::Value = serde_json::from_str(&status.unwrap()).unwrap();
+    assert_eq!(status_json["ok"], true);
+    assert_eq!(status_json["data"]["protocol"], "websocket");
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(
+        stop.is_ok(),
+        "raw websocket subscribe stop failed: {:?}",
+        stop
+    );
+    let stop_json: serde_json::Value = serde_json::from_str(&stop.unwrap()).unwrap();
+    assert_eq!(stop_json["ok"], true);
+    assert_eq!(stop_json["data"]["stopped"], true);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_raw_websocket_subscribe_sends_init_frames_and_subprotocol() {
+    let server = start_test_server("websocket", "ok");
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("websocket-init.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+    let endpoint = format!("ws://{}/init", server.addr);
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "--transport",
+            "websocket",
+            "--init-frame",
+            r#"{"op":"subscribe","channel":"trades"}"#,
+            "--init-frame",
+            "ping",
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(
+        start.is_ok(),
+        "raw websocket init subscribe start failed: {:?}",
+        start
+    );
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    assert_eq!(start_json["ok"], true);
+    assert_eq!(start_json["data"]["protocol"], "websocket");
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(
+            &sink_path,
+            r#""received_frames":["{\"op\":\"subscribe\",\"channel\":\"trades\"}","ping"]"#,
+            Duration::from_secs(5)
+        ),
+        "raw websocket sink did not record init frames"
+    );
+
+    let subprotocol_endpoint = format!("ws://{}/subprotocol", server.addr);
+    let second_sink_path = test_home.join("websocket-subprotocol.ndjson");
+    let second_sink_spec = format!("file:{}", second_sink_path.display());
+    let second_start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &subprotocol_endpoint,
+            "--transport",
+            "websocket",
+            "--subprotocol",
+            "market.v1",
+            "--sink",
+            &second_sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(
+        second_start.is_ok(),
+        "raw websocket subprotocol subscribe start failed: {:?}",
+        second_start
+    );
+    let second_json: serde_json::Value = serde_json::from_str(&second_start.unwrap()).unwrap();
+    let second_job_id = second_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(
+            &second_sink_path,
+            r#""subprotocol":"market.v1""#,
+            Duration::from_secs(5)
+        ),
+        "raw websocket sink did not record negotiated subprotocol"
+    );
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(stop.is_ok(), "raw websocket init stop failed: {:?}", stop);
+    let second_stop = run_uxc_in_home(&["subscribe", "stop", &second_job_id], &test_home);
+    assert!(
+        second_stop.is_ok(),
+        "raw websocket subprotocol stop failed: {:?}",
+        second_stop
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn test_jsonrpc_subscribe_start_status_stop_writes_file() {
     let server = start_test_server("jsonrpc", "ok");
     let test_home = fresh_test_home_dir();
