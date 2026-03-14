@@ -142,6 +142,11 @@ impl PollSubscriptionConfig {
         if self.cursor_transform.is_some() && self.cursor_from_item_pointer.is_none() {
             bail!("poll cursor_transform requires cursor_from_item_pointer");
         }
+        if self.response_cursor_pointer.is_some() && self.cursor_from_item_pointer.is_some() {
+            bail!(
+                "poll response_cursor_pointer and cursor_from_item_pointer are mutually exclusive"
+            );
+        }
 
         match &self.checkpoint_strategy {
             PollCheckpointStrategy::CursorOnly => {
@@ -402,7 +407,7 @@ impl PollSubscriptionRunner {
     }
 
     fn transform_cursor_value(&self, value: Value) -> Result<Value> {
-        match self.config.cursor_transform {
+        match self.config.cursor_transform.as_ref() {
             None => Ok(value),
             Some(PollCursorTransform::Increment) => increment_cursor_value(value),
         }
@@ -529,17 +534,31 @@ fn push_seen_key(buffer: &mut VecDeque<String>, key: String, seen_window: usize)
 
 fn compare_json_values(left: &Value, right: &Value) -> Ordering {
     match (left, right) {
-        (Value::Number(a), Value::Number(b)) => a
-            .as_f64()
-            .zip(b.as_f64())
-            .and_then(|(a, b)| a.partial_cmp(&b))
-            .unwrap_or(Ordering::Equal),
+        (Value::Number(a), Value::Number(b)) => compare_json_numbers(a, b),
         (Value::String(a), Value::String(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         _ => serde_json::to_string(left)
             .unwrap_or_default()
             .cmp(&serde_json::to_string(right).unwrap_or_default()),
     }
+}
+
+fn compare_json_numbers(left: &serde_json::Number, right: &serde_json::Number) -> Ordering {
+    match (left.as_i64(), right.as_i64()) {
+        (Some(a), Some(b)) => return a.cmp(&b),
+        (Some(a), None) if a < 0 => return Ordering::Less,
+        (None, Some(b)) if b < 0 => return Ordering::Greater,
+        _ => {}
+    }
+
+    if let (Some(a), Some(b)) = (left.as_u64(), right.as_u64()) {
+        return a.cmp(&b);
+    }
+
+    left.as_f64()
+        .zip(right.as_f64())
+        .and_then(|(a, b)| a.partial_cmp(&b))
+        .unwrap_or(Ordering::Equal)
 }
 
 fn value_type_name(value: &Value) -> &'static str {
@@ -808,6 +827,23 @@ mod tests {
     }
 
     #[test]
+    fn poll_config_rejects_multiple_cursor_sources() {
+        let err = PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("cursor".to_string()),
+            response_cursor_pointer: Some("/next_cursor".to_string()),
+            cursor_from_item_pointer: Some("/update_id".to_string()),
+            cursor_transform: None,
+            checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
     fn item_derived_cursor_updates_next_request_with_increment() {
         let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
             interval_secs: 1,
@@ -835,6 +871,38 @@ mod tests {
             .unwrap();
 
         assert_eq!(runner.build_request_args(&HashMap::new())["offset"], 1005);
+    }
+
+    #[test]
+    fn item_derived_cursor_preserves_large_integer_ordering() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            request_cursor_arg: Some("offset".to_string()),
+            response_cursor_pointer: None,
+            cursor_from_item_pointer: Some("/update_id".to_string()),
+            cursor_transform: Some(PollCursorTransform::Increment),
+            checkpoint_strategy: PollCheckpointStrategy::ItemKey {
+                item_key_pointer: "/update_id".to_string(),
+                seen_window: Some(8),
+            },
+        })
+        .unwrap();
+
+        runner
+            .process_response(
+                json!({"items":[
+                    {"update_id": 9007199254740992_u64},
+                    {"update_id": 9007199254740994_u64}
+                ]}),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runner.build_request_args(&HashMap::new())["offset"],
+            json!(9007199254740995_u64)
+        );
     }
 
     #[test]
