@@ -18,18 +18,19 @@ upbit-openapi-cli -h
 upbit-openapi-cli get:/v1/market/all isDetails=false
 
 # Read ticker
-upbit-openapi-cli get:/v1/ticker markets=BTC-SGD
+upbit-openapi-cli get:/v1/ticker markets=SGD-BTC
 
 # Read minute candles
-upbit-openapi-cli get:/v1/candles/minutes/{unit} unit=60 market=BTC-SGD count=24
+upbit-openapi-cli get:/v1/candles/minutes/{unit} unit=60 market=SGD-BTC count=24
 
 # Read order book
-upbit-openapi-cli get:/v1/orderbook markets=BTC-SGD
+upbit-openapi-cli get:/v1/orderbook markets=SGD-BTC
 ```
 
 ## Guardrail Note
 
 - Keep this v1 skill on public reads only because Upbit private APIs use provider-specific JWT generation with request-specific claims not yet packaged into a reusable `uxc` signer flow.
+- Live Upbit market codes are quote-first on regional hosts, for example `SGD-BTC`.
 
 ## Fallback Equivalence
 

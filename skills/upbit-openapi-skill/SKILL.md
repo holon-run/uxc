@@ -60,8 +60,8 @@ Upbit private APIs use provider-specific bearer JWT generation with request-spec
    - `upbit-openapi-cli get:/v1/ticker -h`
 
 4. Prefer narrow market reads first:
-   - `upbit-openapi-cli get:/v1/ticker markets=BTC-SGD`
-   - `upbit-openapi-cli get:/v1/orderbook markets=BTC-SGD`
+   - `upbit-openapi-cli get:/v1/ticker markets=SGD-BTC`
+   - `upbit-openapi-cli get:/v1/orderbook markets=SGD-BTC`
 
 ## Operations
 
@@ -76,6 +76,7 @@ Upbit private APIs use provider-specific bearer JWT generation with request-spec
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Treat this v1 skill as read-only.
 - Confirm the correct regional host and quote market before execution.
+- On regional Upbit hosts, live market codes are quote-first, for example `SGD-BTC` and `USDT-BTC`.
 - `upbit-openapi-cli <operation> ...` is equivalent to `uxc <upbit_region_host> --schema-url <upbit_public_openapi_schema> <operation> ...`.
 
 ## References
