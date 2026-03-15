@@ -30,7 +30,7 @@ rg -q 'uxc link sui-jsonrpc-cli https://fullnode.mainnet.sui.io' "${SKILL_FILE}"
 rg -q 'sui-jsonrpc-cli -h' "${SKILL_FILE}" || fail 'missing help-first host discovery example'
 rg -q 'sui-jsonrpc-cli sui_getLatestCheckpointSequenceNumber -h' "${SKILL_FILE}" || fail 'missing operation-level help example'
 rg -q 'OpenRPC or `rpc.discover`' "${SKILL_FILE}" || fail 'missing JSON-RPC discovery note'
-rg -q 'unsafe_\\*' "${SKILL_FILE}" || fail 'missing unsafe method guardrail'
+rg -q 'unsafe_\*' "${SKILL_FILE}" || fail 'missing unsafe method guardrail'
 rg -q 'positional JSON' "${SKILL_FILE}" || fail 'missing positional JSON guidance'
 
 if rg -q -- '(^|[[:space:]])uxc <host> (list|describe|call)([[:space:]]|$)|(^|[[:space:]])sui-jsonrpc-cli (list|describe|call)([[:space:]]|$)|--args .*\{' "${SKILL_FILE}" "${USAGE_FILE}"; then
