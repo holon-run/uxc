@@ -1618,7 +1618,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             notes: vec![
                 "For raw HTTP streams, omit <operation_id> and use <endpoint> as the final stream URL.".to_string(),
                 "For generic raw WebSocket streams, pass --transport websocket plus a ws:// or wss:// endpoint; --subprotocol and --init-frame are optional and can be repeated independently.".to_string(),
-                "For Discord Gateway, pass --transport discord-gateway plus a Discord REST API base such as https://discord.com/api/v10 and a bot token via --auth; optional key=value or JSON config may set intents, os, browser, or device.".to_string(),
+                "For Discord Gateway, pass --transport discord-gateway plus a Discord REST API base such as https://discord.com/api/v10 and a bot token via --auth; optional config may be provided as positional JSON or via --input-json to set intents, os, browser, or device.".to_string(),
                 "For Slack Socket Mode, pass --transport slack-socket-mode plus a Slack Web API base endpoint such as https://slack.com/api and an app-level xapp token via --auth; the runtime opens a fresh temporary WebSocket URL on each connect attempt.".to_string(),
                 "Raw WebSocket sink events preserve frame type in meta: JSON text frames populate data, plain text frames populate meta.text, and binary frames populate meta.base64.".to_string(),
                 "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint, reuses auth/cache behavior, and automatically falls back between modern and legacy GraphQL websocket profiles.".to_string(),

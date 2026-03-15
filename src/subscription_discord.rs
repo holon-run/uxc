@@ -88,9 +88,19 @@ pub fn prepare_gateway_websocket_url(raw: &str) -> Result<String> {
             other
         ),
     }
-    url.query_pairs_mut()
-        .append_pair("v", "10")
-        .append_pair("encoding", "json");
+    let retained_pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "v" && key != "encoding")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        for (key, value) in retained_pairs {
+            pairs.append_pair(&key, &value);
+        }
+        pairs.append_pair("v", "10").append_pair("encoding", "json");
+    }
     Ok(url.to_string())
 }
 
@@ -420,6 +430,15 @@ mod tests {
         assert_eq!(
             prepare_gateway_websocket_url("wss://gateway.discord.gg").unwrap(),
             "wss://gateway.discord.gg/?v=10&encoding=json"
+        );
+    }
+
+    #[test]
+    fn prepares_gateway_websocket_url_replaces_existing_protocol_params() {
+        assert_eq!(
+            prepare_gateway_websocket_url("wss://gateway.discord.gg/?foo=bar&v=9&encoding=etf")
+                .unwrap(),
+            "wss://gateway.discord.gg/?foo=bar&v=10&encoding=json"
         );
     }
 
