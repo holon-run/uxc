@@ -785,7 +785,7 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
             SubscriptionTransportHint::SlackSocketMode => {
                 if !lower.starts_with("http://") && !lower.starts_with("https://") {
                     bail!(
-                        "slack_socket_mode transport requires an http:// or https:// Slack API endpoint"
+                        "slack-socket-mode transport requires an http:// or https:// Slack API endpoint"
                     );
                 }
                 return Ok("slack_socket_mode".to_string());
@@ -964,16 +964,16 @@ impl SubscriptionManager {
             Some(SubscriptionTransportHint::SlackSocketMode)
         ) {
             if request.operation_id.is_some() {
-                bail!("slack_socket_mode transport cannot be combined with an operation_id");
+                bail!("slack-socket-mode transport cannot be combined with an operation_id");
             }
             if request.resource_uri.is_some() {
-                bail!("slack_socket_mode transport cannot be combined with --resource-uri");
+                bail!("slack-socket-mode transport cannot be combined with --resource-uri");
             }
             if request.mode != SubscriptionMode::Stream {
-                bail!("slack_socket_mode transport is only valid with stream mode");
+                bail!("slack-socket-mode transport is only valid with stream mode");
             }
             if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
-                bail!("slack_socket_mode transport manages its own websocket setup and does not accept --subprotocol or --init-frame");
+                bail!("slack-socket-mode transport manages its own websocket setup and does not accept --subprotocol or --init-frame");
             }
         } else if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
             bail!("websocket subprotocols and init frames require websocket transport");
@@ -2466,14 +2466,31 @@ async fn open_slack_socket_mode_websocket_url(request: &SubscribeStartRequest) -
     }
     let response = req.send().await?;
     if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read response body>".to_string());
+        let body = truncate_error_body(&body, 512);
         bail!(
-            "Slack Socket Mode open request failed with status {}",
-            response.status()
+            "Slack Socket Mode open request failed with status {}: {}",
+            status,
+            body
         );
     }
     let body = response.json::<Value>().await?;
     let parsed = parse_socket_mode_open_response(&body)?;
     Ok(parsed.websocket_url)
+}
+
+fn truncate_error_body(body: &str, max_chars: usize) -> String {
+    let mut chars = body.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 async fn run_slack_socket_mode_subscription_job(

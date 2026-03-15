@@ -4,6 +4,7 @@ use crate::subscription_websocket::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
+use base64::Engine;
 use serde_json::{json, Value};
 
 pub fn derive_socket_mode_open_endpoint(endpoint: &str) -> Result<String> {
@@ -113,11 +114,14 @@ impl WebSocketSessionHandler for SlackSocketModeHandler {
         })
     }
 
-    async fn on_binary_frame(&mut self, _bytes: Vec<u8>) -> Result<WebSocketHandlerOutput> {
+    async fn on_binary_frame(&mut self, bytes: Vec<u8>) -> Result<WebSocketHandlerOutput> {
         Ok(WebSocketHandlerOutput {
             action: WebSocketHandlerAction::Continue,
             data: None,
-            meta: None,
+            meta: Some(json!({
+                "frame_type": "binary",
+                "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+            })),
             outbound_text_frames: Vec::new(),
             stop_reason: None,
         })
@@ -197,5 +201,19 @@ mod tests {
 
         assert_eq!(output.action, WebSocketHandlerAction::Reconnect);
         assert_eq!(output.data.unwrap()["type"], "disconnect");
+    }
+
+    #[tokio::test]
+    async fn handler_emits_binary_frame_metadata() {
+        let mut handler = SlackSocketModeHandler::new();
+        let output = handler
+            .on_binary_frame(vec![0x01, 0x02, 0x03])
+            .await
+            .unwrap();
+
+        assert_eq!(output.action, WebSocketHandlerAction::Continue);
+        assert!(output.data.is_none());
+        assert_eq!(output.meta.as_ref().unwrap()["frame_type"], "binary");
+        assert_eq!(output.meta.as_ref().unwrap()["base64"], "AQID");
     }
 }
