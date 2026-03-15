@@ -216,7 +216,7 @@ impl JsonRpcAdapter {
 
     async fn load_schema_document(&self, schema_url: &str) -> Result<Value> {
         if let Some(path) = Self::parse_schema_file_path(schema_url)? {
-            let body = std::fs::read_to_string(&path).with_context(|| {
+            let body = tokio::fs::read_to_string(&path).await.with_context(|| {
                 format!("Failed to read OpenRPC schema file '{}'", path.display())
             })?;
             return serde_json::from_str(&body).with_context(|| {

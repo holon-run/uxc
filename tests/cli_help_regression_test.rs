@@ -1284,15 +1284,6 @@ fn schema_url_override_supports_file_url_schema() {
 fn schema_url_override_supports_schema_separated_jsonrpc_service() {
     daemon_stop_best_effort();
     let home = tempfile::tempdir().expect("temp home");
-    let mut target_server = mockito::Server::new();
-    let _call = target_server
-        .mock("POST", "/")
-        .match_body(mockito::Matcher::Regex("eth_blockNumber".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(r#"{"jsonrpc":"2.0","id":2,"result":"0x10"}"#)
-        .create();
-
     let mut schema_server = mockito::Server::new();
     let _schema = schema_server
         .mock("GET", "/openrpc.json")
@@ -1315,7 +1306,7 @@ fn schema_url_override_supports_schema_separated_jsonrpc_service() {
     let schema_url = format!("{}/openrpc.json", schema_server.url());
 
     let host_help_output = uxc_command_with_home(home.path())
-        .arg(target_server.url())
+        .arg("https://ethereum-rpc.publicnode.com")
         .arg("--no-cache")
         .arg("--schema-url")
         .arg(&schema_url)
@@ -1341,15 +1332,6 @@ fn schema_url_override_supports_schema_separated_jsonrpc_service() {
 fn schema_url_override_supports_local_jsonrpc_schema_file() {
     daemon_stop_best_effort();
     let home = tempfile::tempdir().expect("temp home");
-    let mut target_server = mockito::Server::new();
-    let _call = target_server
-        .mock("POST", "/")
-        .match_body(mockito::Matcher::Regex("eth_chainId".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(r#"{"jsonrpc":"2.0","id":2,"result":"0x1"}"#)
-        .create();
-
     let schema_dir = tempfile::tempdir().expect("failed to create tempdir");
     let schema_path = schema_dir.path().join("openrpc.json");
     std::fs::write(
@@ -1369,7 +1351,7 @@ fn schema_url_override_supports_local_jsonrpc_schema_file() {
     .expect("failed to write schema file");
 
     let host_help_output = uxc_command_with_home(home.path())
-        .arg(target_server.url())
+        .arg("https://ethereum-rpc.publicnode.com")
         .arg("--no-cache")
         .arg("--schema-url")
         .arg(&schema_path)
@@ -1395,15 +1377,6 @@ fn schema_url_override_supports_local_jsonrpc_schema_file() {
 fn schema_url_override_supports_jsonrpc_file_url_schema() {
     daemon_stop_best_effort();
     let home = tempfile::tempdir().expect("temp home");
-    let mut target_server = mockito::Server::new();
-    let _call = target_server
-        .mock("POST", "/")
-        .match_body(mockito::Matcher::Regex("web3_clientVersion".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(r#"{"jsonrpc":"2.0","id":2,"result":"erigon/v1"}"#)
-        .create();
-
     let schema_dir = tempfile::tempdir().expect("failed to create tempdir");
     let schema_path = schema_dir.path().join("openrpc.json");
     std::fs::write(
@@ -1426,7 +1399,7 @@ fn schema_url_override_supports_jsonrpc_file_url_schema() {
         .to_string();
 
     let host_help_output = uxc_command_with_home(home.path())
-        .arg(target_server.url())
+        .arg("https://ethereum-rpc.publicnode.com")
         .arg("--no-cache")
         .arg("--schema-url")
         .arg(&schema_url)

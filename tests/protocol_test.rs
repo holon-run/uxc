@@ -411,15 +411,6 @@ fn test_protocol_router_get_adapter_with_schema_url_override() {
 
 #[test]
 fn test_protocol_router_gets_jsonrpc_adapter_with_openrpc_schema_url_override() {
-    let mut target_server = mockito::Server::new();
-    let _call = target_server
-        .mock("POST", "/")
-        .match_body(mockito::Matcher::Regex("eth_blockNumber".into()))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(r#"{"jsonrpc":"2.0","id":2,"result":"0x10"}"#)
-        .create();
-
     let mut schema_server = mockito::Server::new();
     let openrpc_doc = serde_json::json!({
         "openrpc": "1.2.6",
@@ -446,7 +437,7 @@ fn test_protocol_router_gets_jsonrpc_adapter_with_openrpc_schema_url_override() 
         .with_body(openrpc_doc.to_string())
         .create();
 
-    let base_url = target_server.url();
+    let base_url = "https://ethereum-rpc.publicnode.com".to_string();
     let schema_url = format!("{}/openrpc.json", schema_server.url());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
