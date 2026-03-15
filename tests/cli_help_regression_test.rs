@@ -1228,7 +1228,7 @@ fn schema_url_override_supports_local_schema_file() {
 
 #[test]
 #[serial]
-fn schema_url_override_supports_file_url_schema_file() {
+fn schema_url_override_supports_file_url_schema() {
     let mut target_server = mockito::Server::new();
     let _call = target_server
         .mock("GET", "/pets")

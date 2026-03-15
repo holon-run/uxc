@@ -221,7 +221,15 @@ impl OpenAPIAdapter {
             return Ok(Some(path_like.to_path_buf()));
         }
 
-        if let Ok(parsed) = url::Url::parse(schema_url) {
+        let treat_as_url = schema_url.contains("://")
+            || schema_url.starts_with("file:")
+            || schema_url.starts_with("http:")
+            || schema_url.starts_with("https:");
+
+        if treat_as_url {
+            let parsed = url::Url::parse(schema_url).with_context(|| {
+                format!("Invalid schema URL '{}': expected a valid URL", schema_url)
+            })?;
             return match parsed.scheme() {
                 "http" | "https" => Ok(None),
                 "file" => parsed.to_file_path().map(Some).map_err(|_| {
@@ -1651,6 +1659,20 @@ mod tests {
             .to_string();
 
         let adapter = OpenAPIAdapter::new().with_schema_url_override(Some(schema_url));
+
+        assert!(adapter.can_handle("https://example.com").await.unwrap());
+        let schema = adapter.fetch_schema("https://example.com").await.unwrap();
+        assert_eq!(schema["openapi"], "3.0.0");
+    }
+
+    #[tokio::test]
+    async fn schema_url_override_treats_colon_filename_as_local_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let schema_path = temp_dir.path().join("schema:v1.json");
+        std::fs::write(&schema_path, openapi_doc()).unwrap();
+
+        let adapter =
+            OpenAPIAdapter::new().with_schema_url_override(Some(schema_path.display().to_string()));
 
         assert!(adapter.can_handle("https://example.com").await.unwrap());
         let schema = adapter.fetch_schema("https://example.com").await.unwrap();
