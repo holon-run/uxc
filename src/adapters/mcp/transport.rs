@@ -417,6 +417,10 @@ impl McpStdioTransport {
         })
     }
 
+    pub fn child_id(&self) -> Option<u32> {
+        self.child.id()
+    }
+
     pub fn start_kill(&mut self) {
         // Best-effort: ensure cached/evicted MCP processes are terminated promptly.
         // Many MCP servers (including Node-based) will exit when their stdio is closed, but

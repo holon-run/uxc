@@ -116,6 +116,7 @@ pub struct RuntimeInvokeOptions {
     pub schema_mapping_file: Option<String>,
     #[serde(default)]
     pub daemon_exclusive: Vec<String>,
+    pub daemon_idle_ttl: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +258,21 @@ pub struct DaemonStatus {
     pub log_file: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonSessionView {
+    pub session_key: String,
+    pub protocol: String,
+    pub endpoint: String,
+    pub link_name: Option<String>,
+    pub child_pid: Option<u32>,
+    pub started_at_unix: u64,
+    pub last_used_at_unix: u64,
+    pub idle_ttl_secs: u64,
+    #[serde(default)]
+    pub daemon_exclusive: Vec<String>,
+    pub state: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonRpcRequest {
     jsonrpc: String,
@@ -327,6 +343,13 @@ struct McpStdioSession {
     tools: Option<Vec<adapters::mcp::types::Tool>>,
     tools_dirty: bool,
     last_used: Instant,
+    last_used_at_unix: u64,
+    started_at_unix: u64,
+    idle_ttl_secs: u64,
+    child_pid: Option<u32>,
+    link_name: Option<String>,
+    endpoint: String,
+    daemon_exclusive: Vec<String>,
 }
 
 struct McpHttpSession {
@@ -404,8 +427,7 @@ impl McpSessionManager {
     }
 
     async fn cleanup_idle(&self) {
-        let cutoff = Instant::now() - Duration::from_secs(MCP_IDLE_TTL_SECS);
-
+        let http_cutoff = Instant::now() - Duration::from_secs(MCP_IDLE_TTL_SECS);
         let stdio_entries: Vec<(String, Arc<Mutex<McpStdioSession>>)> = {
             let map = self.stdio.lock().await;
             map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
@@ -415,6 +437,10 @@ impl McpSessionManager {
             // Use try_lock to avoid blocking on sessions that may be held across .await in invoke_mcp.
             // If a session is busy, we'll check it again in the next cleanup cycle.
             if let Ok(mut guard) = session.try_lock() {
+                if guard.idle_ttl_secs == 0 {
+                    continue;
+                }
+                let cutoff = Instant::now() - Duration::from_secs(guard.idle_ttl_secs);
                 if guard.last_used < cutoff {
                     // Idle cleanup is best-effort: even if shutdown waiting fails, we still drop
                     // the cached session so cleanup can make forward progress on the next cycle.
@@ -466,7 +492,7 @@ impl McpSessionManager {
         let mut http_remove = Vec::new();
         for (key, session) in &http_entries {
             let last = *session.last_used.lock().await;
-            if last < cutoff {
+            if last < http_cutoff {
                 http_remove.push(key.clone());
             }
         }
@@ -485,6 +511,9 @@ impl McpSessionManager {
         args: &[String],
         spawn_options: &adapters::mcp::StdioSpawnOptions,
         exclusive_keys: &[String],
+        idle_ttl_secs: Option<u64>,
+        link_name: Option<&str>,
+        endpoint: &str,
     ) -> Result<(Arc<Mutex<McpStdioSession>>, bool)> {
         let exclusive_keys = normalize_exclusive_keys(exclusive_keys);
 
@@ -505,10 +534,22 @@ impl McpSessionManager {
             let map = self.stdio.lock().await;
             if let Some(s) = map.get(session_key) {
                 *self.reuse_hits.lock().await += 1;
+                let mut guard = s.lock().await;
+                if let Some(idle_ttl_secs) = idle_ttl_secs {
+                    guard.idle_ttl_secs = idle_ttl_secs;
+                }
+                if let Some(link_name) = link_name {
+                    guard.link_name = Some(link_name.to_string());
+                }
+                guard.endpoint = endpoint.to_string();
+                if !exclusive_keys.is_empty() {
+                    guard.daemon_exclusive = exclusive_keys.clone();
+                }
                 if !exclusive_keys.is_empty() {
                     self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
                         .await;
                 }
+                drop(guard);
                 return Ok((s.clone(), true));
             }
         }
@@ -532,10 +573,22 @@ impl McpSessionManager {
             let map = self.stdio.lock().await;
             if let Some(s) = map.get(session_key) {
                 *self.reuse_hits.lock().await += 1;
+                let mut guard = s.lock().await;
+                if let Some(idle_ttl_secs) = idle_ttl_secs {
+                    guard.idle_ttl_secs = idle_ttl_secs;
+                }
+                if let Some(link_name) = link_name {
+                    guard.link_name = Some(link_name.to_string());
+                }
+                guard.endpoint = endpoint.to_string();
+                if !exclusive_keys.is_empty() {
+                    guard.daemon_exclusive = exclusive_keys.clone();
+                }
                 if !exclusive_keys.is_empty() {
                     self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
                         .await;
                 }
+                drop(guard);
                 return Ok((s.clone(), true));
             }
         }
@@ -546,11 +599,19 @@ impl McpSessionManager {
             spawn_options.clone(),
         )
         .await?;
+        let effective_idle_ttl_secs = idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS);
         let session = Arc::new(Mutex::new(McpStdioSession {
+            child_pid: client.child_id(),
             client,
             tools: None,
             tools_dirty: false,
             last_used: Instant::now(),
+            last_used_at_unix: now_unix_secs(),
+            started_at_unix: now_unix_secs(),
+            idle_ttl_secs: effective_idle_ttl_secs,
+            link_name: link_name.map(str::to_string),
+            endpoint: endpoint.to_string(),
+            daemon_exclusive: exclusive_keys.clone(),
         }));
 
         let mut map = self.stdio.lock().await;
@@ -781,6 +842,32 @@ impl McpSessionManager {
         let http_count = self.http.lock().await.len();
         let reuse_hits = *self.reuse_hits.lock().await;
         (stdio_count, http_count, reuse_hits)
+    }
+
+    async fn session_views(&self) -> Vec<DaemonSessionView> {
+        let stdio_entries: Vec<(String, Arc<Mutex<McpStdioSession>>)> = {
+            let map = self.stdio.lock().await;
+            map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
+        };
+
+        let mut views = Vec::with_capacity(stdio_entries.len());
+        for (session_key, session) in stdio_entries {
+            let guard = session.lock().await;
+            views.push(DaemonSessionView {
+                session_key,
+                protocol: "mcp_stdio".to_string(),
+                endpoint: redact_sensitive(&guard.endpoint),
+                link_name: guard.link_name.clone(),
+                child_pid: guard.child_pid,
+                started_at_unix: guard.started_at_unix,
+                last_used_at_unix: guard.last_used_at_unix,
+                idle_ttl_secs: guard.idle_ttl_secs,
+                daemon_exclusive: guard.daemon_exclusive.clone(),
+                state: "live".to_string(),
+            });
+        }
+        views.sort_by(|a, b| a.session_key.cmp(&b.session_key));
+        views
     }
 }
 
@@ -1707,6 +1794,10 @@ impl DaemonRuntime {
         }
     }
 
+    pub async fn session_views(&self) -> Vec<DaemonSessionView> {
+        self.mcp.session_views().await
+    }
+
     pub async fn subscribe_start(
         &self,
         request: SubscribeStartRequest,
@@ -1845,10 +1936,14 @@ impl DaemonRuntime {
                     &cmd_args,
                     &spawn_options,
                     &request.options.daemon_exclusive,
+                    request.options.daemon_idle_ttl,
+                    request.options.link_name.as_deref(),
+                    endpoint,
                 )
                 .await?;
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
+            guard.last_used_at_unix = now_unix_secs();
             let result = guard.client.call_tool(op, arguments).await?;
             let _ = guard
                 .mark_tools_dirty_from_notifications(endpoint, &cache)
@@ -3759,6 +3854,17 @@ pub async fn daemon_status_client() -> Result<DaemonStatus> {
 }
 
 #[cfg(unix)]
+pub async fn daemon_sessions_client() -> Result<Vec<DaemonSessionView>> {
+    let value = client_call("daemon.sessions", None).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn daemon_sessions_client() -> Result<Vec<DaemonSessionView>> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
 pub async fn daemon_stop_client() -> Result<()> {
     let _ = client_call("daemon.shutdown", None).await?;
     Ok(())
@@ -4041,6 +4147,15 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 error: None,
             }
         }
+        "daemon.sessions" => {
+            let sessions = runtime.session_views().await;
+            JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: req.id,
+                result: Some(serde_json::to_value(sessions)?),
+                error: None,
+            }
+        }
         "daemon.shutdown" => {
             runtime.request_stop().await;
             JsonRpcResponse {
@@ -4243,6 +4358,10 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
 
 pub async fn daemon_status_local() -> Result<DaemonStatus> {
     daemon_status_client().await
+}
+
+pub async fn daemon_sessions_local() -> Result<Vec<DaemonSessionView>> {
+    daemon_sessions_client().await
 }
 
 pub async fn daemon_start_local() -> Result<EnsureDaemonOutcome> {
@@ -4905,6 +5024,7 @@ async fn invoke_live_stdio_mcp_help(
 
     let mut guard = session.lock().await;
     guard.last_used = Instant::now();
+    guard.last_used_at_unix = now_unix_secs();
     let _ = guard
         .mark_tools_dirty_from_notifications(&request.endpoint, &cache)
         .await;
@@ -5245,6 +5365,7 @@ mod tests {
                 link_name: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
             },
         };
 
@@ -5272,6 +5393,7 @@ mod tests {
                 link_name: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
             },
         };
 
@@ -5342,6 +5464,7 @@ mod tests {
                 link_name: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
             },
         };
 
@@ -5369,6 +5492,7 @@ mod tests {
                 link_name: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
             },
         };
 
@@ -5477,6 +5601,7 @@ mod tests {
                 link_name: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
             },
         }
     }
