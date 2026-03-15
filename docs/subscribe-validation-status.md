@@ -243,21 +243,23 @@ Skill:
 
 - [skills/discord-openapi-skill/SKILL.md](../skills/discord-openapi-skill/SKILL.md)
 
-Observed behavior:
+Validation result:
 
 - Discord bot auth worked against the REST API
-- `get:/gateway/bot` returned a live Gateway URL
-- a raw WebSocket smoke test against `wss://gateway.discord.gg/?v=10&encoding=json` succeeded
-- the initial Gateway `HELLO` payload was received through `uxc subscribe --transport websocket`
+- `discord-gateway` subscribe bootstrapped successfully through `GET /gateway/bot`
+- live Gateway sessions reached `READY`
+- `GUILD_CREATE` state sync arrived through the subscribe sink
+- a real posted channel message produced `MESSAGE_CREATE`
+- heartbeat scheduling, `IDENTIFY`, sequence tracking, and reconnect handling were exercised in live runs
 
-Current assessment:
+Recommended runtime note:
 
-- raw WebSocket connectivity is confirmed
-- Discord is **not** yet a validated IM subscribe provider because full event intake still needs Gateway-specific heartbeat, identify, intents, and resume handling
+- `4609` (`GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES`) is a safe default intent bitset
+- add `32768` (`MESSAGE_CONTENT`) only when the bot has that privileged intent enabled
 
 Status:
 
-- **exploratory smoke test only**
+- **validated successfully**
 
 #### Slack Socket Mode
 
