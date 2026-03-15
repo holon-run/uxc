@@ -175,18 +175,27 @@ Discord inbound events flow through the Gateway WebSocket, not through this REST
 
 Current `uxc subscribe` status:
 
-- a live raw WebSocket smoke test against `wss://gateway.discord.gg/?v=10&encoding=json` succeeded
-- the initial Gateway `HELLO` frame was received through `uxc subscribe --transport websocket`
-- this does **not** yet mean Discord message ingest is supported
+- the built-in `discord-gateway` transport now bootstraps through `GET /gateway/bot`
+- live Gateway sessions reached `READY` and delivered `GUILD_CREATE`
+- a real posted channel message produced a `MESSAGE_CREATE` event in the subscribe sink
+- heartbeat scheduling, `IDENTIFY`, sequence tracking, and reconnect handling are implemented
 
-What is still missing for real Gateway-based event intake:
+Recommended invocation:
 
-- heartbeat handling based on the server-provided interval
-- `IDENTIFY` / `RESUME` session logic
-- gateway intents handling
-- sequence tracking and reconnect/resume behavior
+```bash
+uxc subscribe start https://discord.com/api/v10 \
+  '{"intents":4609,"device":"uxc-discord"}' \
+  --transport discord-gateway \
+  --auth discord-bot \
+  --sink file:$HOME/.uxc/subscriptions/discord-gateway.ndjson
+```
 
-Treat Discord as a future subscribe target, not a currently validated IM message-ingest provider.
+Intent notes:
+
+- `4609` = `GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES`
+- add `32768` (`MESSAGE_CONTENT`) only when the bot has that privileged intent enabled in the Discord developer portal
+
+Use `discord-openapi-cli` for REST calls and `uxc subscribe start ... --transport discord-gateway ...` for inbound Gateway events.
 
 ## Guardrails
 

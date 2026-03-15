@@ -33,6 +33,9 @@ fn subscribe_start_help_shows_subcommand_help() {
     assert!(json["data"]["usage"]
         .as_str()
         .is_some_and(|usage| usage.contains("--ephemeral")));
+    assert!(json["data"]["usage"]
+        .as_str()
+        .is_some_and(|usage| usage.contains("discord-gateway")));
 }
 
 #[test]
@@ -134,6 +137,57 @@ fn subscribe_rejects_slack_socket_mode_transport_with_operation_id() {
         .as_str()
         .is_some_and(|msg| msg
             .contains("--transport slack-socket-mode cannot be combined with an operation_id")));
+}
+
+#[test]
+#[serial]
+fn subscribe_rejects_discord_gateway_transport_with_operation_id() {
+    let (temp, mut command) = isolated_uxc_command();
+    let sink = format!("file:{}", temp.path().join("events.ndjson").display());
+    let output = command
+        .arg("subscribe")
+        .arg("start")
+        .arg("https://discord.com/api/v10")
+        .arg("get:/gateway")
+        .arg("--transport")
+        .arg("discord-gateway")
+        .arg("--sink")
+        .arg(&sink)
+        .output()
+        .expect("subscribe start should run");
+    assert!(!output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+    assert!(json["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| msg
+            .contains("--transport discord-gateway cannot be combined with an operation_id")));
+}
+
+#[test]
+#[serial]
+fn subscribe_accepts_discord_gateway_config_without_operation_id() {
+    let (temp, mut command) = isolated_uxc_command();
+    let sink = format!("file:{}", temp.path().join("events.ndjson").display());
+    let output = command
+        .arg("subscribe")
+        .arg("start")
+        .arg("https://discord.com/api/v10")
+        .arg(r#"{"intents":37377,"device":"uxc-test"}"#)
+        .arg("--transport")
+        .arg("discord-gateway")
+        .arg("--sink")
+        .arg(&sink)
+        .output()
+        .expect("subscribe start should run");
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subscribe_start_result");
+    assert_eq!(json["data"]["protocol"], "discord_gateway");
+    assert_eq!(json["data"]["status"], "running");
 }
 
 #[test]

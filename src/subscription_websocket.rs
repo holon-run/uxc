@@ -43,6 +43,18 @@ pub struct WebSocketHandlerOutput {
     pub stop_reason: Option<String>,
 }
 
+impl WebSocketHandlerOutput {
+    pub fn continue_empty() -> Self {
+        Self {
+            action: WebSocketHandlerAction::Continue,
+            data: None,
+            meta: None,
+            outbound_text_frames: Vec::new(),
+            stop_reason: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WebSocketStopOutput {
     pub outbound_text_frames: Vec<String>,
@@ -74,6 +86,14 @@ pub trait WebSocketSessionHandler: Send {
 
     async fn on_close(&mut self, _meta: WebSocketCloseMeta) -> Result<WebSocketHandlerAction> {
         Ok(WebSocketHandlerAction::Reconnect)
+    }
+
+    fn next_wakeup_at(&self) -> Option<tokio::time::Instant> {
+        None
+    }
+
+    async fn on_wakeup(&mut self) -> Result<WebSocketHandlerOutput> {
+        Ok(WebSocketHandlerOutput::continue_empty())
     }
 
     async fn on_stop_requested(&mut self) -> Result<WebSocketStopOutput> {
@@ -353,138 +373,183 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
             return Ok(());
         }
 
-        tokio::select! {
-            changed = stop_rx.changed() => {
-                if changed.is_ok() && *stop_rx.borrow() {
-                    handle_stop_requested(handler, Some(&mut stream), observer, "stopped").await?;
-                    return Ok(());
+        if let Some(deadline) = handler.next_wakeup_at() {
+            tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_ok() && *stop_rx.borrow() {
+                        handle_stop_requested(handler, Some(&mut stream), observer, "stopped").await?;
+                        return Ok(());
+                    }
+                    return Err(WebSocketRunError::Retry(anyhow!("subscription stop channel closed unexpectedly")));
                 }
-                return Err(WebSocketRunError::Retry(anyhow!("subscription stop channel closed unexpectedly")));
+                _ = tokio::time::sleep_until(deadline) => {
+                    let output = handler.on_wakeup().await.map_err(WebSocketRunError::Fatal)?;
+                    if apply_handler_output(&mut stream, observer, output).await? {
+                        return Ok(());
+                    }
+                }
+                item = async {
+                    if let Some(duration) = first_message_timeout {
+                        match tokio::time::timeout(duration, stream.next()).await {
+                            Ok(item) => item,
+                            Err(_) => {
+                                Some(Err(tokio_tungstenite::tungstenite::Error::Io(
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::TimedOut,
+                                        format!("websocket first message timed out after {}s", duration.as_secs()),
+                                    ),
+                                )))
+                            }
+                        }
+                    } else {
+                        stream.next().await
+                    }
+                } => {
+                    let (next_timeout, stopped) = handle_stream_item(handler, observer, &mut stream, item, first_message_timeout).await?;
+                    first_message_timeout = next_timeout;
+                    if stopped {
+                        return Ok(());
+                    }
+                }
             }
-            item = async {
-                if let Some(duration) = first_message_timeout {
-                    match tokio::time::timeout(duration, stream.next()).await {
-                        Ok(item) => item,
-                        Err(_) => {
-                            Some(Err(tokio_tungstenite::tungstenite::Error::Io(
-                                std::io::Error::new(
-                                    std::io::ErrorKind::TimedOut,
-                                    format!("websocket first message timed out after {}s", duration.as_secs()),
-                                ),
-                            )))
-                        }
+        } else {
+            tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_ok() && *stop_rx.borrow() {
+                        handle_stop_requested(handler, Some(&mut stream), observer, "stopped").await?;
+                        return Ok(());
                     }
-                } else {
-                    stream.next().await
+                    return Err(WebSocketRunError::Retry(anyhow!("subscription stop channel closed unexpectedly")));
                 }
-            } => {
-                match item {
-                    Some(Ok(Message::Text(text))) => {
-                        first_message_timeout = None;
-                        let output = handler
-                            .on_text_frame(text.to_string())
-                            .await
-                            .map_err(WebSocketRunError::Fatal)?;
-                        for frame in &output.outbound_text_frames {
-                            stream
-                                .send(Message::Text(frame.clone()))
-                                .await
-                                .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket send failed: {}", err)))?;
-                        }
-                        if output.data.is_some() || output.meta.is_some() {
-                            observer
-                                .emit("data", output.data, output.meta)
-                                .await
-                                .map_err(WebSocketRunError::Fatal)?;
-                        }
-                        match output.action {
-                            WebSocketHandlerAction::Continue => {}
-                            WebSocketHandlerAction::Stop => {
-                                close_as_stopped(
-                                    observer,
-                                    output.stop_reason.as_deref().unwrap_or("handler_stop"),
-                                )
-                                    .await
-                                    .map_err(WebSocketRunError::Fatal)?;
-                                return Ok(());
-                            }
-                            WebSocketHandlerAction::Reconnect => {
-                                return Err(WebSocketRunError::Retry(anyhow!("websocket handler requested reconnect")));
+                item = async {
+                    if let Some(duration) = first_message_timeout {
+                        match tokio::time::timeout(duration, stream.next()).await {
+                            Ok(item) => item,
+                            Err(_) => {
+                                Some(Err(tokio_tungstenite::tungstenite::Error::Io(
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::TimedOut,
+                                        format!("websocket first message timed out after {}s", duration.as_secs()),
+                                    ),
+                                )))
                             }
                         }
+                    } else {
+                        stream.next().await
                     }
-                    Some(Ok(Message::Binary(bytes))) => {
-                        first_message_timeout = None;
-                        let output = handler
-                            .on_binary_frame(bytes.to_vec())
-                            .await
-                            .map_err(WebSocketRunError::Fatal)?;
-                        for frame in &output.outbound_text_frames {
-                            stream
-                                .send(Message::Text(frame.clone()))
-                                .await
-                                .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket send failed: {}", err)))?;
-                        }
-                        if output.data.is_some() || output.meta.is_some() {
-                            observer
-                                .emit("data", output.data, output.meta)
-                                .await
-                                .map_err(WebSocketRunError::Fatal)?;
-                        }
-                        match output.action {
-                            WebSocketHandlerAction::Continue => {}
-                            WebSocketHandlerAction::Stop => {
-                                close_as_stopped(
-                                    observer,
-                                    output.stop_reason.as_deref().unwrap_or("handler_stop"),
-                                )
-                                    .await
-                                    .map_err(WebSocketRunError::Fatal)?;
-                                return Ok(());
-                            }
-                            WebSocketHandlerAction::Reconnect => {
-                                return Err(WebSocketRunError::Retry(anyhow!("websocket handler requested reconnect")));
-                            }
-                        }
+                } => {
+                    let (next_timeout, stopped) = handle_stream_item(handler, observer, &mut stream, item, first_message_timeout).await?;
+                    first_message_timeout = next_timeout;
+                    if stopped {
+                        return Ok(());
                     }
-                    Some(Ok(Message::Close(frame))) => {
-                        let close_meta = WebSocketCloseMeta {
-                            code: frame.as_ref().map(|value| value.code.into()),
-                            reason: frame.as_ref().map(|value| value.reason.to_string()),
-                        };
-                        match handler.on_close(close_meta.clone()).await.map_err(WebSocketRunError::Fatal)? {
-                            WebSocketHandlerAction::Stop => {
-                                close_as_stopped(observer, "remote_close")
-                                    .await
-                                    .map_err(WebSocketRunError::Fatal)?;
-                                return Ok(());
-                            }
-                            WebSocketHandlerAction::Continue | WebSocketHandlerAction::Reconnect => {
-                                return Err(WebSocketRunError::Retry(anyhow!(
-                                    "websocket closed by remote peer{}",
-                                    close_meta
-                                        .code
-                                        .map(|code| format!(" with code {}", code))
-                                        .unwrap_or_default()
-                                )));
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Ping(payload))) => {
-                        first_message_timeout = None;
-                        stream
-                            .send(Message::Pong(payload))
-                            .await
-                            .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket pong send failed: {}", err)))?;
-                    }
-                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {
-                        first_message_timeout = None;
-                    }
-                    Some(Err(err)) => return Err(WebSocketRunError::Retry(anyhow!("websocket read failed: {}", err))),
-                    None => return Err(WebSocketRunError::Retry(anyhow!("websocket stream ended"))),
                 }
             }
         }
+    }
+}
+
+async fn apply_handler_output<O: WebSocketRuntimeObserver>(
+    stream: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    observer: &mut O,
+    output: WebSocketHandlerOutput,
+) -> std::result::Result<bool, WebSocketRunError> {
+    for frame in &output.outbound_text_frames {
+        stream
+            .send(Message::Text(frame.clone()))
+            .await
+            .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket send failed: {}", err)))?;
+    }
+    if output.data.is_some() || output.meta.is_some() {
+        observer
+            .emit("data", output.data, output.meta)
+            .await
+            .map_err(WebSocketRunError::Fatal)?;
+    }
+    match output.action {
+        WebSocketHandlerAction::Continue => Ok(false),
+        WebSocketHandlerAction::Stop => {
+            close_as_stopped(
+                observer,
+                output.stop_reason.as_deref().unwrap_or("handler_stop"),
+            )
+            .await
+            .map_err(WebSocketRunError::Fatal)?;
+            Ok(true)
+        }
+        WebSocketHandlerAction::Reconnect => Err(WebSocketRunError::Retry(anyhow!(
+            "websocket handler requested reconnect"
+        ))),
+    }
+}
+
+async fn handle_stream_item<H: WebSocketSessionHandler, O: WebSocketRuntimeObserver>(
+    handler: &mut H,
+    observer: &mut O,
+    stream: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    item: Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>,
+    first_message_timeout: Option<Duration>,
+) -> std::result::Result<(Option<Duration>, bool), WebSocketRunError> {
+    match item {
+        Some(Ok(Message::Text(text))) => {
+            let output = handler
+                .on_text_frame(text.to_string())
+                .await
+                .map_err(WebSocketRunError::Fatal)?;
+            let stopped = apply_handler_output(stream, observer, output).await?;
+            Ok((None, stopped))
+        }
+        Some(Ok(Message::Binary(bytes))) => {
+            let output = handler
+                .on_binary_frame(bytes.to_vec())
+                .await
+                .map_err(WebSocketRunError::Fatal)?;
+            let stopped = apply_handler_output(stream, observer, output).await?;
+            Ok((None, stopped))
+        }
+        Some(Ok(Message::Close(frame))) => {
+            let close_meta = WebSocketCloseMeta {
+                code: frame.as_ref().map(|value| value.code.into()),
+                reason: frame.as_ref().map(|value| value.reason.to_string()),
+            };
+            match handler
+                .on_close(close_meta.clone())
+                .await
+                .map_err(WebSocketRunError::Fatal)?
+            {
+                WebSocketHandlerAction::Stop => {
+                    close_as_stopped(observer, "remote_close")
+                        .await
+                        .map_err(WebSocketRunError::Fatal)?;
+                    Ok((first_message_timeout, true))
+                }
+                WebSocketHandlerAction::Continue | WebSocketHandlerAction::Reconnect => {
+                    Err(WebSocketRunError::Retry(anyhow!(
+                        "websocket closed by remote peer{}",
+                        close_meta
+                            .code
+                            .map(|code| format!(" with code {}", code))
+                            .unwrap_or_default()
+                    )))
+                }
+            }
+        }
+        Some(Ok(Message::Ping(payload))) => {
+            stream.send(Message::Pong(payload)).await.map_err(|err| {
+                WebSocketRunError::Retry(anyhow!("websocket pong send failed: {}", err))
+            })?;
+            Ok((None, false))
+        }
+        Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => Ok((None, false)),
+        Some(Err(err)) => Err(WebSocketRunError::Retry(anyhow!(
+            "websocket read failed: {}",
+            err
+        ))),
+        None => Err(WebSocketRunError::Retry(anyhow!("websocket stream ended"))),
     }
 }
 

@@ -8,6 +8,11 @@ use crate::cache::{self, Cache, CacheConfig};
 use crate::daemon_log::{redact_endpoint, redact_sensitive};
 use crate::daemon_log::{DaemonEventType, DaemonLogEntry, DaemonLogger};
 use crate::error::UxcError;
+use crate::subscription_discord::{
+    derive_gateway_bot_endpoint, parse_gateway_bot_response, prepare_gateway_websocket_url,
+    DiscordGatewayBotResponse, DiscordGatewayHandler, DiscordGatewayRuntimeConfig,
+    DiscordIdentifyProperties, DISCORD_DEFAULT_MESSAGE_INTENTS,
+};
 use crate::subscription_graphql::{
     derive_graphql_websocket_endpoint, graphql_transport_init_message, GraphQLProfileFallback,
     GraphQLSubscriptionConfig, GraphQLSubscriptionHandler, GraphQLWebSocketProfile,
@@ -175,6 +180,7 @@ pub struct SubscribeStopResponse {
 #[serde(rename_all = "snake_case")]
 pub enum SubscriptionTransportHint {
     Websocket,
+    DiscordGateway,
     SlackSocketMode,
 }
 
@@ -782,6 +788,14 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
                 }
                 return Ok("websocket".to_string());
             }
+            SubscriptionTransportHint::DiscordGateway => {
+                if !lower.starts_with("http://") && !lower.starts_with("https://") {
+                    bail!(
+                        "discord-gateway transport requires an http:// or https:// Discord API endpoint"
+                    );
+                }
+                return Ok("discord_gateway".to_string());
+            }
             SubscriptionTransportHint::SlackSocketMode => {
                 if !lower.starts_with("http://") && !lower.starts_with("https://") {
                     bail!(
@@ -961,6 +975,22 @@ impl SubscriptionManager {
             }
         } else if matches!(
             request.transport_hint,
+            Some(SubscriptionTransportHint::DiscordGateway)
+        ) {
+            if request.operation_id.is_some() {
+                bail!("discord-gateway transport cannot be combined with an operation_id");
+            }
+            if request.resource_uri.is_some() {
+                bail!("discord-gateway transport cannot be combined with --resource-uri");
+            }
+            if request.mode != SubscriptionMode::Stream {
+                bail!("discord-gateway transport is only valid with stream mode");
+            }
+            if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
+                bail!("discord-gateway transport manages its own websocket setup and does not accept --subprotocol or --init-frame");
+            }
+        } else if matches!(
+            request.transport_hint,
             Some(SubscriptionTransportHint::SlackSocketMode)
         ) {
             if request.operation_id.is_some() {
@@ -978,7 +1008,13 @@ impl SubscriptionManager {
         } else if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
             bail!("websocket subprotocols and init frames require websocket transport");
         }
-        if request.args.is_some() && request.operation_id.is_none() {
+        if request.args.is_some()
+            && request.operation_id.is_none()
+            && !matches!(
+                request.transport_hint,
+                Some(SubscriptionTransportHint::DiscordGateway)
+            )
+        {
             bail!("subscribe start cannot accept args without an operation_id");
         }
         match request.mode {
@@ -2383,6 +2419,13 @@ async fn run_stream_subscription_job(
     }
     if matches!(
         request.transport_hint,
+        Some(SubscriptionTransportHint::DiscordGateway)
+    ) {
+        return run_discord_gateway_subscription_job(job_id, request, sink_path, view, stop_rx)
+            .await;
+    }
+    if matches!(
+        request.transport_hint,
         Some(SubscriptionTransportHint::SlackSocketMode)
     ) {
         return run_slack_socket_mode_subscription_job(job_id, request, sink_path, view, stop_rx)
@@ -2443,6 +2486,149 @@ async fn run_websocket_subscription_job(
     .await
 }
 
+async fn run_discord_gateway_subscription_job(
+    _job_id: &str,
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let resolved = resolve_discord_gateway_runtime_config(request)?;
+    let mut sink = open_subscription_sink(&sink_path).await?;
+    let mut seq = 0u64;
+    let mut delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
+    let mut handler = DiscordGatewayHandler::new(resolved.session);
+
+    loop {
+        if *stop_rx.borrow() {
+            close_subscription_as_stopped(&mut sink, &view, &mut seq, "discord_gateway").await?;
+            return Ok(());
+        }
+
+        let websocket_url = if let Some(url) = handler.preferred_gateway_websocket_url() {
+            url
+        } else {
+            match open_discord_gateway_websocket_url(request, &resolved.auth_profile).await {
+                Ok((url, _open_meta)) => url,
+                Err(err) => {
+                    let message = err.to_string();
+                    append_subscription_event(
+                        &mut sink,
+                        &view,
+                        &mut seq,
+                        "discord_gateway",
+                        "error",
+                        None,
+                        Some(json!({ "message": message })),
+                    )
+                    .await?;
+                    update_subscription_view(&view, Some("reconnecting"), Some(message), true)
+                        .await;
+                    append_subscription_event(
+                        &mut sink,
+                        &view,
+                        &mut seq,
+                        "discord_gateway",
+                        "reconnect",
+                        None,
+                        Some(json!({ "delay_secs": delay_secs, "phase": "gateway_open" })),
+                    )
+                    .await?;
+                    if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await
+                    {
+                        close_subscription_as_stopped(
+                            &mut sink,
+                            &view,
+                            &mut seq,
+                            "discord_gateway",
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    delay_secs =
+                        (delay_secs.saturating_mul(2)).min(SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS);
+                    continue;
+                }
+            }
+        };
+
+        let config = WebSocketRuntimeConfig {
+            endpoint: websocket_url,
+            auth_profile: None,
+            subprotocols: Vec::new(),
+            initial_text_frames: Vec::new(),
+            first_message_timeout_secs: Some(10),
+            initial_reconnect_delay_secs: SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS,
+            max_reconnect_delay_secs: SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS,
+        };
+
+        let result = {
+            let mut observer = DaemonWebSocketObserver {
+                sink: &mut sink,
+                view: &view,
+                seq: &mut seq,
+                source_kind: "discord_gateway",
+            };
+            subscription_websocket::run_websocket_subscription_session_once(
+                &config,
+                &mut handler,
+                &mut observer,
+                &mut stop_rx,
+            )
+            .await
+        };
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(WebSocketRunError::Fatal(err)) => {
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "discord_gateway",
+                    "error",
+                    None,
+                    Some(json!({ "message": err.to_string() })),
+                )
+                .await?;
+                return Err(err);
+            }
+            Err(WebSocketRunError::Retry(err)) => {
+                let message = err.to_string();
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "discord_gateway",
+                    "error",
+                    None,
+                    Some(json!({ "message": message })),
+                )
+                .await?;
+                update_subscription_view(&view, Some("reconnecting"), Some(err.to_string()), true)
+                    .await;
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "discord_gateway",
+                    "reconnect",
+                    None,
+                    Some(json!({ "delay_secs": delay_secs })),
+                )
+                .await?;
+                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
+                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "discord_gateway")
+                        .await?;
+                    return Ok(());
+                }
+                delay_secs =
+                    (delay_secs.saturating_mul(2)).min(SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS);
+            }
+        }
+    }
+}
+
 async fn open_slack_socket_mode_websocket_url(request: &SubscribeStartRequest) -> Result<String> {
     let auth_profile =
         auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?
@@ -2491,6 +2677,115 @@ fn truncate_error_body(body: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+struct DiscordGatewayResolvedConfig {
+    auth_profile: Profile,
+    session: DiscordGatewayRuntimeConfig,
+}
+
+fn resolve_discord_gateway_runtime_config(
+    request: &SubscribeStartRequest,
+) -> Result<DiscordGatewayResolvedConfig> {
+    let auth_profile =
+        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?
+            .ok_or_else(|| {
+                anyhow!("Discord Gateway requires an auth credential with a bot token")
+            })?;
+    let token = auth_profile
+        .resolve_secret()?
+        .ok_or_else(|| anyhow!("Discord Gateway requires a credential with a bot token secret"))?;
+
+    let args = request.args.as_ref().cloned().unwrap_or_default();
+    let allowed: std::collections::HashSet<&str> =
+        ["intents", "os", "browser", "device"].into_iter().collect();
+    if let Some(unexpected) = args.keys().find(|key| !allowed.contains(key.as_str())) {
+        bail!(
+            "discord-gateway transport does not support argument '{}' (allowed: intents, os, browser, device)",
+            unexpected
+        );
+    }
+
+    let intents = match args.get("intents") {
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .ok_or_else(|| anyhow!("discord-gateway intents must be a non-negative integer"))?,
+        Some(Value::String(raw)) => raw
+            .parse::<u64>()
+            .with_context(|| format!("invalid discord-gateway intents '{}'", raw))?,
+        Some(other) => bail!(
+            "discord-gateway intents must be a number or string, got {}",
+            other
+        ),
+        None => DISCORD_DEFAULT_MESSAGE_INTENTS,
+    };
+
+    let read_string = |name: &str| -> Result<Option<String>> {
+        match args.get(name) {
+            Some(Value::String(value)) => Ok(Some(value.clone())),
+            Some(other) => bail!("discord-gateway '{}' must be a string, got {}", name, other),
+            None => Ok(None),
+        }
+    };
+
+    let mut identify_properties = DiscordIdentifyProperties::default();
+    if let Some(value) = read_string("os")? {
+        identify_properties.os = value;
+    }
+    if let Some(value) = read_string("browser")? {
+        identify_properties.browser = value;
+    }
+    if let Some(value) = read_string("device")? {
+        identify_properties.device = value;
+    }
+
+    Ok(DiscordGatewayResolvedConfig {
+        auth_profile,
+        session: DiscordGatewayRuntimeConfig {
+            token,
+            intents,
+            identify_properties,
+        },
+    })
+}
+
+async fn open_discord_gateway_websocket_url(
+    request: &SubscribeStartRequest,
+    auth_profile: &Profile,
+) -> Result<(String, DiscordGatewayBotResponse)> {
+    let open_endpoint = derive_gateway_bot_endpoint(&request.endpoint)?;
+    let resolved = auth::resolve_profile_operation_request_auth(
+        &auth::AuthRequestContext::new("GET", &open_endpoint),
+        auth_profile,
+    )?;
+    let client = crate::http_client::build_resilient_http_client(
+        Duration::from_secs(10),
+        "Discord Gateway open",
+    )?;
+    let mut req = client.get(&resolved.url);
+    for (name, value) in resolved.headers {
+        req = req.header(name, value);
+    }
+    let response = req.send().await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read response body>".to_string());
+        let body = truncate_error_body(&body, 512);
+        bail!(
+            "Discord Gateway open request failed with status {}: {}",
+            status,
+            body
+        );
+    }
+    let body = response.json::<Value>().await?;
+    let parsed = parse_gateway_bot_response(&body)?;
+    Ok((
+        prepare_gateway_websocket_url(&parsed.websocket_url)?,
+        parsed,
+    ))
 }
 
 async fn run_slack_socket_mode_subscription_job(
