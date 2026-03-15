@@ -31,9 +31,37 @@ This skill covers a Messaging Core surface:
 This skill does **not** cover:
 
 - Slack OAuth app installation flow
-- Events API or Socket Mode runtime
 - file upload flows
 - `users.*`, `admin.*`, or `usergroups.*` method families
+
+## Subscribe / Socket Mode Status
+
+Slack inbound events can be delivered through Socket Mode. `uxc` now has a built-in Slack Socket Mode transport, but this skill still treats it as a limited event-ingest path rather than a fully packaged workflow surface.
+
+Current `uxc subscribe` status:
+
+- Slack Web API request/response calls are supported by this skill
+- a live Socket Mode smoke test succeeded with the built-in transport:
+  - `uxc subscribe start https://slack.com/api --transport slack-socket-mode --auth slack-app --sink file:...`
+  - the runtime opened a fresh temporary WebSocket URL automatically
+  - the initial Slack `hello` frame was received
+- a real inbound message event was validated end-to-end:
+  - while the Socket Mode job was running, a live Slack message event was delivered as an `events_api` envelope
+  - the sink recorded the message payload and `ack_sent=true`
+
+What the current built-in transport already handles:
+
+- app-level `xapp-...` auth via `--auth`
+- automatic `apps.connections.open` before each connect attempt
+- raw Socket Mode frame capture
+- automatic ack for envelopes that carry `envelope_id`
+
+What is still not packaged:
+
+- event-shape guidance per subscribed Slack event family
+- higher-level workflow packaging for common Slack event intake flows
+
+Slack Socket Mode is now a validated IM subscribe provider at the transport/runtime level.
 
 ## Authentication
 
@@ -43,7 +71,15 @@ Token types used in practice:
 
 - `xoxb-...`: Bot User OAuth Token. This is the recommended default for this skill.
 - `xoxp-...`: User OAuth Token. Use this only when you explicitly want user-token semantics.
-- `xapp-...`: App-level token. Do **not** use this with Slack Web API methods in this skill.
+- `xapp-...`: App-level token. Use this for Socket Mode subscribe, not for normal Web API methods.
+
+To create an app-level `xapp-...` token for Socket Mode:
+
+1. Open the target Slack app at `https://api.slack.com/apps`
+2. Go to `Basic Information`
+3. Find `App-Level Tokens`
+4. Generate a token with the `connections:write` scope
+5. Enable `Socket Mode` in the app configuration before relying on subscribe-based event intake
 
 ### Option 1: Bot Token (Recommended Default)
 

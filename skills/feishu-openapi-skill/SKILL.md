@@ -35,6 +35,17 @@ This skill does **not** cover:
 - docs, bitable, approval, or non-IM product families
 - the full Feishu or Lark Open Platform surface
 
+## Subscribe Status
+
+Feishu and Lark expose event-delivery models beyond plain request/response APIs, including long-connection event delivery in the platform ecosystem.
+
+Current `uxc subscribe` status:
+
+- this skill is validated only for request/response IM operations
+- inbound event/message intake is **not** currently validated through `uxc subscribe`
+
+Treat Feishu / Lark as future subscribe targets that will need provider-aware session behavior beyond this v1 OpenAPI wrapper.
+
 ## Endpoint Choice
 
 This schema works against either Feishu or Lark Open Platform base URLs:

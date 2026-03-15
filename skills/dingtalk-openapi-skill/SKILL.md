@@ -36,6 +36,17 @@ This skill does **not** cover:
 - inbound callback or webhook receiver runtime
 - generic token refresh inside `uxc`
 
+## Subscribe / Stream Mode Status
+
+DingTalk has event-delivery flows such as Stream Mode, but those flows are outside the current scope of this skill.
+
+Current `uxc subscribe` status:
+
+- this skill is validated only for request/response messaging operations
+- DingTalk inbound event/message intake is **not** currently validated through `uxc subscribe`
+
+Treat DingTalk as a possible future subscribe target via Stream Mode rather than a currently supported IM subscribe provider.
+
 ## API Surface Choice
 
 This skill is intentionally pinned to the newer DingTalk Open Platform host:
