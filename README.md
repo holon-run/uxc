@@ -286,6 +286,8 @@ Use `uxc` skill as the shared execution layer, and add wrappers when they fit yo
 - [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md): query Bitquery GraphQL for onchain trades, transfers, holders, balances, and market structure with OAuth client credentials
 - [`binance-web3-openapi-skill`](skills/binance-web3-openapi-skill/SKILL.md): query Binance Web3 token discovery, rankings, smart money, audits, and address positions through OpenAPI
 - [`binance-spot-openapi-skill`](skills/binance-spot-openapi-skill/SKILL.md): operate Binance Spot public market data and signed account/order flows through OpenAPI
+- [`binance-spot-websocket-skill`](skills/binance-spot-websocket-skill/SKILL.md): subscribe to Binance Spot public trade, ticker, depth, and book-ticker streams via raw WebSocket
+- [`okx-exchange-websocket-skill`](skills/okx-exchange-websocket-skill/SKILL.md): subscribe to OKX public exchange ticker, trade, book, and candle channels via raw WebSocket
 - [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md): query OKX MCP for token, market, wallet, and swap workflows
 - [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md): discover blockchain tables, run SQL, fetch results, and build charts via Dune MCP
 - [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md): discover subgraphs, inspect schemas, and execute GraphQL via The Graph Subgraph MCP bridge
@@ -307,7 +309,7 @@ npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill cont
 npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill discord-openapi-skill --agent codex -y
 
 # Add crypto and onchain skills
-npx -y skills@latest add holon-run/uxc --skill bitquery-graphql-skill --skill binance-web3-openapi-skill --skill binance-spot-openapi-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
+npx -y skills@latest add holon-run/uxc --skill bitquery-graphql-skill --skill binance-web3-openapi-skill --skill binance-spot-openapi-skill --skill binance-spot-websocket-skill --skill okx-exchange-websocket-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
 ```
 
 Install published skills from ClawHub:
@@ -330,6 +332,8 @@ clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
 clawhub --workdir ~/.openclaw --dir skills install bitquery-graphql-skill
 clawhub --workdir ~/.openclaw --dir skills install binance-web3-openapi-skill
 clawhub --workdir ~/.openclaw --dir skills install binance-spot-openapi-skill
+clawhub --workdir ~/.openclaw --dir skills install binance-spot-websocket-skill
+clawhub --workdir ~/.openclaw --dir skills install okx-exchange-websocket-skill
 clawhub --workdir ~/.openclaw --dir skills install okx-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install dune-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install thegraph-mcp-skill

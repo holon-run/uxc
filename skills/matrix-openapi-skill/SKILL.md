@@ -24,7 +24,7 @@ This skill covers a practical request/response Matrix surface:
 - token owner lookup
 - joined room discovery
 - room state lookup
-- `/sync` polling reads
+- `/sync` polling reads, including daemon-backed poll subscribe
 - user profile and presence lookup
 - room message sends
 
@@ -120,6 +120,9 @@ Notes:
    - positional JSON:
      `matrix-openapi-cli put:/rooms/{roomId}/send/{eventType}/{txnId} '{"roomId":"!abc123:example.org","eventType":"m.room.message","txnId":"uxc-001","msgtype":"m.text","body":"Hello from UXC"}'`
 
+5. For background `/sync` polling, call `uxc subscribe start` directly against the homeserver base URL:
+   - `uxc subscribe start https://matrix.org/_matrix/client/v3 get:/sync --auth matrix-oauth --mode poll --poll-config '{"interval_secs":2,"extract_items_pointer":"/rooms/join/!abc123:example.org/timeline/events","missing_extract_items_pointer_as_empty":true,"request_cursor_arg":"since","response_cursor_pointer":"/next_batch","checkpoint_strategy":{"type":"cursor_only"}}' --sink file:$HOME/.uxc/subscriptions/matrix-sync.ndjson timeout=1000 'filter={"room":{"rooms":["!abc123:example.org"],"timeline":{"limit":5}}}'`
+
 ## Operation Groups
 
 ### Session / Discovery
@@ -146,7 +149,8 @@ Notes:
 
 - Keep automation on the JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
-- `get:/sync` is a normal polling/read call in this skill. Do not treat it as a subscription runtime or background listener.
+- `get:/sync` works both as a normal polling/read call and as a validated daemon-backed poll subscription when invoked through `uxc subscribe start`.
+- For room-scoped `/sync` subscriptions, set `missing_extract_items_pointer_as_empty=true` so sparse responses without new room timeline events are treated as an empty batch instead of a fatal error.
 - `put:/rooms/{roomId}/send/{eventType}/{txnId}` is high-risk and should default to `m.room.message` text sends unless the user explicitly asks for another event type.
 - Reuse a unique `txnId` per send attempt to avoid accidental duplicates.
 - Many homeservers restrict presence visibility and room state/event access based on membership and server policy; auth success does not imply every room or profile read will succeed.

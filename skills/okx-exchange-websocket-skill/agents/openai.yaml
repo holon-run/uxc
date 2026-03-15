@@ -1,0 +1,4 @@
+interface:
+  display_name: "OKX Exchange WebSocket"
+  short_description: "Public OKX exchange channels via raw WebSocket subscribe"
+  default_prompt: "Use $okx-exchange-websocket-skill to subscribe to OKX public exchange WebSocket channels through UXC raw WebSocket mode with explicit subscribe frames."
