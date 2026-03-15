@@ -1030,6 +1030,8 @@ mod tests {
             .process_response(json!({"next_batch":"s123"}), Some(9))
             .unwrap_err();
 
-        assert!(err.to_string().contains("extract_items_pointer did not resolve"));
+        assert!(err
+            .to_string()
+            .contains("extract_items_pointer did not resolve"));
     }
 }
