@@ -175,7 +175,7 @@ impl McpHttpTransport {
 
     /// Send a request and wait for response
     pub async fn send_request(&self, method: &str, params: Option<JsonValue>) -> Result<JsonValue> {
-        self.maybe_refresh_oauth_token().await?;
+        self.maybe_refresh_auth_token().await?;
 
         // Generate request ID
         let id = {
@@ -204,8 +204,10 @@ impl McpHttpTransport {
             .await
             .context("Failed to send HTTP request to MCP server")?;
 
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.is_oauth_profile().await {
-            self.force_refresh_oauth_token().await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && self.is_refreshable_profile().await
+        {
+            self.force_refresh_auth_token().await?;
             response = self
                 .send_jsonrpc_request(&request)
                 .await
@@ -277,11 +279,11 @@ impl McpHttpTransport {
         req.json(request).send().await.map_err(Into::into)
     }
 
-    async fn is_oauth_profile(&self) -> bool {
+    async fn is_refreshable_profile(&self) -> bool {
         auth::supports_refresh_retry(self.auth_profile.lock().await.as_ref())
     }
 
-    async fn maybe_refresh_oauth_token(&self) -> Result<()> {
+    async fn maybe_refresh_auth_token(&self) -> Result<()> {
         let mut profile = self.auth_profile.lock().await.clone();
         if let Some(active) = profile.as_mut() {
             let refreshed =
@@ -295,7 +297,7 @@ impl McpHttpTransport {
         Ok(())
     }
 
-    async fn force_refresh_oauth_token(&self) -> Result<()> {
+    async fn force_refresh_auth_token(&self) -> Result<()> {
         let _refresh_guard = self.oauth_refresh_lock.lock().await;
         let mut profile = self.auth_profile.lock().await.clone().ok_or_else(|| {
             UxcError::OAuthRequired("No authentication profile available".to_string())
@@ -1103,11 +1105,13 @@ impl McpHttpTransport {
     }
 
     async fn open_event_stream(&self) -> Result<reqwest::Response> {
-        self.maybe_refresh_oauth_token().await?;
+        self.maybe_refresh_auth_token().await?;
 
         let mut response = self.send_get_event_stream_request().await?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.is_oauth_profile().await {
-            self.force_refresh_oauth_token().await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && self.is_refreshable_profile().await
+        {
+            self.force_refresh_auth_token().await?;
             response = self.send_get_event_stream_request().await?;
         }
 
@@ -1219,11 +1223,13 @@ impl LegacySseTransport {
             }
         }
 
-        self.maybe_refresh_oauth_token().await?;
+        self.maybe_refresh_auth_token().await?;
 
         let mut response = self.send_bootstrap_request().await?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.is_oauth_profile().await {
-            self.force_refresh_oauth_token().await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && self.is_refreshable_profile().await
+        {
+            self.force_refresh_auth_token().await?;
             response = self.send_bootstrap_request().await?;
         }
 
@@ -1325,7 +1331,7 @@ impl LegacySseTransport {
 
     async fn send_request(&self, method: &str, params: Option<JsonValue>) -> Result<JsonValue> {
         self.ensure_connected().await?;
-        self.maybe_refresh_oauth_token().await?;
+        self.maybe_refresh_auth_token().await?;
 
         let id = {
             let mut next_id = self.next_id.lock().await;
@@ -1360,8 +1366,10 @@ impl LegacySseTransport {
             }
         };
 
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.is_oauth_profile().await {
-            self.force_refresh_oauth_token().await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && self.is_refreshable_profile().await
+        {
+            self.force_refresh_auth_token().await?;
             response = match self.send_messages_request(&messages_url, &request).await {
                 Ok(response) => response,
                 Err(err) => {
@@ -1420,7 +1428,7 @@ impl LegacySseTransport {
         req.json(request).send().await.map_err(Into::into)
     }
 
-    async fn maybe_refresh_oauth_token(&self) -> Result<()> {
+    async fn maybe_refresh_auth_token(&self) -> Result<()> {
         let mut profile = self.auth_profile.lock().await.clone();
         if let Some(active) = profile.as_mut() {
             let refreshed =
@@ -1434,11 +1442,11 @@ impl LegacySseTransport {
         Ok(())
     }
 
-    async fn is_oauth_profile(&self) -> bool {
+    async fn is_refreshable_profile(&self) -> bool {
         auth::supports_refresh_retry(self.auth_profile.lock().await.as_ref())
     }
 
-    async fn force_refresh_oauth_token(&self) -> Result<()> {
+    async fn force_refresh_auth_token(&self) -> Result<()> {
         let _refresh_guard = self.oauth_refresh_lock.lock().await;
         let mut profile = self.auth_profile.lock().await.clone().ok_or_else(|| {
             UxcError::OAuthRequired("No authentication profile available".to_string())

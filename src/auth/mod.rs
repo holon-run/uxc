@@ -1340,10 +1340,11 @@ fn current_unix_timestamp() -> i64 {
 
 fn truncate_error_text(value: &str) -> String {
     const MAX_LEN: usize = 512;
-    if value.len() <= MAX_LEN {
-        value.to_string()
+    let truncated: String = value.chars().take(MAX_LEN).collect();
+    if truncated.len() == value.len() {
+        truncated
     } else {
-        format!("{}...", &value[..MAX_LEN])
+        format!("{}...", truncated)
     }
 }
 
@@ -1377,6 +1378,7 @@ fn json_pointer_i64(value: &JsonValue, pointer: &str, label: &str) -> Result<i64
     )
 }
 
+/// Force refresh a bootstrap-backed bearer token using the configured token endpoint.
 pub async fn refresh_bootstrap_profile(
     profile: &mut Profile,
     client: &reqwest::Client,
@@ -1476,6 +1478,7 @@ pub async fn refresh_bootstrap_profile(
     Ok(true)
 }
 
+/// Refresh a bootstrap-backed bearer token only when it is missing or near expiry.
 pub async fn maybe_refresh_bootstrap_profile(
     profile: &mut Profile,
     client: &reqwest::Client,
@@ -1504,6 +1507,7 @@ pub async fn maybe_refresh_bootstrap_profile(
     refresh_bootstrap_profile(profile, client).await
 }
 
+/// Refresh an effective auth profile, supporting either OAuth or bootstrap-backed bearer auth.
 pub async fn refresh_effective_auth_profile(
     profile: &mut Profile,
     client: &reqwest::Client,
@@ -1528,6 +1532,7 @@ pub async fn refresh_effective_auth_profile(
     Ok(false)
 }
 
+/// Return whether a profile supports automatic refresh/retry behavior.
 pub fn supports_refresh_retry(profile: Option<&Profile>) -> bool {
     profile.is_some_and(|active| {
         active.auth_type == AuthType::OAuth
@@ -1895,7 +1900,9 @@ pub fn validate_token_bootstrap_config(config: &TokenBootstrapConfig) -> Result<
         )
     })?;
     validate_template(&config.request_json)?;
-    validate_auth_headers(&config.headers)?;
+    if !config.headers.is_empty() {
+        validate_auth_headers(&config.headers)?;
+    }
     validate_json_pointer(&config.access_token_pointer, "access token pointer")?;
     validate_json_pointer(&config.expires_in_pointer, "expires_in pointer")?;
     if let Some(pointer) = &config.token_type_pointer {

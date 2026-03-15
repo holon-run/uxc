@@ -200,6 +200,8 @@ mod tests {
             auth_type: AuthType::Bearer,
             description: None,
             oauth: None,
+            bootstrap: None,
+            bootstrap_state: None,
             name: Some("demo".to_string()),
             secret_source: Some(SecretSource::Literal {
                 value: "test-token".to_string(),
