@@ -233,6 +233,88 @@ Related work:
 - [#274](https://github.com/holon-run/uxc/issues/274)
 - [#283](https://github.com/holon-run/uxc/issues/283)
 
+### Exploratory IM Event Intake
+
+These providers are relevant to IM-style inbound events, but not all of them are validated as full message-ingest providers yet.
+
+#### Discord Gateway
+
+Skill:
+
+- [skills/discord-openapi-skill/SKILL.md](../skills/discord-openapi-skill/SKILL.md)
+
+Observed behavior:
+
+- Discord bot auth worked against the REST API
+- `get:/gateway/bot` returned a live Gateway URL
+- a raw WebSocket smoke test against `wss://gateway.discord.gg/?v=10&encoding=json` succeeded
+- the initial Gateway `HELLO` payload was received through `uxc subscribe --transport websocket`
+
+Current assessment:
+
+- raw WebSocket connectivity is confirmed
+- Discord is **not** yet a validated IM subscribe provider because full event intake still needs Gateway-specific heartbeat, identify, intents, and resume handling
+
+Status:
+
+- **exploratory smoke test only**
+
+#### Slack Socket Mode
+
+Skill:
+
+- [skills/slack-openapi-skill/SKILL.md](../skills/slack-openapi-skill/SKILL.md)
+
+Observed behavior:
+
+- Slack Web API auth and request/response calls are working
+- the built-in `slack_socket_mode` transport succeeded against the live Slack API
+- `uxc subscribe start https://slack.com/api --transport slack-socket-mode --auth slack-app ...` opened a temporary WebSocket URL automatically
+- the initial Slack Socket Mode `hello` payload was received through the built-in transport
+- a real Slack message event was delivered as an `events_api` envelope while the subscription job was running
+- the sink recorded the message payload and `ack_sent=true`
+- automatic ack behavior for envelope-style frames is implemented and covered by unit tests
+
+Current assessment:
+
+- Slack Socket Mode now has provider-aware runtime support inside `uxc subscribe`
+- live connection setup is validated
+- live inbound message event delivery is validated
+
+Status:
+
+- **validated successfully**
+
+#### Feishu / Lark IM
+
+Skill:
+
+- [skills/feishu-openapi-skill/SKILL.md](../skills/feishu-openapi-skill/SKILL.md)
+
+Current assessment:
+
+- current skill scope is request/response only
+- platform event delivery exists, but no `uxc subscribe` validation has been completed yet
+
+Status:
+
+- **not yet validated for subscribe**
+
+#### DingTalk Messaging
+
+Skill:
+
+- [skills/dingtalk-openapi-skill/SKILL.md](../skills/dingtalk-openapi-skill/SKILL.md)
+
+Current assessment:
+
+- current skill scope is request/response only
+- Stream Mode / inbound event handling has not yet been validated through `uxc subscribe`
+
+Status:
+
+- **not yet validated for subscribe**
+
 ## Interpretation
 
 Current real-world status is uneven by provider:

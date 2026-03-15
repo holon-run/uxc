@@ -19,6 +19,7 @@ pub mod schema_mapping;
 pub mod subscription_graphql;
 pub mod subscription_jsonrpc;
 pub mod subscription_poll;
+pub mod subscription_slack;
 pub mod subscription_websocket;
 
 #[cfg(feature = "test-server")]

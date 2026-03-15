@@ -46,6 +46,22 @@ slack-openapi-cli --auth slack-user get:/conversations.history channel=C12345678
 
 Use `--auth slack-user` on write methods only when you intentionally want the message to be attributed to the user-token identity rather than the default bot path.
 
+## Auth Setup (Socket Mode App Token)
+
+Use an app-level `xapp-...` token for Socket Mode subscriptions:
+
+- Slack app page: `https://api.slack.com/apps`
+- Path: `Basic Information -> App-Level Tokens`
+- Recommended scope: `connections:write`
+
+```bash
+uxc auth credential set slack-app \
+  --auth-type bearer \
+  --secret-env SLACK_APP_TOKEN
+```
+
+Invoke it explicitly with `--auth slack-app` when using `--transport slack-socket-mode`.
+
 ## Read Examples
 
 ```bash
@@ -77,6 +93,31 @@ slack-openapi-cli post:/chat.postMessage '{"channel":"C1234567890","text":"Reply
 # Add a reaction to a message
 slack-openapi-cli post:/reactions.add '{"channel":"C1234567890","timestamp":"1717171717.000100","name":"thumbsup"}'
 ```
+
+## Socket Mode Subscribe
+
+```bash
+# Start Slack Socket Mode using an app-level xapp token.
+# The runtime will call apps.connections.open automatically.
+uxc subscribe start https://slack.com/api \
+  --transport slack-socket-mode \
+  --auth slack-app \
+  --sink file:$HOME/.uxc/subscriptions/slack-socket-mode.ndjson
+
+# Inspect job state
+uxc subscribe list
+uxc subscribe status sub_123
+
+# Stop the background job
+uxc subscribe stop sub_123
+```
+
+Current validation level:
+
+- live connection/hello path validated
+- automatic temporary WebSocket URL acquisition validated
+- automatic ack for Socket Mode envelopes is implemented
+- live `events_api` message delivery has been validated against a real Slack workspace
 
 ## Fallback Equivalence
 

@@ -16,6 +16,9 @@ use crate::subscription_jsonrpc::{
     resolve_jsonrpc_unsubscribe_operation, JsonRpcSubscriptionConfig, JsonRpcSubscriptionHandler,
 };
 use crate::subscription_poll::{PollRuntimeContext, PollRuntimeObserver, PollSubscriptionConfig};
+use crate::subscription_slack::{
+    derive_socket_mode_open_endpoint, parse_socket_mode_open_response, SlackSocketModeHandler,
+};
 use crate::subscription_websocket::{
     self, RawFrameHandler, WebSocketRunError, WebSocketRuntimeConfig, WebSocketRuntimeObserver,
 };
@@ -172,6 +175,7 @@ pub struct SubscribeStopResponse {
 #[serde(rename_all = "snake_case")]
 pub enum SubscriptionTransportHint {
     Websocket,
+    SlackSocketMode,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -769,15 +773,24 @@ impl McpSessionManager {
 }
 
 fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Result<String> {
-    if matches!(
-        request.transport_hint,
-        Some(SubscriptionTransportHint::Websocket)
-    ) {
+    if let Some(transport_hint) = request.transport_hint.as_ref() {
         let lower = request.endpoint.to_ascii_lowercase();
-        if !lower.starts_with("ws://") && !lower.starts_with("wss://") {
-            bail!("websocket subscription transport requires a ws:// or wss:// endpoint");
+        match transport_hint {
+            SubscriptionTransportHint::Websocket => {
+                if !lower.starts_with("ws://") && !lower.starts_with("wss://") {
+                    bail!("websocket subscription transport requires a ws:// or wss:// endpoint");
+                }
+                return Ok("websocket".to_string());
+            }
+            SubscriptionTransportHint::SlackSocketMode => {
+                if !lower.starts_with("http://") && !lower.starts_with("https://") {
+                    bail!(
+                        "slack-socket-mode transport requires an http:// or https:// Slack API endpoint"
+                    );
+                }
+                return Ok("slack_socket_mode".to_string());
+            }
         }
-        return Ok("websocket".to_string());
     }
 
     if let Some(operation_id) = request.operation_id.as_deref() {
@@ -945,6 +958,22 @@ impl SubscriptionManager {
             }
             if request.mode != SubscriptionMode::Stream {
                 bail!("websocket transport is only valid with stream mode");
+            }
+        } else if matches!(
+            request.transport_hint,
+            Some(SubscriptionTransportHint::SlackSocketMode)
+        ) {
+            if request.operation_id.is_some() {
+                bail!("slack-socket-mode transport cannot be combined with an operation_id");
+            }
+            if request.resource_uri.is_some() {
+                bail!("slack-socket-mode transport cannot be combined with --resource-uri");
+            }
+            if request.mode != SubscriptionMode::Stream {
+                bail!("slack-socket-mode transport is only valid with stream mode");
+            }
+            if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
+                bail!("slack-socket-mode transport manages its own websocket setup and does not accept --subprotocol or --init-frame");
             }
         } else if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
             bail!("websocket subprotocols and init frames require websocket transport");
@@ -1645,11 +1674,8 @@ impl DaemonRuntime {
         if request.resource_uri.is_some() {
             bail!("poll subscriptions do not support --resource-uri");
         }
-        if matches!(
-            request.transport_hint,
-            Some(SubscriptionTransportHint::Websocket)
-        ) {
-            bail!("poll subscriptions do not support websocket transport hints");
+        if request.transport_hint.is_some() {
+            bail!("poll subscriptions do not support transport hints");
         }
         if operation_id.starts_with("subscription/") {
             bail!("poll subscriptions do not support GraphQL subscription/<field> operations");
@@ -2355,6 +2381,13 @@ async fn run_stream_subscription_job(
     ) {
         return run_websocket_subscription_job(job_id, request, sink_path, view, stop_rx).await;
     }
+    if matches!(
+        request.transport_hint,
+        Some(SubscriptionTransportHint::SlackSocketMode)
+    ) {
+        return run_slack_socket_mode_subscription_job(job_id, request, sink_path, view, stop_rx)
+            .await;
+    }
 
     if request.operation_id.is_some() {
         if request
@@ -2408,6 +2441,187 @@ async fn run_websocket_subscription_job(
         &mut stop_rx,
     )
     .await
+}
+
+async fn open_slack_socket_mode_websocket_url(request: &SubscribeStartRequest) -> Result<String> {
+    let auth_profile =
+        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?
+            .ok_or_else(|| {
+                anyhow!(
+                    "Slack Socket Mode requires an auth credential with an app-level xapp token"
+                )
+            })?;
+    let open_endpoint = derive_socket_mode_open_endpoint(&request.endpoint)?;
+    let resolved = auth::resolve_profile_operation_request_auth(
+        &auth::AuthRequestContext::new("POST", &open_endpoint),
+        &auth_profile,
+    )?;
+    let client = crate::http_client::build_resilient_http_client(
+        Duration::from_secs(10),
+        "Slack Socket Mode open",
+    )?;
+    let mut req = client.post(&resolved.url);
+    for (name, value) in resolved.headers {
+        req = req.header(name, value);
+    }
+    let response = req.send().await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read response body>".to_string());
+        let body = truncate_error_body(&body, 512);
+        bail!(
+            "Slack Socket Mode open request failed with status {}: {}",
+            status,
+            body
+        );
+    }
+    let body = response.json::<Value>().await?;
+    let parsed = parse_socket_mode_open_response(&body)?;
+    Ok(parsed.websocket_url)
+}
+
+fn truncate_error_body(body: &str, max_chars: usize) -> String {
+    let mut chars = body.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+async fn run_slack_socket_mode_subscription_job(
+    _job_id: &str,
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let mut sink = open_subscription_sink(&sink_path).await?;
+    let mut seq = 0u64;
+    let mut delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
+
+    loop {
+        if *stop_rx.borrow() {
+            close_subscription_as_stopped(&mut sink, &view, &mut seq, "slack_socket_mode").await?;
+            return Ok(());
+        }
+
+        let websocket_url = match open_slack_socket_mode_websocket_url(request).await {
+            Ok(url) => url,
+            Err(err) => {
+                let message = err.to_string();
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "slack_socket_mode",
+                    "error",
+                    None,
+                    Some(json!({ "message": message })),
+                )
+                .await?;
+                update_subscription_view(&view, Some("reconnecting"), Some(message), true).await;
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "slack_socket_mode",
+                    "reconnect",
+                    None,
+                    Some(json!({ "delay_secs": delay_secs, "phase": "open_url" })),
+                )
+                .await?;
+                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
+                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "slack_socket_mode")
+                        .await?;
+                    return Ok(());
+                }
+                delay_secs =
+                    (delay_secs.saturating_mul(2)).min(SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS);
+                continue;
+            }
+        };
+
+        let mut handler = SlackSocketModeHandler::new();
+        let config = WebSocketRuntimeConfig {
+            endpoint: websocket_url,
+            auth_profile: None,
+            subprotocols: Vec::new(),
+            initial_text_frames: Vec::new(),
+            first_message_timeout_secs: Some(5),
+            initial_reconnect_delay_secs: SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS,
+            max_reconnect_delay_secs: SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS,
+        };
+
+        let result = {
+            let mut observer = DaemonWebSocketObserver {
+                sink: &mut sink,
+                view: &view,
+                seq: &mut seq,
+                source_kind: "slack_socket_mode",
+            };
+            subscription_websocket::run_websocket_subscription_session_once(
+                &config,
+                &mut handler,
+                &mut observer,
+                &mut stop_rx,
+            )
+            .await
+        };
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(WebSocketRunError::Fatal(err)) => {
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "slack_socket_mode",
+                    "error",
+                    None,
+                    Some(json!({ "message": err.to_string() })),
+                )
+                .await?;
+                return Err(err);
+            }
+            Err(WebSocketRunError::Retry(err)) => {
+                let message = err.to_string();
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "slack_socket_mode",
+                    "error",
+                    None,
+                    Some(json!({ "message": message })),
+                )
+                .await?;
+                update_subscription_view(&view, Some("reconnecting"), Some(err.to_string()), true)
+                    .await;
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "slack_socket_mode",
+                    "reconnect",
+                    None,
+                    Some(json!({ "delay_secs": delay_secs })),
+                )
+                .await?;
+                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
+                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "slack_socket_mode")
+                        .await?;
+                    return Ok(());
+                }
+                delay_secs =
+                    (delay_secs.saturating_mul(2)).min(SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS);
+            }
+        }
+    }
 }
 
 fn resolve_jsonrpc_subscription_config(

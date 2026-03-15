@@ -169,6 +169,25 @@ Then paste the callback URL when prompted.
 
 **Key Recommendation:** Use **Bot Token** for almost all operations. User OAuth2 is only useful if you need to read user profile information as that specific user. For reading channel messages, managing servers, or sending messages, Bot Token is required.
 
+## Subscribe / Gateway Status
+
+Discord inbound events flow through the Gateway WebSocket, not through this REST/OpenAPI surface.
+
+Current `uxc subscribe` status:
+
+- a live raw WebSocket smoke test against `wss://gateway.discord.gg/?v=10&encoding=json` succeeded
+- the initial Gateway `HELLO` frame was received through `uxc subscribe --transport websocket`
+- this does **not** yet mean Discord message ingest is supported
+
+What is still missing for real Gateway-based event intake:
+
+- heartbeat handling based on the server-provided interval
+- `IDENTIFY` / `RESUME` session logic
+- gateway intents handling
+- sequence tracking and reconnect/resume behavior
+
+Treat Discord as a future subscribe target, not a currently validated IM message-ingest provider.
+
 ## Guardrails
 
 - **OAuth2 Scope Limitation:** User OAuth2 tokens cannot read channel messages via HTTP API, send messages, or manage servers. These operations require Bot Token authentication.
