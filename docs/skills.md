@@ -321,3 +321,58 @@ clawhub sync --all --bump patch
   - `clawhub sync` compares current local skill fingerprints with registry state, not git history.
   - `uxc (9 files)` refers to the total file count in the skill package, not the number of changed files.
   - Immediately after publish, `clawhub inspect uxc` may return `Skill is hidden while security scan is pending`; `clawhub sync --dry-run` still reports `Already synced`, which confirms the upload succeeded.
+
+## ClawHub Publish Log (2026-03-15)
+
+- `clawhub whoami`: `jolestar`
+- Published in the current rate-limit window:
+  - `slack-openapi-skill@1.0.0`
+  - `discord-openapi-skill@1.0.1`
+  - `feishu-openapi-skill@1.0.0`
+  - `telegram-openapi-skill@1.0.0`
+  - `matrix-openapi-skill@1.0.0`
+  - `binance-spot-websocket-skill@1.0.0`
+  - `bitquery-graphql-skill@1.0.1`
+  - `binance-spot-openapi-skill@1.0.1`
+- Notes:
+  - The practical ClawHub limit still appears to be `5` new skills per hour.
+  - Updates to already-published skills were accepted in the same window.
+  - Workspace/README install indexes were updated together with this wave.
+
+### Remaining publish queue after the 2026-03-15 window
+
+- Next realtime / subscribe wave:
+  - `okx-exchange-websocket-skill`
+  - `ethereum-jsonrpc-skill`
+  - `sui-jsonrpc-skill`
+  - `dingtalk-openapi-skill`
+  - `coinbase-openapi-skill`
+- Next exchange coverage wave:
+  - `bybit-openapi-skill`
+  - `kraken-openapi-skill`
+  - `kucoin-openapi-skill`
+  - `bitget-openapi-skill`
+  - `mexc-openapi-skill`
+- Next market / data wave:
+  - `upbit-openapi-skill`
+  - `coingecko-openapi-skill`
+  - `alchemy-openapi-skill`
+  - `chainbase-openapi-skill`
+  - `moralis-openapi-skill`
+- Next data / MCP wave:
+  - `blockscout-openapi-skill`
+  - `coinapi-openapi-skill`
+  - `birdeye-mcp-skill`
+  - `lifi-mcp-skill`
+  - `coinmarketcap-mcp-skill`
+- Next MCP / DeFi wave:
+  - `gate-mcp-skill`
+  - `crypto-com-mcp-skill`
+  - `defillama-openapi-skill`
+  - `defillama-prices-openapi-skill`
+  - `defillama-pro-openapi-skill`
+- Final remaining wave:
+  - `defillama-yields-openapi-skill`
+  - `goldrush-mcp-skill`
+  - `line-openapi-skill`
+  - `whatsapp-openapi-skill`
