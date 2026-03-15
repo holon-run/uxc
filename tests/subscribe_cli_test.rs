@@ -30,6 +30,9 @@ fn subscribe_start_help_shows_subcommand_help() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["kind"], "subcommand_help");
     assert_eq!(json["data"]["path"], "uxc subscribe start");
+    assert!(json["data"]["usage"]
+        .as_str()
+        .is_some_and(|usage| usage.contains("--ephemeral")));
 }
 
 #[test]

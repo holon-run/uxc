@@ -59,6 +59,8 @@ const SUBSCRIPTION_STOP_TIMEOUT_SECS: u64 = 5;
 const SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
 const SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS: u64 = 30;
 const SUBSCRIPTION_MAX_BUFFER_BYTES: usize = 1024 * 1024;
+const SUB_STATUS_STOPPED_AFTER_RESTART: &str = "stopped_after_restart";
+const SUB_STATUS_RESUME_FAILED: &str = "resume_failed";
 const ERR_PROTOCOL_DETECTION: i32 = -32010;
 const ERR_OPERATION_NOT_FOUND: i32 = -32011;
 const ERR_OAUTH_REQUIRED: i32 = -32012;
@@ -143,6 +145,9 @@ pub struct SubscribeStartRequest {
     pub mode: SubscriptionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_config: Option<Value>,
+    /// If true, do not auto-resume this subscription after daemon restart.
+    #[serde(default)]
+    pub ephemeral: bool,
     pub options: RuntimeInvokeOptions,
 }
 
@@ -185,11 +190,23 @@ pub struct SubscriptionJobView {
     pub sink: String,
     pub resource_uri: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub durable: bool,
+    #[serde(default)]
+    pub auto_resume: bool,
+    #[serde(default)]
+    pub resume_strategy: String,
     pub created_at_unix: u64,
     pub started_at_unix: Option<u64>,
     pub stopped_at_unix: Option<u64>,
     pub last_event_at_unix: Option<u64>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub restart_count: u64,
+    #[serde(default)]
+    pub last_resume_at_unix: Option<u64>,
+    #[serde(default)]
+    pub last_resume_error: Option<String>,
     pub reconnect_count: u64,
     pub written_events: u64,
 }
@@ -305,12 +322,27 @@ struct McpHttpSession {
 struct SubscriptionManager {
     jobs: Arc<Mutex<HashMap<String, Arc<SubscriptionJobEntry>>>>,
     next_id: Arc<Mutex<u64>>,
+    store_path: PathBuf,
 }
 
 struct SubscriptionJobEntry {
+    request: SubscribeStartRequest,
     view: Arc<Mutex<SubscriptionJobView>>,
-    stop_tx: watch::Sender<bool>,
+    /// Wrapped so resume can replace the sender for a reconstructed job.
+    stop_tx: Mutex<watch::Sender<bool>>,
     task: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedSubscriptionRecord {
+    request: SubscribeStartRequest,
+    view: SubscriptionJobView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedSubscriptionStore {
+    version: String,
+    jobs: Vec<PersistedSubscriptionRecord>,
 }
 
 impl McpStdioSession {
@@ -786,16 +818,117 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
 }
 
 impl SubscriptionManager {
-    fn new() -> Self {
-        Self::default()
+    fn new(store_path: PathBuf) -> Result<Self> {
+        let manager = Self {
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(Mutex::new(0)),
+            store_path,
+        };
+        manager.load_persisted_records()?;
+        Ok(manager)
     }
 
-    async fn start(
+    fn load_persisted_records(&self) -> Result<()> {
+        if let Some(parent) = self.store_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create subscription store directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+        if !self.store_path.exists() {
+            return Ok(());
+        }
+        let raw = fs::read_to_string(&self.store_path).with_context(|| {
+            format!(
+                "Failed to read subscription store {}",
+                self.store_path.display()
+            )
+        })?;
+        if raw.trim().is_empty() {
+            return Ok(());
+        }
+        let store: PersistedSubscriptionStore = match serde_json::from_str(&raw) {
+            Ok(store) => store,
+            Err(err) => {
+                quarantine_subscription_store(&self.store_path, "parse_error")?;
+                tracing::warn!(
+                    "Ignoring malformed subscription store {}: {}",
+                    self.store_path.display(),
+                    err
+                );
+                return Ok(());
+            }
+        };
+        if store.version != "v1" {
+            quarantine_subscription_store(&self.store_path, "unsupported_version")?;
+            tracing::warn!(
+                "Ignoring unsupported subscription store version '{}' at {}",
+                store.version,
+                self.store_path.display()
+            );
+            return Ok(());
+        }
+        let mut next_id = 0_u64;
+        let mut jobs = HashMap::new();
+        for record in store.jobs {
+            next_id = next_id.max(parse_subscription_numeric_id(&record.view.job_id).unwrap_or(0));
+            let (stop_tx, _) = watch::channel(false);
+            jobs.insert(
+                record.view.job_id.clone(),
+                Arc::new(SubscriptionJobEntry {
+                    request: record.request,
+                    view: Arc::new(Mutex::new(record.view)),
+                    stop_tx: Mutex::new(stop_tx),
+                    task: Mutex::new(None),
+                }),
+            );
+        }
+        *self
+            .jobs
+            .try_lock()
+            .expect("subscription job map should not be contended during init") = jobs;
+        *self
+            .next_id
+            .try_lock()
+            .expect("subscription id counter should not be contended during init") = next_id;
+        Ok(())
+    }
+
+    async fn snapshot_persisted_records(&self) -> Vec<PersistedSubscriptionRecord> {
+        let entries = {
+            let jobs = self.jobs.lock().await;
+            jobs.values().cloned().collect::<Vec<_>>()
+        };
+        let mut records = Vec::with_capacity(entries.len());
+        for entry in entries {
+            records.push(PersistedSubscriptionRecord {
+                request: entry.request.clone(),
+                view: entry.view.lock().await.clone(),
+            });
+        }
+        records.sort_by(|a, b| a.view.job_id.cmp(&b.view.job_id));
+        records
+    }
+
+    async fn persist_state(&self) -> Result<()> {
+        let records = self.snapshot_persisted_records().await;
+        write_subscription_store(&self.store_path, &records)
+    }
+
+    async fn prepare_request(
         &self,
         runtime: &DaemonRuntime,
         request: &SubscribeStartRequest,
-    ) -> Result<SubscribeStartResponse> {
+    ) -> Result<(PathBuf, String, String)> {
         let sink_path = parse_file_sink(&request.sink)?;
+        if is_nonstandard_subscription_sink_path(&sink_path) {
+            tracing::warn!(
+                "subscription sink path is outside HOME/temp directories: {}. This path may be unavailable after daemon restart if permissions or mounts change.",
+                sink_path.display()
+            );
+        }
         let sink_spec = format!("file:{}", sink_path.display());
         if request.resource_uri.is_some() && request.operation_id.is_some() {
             bail!("subscribe start cannot combine --resource-uri with an operation_id");
@@ -833,6 +966,147 @@ impl SubscriptionManager {
             SubscriptionMode::Stream => resolve_stream_subscription_protocol(request)?,
             SubscriptionMode::Poll => runtime.detect_poll_subscription_protocol(request).await?,
         };
+        Ok((sink_path, sink_spec, protocol))
+    }
+
+    fn spawn_job_task(
+        &self,
+        runtime: &DaemonRuntime,
+        job_id: &str,
+        request: &SubscribeStartRequest,
+        sink_path: PathBuf,
+        view: Arc<Mutex<SubscriptionJobView>>,
+        stop_rx: watch::Receiver<bool>,
+    ) -> JoinHandle<()> {
+        let manager = self.clone();
+        let request_clone = request.clone();
+        let job_id_clone = job_id.to_string();
+        let runtime_clone = runtime.clone();
+        tokio::spawn(async move {
+            let result = match request_clone.mode {
+                SubscriptionMode::Stream => {
+                    run_stream_subscription_job(
+                        &job_id_clone,
+                        &request_clone,
+                        sink_path,
+                        view.clone(),
+                        stop_rx,
+                    )
+                    .await
+                }
+                SubscriptionMode::Poll => {
+                    run_poll_subscription_job(
+                        &runtime_clone,
+                        &job_id_clone,
+                        &request_clone,
+                        sink_path,
+                        view.clone(),
+                        stop_rx,
+                    )
+                    .await
+                }
+            };
+
+            let mut guard = view.lock().await;
+            let was_resumed = guard.status == "resumed" || guard.restart_count > 0;
+            if guard.status != "stopped" {
+                match result {
+                    Ok(()) => {
+                        guard.status = "stopped".to_string();
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        if was_resumed {
+                            guard.status = SUB_STATUS_RESUME_FAILED.to_string();
+                            guard.last_resume_error = Some(message.clone());
+                        } else {
+                            guard.status = "failed".to_string();
+                        }
+                        guard.last_error = Some(message);
+                    }
+                }
+            }
+            guard.stopped_at_unix = Some(now_unix_secs());
+            drop(guard);
+            if let Err(err) = manager.persist_state().await {
+                tracing::warn!(
+                    "Failed to persist subscription state after task exit: {}",
+                    err
+                );
+            }
+        })
+    }
+
+    async fn resume_all(&self, runtime: &DaemonRuntime) -> Result<()> {
+        let entries = {
+            let jobs = self.jobs.lock().await;
+            jobs.values().cloned().collect::<Vec<_>>()
+        };
+        for entry in entries {
+            if entry.request.ephemeral {
+                let mut view = entry.view.lock().await;
+                view.status = SUB_STATUS_STOPPED_AFTER_RESTART.to_string();
+                view.stopped_at_unix = Some(now_unix_secs());
+                view.last_resume_error = None;
+                continue;
+            }
+
+            let (sink_path, sink_spec, protocol) =
+                match self.prepare_request(runtime, &entry.request).await {
+                    Ok(prepared) => prepared,
+                    Err(err) => {
+                        let mut view = entry.view.lock().await;
+                        view.status = SUB_STATUS_RESUME_FAILED.to_string();
+                        view.last_resume_error = Some(err.to_string());
+                        view.stopped_at_unix = Some(now_unix_secs());
+                        continue;
+                    }
+                };
+
+            let (stop_tx, stop_rx) = watch::channel(false);
+            {
+                let mut sender = entry.stop_tx.lock().await;
+                *sender = stop_tx;
+            }
+            let job_id = {
+                let mut view = entry.view.lock().await;
+                view.endpoint = entry.request.endpoint.clone();
+                view.protocol = protocol;
+                view.sink = sink_spec;
+                view.resource_uri = entry.request.resource_uri.clone();
+                view.status = "resumed".to_string();
+                view.durable = true;
+                view.auto_resume = true;
+                if view.resume_strategy.is_empty() {
+                    view.resume_strategy = "reconnect".to_string();
+                }
+                view.started_at_unix = Some(now_unix_secs());
+                view.stopped_at_unix = None;
+                view.last_error = None;
+                view.restart_count = view.restart_count.saturating_add(1);
+                view.last_resume_at_unix = Some(now_unix_secs());
+                view.last_resume_error = None;
+                view.job_id.clone()
+            };
+            let task = self.spawn_job_task(
+                runtime,
+                &job_id,
+                &entry.request,
+                sink_path,
+                entry.view.clone(),
+                stop_rx,
+            );
+            *entry.task.lock().await = Some(task);
+        }
+        self.persist_state().await
+    }
+
+    async fn start(
+        &self,
+        runtime: &DaemonRuntime,
+        request: &SubscribeStartRequest,
+    ) -> Result<SubscribeStartResponse> {
+        let (sink_path, sink_spec, protocol) = self.prepare_request(runtime, request).await?;
 
         let job_id = {
             let mut next = self.next_id.lock().await;
@@ -848,64 +1122,42 @@ impl SubscriptionManager {
             sink: sink_spec.clone(),
             resource_uri: request.resource_uri.clone(),
             status: "running".to_string(),
+            durable: !request.ephemeral,
+            auto_resume: !request.ephemeral,
+            resume_strategy: if request.ephemeral {
+                "none".to_string()
+            } else {
+                "reconnect".to_string()
+            },
             created_at_unix: now,
             started_at_unix: Some(now),
             stopped_at_unix: None,
             last_event_at_unix: None,
             last_error: None,
+            restart_count: 0,
+            last_resume_at_unix: None,
+            last_resume_error: None,
             reconnect_count: 0,
             written_events: 0,
         }));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let request_clone = request.clone();
-        let job_id_clone = job_id.clone();
-        let view_clone = view.clone();
-        let runtime_clone = runtime.clone();
-        let task = tokio::spawn(async move {
-            let result = match request_clone.mode {
-                SubscriptionMode::Stream => {
-                    run_stream_subscription_job(
-                        &job_id_clone,
-                        &request_clone,
-                        sink_path,
-                        view_clone.clone(),
-                        stop_rx,
-                    )
-                    .await
-                }
-                SubscriptionMode::Poll => {
-                    run_poll_subscription_job(
-                        &runtime_clone,
-                        &job_id_clone,
-                        &request_clone,
-                        sink_path,
-                        view_clone.clone(),
-                        stop_rx,
-                    )
-                    .await
-                }
-            };
-
-            let mut guard = view_clone.lock().await;
-            if guard.status != "stopped" {
-                match result {
-                    Ok(()) => {
-                        guard.status = "stopped".to_string();
-                    }
-                    Err(err) => {
-                        guard.status = "failed".to_string();
-                        guard.last_error = Some(err.to_string());
-                    }
-                }
-            }
-            guard.stopped_at_unix = Some(now_unix_secs());
-        });
         let entry = Arc::new(SubscriptionJobEntry {
+            request: request.clone(),
             view: view.clone(),
-            stop_tx,
-            task: Mutex::new(Some(task)),
+            stop_tx: Mutex::new(stop_tx),
+            task: Mutex::new(None),
         });
-        self.jobs.lock().await.insert(job_id.clone(), entry);
+        {
+            let mut jobs = self.jobs.lock().await;
+            jobs.insert(job_id.clone(), entry.clone());
+        }
+        if let Err(err) = self.persist_state().await {
+            let mut jobs = self.jobs.lock().await;
+            jobs.remove(&job_id);
+            return Err(err);
+        }
+        let task = self.spawn_job_task(runtime, &job_id, request, sink_path, view.clone(), stop_rx);
+        *entry.task.lock().await = Some(task);
 
         let guard = view.lock().await;
         Ok(SubscribeStartResponse {
@@ -953,7 +1205,7 @@ impl SubscriptionManager {
             UxcError::OperationNotFound(format!("subscription job not found: {}", job_id))
         })?;
 
-        let _ = entry.stop_tx.send(true);
+        let _ = entry.stop_tx.lock().await.send(true);
         if let Some(mut handle) = entry.task.lock().await.take() {
             if tokio::time::timeout(
                 Duration::from_secs(SUBSCRIPTION_STOP_TIMEOUT_SECS),
@@ -976,6 +1228,11 @@ impl SubscriptionManager {
             guard.status = "stopped".to_string();
             guard.stopped_at_unix = Some(now_unix_secs());
         }
+        {
+            let mut jobs = self.jobs.lock().await;
+            jobs.remove(job_id);
+        }
+        self.persist_state().await?;
         Ok(SubscribeStopResponse {
             job_id: job_id.to_string(),
             stopped: true,
@@ -1013,18 +1270,26 @@ pub struct DaemonRuntime {
 
 impl DaemonRuntime {
     pub fn new() -> Self {
+        Self::try_new().expect("daemon runtime should initialize")
+    }
+
+    pub fn try_new() -> Result<Self> {
+        Self::try_new_with_subscription_store_path(subscription_store_path())
+    }
+
+    fn try_new_with_subscription_store_path(store_path: PathBuf) -> Result<Self> {
         let logger = Self::initialize_logger();
-        Self {
+        Ok(Self {
             state: Arc::new(Mutex::new(ServerState {
                 started_at_unix: now_unix_secs(),
                 request_count: 0,
             })),
             mcp: McpSessionManager::new(),
-            subscriptions: SubscriptionManager::new(),
+            subscriptions: SubscriptionManager::new(store_path)?,
             should_stop: Arc::new(RwLock::new(false)),
             schema_mapping_lock: Arc::new(Mutex::new(())),
             logger,
-        }
+        })
     }
 
     fn initialize_logger() -> Option<DaemonLogger> {
@@ -1365,6 +1630,10 @@ impl DaemonRuntime {
         self.subscriptions.stop(job_id).await
     }
 
+    pub async fn resume_persisted_subscriptions(&self) -> Result<()> {
+        self.subscriptions.resume_all(self).await
+    }
+
     async fn detect_poll_subscription_protocol(
         &self,
         request: &SubscribeStartRequest,
@@ -1563,6 +1832,19 @@ fn validate_subscription_sink_path(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_nonstandard_subscription_sink_path(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    if let Some(home) = resolve_home_dir_for_tilde() {
+        if path.starts_with(&home) {
+            return false;
+        }
+    }
+    let temp_dir = std::env::temp_dir();
+    !path.starts_with(&temp_dir)
 }
 
 async fn open_subscription_sink(path: &Path) -> Result<tokio::fs::File> {
@@ -2934,7 +3216,13 @@ pub async fn run_daemon_server() -> Result<()> {
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("Failed to bind daemon socket at {}", socket.display()))?;
 
-    let runtime = Arc::new(DaemonRuntime::new());
+    let runtime = Arc::new(DaemonRuntime::try_new()?);
+    let resume_runtime = runtime.clone();
+    tokio::spawn(async move {
+        if let Err(err) = resume_runtime.resume_persisted_subscriptions().await {
+            tracing::warn!("Failed to resume persisted subscriptions: {}", err);
+        }
+    });
 
     // Log daemon start
     runtime
@@ -3389,6 +3677,55 @@ fn daemon_dir() -> PathBuf {
 
 pub fn socket_path() -> PathBuf {
     daemon_dir().join("uxc.sock")
+}
+
+fn subscription_store_path() -> PathBuf {
+    daemon_dir().join("subscriptions.json")
+}
+
+fn parse_subscription_numeric_id(job_id: &str) -> Option<u64> {
+    job_id.strip_prefix("sub_")?.parse().ok()
+}
+
+fn write_subscription_store(path: &Path, jobs: &[PersistedSubscriptionRecord]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create subscription store directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    let store = PersistedSubscriptionStore {
+        version: "v1".to_string(),
+        jobs: jobs.to_vec(),
+    };
+    let tmp_path = path.with_extension("json.tmp");
+    let raw = serde_json::to_vec_pretty(&store)?;
+    fs::write(&tmp_path, raw).with_context(|| {
+        format!(
+            "Failed to write temporary subscription store {}",
+            tmp_path.display()
+        )
+    })?;
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("Failed to replace subscription store {}", path.display()))?;
+    Ok(())
+}
+
+fn quarantine_subscription_store(path: &Path, suffix: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let quarantined = path.with_extension(format!("json.{suffix}.bak"));
+    fs::rename(path, &quarantined).with_context(|| {
+        format!(
+            "Failed to quarantine subscription store {} to {}",
+            path.display(),
+            quarantined.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn best_effort_user_label() -> String {
@@ -4398,6 +4735,7 @@ mod tests {
             initial_text_frames: Vec::new(),
             mode: SubscriptionMode::Stream,
             poll_config: None,
+            ephemeral: false,
             options: RuntimeInvokeOptions {
                 auth: None,
                 inject_env: Vec::new(),
@@ -4425,6 +4763,11 @@ mod tests {
         false
     }
 
+    fn test_runtime_with_store(temp: &tempfile::TempDir) -> DaemonRuntime {
+        DaemonRuntime::try_new_with_subscription_store_path(temp.path().join("subscriptions.json"))
+            .expect("test daemon runtime should initialize")
+    }
+
     #[tokio::test]
     async fn websocket_subscription_runtime_reconnects_and_stops_cleanly() {
         let temp = tempdir().unwrap();
@@ -4442,7 +4785,7 @@ mod tests {
         ])
         .await;
 
-        let runtime = DaemonRuntime::new();
+        let runtime = test_runtime_with_store(&temp);
         let response = runtime
             .subscribe_start(subscription_request(&endpoint, &sink_spec))
             .await
@@ -4498,7 +4841,7 @@ mod tests {
             }])
             .await;
 
-        let runtime = DaemonRuntime::new();
+        let runtime = test_runtime_with_store(&temp);
         let response = runtime
             .subscribe_start(subscription_request(&endpoint, &sink_spec))
             .await

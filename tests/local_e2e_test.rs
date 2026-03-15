@@ -38,6 +38,24 @@ fn wait_for_file_contains(path: &std::path::Path, needle: &str, timeout: Duratio
     false
 }
 
+fn wait_for_file_match_count(
+    path: &std::path::Path,
+    needle: &str,
+    expected_count: usize,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(contents) = fs::read_to_string(path) {
+            if contents.matches(needle).count() >= expected_count {
+                return true;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 #[test]
 #[serial_test::serial]
 fn test_openapi_host_help_lists_operations() {
@@ -924,6 +942,62 @@ fn test_http_subscribe_start_status_stop_writes_file() {
 
 #[test]
 #[serial_test::serial]
+fn test_durable_subscribe_auto_resumes_after_daemon_restart() {
+    let server = start_test_server("openapi", "ok");
+    let endpoint = format!("http://{}/stream", server.addr);
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("http-subscribe-durable.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+
+    let start = run_uxc_in_home(
+        &["subscribe", "start", &endpoint, "--sink", &sink_spec],
+        &test_home,
+    );
+    assert!(start.is_ok(), "durable subscribe start failed: {:?}", start);
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""value":2"#, Duration::from_secs(5)),
+        "durable sink did not receive initial events"
+    );
+
+    let stop_daemon = run_uxc_in_home(&["daemon", "stop"], &test_home);
+    assert!(stop_daemon.is_ok(), "daemon stop failed: {:?}", stop_daemon);
+    let start_daemon = run_uxc_in_home(&["daemon", "start"], &test_home);
+    assert!(
+        start_daemon.is_ok(),
+        "daemon start failed: {:?}",
+        start_daemon
+    );
+
+    assert!(
+        wait_for_file_match_count(&sink_path, r#""value":1"#, 2, Duration::from_secs(5)),
+        "durable sink did not receive resumed events after daemon restart"
+    );
+
+    let status = run_uxc_in_home(&["subscribe", "status", &job_id], &test_home);
+    assert!(
+        status.is_ok(),
+        "durable subscribe status failed: {:?}",
+        status
+    );
+    let status_json: serde_json::Value = serde_json::from_str(&status.unwrap()).unwrap();
+    assert_eq!(status_json["data"]["durable"], true);
+    assert_eq!(status_json["data"]["auto_resume"], true);
+    assert_eq!(status_json["data"]["restart_count"], 1);
+    assert!(status_json["data"]["last_resume_at_unix"].is_number());
+
+    let cleanup = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(
+        cleanup.is_ok(),
+        "durable subscribe cleanup failed: {:?}",
+        cleanup
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn test_poll_subscribe_start_status_stop_writes_file() {
     let server = start_test_server("openapi", "ok");
     let test_home = fresh_test_home_dir();
@@ -984,6 +1058,68 @@ fn test_poll_subscribe_start_status_stop_writes_file() {
     let stop_json: serde_json::Value = serde_json::from_str(&stop.unwrap()).unwrap();
     assert_eq!(stop_json["ok"], true);
     assert_eq!(stop_json["data"]["stopped"], true);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_ephemeral_subscribe_is_not_resumed_after_daemon_restart() {
+    let server = start_test_server("openapi", "ok");
+    let endpoint = format!("http://{}/stream", server.addr);
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("http-subscribe-ephemeral.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "--ephemeral",
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(
+        start.is_ok(),
+        "ephemeral subscribe start failed: {:?}",
+        start
+    );
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""value":2"#, Duration::from_secs(5)),
+        "ephemeral sink did not receive initial events"
+    );
+
+    let stop_daemon = run_uxc_in_home(&["daemon", "stop"], &test_home);
+    assert!(stop_daemon.is_ok(), "daemon stop failed: {:?}", stop_daemon);
+    let start_daemon = run_uxc_in_home(&["daemon", "start"], &test_home);
+    assert!(
+        start_daemon.is_ok(),
+        "daemon start failed: {:?}",
+        start_daemon
+    );
+
+    let status = run_uxc_in_home(&["subscribe", "status", &job_id], &test_home);
+    assert!(
+        status.is_ok(),
+        "ephemeral subscribe status failed: {:?}",
+        status
+    );
+    let status_json: serde_json::Value = serde_json::from_str(&status.unwrap()).unwrap();
+    assert_eq!(status_json["data"]["durable"], false);
+    assert_eq!(status_json["data"]["auto_resume"], false);
+    assert_eq!(status_json["data"]["status"], "stopped_after_restart");
+    assert!(status_json["data"]["last_resume_at_unix"].is_null());
+
+    let cleanup = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(
+        cleanup.is_ok(),
+        "ephemeral subscribe cleanup failed: {:?}",
+        cleanup
+    );
 }
 
 #[test]

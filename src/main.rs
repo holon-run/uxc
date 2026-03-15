@@ -239,6 +239,10 @@ enum SubscribeCommands {
         /// JSON object describing poll interval, extraction, and checkpoint strategy
         #[arg(long = "poll-config", value_name = "JSON")]
         poll_config: Option<String>,
+
+        /// Do not auto-resume this subscription after daemon restart
+        #[arg(long)]
+        ephemeral: bool,
     },
     /// List background subscription jobs
     List,
@@ -1579,12 +1583,15 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "Supports stream subscriptions plus polling-based subscriptions under the same daemon-backed job model.".to_string(),
                 "Use --sink file:/path.ndjson to append normalized event envelopes to a file."
                     .to_string(),
+                "Subscriptions are durable by default and auto-resume after daemon restart; pass --ephemeral to avoid restart recovery."
+                    .to_string(),
                 "Stream mode covers raw HTTP JSON streams, GraphQL subscriptions, JSON-RPC pubsub over WebSocket, explicit raw WebSocket streams, and MCP resource subscriptions; poll mode repeatedly executes a normal operation and emits only new items."
                     .to_string(),
             ],
             examples: vec![
                 "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
                     .to_string(),
+                "uxc subscribe start https://example.com/stream --ephemeral --sink file:/tmp/oneshot.ndjson".to_string(),
                 "uxc subscribe start wss://stream.binance.com:9443/ws/btcusdt@trade --transport websocket --sink file:/tmp/binance.ndjson".to_string(),
                 "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"newHeads\"]}' --sink file:/tmp/heads.ndjson".to_string(),
@@ -1600,7 +1607,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["subscribe", "start"] => HelpData {
             path: "uxc subscribe start".to_string(),
             about: "Start a background subscription job".to_string(),
-            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--transport websocket] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>]".to_string(),
+            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--ephemeral] [--transport websocket] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>]".to_string(),
             commands: vec![],
             notes: vec![
                 "For raw HTTP streams, omit <operation_id> and use <endpoint> as the final stream URL.".to_string(),
@@ -1610,10 +1617,12 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "For JSON-RPC pubsub, pass a ws:// or wss:// endpoint plus a method ending in _subscribe; send raw JSON-RPC params through '{\"params\":...}'.".to_string(),
                 "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>.".to_string(),
                 "For poll mode, pass a normal operation ID plus --mode poll and --poll-config '{...}'; poll config controls interval, extraction, checkpoint strategy, and optional item-derived request cursors.".to_string(),
+                "Subscriptions are durable by default. Use --ephemeral when the job should not auto-resume after daemon restart.".to_string(),
             ],
             examples: vec![
                 "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
                     .to_string(),
+                "uxc subscribe start https://example.com/stream --ephemeral --sink file:/tmp/oneshot.ndjson".to_string(),
                 "uxc subscribe start wss://ws.okx.com:8443/ws/v5/public --transport websocket --init-frame '{\"op\":\"subscribe\",\"args\":[{\"channel\":\"tickers\",\"instId\":\"BTC-USDT\"}]}' --sink file:/tmp/okx.ndjson".to_string(),
                 "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\",\"_select\":\"id body\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"logs\",{\"address\":\"0xabc\"}]}' --sink file:/tmp/logs.ndjson".to_string(),
@@ -3495,6 +3504,7 @@ async fn handle_subscribe_command(
             init_frames,
             mode,
             poll_config,
+            ephemeral,
         } => {
             let transport_hint = transport.as_ref().map(|value| match value {
                 SubscribeTransportArg::Websocket => daemon::SubscriptionTransportHint::Websocket,
@@ -3592,6 +3602,7 @@ async fn handle_subscribe_command(
                     SubscribeModeArg::Poll => daemon::SubscriptionMode::Poll,
                 },
                 poll_config,
+                ephemeral: *ephemeral,
                 options: daemon::RuntimeInvokeOptions {
                     auth: cli.auth.clone(),
                     inject_env: collect_inject_env_specs(cli)?,
