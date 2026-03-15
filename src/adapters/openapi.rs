@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
@@ -213,7 +214,43 @@ impl OpenAPIAdapter {
         body.get("openapi").is_some() || body.get("swagger").is_some()
     }
 
-    async fn check_schema_url(&self, schema_url: &str) -> Result<bool> {
+    fn parse_schema_file_path(schema_url: &str) -> Result<Option<PathBuf>> {
+        let path_like = Path::new(schema_url);
+        if path_like.is_absolute() || schema_url.starts_with("./") || schema_url.starts_with("../")
+        {
+            return Ok(Some(path_like.to_path_buf()));
+        }
+
+        if let Ok(parsed) = url::Url::parse(schema_url) {
+            return match parsed.scheme() {
+                "http" | "https" => Ok(None),
+                "file" => parsed.to_file_path().map(Some).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Invalid file schema URL '{}': unable to resolve path",
+                        schema_url
+                    )
+                }),
+                scheme => Err(anyhow::anyhow!(
+                    "Unsupported schema URL scheme '{}': {}",
+                    scheme,
+                    schema_url
+                )),
+            };
+        }
+
+        Ok(Some(path_like.to_path_buf()))
+    }
+
+    async fn load_schema_document(&self, schema_url: &str) -> Result<Value> {
+        if let Some(path) = Self::parse_schema_file_path(schema_url)? {
+            let raw = tokio::fs::read_to_string(&path).await.with_context(|| {
+                format!("Failed to read OpenAPI schema file '{}'", path.display())
+            })?;
+            return serde_json::from_str(&raw).with_context(|| {
+                format!("Failed to parse OpenAPI schema file '{}'", path.display())
+            });
+        }
+
         let response = self
             .send_with_oauth_retry(|profile| {
                 let resolved = self.resolve_schema_auth_profile("GET", schema_url, profile)?;
@@ -227,11 +264,30 @@ impl OpenAPIAdapter {
             .await?;
 
         if !response.status().is_success() {
-            return Ok(false);
+            anyhow::bail!(
+                "Schema URL returned HTTP {}: {}",
+                response.status().as_u16(),
+                schema_url
+            );
         }
 
-        let body = response.json::<Value>().await?;
-        Ok(Self::is_openapi_document(&body))
+        response
+            .json::<Value>()
+            .await
+            .with_context(|| format!("Failed to parse OpenAPI schema from '{}'", schema_url))
+    }
+
+    async fn check_schema_url(&self, schema_url: &str) -> Result<bool> {
+        match self.load_schema_document(schema_url).await {
+            Ok(body) => Ok(Self::is_openapi_document(&body)),
+            Err(err) => {
+                if Self::parse_schema_file_path(schema_url)?.is_some() {
+                    return Err(err);
+                }
+                debug!("Failed to check schema URL '{}': {}", schema_url, err);
+                Ok(false)
+            }
+        }
     }
 
     fn is_http_method(method: &str) -> bool {
@@ -1254,15 +1310,7 @@ impl Adapter for OpenAPIAdapter {
             }
         }
 
-        // Fetch from remote
-        let resp = self
-            .send_with_oauth_retry(|profile| {
-                let resolved = self.resolve_schema_auth_profile("GET", &schema_url, profile)?;
-                let req = self.client.get(&resolved.url);
-                Ok(Self::apply_resolved_request_auth(req, &resolved))
-            })
-            .await?;
-        let schema: Value = resp.json().await?;
+        let schema = self.load_schema_document(&schema_url).await?;
 
         // Store in cache if available
         if let Some(cache) = &self.cache {
@@ -1577,6 +1625,36 @@ mod tests {
     fn schema_candidates_do_not_append_to_schema_url() {
         let candidates = OpenAPIAdapter::schema_candidates("https://example.com/openapi.json");
         assert_eq!(candidates, vec!["https://example.com/openapi.json"]);
+    }
+
+    #[tokio::test]
+    async fn schema_url_override_supports_local_schema_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let schema_path = temp_dir.path().join("openapi.json");
+        std::fs::write(&schema_path, openapi_doc()).unwrap();
+
+        let adapter =
+            OpenAPIAdapter::new().with_schema_url_override(Some(schema_path.display().to_string()));
+
+        assert!(adapter.can_handle("https://example.com").await.unwrap());
+        let schema = adapter.fetch_schema("https://example.com").await.unwrap();
+        assert_eq!(schema["openapi"], "3.0.0");
+    }
+
+    #[tokio::test]
+    async fn schema_url_override_supports_file_url_schema() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let schema_path = temp_dir.path().join("openapi.json");
+        std::fs::write(&schema_path, openapi_doc()).unwrap();
+        let schema_url = url::Url::from_file_path(&schema_path)
+            .expect("temp schema path should convert to file URL")
+            .to_string();
+
+        let adapter = OpenAPIAdapter::new().with_schema_url_override(Some(schema_url));
+
+        assert!(adapter.can_handle("https://example.com").await.unwrap());
+        let schema = adapter.fetch_schema("https://example.com").await.unwrap();
+        assert_eq!(schema["openapi"], "3.0.0");
     }
 
     #[test]
