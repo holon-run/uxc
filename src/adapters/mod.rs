@@ -223,6 +223,8 @@ impl ProtocolDetector {
         url: &str,
         options: &DetectionOptions,
     ) -> Result<AdapterEnum> {
+        let mut schema_probe_errors = Vec::new();
+
         // Try MCP first (stdio commands are distinct)
         let mut mcp_adapter = mcp::McpAdapter::new();
         if let Some(profile) = options.auth_profile.clone() {
@@ -253,18 +255,30 @@ impl ProtocolDetector {
         } else {
             openapi::OpenAPIAdapter::new().with_schema_url_override(options.schema_url.clone())
         };
-        if openapi_adapter.can_handle(url).await? {
-            return Ok(AdapterEnum::OpenAPI(openapi_adapter));
+        match openapi_adapter.can_handle(url).await {
+            Ok(true) => return Ok(AdapterEnum::OpenAPI(openapi_adapter)),
+            Ok(false) => {}
+            Err(err) if options.schema_url.is_some() => {
+                schema_probe_errors.push(format!("OpenAPI probe failed: {err}"));
+            }
+            Err(err) => return Err(err),
         }
 
         // Try JSON-RPC (OpenRPC discovery)
         let jsonrpc_adapter = if let Some(profile) = options.auth_profile.clone() {
-            jsonrpc::JsonRpcAdapter::new().with_auth(profile)
-        } else {
             jsonrpc::JsonRpcAdapter::new()
+                .with_schema_url_override(options.schema_url.clone())
+                .with_auth(profile)
+        } else {
+            jsonrpc::JsonRpcAdapter::new().with_schema_url_override(options.schema_url.clone())
         };
-        if jsonrpc_adapter.can_handle(url).await? {
-            return Ok(AdapterEnum::JsonRpc(jsonrpc_adapter));
+        match jsonrpc_adapter.can_handle(url).await {
+            Ok(true) => return Ok(AdapterEnum::JsonRpc(jsonrpc_adapter)),
+            Ok(false) => {}
+            Err(err) if options.schema_url.is_some() => {
+                schema_probe_errors.push(format!("JSON-RPC probe failed: {err}"));
+            }
+            Err(err) => return Err(err),
         }
 
         // Try gRPC (less reliable detection, try last)
@@ -280,6 +294,12 @@ impl ProtocolDetector {
         let mut message = format!("No adapter found for URL: {}", url);
         if let Some(diag) = mcp_adapter.latest_probe_diagnostics().await {
             message.push_str(&format!(". MCP probe diagnostics: {}", diag));
+        }
+        if !schema_probe_errors.is_empty() {
+            message.push_str(&format!(
+                ". Schema probe diagnostics: {}",
+                schema_probe_errors.join(" | ")
+            ));
         }
 
         Err(UxcError::ProtocolDetectionFailed(message).into())

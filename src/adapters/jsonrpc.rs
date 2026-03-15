@@ -14,6 +14,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
@@ -31,6 +32,7 @@ pub struct JsonRpcAdapter {
     runtime_auth_profile: Arc<Mutex<Option<Profile>>>,
     oauth_refresh_lock: Arc<Mutex<()>>,
     force_refresh_schema: bool,
+    schema_url_override: Option<String>,
     discovered: Arc<RwLock<HashMap<String, ResolvedOpenRpc>>>,
     next_id: Arc<Mutex<i64>>,
 }
@@ -47,6 +49,7 @@ impl JsonRpcAdapter {
             runtime_auth_profile: Arc::new(Mutex::new(None)),
             oauth_refresh_lock: Arc::new(Mutex::new(())),
             force_refresh_schema: false,
+            schema_url_override: None,
             discovered: Arc::new(RwLock::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
         }
@@ -64,6 +67,11 @@ impl JsonRpcAdapter {
 
     pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
         self.force_refresh_schema = refresh;
+        self
+    }
+
+    pub fn with_schema_url_override(mut self, schema_url: Option<String>) -> Self {
+        self.schema_url_override = schema_url;
         self
     }
 
@@ -174,6 +182,77 @@ impl JsonRpcAdapter {
         candidates.sort();
         candidates.dedup();
         candidates
+    }
+
+    fn parse_schema_file_path(schema_url: &str) -> Result<Option<PathBuf>> {
+        let path_like = Path::new(schema_url);
+        if path_like.is_absolute() || schema_url.starts_with("./") || schema_url.starts_with("../")
+        {
+            return Ok(Some(path_like.to_path_buf()));
+        }
+
+        let treat_as_url = schema_url.contains("://")
+            || schema_url.starts_with("file:")
+            || schema_url.starts_with("http:")
+            || schema_url.starts_with("https:");
+        if !treat_as_url {
+            return Ok(Some(path_like.to_path_buf()));
+        }
+
+        let parsed = url::Url::parse(schema_url).with_context(|| {
+            format!("Invalid schema URL '{}': expected a valid URL", schema_url)
+        })?;
+        if parsed.scheme() == "file" {
+            let path = parsed.to_file_path().map_err(|_| {
+                UxcError::SchemaRetrievalFailed(format!(
+                    "Invalid file schema URL '{}': must be a valid local file path",
+                    schema_url
+                ))
+            })?;
+            return Ok(Some(path));
+        }
+        Ok(None)
+    }
+
+    async fn load_schema_document(&self, schema_url: &str) -> Result<Value> {
+        if let Some(path) = Self::parse_schema_file_path(schema_url)? {
+            let body = std::fs::read_to_string(&path).with_context(|| {
+                format!("Failed to read OpenRPC schema file '{}'", path.display())
+            })?;
+            return serde_json::from_str(&body).with_context(|| {
+                format!(
+                    "Failed to parse OpenRPC schema from local file '{}'",
+                    path.display()
+                )
+            });
+        }
+
+        let response = self
+            .send_with_oauth_retry(|profile| {
+                let resolved = Self::resolve_auth_profile("GET", schema_url, profile)?;
+                let req = self
+                    .client
+                    .get(&resolved.url)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .header("Accept", "application/json");
+                Ok(Self::apply_resolved_request_auth(req, &resolved))
+            })
+            .await
+            .with_context(|| format!("Failed to retrieve OpenRPC schema from '{}'", schema_url))?;
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!(
+                "Failed to retrieve OpenRPC schema from '{}': {} - {}",
+                schema_url,
+                status,
+                body
+            );
+        }
+
+        serde_json::from_str(&body)
+            .with_context(|| format!("Failed to parse OpenRPC schema from '{}'", schema_url))
     }
 
     fn schema_type_hint(schema: &Value) -> String {
@@ -534,8 +613,12 @@ impl JsonRpcAdapter {
         }))
     }
 
-    async fn discover_via_schema_urls(&self, url: &str) -> Result<Option<ResolvedOpenRpc>> {
-        for schema_url in Self::schema_candidates(url) {
+    async fn discover_via_schema_urls(
+        &self,
+        url: &str,
+        candidates: Vec<String>,
+    ) -> Result<Option<ResolvedOpenRpc>> {
+        for schema_url in candidates {
             let response = match self
                 .send_with_oauth_retry(|profile| {
                     let resolved = Self::resolve_auth_profile("GET", &schema_url, profile)?;
@@ -576,7 +659,7 @@ impl JsonRpcAdapter {
     }
 
     async fn discover_openrpc(&self, url: &str) -> Result<Option<ResolvedOpenRpc>> {
-        if !Self::is_http_url(url) {
+        if !Self::is_http_url(url) && self.schema_url_override.is_none() {
             return Ok(None);
         }
 
@@ -589,10 +672,20 @@ impl JsonRpcAdapter {
             }
         }
 
-        let discovered = if let Some(found) = self.discover_via_rpc_discover(&normalized).await? {
+        let discovered = if let Some(schema_url) = &self.schema_url_override {
+            let body = self.load_schema_document(schema_url).await?;
+            if !Self::is_openrpc_document(&body) {
+                return Ok(None);
+            }
+            Some(ResolvedOpenRpc {
+                rpc_url: Self::resolve_rpc_url_from_openrpc(&body, schema_url, &normalized),
+                schema: body,
+            })
+        } else if let Some(found) = self.discover_via_rpc_discover(&normalized).await? {
             Some(found)
         } else {
-            self.discover_via_schema_urls(&normalized).await?
+            self.discover_via_schema_urls(&normalized, Self::schema_candidates(&normalized))
+                .await?
         };
 
         if let Some(found) = discovered {
@@ -910,6 +1003,55 @@ mod tests {
             ),
             "https://example.com"
         );
+    }
+
+    #[tokio::test]
+    async fn schema_url_override_supports_remote_openrpc_document() {
+        let mut schema_server = mockito::Server::new_async().await;
+        let _schema = schema_server
+            .mock("GET", "/openrpc.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                  "openrpc":"1.2.6",
+                  "info":{"title":"ethereum","version":"1.0.0"},
+                  "methods":[{"name":"eth_blockNumber","params":[],"result":{"name":"blockNumber","schema":{"type":"string"}}}]
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let adapter = JsonRpcAdapter::new()
+            .with_schema_url_override(Some(format!("{}/openrpc.json", schema_server.url())));
+        let result = adapter
+            .fetch_schema("https://ethereum.example")
+            .await
+            .unwrap();
+        assert_eq!(result["methods"][0]["name"], "eth_blockNumber");
+    }
+
+    #[tokio::test]
+    async fn schema_url_override_supports_local_openrpc_file() {
+        let schema_dir = tempfile::tempdir().expect("tempdir");
+        let schema_path = schema_dir.path().join("openrpc.json");
+        std::fs::write(
+            &schema_path,
+            r#"{
+              "openrpc":"1.2.6",
+              "info":{"title":"ethereum","version":"1.0.0"},
+              "methods":[{"name":"eth_chainId","params":[],"result":{"name":"chainId","schema":{"type":"string"}}}]
+            }"#,
+        )
+        .expect("write schema");
+
+        let adapter =
+            JsonRpcAdapter::new().with_schema_url_override(Some(schema_path.display().to_string()));
+        let result = adapter
+            .fetch_schema("https://ethereum.example")
+            .await
+            .unwrap();
+        assert_eq!(result["methods"][0]["name"], "eth_chainId");
     }
 
     #[tokio::test]
