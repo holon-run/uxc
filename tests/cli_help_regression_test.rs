@@ -1157,6 +1157,130 @@ fn schema_url_override_supports_schema_separated_openapi_service() {
 
 #[test]
 #[serial]
+fn schema_url_override_supports_local_schema_file() {
+    let mut target_server = mockito::Server::new();
+    let _call = target_server
+        .mock("GET", "/pets")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"items":[]}"#)
+        .create();
+
+    let schema_dir = tempfile::tempdir().expect("failed to create tempdir");
+    let schema_path = schema_dir.path().join("schema.json");
+    std::fs::write(
+        &schema_path,
+        r#"{
+  "openapi": "3.0.0",
+  "info": { "title": "local", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "list pets",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"#,
+    )
+    .expect("failed to write schema file");
+
+    let host_help_output = uxc_command()
+        .arg(target_server.url())
+        .arg("--no-cache")
+        .arg("--schema-url")
+        .arg(&schema_path)
+        .arg("-h")
+        .output()
+        .expect("failed to run uxc host help");
+    assert!(
+        host_help_output.status.success(),
+        "host help should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&host_help_output.stdout),
+        String::from_utf8_lossy(&host_help_output.stderr)
+    );
+    let host_help_json: serde_json::Value =
+        serde_json::from_slice(&host_help_output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(host_help_json["protocol"], "openapi");
+    assert!(host_help_json["data"]["operations"]
+        .as_array()
+        .is_some_and(|ops| { ops.iter().any(|op| op["operation_id"] == "get:/pets") }));
+
+    let call_output = uxc_command()
+        .arg(target_server.url())
+        .arg("--no-cache")
+        .arg("--schema-url")
+        .arg(&schema_path)
+        .arg("get:/pets")
+        .output()
+        .expect("failed to run uxc operation call");
+    assert!(
+        call_output.status.success(),
+        "call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&call_output.stdout),
+        String::from_utf8_lossy(&call_output.stderr)
+    );
+    let call_json: serde_json::Value =
+        serde_json::from_slice(&call_output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(call_json["ok"], true);
+    assert_eq!(call_json["kind"], "call_result");
+}
+
+#[test]
+#[serial]
+fn schema_url_override_supports_file_url_schema() {
+    let mut target_server = mockito::Server::new();
+    let _call = target_server
+        .mock("GET", "/pets")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"items":[]}"#)
+        .create();
+
+    let schema_dir = tempfile::tempdir().expect("failed to create tempdir");
+    let schema_path = schema_dir.path().join("schema.json");
+    std::fs::write(
+        &schema_path,
+        r#"{
+  "openapi": "3.0.0",
+  "info": { "title": "local-file-url", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "list pets",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"#,
+    )
+    .expect("failed to write schema file");
+    let schema_url = url::Url::from_file_path(&schema_path)
+        .expect("schema path should convert to file URL")
+        .to_string();
+
+    let call_output = uxc_command()
+        .arg(target_server.url())
+        .arg("--no-cache")
+        .arg("--schema-url")
+        .arg(&schema_url)
+        .arg("get:/pets")
+        .output()
+        .expect("failed to run uxc operation call");
+    assert!(
+        call_output.status.success(),
+        "call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&call_output.stdout),
+        String::from_utf8_lossy(&call_output.stderr)
+    );
+    let call_json: serde_json::Value =
+        serde_json::from_slice(&call_output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(call_json["ok"], true);
+    assert_eq!(call_json["kind"], "call_result");
+}
+
+#[test]
+#[serial]
 fn user_schema_mapping_file_supports_schema_separated_openapi_service() {
     let mut target_server = mockito::Server::new();
     let _call = target_server
