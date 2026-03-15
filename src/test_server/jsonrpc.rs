@@ -50,6 +50,52 @@ struct JsonRpcError {
     message: String,
 }
 
+#[derive(Clone, Copy)]
+enum JsonRpcPubSubProfile {
+    DerivedUnsubscribe,
+    CloseOnly,
+}
+
+fn pubsub_profile(scenario: Scenario) -> Option<JsonRpcPubSubProfile> {
+    match scenario {
+        Scenario::Ok | Scenario::Legacy => Some(JsonRpcPubSubProfile::DerivedUnsubscribe),
+        Scenario::SuiPubSub => Some(JsonRpcPubSubProfile::CloseOnly),
+        _ => None,
+    }
+}
+
+fn is_subscription_method(method: &str, profile: JsonRpcPubSubProfile) -> bool {
+    match profile {
+        JsonRpcPubSubProfile::DerivedUnsubscribe => method.ends_with("_subscribe"),
+        JsonRpcPubSubProfile::CloseOnly => {
+            method.contains("subscribe") && !method.contains("unsubscribe")
+        }
+    }
+}
+
+fn notification_method(profile: JsonRpcPubSubProfile) -> &'static str {
+    match profile {
+        JsonRpcPubSubProfile::DerivedUnsubscribe => "eth_subscription",
+        JsonRpcPubSubProfile::CloseOnly => "subscription",
+    }
+}
+
+fn notification_result(profile: JsonRpcPubSubProfile) -> serde_json::Value {
+    match profile {
+        JsonRpcPubSubProfile::DerivedUnsubscribe => json!({
+            "number": "0x1",
+            "hash": "0xabc"
+        }),
+        JsonRpcPubSubProfile::CloseOnly => json!({
+            "id": {
+                "txDigest": "0xabc",
+                "eventSeq": "0"
+            },
+            "packageId": "0x2"
+        }),
+    }
+}
+
 async fn handle_jsonrpc_websocket(mut socket: WebSocket, state: ServerState) {
     let mut next_subscription_id = 1u64;
 
@@ -65,58 +111,38 @@ async fn handle_jsonrpc_websocket(mut socket: WebSocket, state: ServerState) {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
-        let is_sui_subscribe = method == "suix_subscribeEvent" || method == "suix_subscribeTransaction";
 
-        if method.ends_with("_subscribe") || (matches!(state.scenario, Scenario::SuiPubSub) && is_sui_subscribe) {
-            let subscription_id = format!("sub-{}", next_subscription_id);
-            next_subscription_id += 1;
-            let _ = socket
-                .send(Message::Text(
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": subscription_id,
-                    })
-                    .to_string(),
-                ))
-                .await;
-
-            if matches!(state.scenario, Scenario::Ok | Scenario::Legacy | Scenario::SuiPubSub) {
-                sleep(Duration::from_millis(50)).await;
-                let notification_method = if matches!(state.scenario, Scenario::SuiPubSub) {
-                    "suix_subscription"
-                } else {
-                    "eth_subscription"
-                };
-                let notification_result = if matches!(state.scenario, Scenario::SuiPubSub) {
-                    json!({
-                        "id": {
-                            "txDigest": "0xabc",
-                            "eventSeq": "0"
-                        },
-                        "packageId": "0x2"
-                    })
-                } else {
-                    json!({
-                        "number": "0x1",
-                        "hash": "0xabc"
-                    })
-                };
+        if let Some(profile) = pubsub_profile(state.scenario) {
+            if is_subscription_method(method, profile) {
+                let subscription_id = format!("sub-{}", next_subscription_id);
+                next_subscription_id += 1;
                 let _ = socket
                     .send(Message::Text(
                         json!({
                             "jsonrpc": "2.0",
-                            "method": notification_method,
+                            "id": id,
+                            "result": subscription_id,
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+
+                sleep(Duration::from_millis(50)).await;
+                let _ = socket
+                    .send(Message::Text(
+                        json!({
+                            "jsonrpc": "2.0",
+                            "method": notification_method(profile),
                             "params": {
                                 "subscription": subscription_id,
-                                "result": notification_result
+                                "result": notification_result(profile)
                             }
                         })
                         .to_string(),
                     ))
                     .await;
+                continue;
             }
-            continue;
         }
 
         if method.ends_with("_unsubscribe") {
@@ -137,19 +163,13 @@ async fn handle_jsonrpc_websocket(mut socket: WebSocket, state: ServerState) {
 }
 
 /// Serve OpenRPC schema
-async fn serve_schema() -> Json<serde_json::Value> {
-    Json(schema_value())
+async fn serve_schema(State(state): State<ServerState>) -> Json<serde_json::Value> {
+    Json(schema_value(state.scenario))
 }
 
-fn schema_value() -> serde_json::Value {
-    json!({
-      "openrpc": "1.2.6",
-      "info": {
-        "title": "UXC Test JSON-RPC API",
-        "version": "1.0.0"
-      },
-      "methods": [
-        {
+fn schema_value(scenario: Scenario) -> serde_json::Value {
+    let mut methods = vec![
+        json!({
           "name": "health",
           "summary": "Health check",
           "params": [],
@@ -162,8 +182,8 @@ fn schema_value() -> serde_json::Value {
               }
             }
           }
-        },
-        {
+        }),
+        json!({
           "name": "get_user",
           "summary": "Get user by ID",
           "params": [
@@ -184,8 +204,8 @@ fn schema_value() -> serde_json::Value {
               }
             }
           }
-        },
-        {
+        }),
+        json!({
           "name": "list_users",
           "summary": "List all users",
           "params": [],
@@ -203,8 +223,8 @@ fn schema_value() -> serde_json::Value {
               }
             }
           }
-        },
-        {
+        }),
+        json!({
           "name": "create_user",
           "summary": "Create a new user",
           "params": [
@@ -230,8 +250,11 @@ fn schema_value() -> serde_json::Value {
               }
             }
           }
-        },
-        {
+        }),
+    ];
+
+    if matches!(scenario, Scenario::SuiPubSub) {
+        methods.push(json!({
           "name": "suix_subscribeEvent",
           "summary": "Subscribe to a stream of Sui event",
           "params": [
@@ -250,8 +273,8 @@ fn schema_value() -> serde_json::Value {
               }
             }
           }
-        },
-        {
+        }));
+        methods.push(json!({
           "name": "suix_subscribeTransaction",
           "summary": "Subscribe to a stream of Sui transaction effects",
           "params": [
@@ -270,8 +293,16 @@ fn schema_value() -> serde_json::Value {
               }
             }
           }
-        }
-      ]
+        }));
+    }
+
+    json!({
+      "openrpc": "1.2.6",
+      "info": {
+        "title": "UXC Test JSON-RPC API",
+        "version": "1.0.0"
+      },
+      "methods": methods
     })
 }
 
@@ -291,7 +322,7 @@ async fn execute_method(
         | Scenario::StructuredContent
         | Scenario::DynamicToolset => {
             let result = match method {
-                "rpc.discover" => schema_value(),
+                "rpc.discover" => schema_value(state.scenario),
                 "health" => json!({"status": "ok"}),
                 "list_users" => json!([
                     {"id": 1, "name": "Alice", "email": "alice@example.com"},
@@ -392,7 +423,7 @@ fn create_router(state: ServerState) -> Router {
                 .on_upgrade(move |socket| handle_jsonrpc_websocket(socket, state))
                 .into_response();
         }
-        serve_schema().await.into_response()
+        serve_schema(State(state)).await.into_response()
     }
 
     async fn jsonrpc_handler(

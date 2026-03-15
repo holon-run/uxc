@@ -20,6 +20,12 @@ pub fn resolve_jsonrpc_unsubscribe_operation(operation_id: &str) -> Result<Optio
     if let Some(prefix) = operation_id.strip_suffix("_subscribe") {
         return Ok(Some(format!("{prefix}_unsubscribe")));
     }
+    if operation_id.contains("unsubscribe") {
+        bail!(
+            "JSON-RPC subscription operation '{}' cannot be an unsubscribe method",
+            operation_id
+        );
+    }
     if operation_id.contains("subscribe") {
         return Ok(None);
     }
@@ -196,6 +202,12 @@ mod tests {
     fn rejects_non_subscribe_operation_name() {
         let err = resolve_jsonrpc_unsubscribe_operation("watch_heads").unwrap_err();
         assert!(err.to_string().contains("contain 'subscribe'"));
+    }
+
+    #[test]
+    fn rejects_unsubscribe_operation_name() {
+        let err = resolve_jsonrpc_unsubscribe_operation("eth_unsubscribe").unwrap_err();
+        assert!(err.to_string().contains("cannot be an unsubscribe method"));
     }
 
     #[tokio::test]
