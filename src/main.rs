@@ -25,6 +25,7 @@ mod http_client;
 mod output;
 mod schema_mapping;
 mod subscription_discord;
+mod subscription_feishu;
 mod subscription_graphql;
 mod subscription_jsonrpc;
 mod subscription_poll;
@@ -62,6 +63,7 @@ enum SubscribeTransportArg {
     Websocket,
     DiscordGateway,
     SlackSocketMode,
+    FeishuLongConnection,
 }
 
 #[derive(Parser)]
@@ -1702,6 +1704,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc subscribe start wss://stream.binance.com:9443/ws/btcusdt@trade --transport websocket --sink file:/tmp/binance.ndjson".to_string(),
                 "uxc subscribe start https://discord.com/api/v10 --transport discord-gateway --auth discord-bot --sink file:/tmp/discord.ndjson".to_string(),
                 "uxc subscribe start https://slack.com/api --transport slack-socket-mode --auth slack-app --sink file:/tmp/slack.ndjson".to_string(),
+                "uxc subscribe start https://open.feishu.cn/open-apis --transport feishu-long-connection --auth feishu-tenant --sink file:/tmp/feishu.ndjson".to_string(),
                 "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"newHeads\"]}' --sink file:/tmp/heads.ndjson".to_string(),
                 "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"request_cursor_arg\":\"cursor\",\"response_cursor_pointer\":\"/next_cursor\",\"checkpoint_strategy\":{\"type\":\"cursor_only\"}}' --sink file:/tmp/poll.ndjson".to_string(),
@@ -1716,13 +1719,14 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["subscribe", "start"] => HelpData {
             path: "uxc subscribe start".to_string(),
             about: "Start a background subscription job".to_string(),
-            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--ephemeral] [--transport websocket|discord-gateway|slack-socket-mode] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>]".to_string(),
+            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--ephemeral] [--transport websocket|discord-gateway|slack-socket-mode|feishu-long-connection] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>]".to_string(),
             commands: vec![],
             notes: vec![
                 "For raw HTTP streams, omit <operation_id> and use <endpoint> as the final stream URL.".to_string(),
                 "For generic raw WebSocket streams, pass --transport websocket plus a ws:// or wss:// endpoint; --subprotocol and --init-frame are optional and can be repeated independently.".to_string(),
                 "For Discord Gateway, pass --transport discord-gateway plus a Discord REST API base such as https://discord.com/api/v10 and a bot token via --auth; optional config may be provided as positional JSON or via --input-json to set intents, os, browser, or device.".to_string(),
                 "For Slack Socket Mode, pass --transport slack-socket-mode plus a Slack Web API base endpoint such as https://slack.com/api and an app-level xapp token via --auth; the runtime opens a fresh temporary WebSocket URL on each connect attempt.".to_string(),
+                "For Feishu or Lark long connection, pass --transport feishu-long-connection plus an Open Platform base endpoint such as https://open.feishu.cn/open-apis and a credential whose fields include app_id and app_secret; the runtime opens a fresh temporary WebSocket URL on each connect attempt.".to_string(),
                 "Raw WebSocket sink events preserve frame type in meta: JSON text frames populate data, plain text frames populate meta.text, and binary frames populate meta.base64.".to_string(),
                 "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint, reuses auth/cache behavior, and automatically falls back between modern and legacy GraphQL websocket profiles.".to_string(),
                 "For JSON-RPC pubsub, pass a ws:// or wss:// endpoint plus a method ending in _subscribe; send raw JSON-RPC params through '{\"params\":...}'.".to_string(),
@@ -1737,6 +1741,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc subscribe start wss://ws.okx.com:8443/ws/v5/public --transport websocket --init-frame '{\"op\":\"subscribe\",\"args\":[{\"channel\":\"tickers\",\"instId\":\"BTC-USDT\"}]}' --sink file:/tmp/okx.ndjson".to_string(),
                 "uxc subscribe start https://discord.com/api/v10 --transport discord-gateway --auth discord-bot '{\"intents\":37377}' --sink file:/tmp/discord.ndjson".to_string(),
                 "uxc subscribe start https://slack.com/api --transport slack-socket-mode --auth slack-app --sink file:/tmp/slack.ndjson".to_string(),
+                "uxc subscribe start https://open.feishu.cn/open-apis --transport feishu-long-connection --auth feishu-tenant --sink file:/tmp/feishu.ndjson".to_string(),
                 "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\",\"_select\":\"id body\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"logs\",{\"address\":\"0xabc\"}]}' --sink file:/tmp/logs.ndjson".to_string(),
                 "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}' --sink file:/tmp/events.ndjson".to_string(),
@@ -3684,6 +3689,9 @@ async fn handle_subscribe_command(
                 SubscribeTransportArg::SlackSocketMode => {
                     daemon::SubscriptionTransportHint::SlackSocketMode
                 }
+                SubscribeTransportArg::FeishuLongConnection => {
+                    daemon::SubscriptionTransportHint::FeishuLongConnection
+                }
             });
             let mut transport_operation_id = operation_id.clone();
             let mut transport_input_json = input_json.clone();
@@ -3793,6 +3801,32 @@ async fn handle_subscribe_command(
                     .into());
                 }
             }
+            if matches!(
+                transport_hint,
+                Some(daemon::SubscriptionTransportHint::FeishuLongConnection)
+            ) {
+                if operation_id.is_some() {
+                    return Err(UxcError::InvalidArguments(
+                        "--transport feishu-long-connection cannot be combined with an operation_id"
+                            .to_string(),
+                    )
+                    .into());
+                }
+                if resource_uri.is_some() {
+                    return Err(UxcError::InvalidArguments(
+                        "--transport feishu-long-connection cannot be combined with --resource-uri"
+                            .to_string(),
+                    )
+                    .into());
+                }
+                if !matches!(mode, SubscribeModeArg::Stream) {
+                    return Err(UxcError::InvalidArguments(
+                        "--transport feishu-long-connection is only valid with --mode stream"
+                            .to_string(),
+                    )
+                    .into());
+                }
+            }
             let (normalized_args, normalized_input_json) = match transport_operation_id.as_ref() {
                 Some(op) => {
                     let mut explicit_args = Vec::new();
@@ -3831,6 +3865,25 @@ async fn handle_subscribe_command(
                             transport_input_json.clone(),
                             &positional,
                         )?
+                    } else if matches!(
+                        transport_hint,
+                        Some(daemon::SubscriptionTransportHint::FeishuLongConnection)
+                    ) {
+                        let mut explicit_args = Vec::new();
+                        let mut positional = Vec::new();
+                        for arg in args {
+                            if arg.contains('=') {
+                                explicit_args.push(arg.clone());
+                            } else {
+                                positional.push(arg.clone());
+                            }
+                        }
+                        normalize_operation_inputs(
+                            "feishu-long-connection",
+                            explicit_args,
+                            transport_input_json.clone(),
+                            &positional,
+                        )?
                     } else if transport_input_json.is_some() || !args.is_empty() {
                         return Err(UxcError::InvalidArguments(
                             "subscribe start only accepts operation arguments when <operation_id> is provided".to_string(),
@@ -3859,6 +3912,19 @@ async fn handle_subscribe_command(
                     parse_arguments(normalized_args, normalized_input_json).map_err(|err| {
                         UxcError::InvalidArguments(format!(
                             "Invalid arguments for subscribe transport 'discord-gateway': {}",
+                            err
+                        ))
+                    })?,
+                )
+            } else if matches!(
+                transport_hint,
+                Some(daemon::SubscriptionTransportHint::FeishuLongConnection)
+            ) && (normalized_input_json.is_some() || !normalized_args.is_empty())
+            {
+                Some(
+                    parse_arguments(normalized_args, normalized_input_json).map_err(|err| {
+                        UxcError::InvalidArguments(format!(
+                            "Invalid arguments for subscribe transport 'feishu-long-connection': {}",
                             err
                         ))
                     })?,

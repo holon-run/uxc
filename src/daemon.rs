@@ -13,6 +13,11 @@ use crate::subscription_discord::{
     DiscordGatewayBotResponse, DiscordGatewayHandler, DiscordGatewayRuntimeConfig,
     DiscordIdentifyProperties, DISCORD_DEFAULT_MESSAGE_INTENTS,
 };
+use crate::subscription_feishu::{
+    derive_feishu_ws_config_endpoint, parse_feishu_long_connection_open_response,
+    resolve_feishu_long_connection_runtime_config, FeishuLongConnectionHandler,
+    FeishuLongConnectionOpenResponse,
+};
 use crate::subscription_graphql::{
     derive_graphql_websocket_endpoint, graphql_transport_init_message, GraphQLProfileFallback,
     GraphQLSubscriptionConfig, GraphQLSubscriptionHandler, GraphQLWebSocketProfile,
@@ -182,6 +187,7 @@ pub enum SubscriptionTransportHint {
     Websocket,
     DiscordGateway,
     SlackSocketMode,
+    FeishuLongConnection,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -804,6 +810,14 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
                 }
                 return Ok("slack_socket_mode".to_string());
             }
+            SubscriptionTransportHint::FeishuLongConnection => {
+                if !lower.starts_with("http://") && !lower.starts_with("https://") {
+                    bail!(
+                        "feishu-long-connection transport requires an http:// or https:// Feishu/Lark API endpoint"
+                    );
+                }
+                return Ok("feishu_long_connection".to_string());
+            }
         }
     }
 
@@ -1005,6 +1019,22 @@ impl SubscriptionManager {
             if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
                 bail!("slack-socket-mode transport manages its own websocket setup and does not accept --subprotocol or --init-frame");
             }
+        } else if matches!(
+            request.transport_hint,
+            Some(SubscriptionTransportHint::FeishuLongConnection)
+        ) {
+            if request.operation_id.is_some() {
+                bail!("feishu-long-connection transport cannot be combined with an operation_id");
+            }
+            if request.resource_uri.is_some() {
+                bail!("feishu-long-connection transport cannot be combined with --resource-uri");
+            }
+            if request.mode != SubscriptionMode::Stream {
+                bail!("feishu-long-connection transport is only valid with stream mode");
+            }
+            if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
+                bail!("feishu-long-connection transport manages its own websocket setup and does not accept --subprotocol or --init-frame");
+            }
         } else if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
             bail!("websocket subprotocols and init frames require websocket transport");
         }
@@ -1013,6 +1043,7 @@ impl SubscriptionManager {
             && !matches!(
                 request.transport_hint,
                 Some(SubscriptionTransportHint::DiscordGateway)
+                    | Some(SubscriptionTransportHint::FeishuLongConnection)
             )
         {
             bail!("subscribe start cannot accept args without an operation_id");
@@ -2431,6 +2462,15 @@ async fn run_stream_subscription_job(
         return run_slack_socket_mode_subscription_job(job_id, request, sink_path, view, stop_rx)
             .await;
     }
+    if matches!(
+        request.transport_hint,
+        Some(SubscriptionTransportHint::FeishuLongConnection)
+    ) {
+        return run_feishu_long_connection_subscription_job(
+            job_id, request, sink_path, view, stop_rx,
+        )
+        .await;
+    }
 
     if request.operation_id.is_some() {
         if request
@@ -2667,6 +2707,49 @@ async fn open_slack_socket_mode_websocket_url(request: &SubscribeStartRequest) -
     let body = response.json::<Value>().await?;
     let parsed = parse_socket_mode_open_response(&body)?;
     Ok(parsed.websocket_url)
+}
+
+async fn open_feishu_long_connection_websocket_url(
+    request: &SubscribeStartRequest,
+) -> Result<FeishuLongConnectionOpenResponse> {
+    let auth_profile = auth::resolve_auth_for_endpoint(
+        &request.endpoint,
+        request.options.auth.clone(),
+    )?
+    .ok_or_else(|| {
+        anyhow!("Feishu long-connection requires an auth credential with app_id/app_secret fields")
+    })?;
+    let runtime_config = resolve_feishu_long_connection_runtime_config(&auth_profile)?;
+    let open_endpoint = derive_feishu_ws_config_endpoint(&request.endpoint)?;
+    let client = crate::http_client::build_resilient_http_client(
+        Duration::from_secs(10),
+        "Feishu long-connection open",
+    )?;
+    let response = client
+        .post(&open_endpoint)
+        .header("Content-Type", "application/json; charset=utf-8")
+        .header("locale", "zh")
+        .json(&json!({
+            "AppID": runtime_config.app_id,
+            "AppSecret": runtime_config.app_secret,
+        }))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read response body>".to_string());
+        let body = truncate_error_body(&body, 512);
+        bail!(
+            "Feishu long-connection open request failed with status {}: {}",
+            status,
+            body
+        );
+    }
+    let body = response.json::<Value>().await?;
+    parse_feishu_long_connection_open_response(&body)
 }
 
 fn truncate_error_body(body: &str, max_chars: usize) -> String {
@@ -2910,6 +2993,155 @@ async fn run_slack_socket_mode_subscription_job(
                 if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
                     close_subscription_as_stopped(&mut sink, &view, &mut seq, "slack_socket_mode")
                         .await?;
+                    return Ok(());
+                }
+                delay_secs =
+                    (delay_secs.saturating_mul(2)).min(SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS);
+            }
+        }
+    }
+}
+
+async fn run_feishu_long_connection_subscription_job(
+    _job_id: &str,
+    request: &SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let mut sink = open_subscription_sink(&sink_path).await?;
+    let mut seq = 0u64;
+    let mut delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
+
+    loop {
+        if *stop_rx.borrow() {
+            close_subscription_as_stopped(&mut sink, &view, &mut seq, "feishu_long_connection")
+                .await?;
+            return Ok(());
+        }
+
+        let open = match open_feishu_long_connection_websocket_url(request).await {
+            Ok(open) => open,
+            Err(err) => {
+                let message = err.to_string();
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "feishu_long_connection",
+                    "error",
+                    None,
+                    Some(json!({ "message": message })),
+                )
+                .await?;
+                update_subscription_view(&view, Some("reconnecting"), Some(message), true).await;
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "feishu_long_connection",
+                    "reconnect",
+                    None,
+                    Some(json!({ "delay_secs": delay_secs, "phase": "open_url" })),
+                )
+                .await?;
+                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
+                    close_subscription_as_stopped(
+                        &mut sink,
+                        &view,
+                        &mut seq,
+                        "feishu_long_connection",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                delay_secs =
+                    (delay_secs.saturating_mul(2)).min(SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS);
+                continue;
+            }
+        };
+
+        let config = WebSocketRuntimeConfig {
+            endpoint: open.websocket_url.clone(),
+            auth_profile: None,
+            subprotocols: Vec::new(),
+            initial_text_frames: Vec::new(),
+            first_message_timeout_secs: None,
+            initial_reconnect_delay_secs: SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS,
+            max_reconnect_delay_secs: SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS,
+        };
+        let mut handler =
+            FeishuLongConnectionHandler::new(open.service_id, open.ping_interval_secs);
+
+        let result = {
+            let mut observer = DaemonWebSocketObserver {
+                sink: &mut sink,
+                view: &view,
+                seq: &mut seq,
+                source_kind: "feishu_long_connection",
+            };
+            subscription_websocket::run_websocket_subscription_session_once(
+                &config,
+                &mut handler,
+                &mut observer,
+                &mut stop_rx,
+            )
+            .await
+        };
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(WebSocketRunError::Fatal(err)) => {
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "feishu_long_connection",
+                    "error",
+                    None,
+                    Some(json!({ "message": err.to_string() })),
+                )
+                .await?;
+                return Err(err);
+            }
+            Err(WebSocketRunError::Retry(err)) => {
+                let message = err.to_string();
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "feishu_long_connection",
+                    "error",
+                    None,
+                    Some(json!({ "message": message })),
+                )
+                .await?;
+                update_subscription_view(&view, Some("reconnecting"), Some(err.to_string()), true)
+                    .await;
+                append_subscription_event(
+                    &mut sink,
+                    &view,
+                    &mut seq,
+                    "feishu_long_connection",
+                    "reconnect",
+                    None,
+                    Some(json!({
+                        "delay_secs": delay_secs,
+                        "ping_interval_secs": open.ping_interval_secs,
+                        "reconnect_count": open.reconnect_count,
+                        "reconnect_interval_secs": open.reconnect_interval_secs,
+                        "reconnect_nonce_secs": open.reconnect_nonce_secs,
+                    })),
+                )
+                .await?;
+                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
+                    close_subscription_as_stopped(
+                        &mut sink,
+                        &view,
+                        &mut seq,
+                        "feishu_long_connection",
+                    )
+                    .await?;
                     return Ok(());
                 }
                 delay_secs =
