@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-03-15
+
+### Added
+- Added daemon-backed provider-aware subscribe transports for Slack Socket Mode, Discord Gateway, and Feishu long connection, enabling live IM event intake through `uxc subscribe`.
+- Added generic auth bootstrap for app-credential flows such as `app_id/app_secret -> bearer token`, with explicit `uxc auth bootstrap set|info|refresh|remove` commands and automatic runtime refresh.
+- Added raw exchange WebSocket skills for Binance Spot and OKX public market streams.
+- Added `ethereum-jsonrpc-skill` and `sui-jsonrpc-skill` for OpenRPC-backed reads plus runtime pubsub guidance.
+
+### Changed
+- Extended `uxc subscribe` from basic transport support to validated real-provider event intake across Telegram polling, Matrix `/sync`, Bitquery GraphQL subscriptions, exchange WebSocket feeds, Slack, Discord, and Feishu.
+- Skill documentation now reflects validated subscribe usage for Telegram, Matrix, Slack, Discord, Feishu, Bitquery, Binance Spot WebSocket, and OKX Exchange WebSocket.
+- README positioning and architecture snapshot now align with the “stable execution surface for agents” framing and current subscribe/runtime capabilities.
+
+### Fixed
+- Removed restrictive `file:` sink path checks so daemon-backed subscriptions can write to any explicit absolute path the user chooses.
+- Fixed sparse Matrix `/sync` polling so missing timeline paths can be treated as empty batches instead of fatal poll failures.
+- Improved GraphQL WebSocket compatibility so Bitquery live subscriptions succeed with explicit `_select` shapes.
+
 ## [0.11.1] - 2026-03-11
 
 ### Changed
@@ -283,7 +301,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/holon-run/uxc/releases/tag/v0.12.0
+[0.11.1]: https://github.com/holon-run/uxc/releases/tag/v0.11.1
 [0.11.0]: https://github.com/holon-run/uxc/releases/tag/v0.11.0
 [0.10.0]: https://github.com/holon-run/uxc/releases/tag/v0.10.0
 [0.9.0]: https://github.com/holon-run/uxc/releases/tag/v0.9.0

@@ -53,9 +53,11 @@ UXC 的目标，是让远端能力对 Agent 和自动化任务来说，都表现
 - 结构化调用（位置 JSON、key=value）
 - 面向自动化与 agent 的确定性 JSON envelope
 - 可复用凭证、binding 和 signer profile 的认证模型
+- 面向短期 bearer token 的 app 凭证 bootstrap（例如 Feishu/Lark、DingTalk）
 - 通过 `uxc link` 提供 host 快捷命令
 - 通过 `uxc link --schema-url` 为 OpenAPI link 持久化默认 schema 地址
 - 通过 `uxc subscribe` 提供 daemon 驱动的后台订阅能力
+- 面向 Slack Socket Mode、Discord Gateway、Feishu 长连接的 provider-aware 事件接入
 - 通过 `--inject-env NAME={{secret}}` 为 stdio 子进程注入认证环境变量
 
 支持协议：
@@ -117,7 +119,7 @@ bash install-uxc.sh
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.10.0
+curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.12.0
 ```
 
 Windows 说明：不再支持原生 Windows，请通过 WSL 运行 UXC。

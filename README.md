@@ -57,9 +57,11 @@ If a target can describe itself, UXC can usually call it.
 - Structured invocation (positional JSON, key-value args)
 - Deterministic JSON envelopes for automation and agents
 - Auth model with reusable credentials, bindings, and signer profiles
+- App-credential bootstrap for short-lived bearer tokens (for example, Feishu/Lark and DingTalk)
 - Host shortcut commands via `uxc link`
 - Link-level default OpenAPI schema persistence via `uxc link --schema-url`
 - Daemon-backed background subscriptions via `uxc subscribe`
+- Provider-aware event transports for Slack Socket Mode, Discord Gateway, and Feishu long connection
 - Stdio child-process auth injection via `--inject-env NAME={{secret}}`
 
 Supported protocols:
@@ -122,7 +124,7 @@ bash install-uxc.sh
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.11.0
+curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.12.0
 ```
 
 Windows note: native Windows is no longer supported; run UXC through WSL.
