@@ -59,6 +59,8 @@ const SUBSCRIPTION_STOP_TIMEOUT_SECS: u64 = 5;
 const SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
 const SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS: u64 = 30;
 const SUBSCRIPTION_MAX_BUFFER_BYTES: usize = 1024 * 1024;
+const SUB_STATUS_STOPPED_AFTER_RESTART: &str = "stopped_after_restart";
+const SUB_STATUS_RESUME_FAILED: &str = "resume_failed";
 const ERR_PROTOCOL_DETECTION: i32 = -32010;
 const ERR_OPERATION_NOT_FOUND: i32 = -32011;
 const ERR_OAUTH_REQUIRED: i32 = -32012;
@@ -143,6 +145,7 @@ pub struct SubscribeStartRequest {
     pub mode: SubscriptionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_config: Option<Value>,
+    /// If true, do not auto-resume this subscription after daemon restart.
     #[serde(default)]
     pub ephemeral: bool,
     pub options: RuntimeInvokeOptions,
@@ -325,6 +328,7 @@ struct SubscriptionManager {
 struct SubscriptionJobEntry {
     request: SubscribeStartRequest,
     view: Arc<Mutex<SubscriptionJobView>>,
+    /// Wrapped so resume can replace the sender for a reconstructed job.
     stop_tx: Mutex<watch::Sender<bool>>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -845,12 +849,27 @@ impl SubscriptionManager {
         if raw.trim().is_empty() {
             return Ok(());
         }
-        let store: PersistedSubscriptionStore = serde_json::from_str(&raw).with_context(|| {
-            format!(
-                "Failed to parse subscription store {}",
+        let store: PersistedSubscriptionStore = match serde_json::from_str(&raw) {
+            Ok(store) => store,
+            Err(err) => {
+                quarantine_subscription_store(&self.store_path, "parse_error")?;
+                tracing::warn!(
+                    "Ignoring malformed subscription store {}: {}",
+                    self.store_path.display(),
+                    err
+                );
+                return Ok(());
+            }
+        };
+        if store.version != "v1" {
+            quarantine_subscription_store(&self.store_path, "unsupported_version")?;
+            tracing::warn!(
+                "Ignoring unsupported subscription store version '{}' at {}",
+                store.version,
                 self.store_path.display()
-            )
-        })?;
+            );
+            return Ok(());
+        }
         let mut next_id = 0_u64;
         let mut jobs = HashMap::new();
         for record in store.jobs {
@@ -906,7 +925,7 @@ impl SubscriptionManager {
         let sink_path = parse_file_sink(&request.sink)?;
         if is_nonstandard_subscription_sink_path(&sink_path) {
             tracing::warn!(
-                "subscription sink path is outside HOME and temp directories: {}",
+                "subscription sink path is outside HOME/temp directories: {}. This path may be unavailable after daemon restart if permissions or mounts change.",
                 sink_path.display()
             );
         }
@@ -989,14 +1008,21 @@ impl SubscriptionManager {
             };
 
             let mut guard = view.lock().await;
+            let was_resumed = guard.status == "resumed" || guard.restart_count > 0;
             if guard.status != "stopped" {
                 match result {
                     Ok(()) => {
                         guard.status = "stopped".to_string();
                     }
                     Err(err) => {
-                        guard.status = "failed".to_string();
-                        guard.last_error = Some(err.to_string());
+                        let message = err.to_string();
+                        if was_resumed {
+                            guard.status = SUB_STATUS_RESUME_FAILED.to_string();
+                            guard.last_resume_error = Some(message.clone());
+                        } else {
+                            guard.status = "failed".to_string();
+                        }
+                        guard.last_error = Some(message);
                     }
                 }
             }
@@ -1019,7 +1045,7 @@ impl SubscriptionManager {
         for entry in entries {
             if entry.request.ephemeral {
                 let mut view = entry.view.lock().await;
-                view.status = "stopped_after_restart".to_string();
+                view.status = SUB_STATUS_STOPPED_AFTER_RESTART.to_string();
                 view.stopped_at_unix = Some(now_unix_secs());
                 view.last_resume_error = None;
                 continue;
@@ -1030,7 +1056,7 @@ impl SubscriptionManager {
                     Ok(prepared) => prepared,
                     Err(err) => {
                         let mut view = entry.view.lock().await;
-                        view.status = "resume_failed".to_string();
+                        view.status = SUB_STATUS_RESUME_FAILED.to_string();
                         view.last_resume_error = Some(err.to_string());
                         view.stopped_at_unix = Some(now_unix_secs());
                         continue;
@@ -3191,7 +3217,12 @@ pub async fn run_daemon_server() -> Result<()> {
         .with_context(|| format!("Failed to bind daemon socket at {}", socket.display()))?;
 
     let runtime = Arc::new(DaemonRuntime::try_new()?);
-    runtime.resume_persisted_subscriptions().await?;
+    let resume_runtime = runtime.clone();
+    tokio::spawn(async move {
+        if let Err(err) = resume_runtime.resume_persisted_subscriptions().await {
+            tracing::warn!("Failed to resume persisted subscriptions: {}", err);
+        }
+    });
 
     // Log daemon start
     runtime
@@ -3679,6 +3710,21 @@ fn write_subscription_store(path: &Path, jobs: &[PersistedSubscriptionRecord]) -
     })?;
     fs::rename(&tmp_path, path)
         .with_context(|| format!("Failed to replace subscription store {}", path.display()))?;
+    Ok(())
+}
+
+fn quarantine_subscription_store(path: &Path, suffix: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let quarantined = path.with_extension(format!("json.{suffix}.bak"));
+    fs::rename(path, &quarantined).with_context(|| {
+        format!(
+            "Failed to quarantine subscription store {} to {}",
+            path.display(),
+            quarantined.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -4717,6 +4763,11 @@ mod tests {
         false
     }
 
+    fn test_runtime_with_store(temp: &tempfile::TempDir) -> DaemonRuntime {
+        DaemonRuntime::try_new_with_subscription_store_path(temp.path().join("subscriptions.json"))
+            .expect("test daemon runtime should initialize")
+    }
+
     #[tokio::test]
     async fn websocket_subscription_runtime_reconnects_and_stops_cleanly() {
         let temp = tempdir().unwrap();
@@ -4734,7 +4785,7 @@ mod tests {
         ])
         .await;
 
-        let runtime = DaemonRuntime::new();
+        let runtime = test_runtime_with_store(&temp);
         let response = runtime
             .subscribe_start(subscription_request(&endpoint, &sink_spec))
             .await
@@ -4790,7 +4841,7 @@ mod tests {
             }])
             .await;
 
-        let runtime = DaemonRuntime::new();
+        let runtime = test_runtime_with_store(&temp);
         let response = runtime
             .subscribe_start(subscription_request(&endpoint, &sink_spec))
             .await
