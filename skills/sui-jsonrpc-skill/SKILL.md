@@ -1,6 +1,6 @@
 ---
 name: sui-jsonrpc-skill
-description: Operate Sui public JSON-RPC through UXC with OpenRPC-driven discovery, mainnet fullnode defaults, and read-only safety guardrails.
+description: Operate Sui public JSON-RPC through UXC with OpenRPC-driven discovery, mainnet fullnode defaults, and read-only query plus pubsub subscription guardrails.
 ---
 
 # Sui JSON-RPC Skill
@@ -24,13 +24,13 @@ This skill covers a safe read-first Sui JSON-RPC surface:
 - object lookup
 - reference gas price reads
 - latest system state reads
+- pubsub subscriptions for events and transaction effects
 
 This skill does **not** cover:
 
 - `unsafe_*` transaction-building methods
 - `sui_executeTransactionBlock`
 - wallet signing flows
-- WebSocket subscriptions such as `suix_subscribeEvent`
 - custom/private Sui RPC providers with different auth or rate limits
 
 ## Endpoint And Discovery
@@ -38,6 +38,8 @@ This skill does **not** cover:
 This skill targets the public Sui fullnode endpoint:
 
 - `https://fullnode.mainnet.sui.io`
+
+For pubsub, use a Sui provider WebSocket endpoint that you have verified actually accepts JSON-RPC subscriptions. Do not assume the public HTTPS fullnode host automatically supports the same `wss://` hostname for pubsub.
 
 `uxc` JSON-RPC discovery depends on OpenRPC or `rpc.discover`. Sui exposes a discoverable method surface, so help-first flow works directly against the endpoint.
 
@@ -71,6 +73,12 @@ If a user later points the same workflow at a private Sui RPC provider, verify i
    - positional JSON:
      `sui-jsonrpc-cli sui_getObject '{"object_id":"0x6"}'`
 
+5. Use `uxc subscribe start` directly for pubsub streams:
+   - `uxc subscribe start wss://<verified-sui-rpc-host> suix_subscribeEvent '{"params":[{"Package":"0x2"}]}' --sink file:$HOME/.uxc/subscriptions/sui-events.ndjson`
+   - `uxc subscribe start wss://<verified-sui-rpc-host> suix_subscribeTransaction '{"params":[{"FromAddress":"0x..."}]}' --sink file:$HOME/.uxc/subscriptions/sui-transactions.ndjson`
+   - `uxc subscribe status <job_id>`
+   - `uxc subscribe stop <job_id>`
+
 ## Recommended Read Operations
 
 - `sui_getChainIdentifier`
@@ -80,6 +88,11 @@ If a user later points the same workflow at a private Sui RPC provider, verify i
 - `suix_getReferenceGasPrice`
 - `suix_getLatestSuiSystemState`
 
+## Recommended Subscription Operations
+
+- `suix_subscribeEvent`
+- `suix_subscribeTransaction`
+
 ## Guardrails
 
 - Keep automation on the JSON output envelope; do not use `--text`.
@@ -87,6 +100,9 @@ If a user later points the same workflow at a private Sui RPC provider, verify i
 - Stay on the public read-only method surface by default.
 - Do not call any `unsafe_*` methods through this skill without explicit follow-up design and review.
 - Do not use this skill for write/sign/submit flows; those need separate wallet/auth guidance.
+- Use `uxc subscribe start` for pubsub methods; the fixed `sui-jsonrpc-cli` link is for normal request/response methods.
+- Subscription jobs should always write to a sink file so events can be inspected and replayed safely.
+- Before documenting or automating a Sui pubsub host, confirm the specific provider actually exposes JSON-RPC WebSocket subscriptions; public HTTPS endpoints do not guarantee a matching `wss://` endpoint.
 - Public RPC availability and rate limits can change over time; if discovery or execution starts failing, re-check the endpoint before assuming a `uxc` bug.
 - `sui-jsonrpc-cli <operation> ...` is equivalent to `uxc https://fullnode.mainnet.sui.io <operation> ...`.
 

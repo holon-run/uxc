@@ -13,7 +13,7 @@ use crate::subscription_graphql::{
     GraphQLSubscriptionConfig, GraphQLSubscriptionHandler, GraphQLWebSocketProfile,
 };
 use crate::subscription_jsonrpc::{
-    derive_jsonrpc_unsubscribe_operation, JsonRpcSubscriptionConfig, JsonRpcSubscriptionHandler,
+    resolve_jsonrpc_unsubscribe_operation, JsonRpcSubscriptionConfig, JsonRpcSubscriptionHandler,
 };
 use crate::subscription_poll::{PollRuntimeContext, PollRuntimeObserver, PollSubscriptionConfig};
 use crate::subscription_websocket::{
@@ -791,7 +791,7 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
             return Ok("graphql".to_string());
         }
         if lower.starts_with("ws://") || lower.starts_with("wss://") {
-            derive_jsonrpc_unsubscribe_operation(operation_id)?;
+            resolve_jsonrpc_unsubscribe_operation(operation_id)?;
             return Ok("jsonrpc".to_string());
         }
         bail!(
@@ -2417,7 +2417,7 @@ fn resolve_jsonrpc_subscription_config(
         .operation_id
         .as_ref()
         .ok_or_else(|| anyhow!("operation_id is required for JSON-RPC subscriptions"))?;
-    let unsubscribe_operation_id = derive_jsonrpc_unsubscribe_operation(operation_id)?;
+    let unsubscribe_operation_id = resolve_jsonrpc_unsubscribe_operation(operation_id)?;
     let params = match request.args.clone().unwrap_or_default().remove("params") {
         Some(params) => params,
         None => Value::Null,

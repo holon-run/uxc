@@ -1,4 +1,4 @@
 interface:
   display_name: "Sui JSON-RPC"
-  short_description: "Read Sui mainnet chain, checkpoint, object, and system-state data through UXC"
-  default_prompt: "Use $sui-jsonrpc-skill to discover and execute safe read-only Sui JSON-RPC methods through UXC with help-first OpenRPC discovery and public fullnode defaults."
+  short_description: "Read Sui mainnet chain data and run Sui pubsub subscriptions through UXC"
+  default_prompt: "Use $sui-jsonrpc-skill to discover and execute safe Sui JSON-RPC reads and pubsub subscriptions through UXC with help-first OpenRPC discovery, public fullnode defaults, and sink-based subscription handling."

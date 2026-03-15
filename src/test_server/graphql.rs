@@ -328,6 +328,7 @@ async fn execute_query(
     match state.scenario {
         Scenario::Ok
         | Scenario::Legacy
+        | Scenario::SuiPubSub
         | Scenario::AuthRequired
         | Scenario::ToolsListFailAfterFirst
         | Scenario::ToolCallTimeout

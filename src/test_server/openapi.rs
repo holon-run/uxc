@@ -239,6 +239,7 @@ fn create_router(state: ServerState) -> Router {
         match state.scenario {
             Scenario::Ok
             | Scenario::Legacy
+            | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -263,6 +264,7 @@ fn create_router(state: ServerState) -> Router {
         match state.scenario {
             Scenario::Ok
             | Scenario::Legacy
+            | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -293,6 +295,7 @@ fn create_router(state: ServerState) -> Router {
         match state.scenario {
             Scenario::Ok
             | Scenario::Legacy
+            | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -331,6 +334,7 @@ fn create_router(state: ServerState) -> Router {
         match state.scenario {
             Scenario::Ok
             | Scenario::Legacy
+            | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -365,6 +369,7 @@ fn create_router(state: ServerState) -> Router {
         match state.scenario {
             Scenario::Ok
             | Scenario::Legacy
+            | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -409,6 +414,7 @@ fn create_router(state: ServerState) -> Router {
         match state.scenario {
             Scenario::Ok
             | Scenario::Legacy
+            | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
@@ -453,6 +459,7 @@ fn create_router(state: ServerState) -> Router {
         match state.scenario {
             Scenario::Ok
             | Scenario::Legacy
+            | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
