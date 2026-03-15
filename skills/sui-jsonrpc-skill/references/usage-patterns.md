@@ -43,7 +43,32 @@ sui-jsonrpc-cli sui_getObject '{"object_id":"0x6"}'
 sui-jsonrpc-cli sui_getLatestCheckpointSequenceNumber -h
 sui-jsonrpc-cli sui_getCheckpoint -h
 sui-jsonrpc-cli sui_getObject -h
+sui-jsonrpc-cli suix_subscribeEvent -h
 ```
+
+## Subscription Examples
+
+```bash
+# Subscribe to events from a package and write NDJSON to a sink file
+uxc subscribe start \
+  wss://<verified-sui-rpc-host> \
+  suix_subscribeEvent \
+  '{"params":[{"Package":"0x2"}]}' \
+  --sink file:$HOME/.uxc/subscriptions/sui-events.ndjson
+
+# Subscribe to transaction effects that match a filter
+uxc subscribe start \
+  wss://<verified-sui-rpc-host> \
+  suix_subscribeTransaction \
+  '{"params":[{"FromAddress":"0x0000000000000000000000000000000000000000000000000000000000000000"}]}' \
+  --sink file:$HOME/.uxc/subscriptions/sui-transactions.ndjson
+
+# Inspect and stop a running job
+uxc subscribe status <job_id>
+uxc subscribe stop <job_id>
+```
+
+Use a WebSocket endpoint you have validated with your Sui provider; do not assume the public HTTPS fullnode host automatically maps to a working `wss://` pubsub endpoint.
 
 ## Fallback Equivalence
 

@@ -25,6 +25,8 @@ pub enum Scenario {
     StructuredContent,
     /// tools/list changes after navigate and emits tools/list_changed notification
     DynamicToolset,
+    /// JSON-RPC WebSocket pubsub shape without explicit unsubscribe method
+    SuiPubSub,
 }
 
 impl Scenario {
@@ -41,8 +43,9 @@ impl Scenario {
             "tools_list_fail_after_first" => Ok(Self::ToolsListFailAfterFirst),
             "structured_content" => Ok(Self::StructuredContent),
             "dynamic_toolset" => Ok(Self::DynamicToolset),
+            "sui_pubsub" => Ok(Self::SuiPubSub),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, dynamic_toolset",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, dynamic_toolset, sui_pubsub",
                 s
             ),
         }

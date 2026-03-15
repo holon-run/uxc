@@ -12,18 +12,21 @@ const UNSUBSCRIBE_REQUEST_ID: i64 = 2;
 #[derive(Debug, Clone)]
 pub struct JsonRpcSubscriptionConfig {
     pub operation_id: String,
-    pub unsubscribe_operation_id: String,
+    pub unsubscribe_operation_id: Option<String>,
     pub params: Option<Value>,
 }
 
-pub fn derive_jsonrpc_unsubscribe_operation(operation_id: &str) -> Result<String> {
-    let Some(prefix) = operation_id.strip_suffix("_subscribe") else {
-        bail!(
-            "JSON-RPC subscription operation '{}' must end with '_subscribe'",
-            operation_id
-        );
-    };
-    Ok(format!("{prefix}_unsubscribe"))
+pub fn resolve_jsonrpc_unsubscribe_operation(operation_id: &str) -> Result<Option<String>> {
+    if let Some(prefix) = operation_id.strip_suffix("_subscribe") {
+        return Ok(Some(format!("{prefix}_unsubscribe")));
+    }
+    if operation_id.contains("subscribe") {
+        return Ok(None);
+    }
+    bail!(
+        "JSON-RPC subscription operation '{}' must contain 'subscribe'",
+        operation_id
+    );
 }
 
 pub struct JsonRpcSubscriptionHandler {
@@ -53,11 +56,12 @@ impl JsonRpcSubscriptionHandler {
 
     fn unsubscribe_message(&self) -> Option<String> {
         let subscription_id = self.subscription_id.as_ref()?;
+        let unsubscribe_operation_id = self.config.unsubscribe_operation_id.as_ref()?;
         Some(
             json!({
                 "jsonrpc": "2.0",
                 "id": UNSUBSCRIBE_REQUEST_ID,
-                "method": self.config.unsubscribe_operation_id,
+                "method": unsubscribe_operation_id,
                 "params": [subscription_id.clone()],
             })
             .to_string(),
@@ -175,22 +179,30 @@ mod tests {
     #[test]
     fn derives_unsubscribe_operation_from_subscribe_operation() {
         assert_eq!(
-            derive_jsonrpc_unsubscribe_operation("eth_subscribe").unwrap(),
-            "eth_unsubscribe"
+            resolve_jsonrpc_unsubscribe_operation("eth_subscribe").unwrap(),
+            Some("eth_unsubscribe".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_sui_style_subscribe_without_unsubscribe() {
+        assert_eq!(
+            resolve_jsonrpc_unsubscribe_operation("suix_subscribeEvent").unwrap(),
+            None
         );
     }
 
     #[test]
     fn rejects_non_subscribe_operation_name() {
-        let err = derive_jsonrpc_unsubscribe_operation("watch_heads").unwrap_err();
-        assert!(err.to_string().contains("_subscribe"));
+        let err = resolve_jsonrpc_unsubscribe_operation("watch_heads").unwrap_err();
+        assert!(err.to_string().contains("contain 'subscribe'"));
     }
 
     #[tokio::test]
     async fn subscribe_message_keeps_raw_params_shape() {
         let handler = JsonRpcSubscriptionHandler::new(JsonRpcSubscriptionConfig {
             operation_id: "eth_subscribe".to_string(),
-            unsubscribe_operation_id: "eth_unsubscribe".to_string(),
+            unsubscribe_operation_id: Some("eth_unsubscribe".to_string()),
             params: Some(json!(["newHeads"])),
         });
 
@@ -203,7 +215,7 @@ mod tests {
     async fn handler_routes_matching_notification_result() {
         let mut handler = JsonRpcSubscriptionHandler::new(JsonRpcSubscriptionConfig {
             operation_id: "eth_subscribe".to_string(),
-            unsubscribe_operation_id: "eth_unsubscribe".to_string(),
+            unsubscribe_operation_id: Some("eth_unsubscribe".to_string()),
             params: None,
         });
         handler
@@ -241,7 +253,7 @@ mod tests {
     async fn handler_ignores_notification_for_other_subscription() {
         let mut handler = JsonRpcSubscriptionHandler::new(JsonRpcSubscriptionConfig {
             operation_id: "eth_subscribe".to_string(),
-            unsubscribe_operation_id: "eth_unsubscribe".to_string(),
+            unsubscribe_operation_id: Some("eth_unsubscribe".to_string()),
             params: None,
         });
         handler
@@ -278,7 +290,7 @@ mod tests {
     async fn stop_requested_emits_unsubscribe_frame() {
         let mut handler = JsonRpcSubscriptionHandler::new(JsonRpcSubscriptionConfig {
             operation_id: "eth_subscribe".to_string(),
-            unsubscribe_operation_id: "eth_unsubscribe".to_string(),
+            unsubscribe_operation_id: Some("eth_unsubscribe".to_string()),
             params: None,
         });
         handler
@@ -297,5 +309,29 @@ mod tests {
         let message: Value = serde_json::from_str(&output.outbound_text_frames[0]).unwrap();
         assert_eq!(message["method"], "eth_unsubscribe");
         assert_eq!(message["params"][0], "sub-1");
+    }
+
+    #[tokio::test]
+    async fn stop_requested_without_unsubscribe_sends_no_cleanup_frame() {
+        let mut handler = JsonRpcSubscriptionHandler::new(JsonRpcSubscriptionConfig {
+            operation_id: "suix_subscribeEvent".to_string(),
+            unsubscribe_operation_id: None,
+            params: Some(json!([{ "Package": "0x2" }])),
+        });
+        handler
+            .on_text_frame(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": SUBSCRIBE_REQUEST_ID,
+                    "result": "sub-1"
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+
+        let output = handler.on_stop_requested().await.unwrap();
+        assert!(output.outbound_text_frames.is_empty());
+        assert_eq!(output.stop_reason.as_deref(), Some("stopped"));
     }
 }

@@ -26,6 +26,7 @@ impl addsvc::add_server::Add for AddService {
         match self.scenario {
             Scenario::Ok
             | Scenario::Legacy
+            | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent

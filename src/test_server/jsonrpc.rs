@@ -65,8 +65,9 @@ async fn handle_jsonrpc_websocket(mut socket: WebSocket, state: ServerState) {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let is_sui_subscribe = method == "suix_subscribeEvent" || method == "suix_subscribeTransaction";
 
-        if method.ends_with("_subscribe") {
+        if method.ends_with("_subscribe") || (matches!(state.scenario, Scenario::SuiPubSub) && is_sui_subscribe) {
             let subscription_id = format!("sub-{}", next_subscription_id);
             next_subscription_id += 1;
             let _ = socket
@@ -80,19 +81,35 @@ async fn handle_jsonrpc_websocket(mut socket: WebSocket, state: ServerState) {
                 ))
                 .await;
 
-            if matches!(state.scenario, Scenario::Ok | Scenario::Legacy) {
+            if matches!(state.scenario, Scenario::Ok | Scenario::Legacy | Scenario::SuiPubSub) {
                 sleep(Duration::from_millis(50)).await;
+                let notification_method = if matches!(state.scenario, Scenario::SuiPubSub) {
+                    "suix_subscription"
+                } else {
+                    "eth_subscription"
+                };
+                let notification_result = if matches!(state.scenario, Scenario::SuiPubSub) {
+                    json!({
+                        "id": {
+                            "txDigest": "0xabc",
+                            "eventSeq": "0"
+                        },
+                        "packageId": "0x2"
+                    })
+                } else {
+                    json!({
+                        "number": "0x1",
+                        "hash": "0xabc"
+                    })
+                };
                 let _ = socket
                     .send(Message::Text(
                         json!({
                             "jsonrpc": "2.0",
-                            "method": "eth_subscription",
+                            "method": notification_method,
                             "params": {
                                 "subscription": subscription_id,
-                                "result": {
-                                    "number": "0x1",
-                                    "hash": "0xabc"
-                                }
+                                "result": notification_result
                             }
                         })
                         .to_string(),
@@ -213,6 +230,46 @@ fn schema_value() -> serde_json::Value {
               }
             }
           }
+        },
+        {
+          "name": "suix_subscribeEvent",
+          "summary": "Subscribe to a stream of Sui event",
+          "params": [
+            {
+              "name": "filter",
+              "schema": {"type": "object"},
+              "required": true
+            }
+          ],
+          "result": {
+            "name": "event",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "packageId": {"type": "string"}
+              }
+            }
+          }
+        },
+        {
+          "name": "suix_subscribeTransaction",
+          "summary": "Subscribe to a stream of Sui transaction effects",
+          "params": [
+            {
+              "name": "filter",
+              "schema": {"type": "object"},
+              "required": true
+            }
+          ],
+          "result": {
+            "name": "effects",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "digest": {"type": "string"}
+              }
+            }
+          }
         }
       ]
     })
@@ -228,6 +285,7 @@ async fn execute_method(
     match state.scenario {
         Scenario::Ok
         | Scenario::Legacy
+        | Scenario::SuiPubSub
         | Scenario::ToolsListFailAfterFirst
         | Scenario::ToolCallTimeout
         | Scenario::StructuredContent

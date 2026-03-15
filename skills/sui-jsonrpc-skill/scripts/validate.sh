@@ -29,9 +29,13 @@ rg -q 'command -v sui-jsonrpc-cli' "${SKILL_FILE}" || fail 'missing link-first c
 rg -q 'uxc link sui-jsonrpc-cli https://fullnode.mainnet.sui.io' "${SKILL_FILE}" || fail 'missing fixed link create command'
 rg -q 'sui-jsonrpc-cli -h' "${SKILL_FILE}" || fail 'missing help-first host discovery example'
 rg -q 'sui-jsonrpc-cli sui_getLatestCheckpointSequenceNumber -h' "${SKILL_FILE}" || fail 'missing operation-level help example'
+rg -q 'uxc subscribe start wss://<verified-sui-rpc-host> suix_subscribeEvent' "${SKILL_FILE}" || fail 'missing event subscription example'
+rg -q 'uxc subscribe stop <job_id>' "${SKILL_FILE}" || fail 'missing subscribe stop example'
 rg -q 'OpenRPC or `rpc.discover`' "${SKILL_FILE}" || fail 'missing JSON-RPC discovery note'
 rg -q 'unsafe_\*' "${SKILL_FILE}" || fail 'missing unsafe method guardrail'
 rg -q 'positional JSON' "${SKILL_FILE}" || fail 'missing positional JSON guidance'
+rg -q 'Use `uxc subscribe start` for pubsub methods' "${SKILL_FILE}" || fail 'missing pubsub execution guidance'
+rg -q 'validated with your Sui provider' "${USAGE_FILE}" || fail 'missing provider-verified websocket endpoint note'
 
 if rg -q -- '(^|[[:space:]])uxc <host> (list|describe|call)([[:space:]]|$)|(^|[[:space:]])sui-jsonrpc-cli (list|describe|call)([[:space:]]|$)|--args .*\{' "${SKILL_FILE}" "${USAGE_FILE}"; then
   fail 'found banned legacy patterns'
