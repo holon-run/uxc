@@ -342,11 +342,47 @@ clawhub sync --all --bump patch
 ### Remaining publish queue after the 2026-03-15 window
 
 - Next realtime / subscribe wave:
-  - `okx-exchange-websocket-skill`
-  - `ethereum-jsonrpc-skill`
-  - `sui-jsonrpc-skill`
-  - `dingtalk-openapi-skill`
-  - `coinbase-openapi-skill`
+  - `bybit-openapi-skill`
+  - `kraken-openapi-skill`
+  - `kucoin-openapi-skill`
+  - `bitget-openapi-skill`
+  - `mexc-openapi-skill`
+- Next market / data wave:
+  - `upbit-openapi-skill`
+  - `coingecko-openapi-skill`
+  - `alchemy-openapi-skill`
+  - `chainbase-openapi-skill`
+  - `moralis-openapi-skill`
+- Next data / MCP wave:
+  - `blockscout-openapi-skill`
+  - `coinapi-openapi-skill`
+  - `birdeye-mcp-skill`
+  - `lifi-mcp-skill`
+  - `coinmarketcap-mcp-skill`
+- Next MCP / DeFi wave:
+  - `gate-mcp-skill`
+  - `crypto-com-mcp-skill`
+  - `defillama-openapi-skill`
+  - `defillama-prices-openapi-skill`
+  - `defillama-pro-openapi-skill`
+- Final remaining wave:
+  - `defillama-yields-openapi-skill`
+  - `goldrush-mcp-skill`
+  - `line-openapi-skill`
+  - `whatsapp-openapi-skill`
+
+## ClawHub Publish Log (2026-03-16)
+
+- `clawhub whoami`: `jolestar`
+- Published in the current rate-limit window:
+  - `okx-exchange-websocket-skill@1.0.0`
+  - `ethereum-jsonrpc-skill@1.0.0`
+  - `sui-jsonrpc-skill@1.0.0`
+  - `dingtalk-openapi-skill@1.0.0`
+  - `coinbase-openapi-skill@1.0.0`
+
+### Remaining publish queue after the 2026-03-16 window
+
 - Next exchange coverage wave:
   - `bybit-openapi-skill`
   - `kraken-openapi-skill`
