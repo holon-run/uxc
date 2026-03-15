@@ -147,7 +147,7 @@ Related work:
 
 - [#269](https://github.com/holon-run/uxc/issues/269) closed
 
-### Not Yet Validated Successfully
+### Verified
 
 #### Bitquery GraphQL
 
@@ -155,27 +155,28 @@ Skill:
 
 - [skills/bitquery-graphql-skill/SKILL.md](../skills/bitquery-graphql-skill/SKILL.md)
 
-Observed behavior:
+Validation result:
 
 - schema discovery succeeded
 - `subscription/*` roots are visible in introspection
 - OAuth credential and auth binding were valid
 - normal `query/*` execution succeeded
-- real `uxc subscribe` runs for `subscription/EVM` and `subscription/Trading` did not emit events
-- sink remained empty
+- GraphQL subscription runs now succeed when the subscription shape matches Bitquery's runtime expectations
+- live `subscription/EVM` validation succeeded against `network=bsc` with `mempool=true`
+- sink emitted `open` followed by repeated `data` events containing real transfer payloads
 
-Current assessment:
+Observed runtime notes:
 
-- this is not a basic auth or introspection problem
-- the likely gap is GraphQL WebSocket protocol/auth compatibility between Bitquery and the current default GraphQL subscription runtime
+- subscriptions require an explicit `_select`
+- `subscription/Trading` with no selection returns a GraphQL application error instead of a useful stream
+- `subscription/EVM` is a better validation target because it produces frequent traffic
+- avoid leading with `limit` in subscription selections; use a direct event shape first
 
 Status:
 
-- **not yet validated**
+- **validated successfully**
 
-Related work:
-
-- [#271](https://github.com/holon-run/uxc/issues/271)
+### Not Yet Validated Successfully
 
 #### GoldRush MCP
 
@@ -324,14 +325,13 @@ Current real-world status is uneven by provider:
 - Binance proves the raw WebSocket runtime works against a live public market stream
 - OKX proves explicit subscribe frames work for custom exchange WebSocket protocols
 - Telegram proves that polling subscriptions are working against a real external API
-- Bitquery shows that GraphQL subscription schema discovery alone is not enough; provider-specific WebSocket compatibility matters
+- Bitquery now proves the GraphQL WebSocket runtime works against a live provider, but provider-specific selection shape still matters
 - GoldRush shows that MCP tools and MCP resource subscriptions must be treated separately
 - Matrix now validates the room-scoped `/sync` polling path; remaining UX work is mainly around linked-command ergonomics
 
 ## Recommended Next Validation Order
 
-1. Bitquery GraphQL subscription compatibility after `#271`
-2. GoldRush only if the upstream MCP server later exposes `resources.subscribe`
+1. GoldRush only if the upstream MCP server later exposes `resources.subscribe`
 
 ## Skill Documentation Implications
 
@@ -339,5 +339,5 @@ Current documentation status after validation work:
 
 - Telegram skill can now describe daemon-backed polling subscribe as validated behavior
 - Matrix skill can now describe direct daemon-backed `/sync` polling subscribe as validated behavior
-- Bitquery skill should continue to describe `subscription/*` as requiring runtime validation
+- Bitquery skill can now describe `subscription/EVM` as validated, while still warning that subscriptions need an explicit `_select` and provider-appropriate shape
 - GoldRush skill should not imply that current live MCP resources are subscribable unless upstream capability changes

@@ -76,7 +76,7 @@ Trading root example:
 bitquery-graphql-cli query/Trading '{"dataset":"combined","_select":"Pairs(limit: {count: 5}) { Market { BaseCurrency { Symbol } QuoteCurrency { Symbol } } }"}'
 ```
 
-## Subscription Caution
+## Subscription Usage
 
 GraphQL subscriptions appear in schema discovery:
 
@@ -84,7 +84,24 @@ GraphQL subscriptions appear in schema discovery:
 bitquery-graphql-cli subscription/EVM -h
 ```
 
-Use them only after validating runtime behavior in the current environment. For stable automation, prefer `query/*`.
+Bitquery subscriptions are now validated through `uxc subscribe`, but they still need an explicit `_select` and a stream-friendly shape.
+
+Recommended first live subscription:
+
+```bash
+uxc subscribe start https://streaming.bitquery.io/graphql \
+  subscription/EVM \
+  '{"network":"bsc","mempool":true,"_select":"Transfers { Transaction { Hash From To } Transfer { Amount Type Currency { Name } } }"}' \
+  --auth bitquery-graphql \
+  --sink file:$HOME/.uxc/subscriptions/bitquery-mempool.ndjson
+```
+
+Guidance:
+
+- prefer `subscription/EVM` as the first validation target
+- always pass `_select`
+- do not assume `subscription/Trading` without a selection will stream useful data
+- for stable automation, keep `query/*` as the default path unless you explicitly need a live stream
 
 ## Output Parsing
 

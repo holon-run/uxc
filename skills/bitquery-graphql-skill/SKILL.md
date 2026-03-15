@@ -49,7 +49,8 @@ Bitquery uses bearer access tokens. The most stable agent path is OAuth `client_
    - `bitquery-graphql-cli query/EVM '{"network":"base","dataset":"combined","_select":"DEXTrades(limit: {count: 1}) { Transaction { Hash } }"}'`
 5. Prefer `query/*` operations first.
    - `uxc subscribe` now auto-negotiates modern `graphql-transport-ws` and legacy `graphql-ws` compatibility profiles for `subscription/*`.
-   - Treat provider-specific auth or payload quirks as the remaining validation surface.
+   - Live Bitquery subscription validation now succeeds when you provide an explicit `_select` that matches a stream-friendly entity shape.
+   - Prefer `subscription/EVM` as the first validation target rather than `subscription/Trading`.
 
 ## Capability Map
 
@@ -77,6 +78,13 @@ Within those roots, Bitquery exposes entities for tasks such as:
 
 Always inspect the current schema with `-h` and use the narrowest `_select` needed.
 
+For subscriptions specifically:
+
+- always provide `_select`
+- start with a high-frequency root such as `subscription/EVM`
+- prefer direct event shapes before adding `limit`
+- treat empty selections or query-oriented shapes as likely application-level errors
+
 ## Recommended Usage Pattern
 
 1. Inspect root arguments first:
@@ -96,6 +104,8 @@ Always inspect the current schema with `-h` and use the narrowest `_select` need
 5. Treat large or realtime queries carefully:
    - avoid wide selections
    - prefer one chain / token / wallet at a time on first pass
+6. For live subscriptions, start with a known-good high-frequency shape:
+   - `./target/debug/uxc subscribe start https://streaming.bitquery.io/graphql subscription/EVM '{"network":"bsc","mempool":true,"_select":"Transfers { Transaction { Hash From To } Transfer { Amount Type Currency { Name } } }"}' --auth bitquery-graphql --sink file:$HOME/.uxc/subscriptions/bitquery-mempool.ndjson`
 
 ## Tested Real Scenario
 
@@ -106,6 +116,8 @@ The following authenticated Bitquery flow was verified successfully through `uxc
 - GraphQL host help
 - `query/EVM -h`
 - authenticated `query/EVM` call on `base`
+- daemon-backed `subscription/EVM` over WebSocket against live Bitquery infra
+- repeated live `data` events from a BSC mempool transfer stream
 
 The verified query shape was:
 
@@ -117,6 +129,16 @@ The verified query shape was:
 }
 ```
 
+The verified subscription shape was:
+
+```json
+{
+  "network": "bsc",
+  "mempool": true,
+  "_select": "Transfers { Transaction { Hash From To } Transfer { Amount Type Currency { Name } } }"
+}
+```
+
 ## Guardrails
 
 - Keep automation on JSON output envelope; do not rely on `--text`.
@@ -125,7 +147,9 @@ The verified query shape was:
 - `bitquery-graphql-cli <operation> ...` is equivalent to `uxc https://streaming.bitquery.io/graphql <operation> ...`.
 - Prefer positional JSON for GraphQL calls because `_select` is usually required.
 - Keep `_select` small on first pass and add explicit filters before expanding scope.
-- Prefer `query/*` for stable agent workflows. `subscription/*` now has built-in GraphQL websocket profile fallback, but still depends on provider auth and server-side subscription behavior.
+- Prefer `query/*` for stable agent workflows. `subscription/*` is now validated at runtime, but still depends on provider-specific selection shape.
+- For subscription validation or automation, start with `subscription/EVM` and an explicit `_select`; do not assume an empty selection or `subscription/Trading` default shape will yield events.
+- If a subscription opens successfully but immediately returns GraphQL errors, treat that as a query-shape problem before assuming transport failure.
 - If auth fails:
   - confirm `uxc auth binding match https://streaming.bitquery.io/graphql` resolves to `bitquery-graphql`
   - inspect token state with `uxc auth oauth info bitquery-graphql`
