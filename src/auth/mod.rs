@@ -150,6 +150,37 @@ pub struct OAuthProfile {
     pub oauth_flow: Option<OAuthFlow>,
 }
 
+fn default_bootstrap_refresh_skew_seconds() -> i64 {
+    60
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenBootstrapConfig {
+    pub token_endpoint: String,
+    pub request_json: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<AuthHeader>,
+    pub access_token_pointer: String,
+    pub expires_in_pointer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_type_pointer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success_code_pointer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success_code_value: Option<String>,
+    #[serde(default = "default_bootstrap_refresh_skew_seconds")]
+    pub refresh_skew_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TokenBootstrapState {
+    pub access_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
 /// Secret source for non-OAuth credentials.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -434,6 +465,12 @@ pub struct Profile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthProfile>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrap: Option<TokenBootstrapConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootstrap_state: Option<TokenBootstrapState>,
+
     /// Runtime-only identifier.
     #[serde(skip)]
     pub name: Option<String>,
@@ -479,6 +516,8 @@ impl Profile {
             auth_type,
             description: None,
             oauth: None,
+            bootstrap: None,
+            bootstrap_state: None,
             name: None,
             secret_source,
             fields: HashMap::new(),
@@ -535,6 +574,15 @@ impl Profile {
                     .and_then(|oauth| oauth.access_token.clone()));
             }
 
+            if let Some(token) = self
+                .bootstrap_state
+                .as_ref()
+                .map(|state| state.access_token.as_str())
+                .filter(|value| !value.is_empty())
+            {
+                return Ok(Some(token.to_string()));
+            }
+
             if let Some(source) = &self.secret_source {
                 return Ok(Some(source.resolve(self.name.as_deref())?));
             }
@@ -571,16 +619,25 @@ impl Profile {
 
     pub fn bearer_token(&self) -> Option<&str> {
         match self.auth_type {
-            AuthType::Bearer => {
-                if self.api_key.is_empty() {
-                    None
-                } else {
-                    Some(self.api_key.as_str())
-                }
-            }
+            AuthType::Bearer => self
+                .bootstrap_state
+                .as_ref()
+                .map(|state| state.access_token.as_str())
+                .filter(|value| !value.is_empty())
+                .or({
+                    if self.api_key.is_empty() {
+                        None
+                    } else {
+                        Some(self.api_key.as_str())
+                    }
+                }),
             AuthType::OAuth => self.oauth.as_ref()?.access_token.as_deref(),
             _ => None,
         }
+    }
+
+    pub fn has_bootstrap_config(&self) -> bool {
+        self.bootstrap.is_some()
     }
 
     fn active_secret_for_masking(&self) -> String {
@@ -768,6 +825,10 @@ struct StoredCredential {
     #[serde(skip_serializing_if = "Option::is_none")]
     oauth: Option<OAuthProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    bootstrap: Option<TokenBootstrapConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bootstrap_state: Option<TokenBootstrapState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     secret_source: Option<SecretSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
@@ -786,6 +847,8 @@ impl StoredCredential {
     fn from_runtime(profile: &Profile) -> Self {
         let secret_source = if profile.auth_type == AuthType::OAuth {
             None
+        } else if profile.bootstrap.is_some() {
+            profile.secret_source.clone()
         } else {
             profile.secret_source.clone().or_else(|| {
                 Some(SecretSource::Literal {
@@ -807,6 +870,8 @@ impl StoredCredential {
             auth_type: profile.auth_type.clone(),
             description: profile.description.clone(),
             oauth: profile.oauth.clone(),
+            bootstrap: profile.bootstrap.clone(),
+            bootstrap_state: profile.bootstrap_state.clone(),
             secret_source,
             api_key,
             fields: profile.fields.clone(),
@@ -832,6 +897,8 @@ impl StoredCredential {
             auth_type: self.auth_type.clone(),
             description: self.description.clone(),
             oauth: self.oauth.clone(),
+            bootstrap: self.bootstrap.clone(),
+            bootstrap_state: self.bootstrap_state.clone(),
             name: Some(name.to_string()),
             secret_source,
             fields: self.fields.clone(),
@@ -848,6 +915,8 @@ impl StoredCredential {
                 .and_then(|oauth| oauth.access_token.clone())
                 .or_else(|| self.api_key.clone())
                 .unwrap_or_default();
+        } else if let Some(state) = &profile.bootstrap_state {
+            profile.api_key = state.access_token.clone();
         } else if let Some(SecretSource::Literal { value }) = &profile.secret_source {
             profile.api_key = value.clone();
         }
@@ -1262,6 +1331,210 @@ pub fn persist_profile_if_named(profile: &Profile) -> Result<()> {
     Ok(())
 }
 
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn truncate_error_text(value: &str) -> String {
+    const MAX_LEN: usize = 512;
+    if value.len() <= MAX_LEN {
+        value.to_string()
+    } else {
+        format!("{}...", &value[..MAX_LEN])
+    }
+}
+
+fn json_pointer_string<'a>(value: &'a JsonValue, pointer: &str, label: &str) -> Result<&'a str> {
+    value
+        .pointer(pointer)
+        .and_then(|item| item.as_str())
+        .with_context(|| format!("Missing string {} at JSON pointer '{}'", label, pointer))
+}
+
+fn json_pointer_i64(value: &JsonValue, pointer: &str, label: &str) -> Result<i64> {
+    let target = value
+        .pointer(pointer)
+        .with_context(|| format!("Missing {} at JSON pointer '{}'", label, pointer))?;
+    if let Some(number) = target.as_i64() {
+        return Ok(number);
+    }
+    if let Some(number) = target.as_u64() {
+        return i64::try_from(number)
+            .with_context(|| format!("{} at '{}' is too large", label, pointer));
+    }
+    if let Some(text) = target.as_str() {
+        return text
+            .parse::<i64>()
+            .with_context(|| format!("{} at '{}' is not a valid integer", label, pointer));
+    }
+    anyhow::bail!(
+        "{} at '{}' must be a number or numeric string",
+        label,
+        pointer
+    )
+}
+
+pub async fn refresh_bootstrap_profile(
+    profile: &mut Profile,
+    client: &reqwest::Client,
+) -> Result<bool> {
+    let Some(config) = profile.bootstrap.clone() else {
+        return Ok(false);
+    };
+
+    if profile.auth_type != AuthType::Bearer {
+        anyhow::bail!(
+            "Token bootstrap is only supported for bearer credentials, not '{}'",
+            profile.auth_type
+        );
+    }
+
+    validate_token_bootstrap_config(&config)?;
+
+    let rendered_body = render_template(
+        &config.request_json,
+        profile,
+        "token bootstrap request body",
+    )?;
+    let body: JsonValue = serde_json::from_str(&rendered_body).with_context(|| {
+        format!(
+            "Rendered token bootstrap request body is not valid JSON: {}",
+            rendered_body
+        )
+    })?;
+
+    let mut request = client.post(&config.token_endpoint);
+    for header in &config.headers {
+        request = request.header(&header.name, header.render_value(profile)?);
+    }
+
+    let response = request
+        .json(&body)
+        .send()
+        .await
+        .context("Token bootstrap request failed")?;
+    let status = response.status();
+    let response_text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!(
+            "Token bootstrap request failed with status {}: {}",
+            status,
+            truncate_error_text(&response_text)
+        );
+    }
+
+    let response_json: JsonValue = serde_json::from_str(&response_text).with_context(|| {
+        format!(
+            "Token bootstrap response is not valid JSON: {}",
+            truncate_error_text(&response_text)
+        )
+    })?;
+
+    if let (Some(pointer), Some(expected)) = (
+        config.success_code_pointer.as_ref(),
+        config.success_code_value.as_ref(),
+    ) {
+        let actual = response_json
+            .pointer(pointer)
+            .with_context(|| format!("Missing success code at JSON pointer '{}'", pointer))?;
+        let expected_value: JsonValue = serde_json::from_str(expected).with_context(|| {
+            format!(
+                "Invalid configured success-code JSON literal '{}'",
+                expected
+            )
+        })?;
+        if actual != &expected_value {
+            anyhow::bail!(
+                "Token bootstrap response indicated failure at '{}': expected {}, got {}",
+                pointer,
+                expected_value,
+                actual
+            );
+        }
+    }
+
+    let access_token =
+        json_pointer_string(&response_json, &config.access_token_pointer, "access token")?;
+    let expires_in = json_pointer_i64(&response_json, &config.expires_in_pointer, "expires_in")?;
+    let token_type = config
+        .token_type_pointer
+        .as_ref()
+        .and_then(|pointer| response_json.pointer(pointer))
+        .and_then(|item| item.as_str())
+        .map(str::to_string);
+
+    profile.bootstrap_state = Some(TokenBootstrapState {
+        access_token: access_token.to_string(),
+        token_type,
+        expires_at: Some(current_unix_timestamp() + expires_in),
+    });
+    profile.api_key = access_token.to_string();
+
+    Ok(true)
+}
+
+pub async fn maybe_refresh_bootstrap_profile(
+    profile: &mut Profile,
+    client: &reqwest::Client,
+) -> Result<bool> {
+    let Some(config) = profile.bootstrap.as_ref() else {
+        return Ok(false);
+    };
+
+    let should_refresh = match profile.bootstrap_state.as_ref() {
+        Some(state) if !state.access_token.is_empty() => match state.expires_at {
+            Some(expires_at) => {
+                expires_at <= current_unix_timestamp() + config.refresh_skew_seconds
+            }
+            None => false,
+        },
+        _ => true,
+    };
+
+    if !should_refresh {
+        if let Some(state) = &profile.bootstrap_state {
+            profile.api_key = state.access_token.clone();
+        }
+        return Ok(false);
+    }
+
+    refresh_bootstrap_profile(profile, client).await
+}
+
+pub async fn refresh_effective_auth_profile(
+    profile: &mut Profile,
+    client: &reqwest::Client,
+    force: bool,
+    oauth_skew_seconds: i64,
+) -> Result<bool> {
+    if profile.auth_type == AuthType::OAuth {
+        if force {
+            oauth::refresh_oauth_profile(profile, client).await?;
+            return Ok(true);
+        }
+        return oauth::maybe_refresh_oauth_profile(profile, client, oauth_skew_seconds).await;
+    }
+
+    if profile.auth_type == AuthType::Bearer && profile.has_bootstrap_config() {
+        if force {
+            return refresh_bootstrap_profile(profile, client).await;
+        }
+        return maybe_refresh_bootstrap_profile(profile, client).await;
+    }
+
+    Ok(false)
+}
+
+pub fn supports_refresh_retry(profile: Option<&Profile>) -> bool {
+    profile.is_some_and(|active| {
+        active.auth_type == AuthType::OAuth
+            || (active.auth_type == AuthType::Bearer && active.has_bootstrap_config())
+    })
+}
+
 fn validate_ready(profile: &Profile) -> Result<()> {
     match profile.auth_type {
         AuthType::OAuth => {
@@ -1294,7 +1567,7 @@ fn validate_ready(profile: &Profile) -> Result<()> {
             }
         }
         _ => {
-            if profile.api_key.is_empty() {
+            if profile.api_key.is_empty() && !profile.has_bootstrap_config() {
                 anyhow::bail!(
                     "Credential '{}' does not have a usable secret. Set it with --secret, --secret-env, or --secret-op.",
                     profile.name.as_deref().unwrap_or("unknown"),
@@ -1601,6 +1874,49 @@ pub fn parse_field_spec(spec: &str) -> Result<(String, SecretSource)> {
         validate_field_name(name)?,
         parse_field_source(source.trim())?,
     ))
+}
+
+fn validate_json_pointer(pointer: &str, label: &str) -> Result<()> {
+    if pointer.is_empty() || !pointer.starts_with('/') {
+        anyhow::bail!(
+            "{} must be a JSON pointer starting with '/': {}",
+            label,
+            pointer
+        );
+    }
+    Ok(())
+}
+
+pub fn validate_token_bootstrap_config(config: &TokenBootstrapConfig) -> Result<()> {
+    url::Url::parse(&config.token_endpoint).with_context(|| {
+        format!(
+            "Invalid token bootstrap endpoint '{}': expected a valid URL",
+            config.token_endpoint
+        )
+    })?;
+    validate_template(&config.request_json)?;
+    validate_auth_headers(&config.headers)?;
+    validate_json_pointer(&config.access_token_pointer, "access token pointer")?;
+    validate_json_pointer(&config.expires_in_pointer, "expires_in pointer")?;
+    if let Some(pointer) = &config.token_type_pointer {
+        validate_json_pointer(pointer, "token type pointer")?;
+    }
+    match (&config.success_code_pointer, &config.success_code_value) {
+        (Some(pointer), Some(value)) => {
+            validate_json_pointer(pointer, "success code pointer")?;
+            serde_json::from_str::<JsonValue>(value).with_context(|| {
+                format!(
+                    "Invalid success-code value '{}': expected a valid JSON literal",
+                    value
+                )
+            })?;
+        }
+        (None, None) => {}
+        _ => {
+            anyhow::bail!("success-code-pointer and success-code-value must be provided together");
+        }
+    }
+    Ok(())
 }
 
 fn template_has_secret(template: &str) -> bool {

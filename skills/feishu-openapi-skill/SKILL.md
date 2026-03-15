@@ -16,7 +16,7 @@ Reuse the `uxc` skill for shared execution, auth, and error-handling guidance.
 - Access to the curated OpenAPI schema URL:
   - `https://raw.githubusercontent.com/holon-run/uxc/main/skills/feishu-openapi-skill/references/feishu-im.openapi.json`
 - A Feishu or Lark app with bot capability enabled.
-- A current `tenant_access_token` for the target tenant.
+- A Feishu or Lark app `app_id` + `app_secret`, or a current `tenant_access_token` if you are using the manual fallback path.
 
 ## Scope
 
@@ -30,7 +30,6 @@ This skill covers an IM-focused request/response surface:
 
 This skill does **not** cover:
 
-- token bootstrap or automatic token refresh inside `uxc`
 - inbound event subscription receiver runtime
 - docs, bitable, approval, or non-IM product families
 - the full Feishu or Lark Open Platform surface
@@ -59,9 +58,37 @@ The fixed link example below uses Feishu. For Lark, use the same schema URL agai
 
 Feishu and Lark service-side APIs use `Authorization: Bearer <tenant_access_token>` for these operations.
 
-Tenant access tokens are typically fetched from the internal app token endpoint using `app_id` and `app_secret`, and the official auth docs state they are valid for 2 hours. Keep that bootstrap outside this skill, then bind the resulting token into `uxc auth`.
+Preferred setup is to store `app_id` + `app_secret` as credential fields and let `uxc auth bootstrap` fetch and refresh the short-lived tenant token automatically.
 
-Feishu bootstrap example:
+Feishu bootstrap-managed setup:
+
+```bash
+uxc auth credential set feishu-tenant \
+  --auth-type bearer \
+  --field app_id=env:FEISHU_APP_ID \
+  --field app_secret=env:FEISHU_APP_SECRET
+
+uxc auth bootstrap set feishu-tenant \
+  --token-endpoint https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal \
+  --header 'Content-Type=application/json; charset=utf-8' \
+  --request-json '{"app_id":"{{field:app_id}}","app_secret":"{{field:app_secret}}"}' \
+  --access-token-pointer /tenant_access_token \
+  --expires-in-pointer /expire \
+  --success-code-pointer /code \
+  --success-code-value 0
+
+uxc auth binding add \
+  --id feishu-tenant \
+  --host open.feishu.cn \
+  --path-prefix /open-apis \
+  --scheme https \
+  --credential feishu-tenant \
+  --priority 100
+```
+
+For Lark, use the same bootstrap shape against the Lark host and bind the credential to `open.larksuite.com`.
+
+Manual fallback if you already have a tenant token:
 
 ```bash
 curl -sS https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal \
@@ -105,7 +132,14 @@ uxc auth binding add \
   --priority 100
 ```
 
-Validate the active mapping when auth looks wrong:
+Inspect or pre-warm bootstrap state when auth looks wrong:
+
+```bash
+uxc auth bootstrap info feishu-tenant
+uxc auth bootstrap refresh feishu-tenant
+```
+
+Validate the active binding when auth looks wrong:
 
 ```bash
 uxc auth binding match https://open.feishu.cn/open-apis
@@ -159,7 +193,7 @@ uxc auth binding match https://open.feishu.cn/open-apis
 
 - Keep automation on the JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
-- `tenant_access_token` bootstrap and refresh are outside this skill. If calls start failing after token expiry, fetch a fresh token and update the bound secret.
+- Prefer `uxc auth bootstrap` over manual token management. Manual `tenant_access_token` setup is still supported as a fallback.
 - `post:/im/v1/messages` requires the `receive_id_type` query parameter and the body `content` field is a JSON-encoded string, not a nested JSON object.
 - `post:/im/v1/messages/{message_id}/reply` is for explicit replies to an existing message. Treat it as a high-risk write.
 - History reads only return chats and messages visible to the bot/app configuration. Auth success does not imply access to every chat.

@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use super::types::*;
-use crate::auth::{oauth, AuthType, Profile, Profiles};
+use crate::auth::{self, oauth, AuthType, Profile, Profiles};
 use crate::error::UxcError;
 use crate::http_client::build_resilient_http_client;
 use anyhow::{bail, Context, Result};
@@ -278,34 +278,18 @@ impl McpHttpTransport {
     }
 
     async fn is_oauth_profile(&self) -> bool {
-        self.auth_profile
-            .lock()
-            .await
-            .as_ref()
-            .map(|profile| profile.auth_type == AuthType::OAuth)
-            .unwrap_or(false)
+        auth::supports_refresh_retry(self.auth_profile.lock().await.as_ref())
     }
 
     async fn maybe_refresh_oauth_token(&self) -> Result<()> {
-        let should_refresh = {
-            let guard = self.auth_profile.lock().await;
-            if let Some(profile) = guard.as_ref() {
-                if profile.auth_type == AuthType::OAuth {
-                    if let Some(oauth_profile) = &profile.oauth {
-                        oauth::should_refresh_token(oauth_profile, 60)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
+        let mut profile = self.auth_profile.lock().await.clone();
+        if let Some(active) = profile.as_mut() {
+            let refreshed =
+                auth::refresh_effective_auth_profile(active, &self.client, false, 60).await?;
+            if refreshed {
+                persist_profile_update(active).await?;
+                *self.auth_profile.lock().await = Some(active.clone());
             }
-        };
-
-        if should_refresh {
-            self.force_refresh_oauth_token().await?;
         }
 
         Ok(())
@@ -316,12 +300,7 @@ impl McpHttpTransport {
         let mut profile = self.auth_profile.lock().await.clone().ok_or_else(|| {
             UxcError::OAuthRequired("No authentication profile available".to_string())
         })?;
-
-        if profile.auth_type != AuthType::OAuth {
-            return Ok(());
-        }
-
-        oauth::refresh_oauth_profile(&mut profile, &self.client).await?;
+        auth::refresh_effective_auth_profile(&mut profile, &self.client, true, 60).await?;
         persist_profile_update(&profile).await?;
         *self.auth_profile.lock().await = Some(profile);
 
@@ -643,10 +622,7 @@ impl McpHttpTransport {
                     .await
             }
             ProbeAttemptResult::Unauthorized(reason) => {
-                let is_oauth = auth_profile
-                    .as_ref()
-                    .map(|profile| profile.auth_type == AuthType::OAuth)
-                    .unwrap_or(false);
+                let is_oauth = auth::supports_refresh_retry(auth_profile.as_ref());
 
                 if !is_oauth {
                     return Ok(ProbeInitializeOutcome::NotMcp(reason));
@@ -657,7 +633,9 @@ impl McpHttpTransport {
                     .as_mut()
                     .expect("oauth probe path requires auth profile");
 
-                if let Err(err) = oauth::refresh_oauth_profile(profile, &client).await {
+                if let Err(err) =
+                    auth::refresh_effective_auth_profile(profile, &client, true, 60).await
+                {
                     return Ok(Self::probe_auth_failure_from_refresh_error(err));
                 }
 
@@ -706,10 +684,7 @@ impl McpHttpTransport {
         match Self::probe_legacy_sse_once(url, client, auth_profile.as_ref()).await {
             ProbeAttemptResult::Success(mode) => Ok(ProbeInitializeOutcome::Success(mode)),
             ProbeAttemptResult::Unauthorized(reason) => {
-                let is_oauth = auth_profile
-                    .as_ref()
-                    .map(|profile| profile.auth_type == AuthType::OAuth)
-                    .unwrap_or(false);
+                let is_oauth = auth::supports_refresh_retry(auth_profile.as_ref());
 
                 if !is_oauth {
                     return Ok(ProbeInitializeOutcome::NotMcp(format!(
@@ -722,7 +697,9 @@ impl McpHttpTransport {
                     .as_mut()
                     .expect("oauth probe path requires auth profile");
 
-                if let Err(err) = oauth::refresh_oauth_profile(profile, client).await {
+                if let Err(err) =
+                    auth::refresh_effective_auth_profile(profile, client, true, 60).await
+                {
                     return Ok(Self::probe_auth_failure_from_refresh_error(err));
                 }
 
@@ -1444,37 +1421,21 @@ impl LegacySseTransport {
     }
 
     async fn maybe_refresh_oauth_token(&self) -> Result<()> {
-        let should_refresh = {
-            let guard = self.auth_profile.lock().await;
-            if let Some(profile) = guard.as_ref() {
-                if profile.auth_type == AuthType::OAuth {
-                    if let Some(oauth_profile) = &profile.oauth {
-                        oauth::should_refresh_token(oauth_profile, 60)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
+        let mut profile = self.auth_profile.lock().await.clone();
+        if let Some(active) = profile.as_mut() {
+            let refreshed =
+                auth::refresh_effective_auth_profile(active, &self.client, false, 60).await?;
+            if refreshed {
+                persist_profile_update(active).await?;
+                *self.auth_profile.lock().await = Some(active.clone());
             }
-        };
-
-        if should_refresh {
-            self.force_refresh_oauth_token().await?;
         }
 
         Ok(())
     }
 
     async fn is_oauth_profile(&self) -> bool {
-        self.auth_profile
-            .lock()
-            .await
-            .as_ref()
-            .map(|profile| profile.auth_type == AuthType::OAuth)
-            .unwrap_or(false)
+        auth::supports_refresh_retry(self.auth_profile.lock().await.as_ref())
     }
 
     async fn force_refresh_oauth_token(&self) -> Result<()> {
@@ -1482,12 +1443,7 @@ impl LegacySseTransport {
         let mut profile = self.auth_profile.lock().await.clone().ok_or_else(|| {
             UxcError::OAuthRequired("No authentication profile available".to_string())
         })?;
-
-        if profile.auth_type != AuthType::OAuth {
-            return Ok(());
-        }
-
-        oauth::refresh_oauth_profile(&mut profile, &self.client).await?;
+        auth::refresh_effective_auth_profile(&mut profile, &self.client, true, 60).await?;
         persist_profile_update(&profile).await?;
         *self.auth_profile.lock().await = Some(profile);
         Ok(())

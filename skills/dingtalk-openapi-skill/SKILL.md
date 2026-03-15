@@ -16,7 +16,7 @@ Reuse the `uxc` skill for shared execution, auth, and error-handling guidance.
 - Access to the curated OpenAPI schema URL:
   - `https://raw.githubusercontent.com/holon-run/uxc/main/skills/dingtalk-openapi-skill/references/dingtalk-messaging.openapi.json`
 - A DingTalk internal app or app suite with bot messaging permissions enabled.
-- A current DingTalk app `accessToken`.
+- A DingTalk app `appKey` + `appSecret`, or a current `accessToken` if you are using the manual fallback path.
 - Robot code, conversation identifiers, and user identifiers for the target send flows.
 
 ## Scope
@@ -34,8 +34,6 @@ This skill does **not** cover:
 - old `oapi.dingtalk.com` endpoints
 - custom robot webhook token/signature flows
 - inbound callback or webhook receiver runtime
-- generic token refresh inside `uxc`
-
 ## Subscribe / Stream Mode Status
 
 DingTalk has event-delivery flows such as Stream Mode, but those flows are outside the current scope of this skill.
@@ -57,9 +55,35 @@ The older `oapi.dingtalk.com` surface is intentionally excluded from v1 to keep 
 
 ## Authentication
 
-DingTalk v1 APIs use app `accessToken` credentials. Bootstrap the token outside this skill, then bind it as a bearer credential for the versioned API host.
+DingTalk v1 APIs use app `accessToken` credentials.
 
-Example bootstrap:
+Preferred setup is to store `appKey` + `appSecret` as credential fields and let `uxc auth bootstrap` fetch and refresh the short-lived access token automatically.
+
+Bootstrap-managed setup:
+
+```bash
+uxc auth credential set dingtalk-app \
+  --auth-type bearer \
+  --field app_key=env:DINGTALK_APP_KEY \
+  --field app_secret=env:DINGTALK_APP_SECRET
+
+uxc auth bootstrap set dingtalk-app \
+  --token-endpoint https://api.dingtalk.com/v1.0/oauth2/accessToken \
+  --header 'Content-Type=application/json' \
+  --request-json '{"appKey":"{{field:app_key}}","appSecret":"{{field:app_secret}}"}' \
+  --access-token-pointer /accessToken \
+  --expires-in-pointer /expireIn
+
+uxc auth binding add \
+  --id dingtalk-app \
+  --host api.dingtalk.com \
+  --path-prefix /v1.0 \
+  --scheme https \
+  --credential dingtalk-app \
+  --priority 100
+```
+
+Manual fallback if you already have an app access token:
 
 ```bash
 curl -sS https://api.dingtalk.com/v1.0/oauth2/accessToken \
@@ -129,7 +153,7 @@ uxc auth binding match https://api.dingtalk.com/v1.0
 
 - Keep automation on the JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
-- Token bootstrap and refresh are outside this skill. DingTalk app `accessToken` values expire; refresh them externally and update the bound secret when needed.
+- Prefer `uxc auth bootstrap` over manual token management. Manual `accessToken` setup is still supported as a fallback.
 - All three send operations are high-risk writes. Require explicit user confirmation before execution.
 - DingTalk `msgParam` is a JSON-encoded string payload, not a nested JSON object. Build and validate that string carefully before sending.
 - `robotCode`, `openConversationId`, `coolAppCode`, and target identifiers are all provider-specific routing fields. Missing any of them generally means the send will fail even if auth is valid.

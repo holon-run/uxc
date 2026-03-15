@@ -309,6 +309,12 @@ enum AuthCommands {
         binding_command: AuthBindingCommands,
     },
 
+    /// Manage app-credential token bootstrap
+    Bootstrap {
+        #[command(subcommand)]
+        bootstrap_command: AuthBootstrapCommands,
+    },
+
     /// Manage OAuth credentials
     Oauth {
         #[command(subcommand)]
@@ -596,6 +602,73 @@ enum AuthOauthCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum AuthBootstrapCommands {
+    /// Configure token bootstrap for a credential
+    Set {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
+
+        /// Token endpoint URL
+        #[arg(long)]
+        token_endpoint: String,
+
+        /// JSON request body template
+        #[arg(long)]
+        request_json: String,
+
+        /// Optional bootstrap request header template (repeatable): <name>=<template>
+        #[arg(long)]
+        header: Vec<String>,
+
+        /// JSON pointer for the access token in the response
+        #[arg(long)]
+        access_token_pointer: String,
+
+        /// JSON pointer for expires_in seconds in the response
+        #[arg(long)]
+        expires_in_pointer: String,
+
+        /// Optional JSON pointer for token_type in the response
+        #[arg(long)]
+        token_type_pointer: Option<String>,
+
+        /// Optional JSON pointer for success-code validation
+        #[arg(long)]
+        success_code_pointer: Option<String>,
+
+        /// Expected JSON literal at success-code pointer
+        #[arg(long)]
+        success_code_value: Option<String>,
+
+        /// Refresh skew in seconds
+        #[arg(long, default_value_t = 60)]
+        refresh_skew_seconds: i64,
+    },
+
+    /// Show token bootstrap configuration and state
+    Info {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
+    },
+
+    /// Force refresh a bootstrap-backed token
+    Refresh {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
+    },
+
+    /// Remove token bootstrap configuration and state
+    Remove {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
+    },
+}
+
 enum EndpointCommand {
     HostHelp,
     Describe {
@@ -676,6 +749,7 @@ struct AuthProfileView {
     auth_path_prefix: Option<AuthPathPrefixView>,
     description: Option<String>,
     oauth: Option<AuthOAuthView>,
+    bootstrap: Option<AuthBootstrapView>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -715,6 +789,29 @@ struct AuthOAuthView {
     scopes: Vec<String>,
     expires_at: Option<i64>,
     has_refresh_token: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthBootstrapView {
+    token_endpoint: String,
+    request_json_masked: String,
+    headers: Option<Vec<AuthHeaderView>>,
+    access_token_pointer: String,
+    expires_in_pointer: String,
+    token_type_pointer: Option<String>,
+    success_code_pointer: Option<String>,
+    success_code_value: Option<String>,
+    refresh_skew_seconds: i64,
+    token_present: bool,
+    expires_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthBootstrapInfoData {
+    credential: String,
+    auth_type: String,
+    fields: Option<Vec<AuthFieldView>>,
+    bootstrap: AuthBootstrapView,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1177,6 +1274,12 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
                 AuthBindingCommands::Add { .. } => Some(vec!["auth", "binding", "add"]),
                 AuthBindingCommands::Remove { .. } => Some(vec!["auth", "binding", "remove"]),
                 AuthBindingCommands::Match { .. } => Some(vec!["auth", "binding", "match"]),
+            },
+            AuthCommands::Bootstrap { bootstrap_command } => match bootstrap_command {
+                AuthBootstrapCommands::Set { .. } => Some(vec!["auth", "bootstrap", "set"]),
+                AuthBootstrapCommands::Info { .. } => Some(vec!["auth", "bootstrap", "info"]),
+                AuthBootstrapCommands::Refresh { .. } => Some(vec!["auth", "bootstrap", "refresh"]),
+                AuthBootstrapCommands::Remove { .. } => Some(vec!["auth", "bootstrap", "remove"]),
             },
             AuthCommands::Oauth { oauth_command } => match oauth_command {
                 AuthOauthCommands::List => Some(vec!["auth", "oauth", "list"]),
@@ -1713,11 +1816,12 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth"] => HelpData {
             path: "uxc auth".to_string(),
             about: "Manage authentication credentials and bindings".to_string(),
-            usage: "uxc auth <credential|info|binding|oauth> ...".to_string(),
+            usage: "uxc auth <credential|info|binding|bootstrap|oauth> ...".to_string(),
             commands: commands(&[
                 ("credential", "Manage credentials"),
                 ("info", "Alias for auth credential info"),
                 ("binding", "Manage endpoint auth bindings"),
+                ("bootstrap", "Manage app-credential token bootstrap"),
                 ("oauth", "Manage OAuth credentials"),
             ]),
             notes: vec![],
@@ -1725,6 +1829,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc auth credential list".to_string(),
                 "uxc auth info deepwiki".to_string(),
                 "uxc auth binding list".to_string(),
+                "uxc auth bootstrap info feishu-tenant".to_string(),
             ],
         },
         ["auth", "info"] => HelpData {
@@ -1850,6 +1955,61 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: vec![],
             notes: vec![],
             examples: vec!["uxc auth binding match https://mcp.deepwiki.com/mcp".to_string()],
+        },
+        ["auth", "bootstrap"] => HelpData {
+            path: "uxc auth bootstrap".to_string(),
+            about: "Manage app-credential token bootstrap".to_string(),
+            usage: "uxc auth bootstrap <set|info|refresh|remove> ...".to_string(),
+            commands: commands(&[
+                ("set", "Configure token bootstrap for a credential"),
+                ("info", "Show token bootstrap configuration and state"),
+                ("refresh", "Force refresh a bootstrap-backed token"),
+                ("remove", "Remove token bootstrap configuration and state"),
+            ]),
+            notes: vec![
+                "Use this for providers that exchange named credential fields such as app_id/app_secret for a short-lived bearer token.".to_string(),
+            ],
+            examples: vec![
+                "uxc auth bootstrap info feishu-tenant".to_string(),
+                "uxc auth bootstrap refresh feishu-tenant".to_string(),
+            ],
+        },
+        ["auth", "bootstrap", "set"] => HelpData {
+            path: "uxc auth bootstrap set".to_string(),
+            about: "Configure token bootstrap for a credential".to_string(),
+            usage: "uxc auth bootstrap set <credential_id> --token-endpoint <url> --request-json <json-template> --access-token-pointer <pointer> --expires-in-pointer <pointer> [--header <name>=<template>]... [--token-type-pointer <pointer>] [--success-code-pointer <pointer> --success-code-value <json-literal>] [--refresh-skew-seconds <n>]".to_string(),
+            commands: vec![],
+            notes: vec![
+                "The credential must already exist and should normally use --auth-type bearer.".to_string(),
+                "--request-json and --header templates support {{secret}}, {{field:name}}, {{env:VAR}}, and {{op://...}}.".to_string(),
+            ],
+            examples: vec![
+                "uxc auth bootstrap set feishu-tenant --token-endpoint https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal --header 'Content-Type=application/json; charset=utf-8' --request-json '{\"app_id\":\"{{field:app_id}}\",\"app_secret\":\"{{field:app_secret}}\"}' --access-token-pointer /tenant_access_token --expires-in-pointer /expire --success-code-pointer /code --success-code-value 0".to_string(),
+            ],
+        },
+        ["auth", "bootstrap", "info"] => HelpData {
+            path: "uxc auth bootstrap info".to_string(),
+            about: "Show token bootstrap configuration and state".to_string(),
+            usage: "uxc auth bootstrap info <credential_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth bootstrap info feishu-tenant".to_string()],
+        },
+        ["auth", "bootstrap", "refresh"] => HelpData {
+            path: "uxc auth bootstrap refresh".to_string(),
+            about: "Force refresh a bootstrap-backed token".to_string(),
+            usage: "uxc auth bootstrap refresh <credential_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth bootstrap refresh feishu-tenant".to_string()],
+        },
+        ["auth", "bootstrap", "remove"] => HelpData {
+            path: "uxc auth bootstrap remove".to_string(),
+            about: "Remove token bootstrap configuration and state".to_string(),
+            usage: "uxc auth bootstrap remove <credential_id>".to_string(),
+            commands: vec![],
+            notes: vec![],
+            examples: vec!["uxc auth bootstrap remove feishu-tenant".to_string()],
         },
         ["auth", "oauth"] => HelpData {
             path: "uxc auth oauth".to_string(),
@@ -3690,23 +3850,21 @@ async fn handle_subscribe_command(
                         ))
                     })?,
                 )
+            } else if matches!(
+                transport_hint,
+                Some(daemon::SubscriptionTransportHint::DiscordGateway)
+            ) && (normalized_input_json.is_some() || !normalized_args.is_empty())
+            {
+                Some(
+                    parse_arguments(normalized_args, normalized_input_json).map_err(|err| {
+                        UxcError::InvalidArguments(format!(
+                            "Invalid arguments for subscribe transport 'discord-gateway': {}",
+                            err
+                        ))
+                    })?,
+                )
             } else {
-                if matches!(
-                    transport_hint,
-                    Some(daemon::SubscriptionTransportHint::DiscordGateway)
-                ) && (normalized_input_json.is_some() || !normalized_args.is_empty())
-                {
-                    Some(
-                        parse_arguments(normalized_args, normalized_input_json).map_err(|err| {
-                            UxcError::InvalidArguments(format!(
-                                "Invalid arguments for subscribe transport 'discord-gateway': {}",
-                                err
-                            ))
-                        })?,
-                    )
-                } else {
-                    None
-                }
+                None
             };
             let poll_config = match poll_config {
                 Some(raw) => Some(serde_json::from_str::<Value>(raw).map_err(|err| {
@@ -3788,7 +3946,196 @@ async fn handle_auth_command(command: &AuthCommands) -> Result<OutputEnvelope> {
             .await
         }
         AuthCommands::Binding { binding_command } => handle_auth_binding_command(binding_command),
+        AuthCommands::Bootstrap { bootstrap_command } => {
+            handle_auth_bootstrap_command(bootstrap_command).await
+        }
         AuthCommands::Oauth { oauth_command } => handle_auth_oauth_command(oauth_command).await,
+    }
+}
+
+async fn handle_auth_bootstrap_command(command: &AuthBootstrapCommands) -> Result<OutputEnvelope> {
+    match command {
+        AuthBootstrapCommands::Set {
+            credential_id,
+            token_endpoint,
+            request_json,
+            header,
+            access_token_pointer,
+            expires_in_pointer,
+            token_type_pointer,
+            success_code_pointer,
+            success_code_value,
+            refresh_skew_seconds,
+        } => {
+            let mut profiles = Profiles::load_profiles()?;
+            let mut profile = profiles.get_profile(credential_id)?.clone();
+            profile.name = Some(credential_id.clone());
+            if profile.auth_type != AuthType::Bearer {
+                return Err(UxcError::InvalidArguments(format!(
+                    "Token bootstrap is only supported for bearer credentials, not '{}'",
+                    profile.auth_type
+                ))
+                .into());
+            }
+
+            let mut headers = Vec::with_capacity(header.len());
+            for spec in header {
+                let parsed = AuthHeader::parse(spec)
+                    .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+                headers.push(parsed);
+            }
+
+            let normalized_success_code_value = success_code_value
+                .as_ref()
+                .map(|value| serde_json::from_str::<Value>(value))
+                .transpose()
+                .map_err(|e| {
+                    UxcError::InvalidArguments(format!(
+                        "Invalid --success-code-value JSON literal: {}",
+                        e
+                    ))
+                })?
+                .map(|value| value.to_string());
+
+            let config = auth::TokenBootstrapConfig {
+                token_endpoint: token_endpoint.clone(),
+                request_json: request_json.clone(),
+                headers,
+                access_token_pointer: access_token_pointer.clone(),
+                expires_in_pointer: expires_in_pointer.clone(),
+                token_type_pointer: token_type_pointer.clone(),
+                success_code_pointer: success_code_pointer.clone(),
+                success_code_value: normalized_success_code_value,
+                refresh_skew_seconds: *refresh_skew_seconds,
+            };
+            auth::validate_token_bootstrap_config(&config)
+                .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+
+            profile.bootstrap = Some(config);
+            profile.bootstrap_state = None;
+            profile.api_key.clear();
+            profiles.set_profile(credential_id.clone(), profile.clone())?;
+            profiles.save_profiles()?;
+
+            let data = serde_json::to_value(AuthBootstrapInfoData {
+                credential: credential_id.clone(),
+                auth_type: profile.auth_type.to_string(),
+                fields: {
+                    let fields = profile
+                        .field_source_kinds()
+                        .into_iter()
+                        .map(|(field_name, source_kind)| AuthFieldView {
+                            name: field_name,
+                            source_kind,
+                            value_masked: "***".to_string(),
+                        })
+                        .collect::<Vec<_>>();
+                    if fields.is_empty() {
+                        None
+                    } else {
+                        Some(fields)
+                    }
+                },
+                bootstrap: to_auth_bootstrap_view(&profile)
+                    .expect("bootstrap should exist after bootstrap set"),
+            })?;
+            Ok(OutputEnvelope::success(
+                "auth_bootstrap_set_result",
+                "cli",
+                "uxc",
+                Some(credential_id),
+                data,
+                None,
+            ))
+        }
+        AuthBootstrapCommands::Info { credential_id } => {
+            let profiles = Profiles::load_profiles()?;
+            let profile = profiles.get_profile(credential_id)?;
+            let bootstrap = to_auth_bootstrap_view(profile).ok_or_else(|| {
+                UxcError::InvalidArguments(format!(
+                    "Credential '{}' does not have token bootstrap configured",
+                    credential_id
+                ))
+            })?;
+            let data = serde_json::to_value(AuthBootstrapInfoData {
+                credential: credential_id.clone(),
+                auth_type: profile.auth_type.to_string(),
+                fields: {
+                    let fields = profile
+                        .field_source_kinds()
+                        .into_iter()
+                        .map(|(field_name, source_kind)| AuthFieldView {
+                            name: field_name,
+                            source_kind,
+                            value_masked: "***".to_string(),
+                        })
+                        .collect::<Vec<_>>();
+                    if fields.is_empty() {
+                        None
+                    } else {
+                        Some(fields)
+                    }
+                },
+                bootstrap,
+            })?;
+            Ok(OutputEnvelope::success(
+                "auth_bootstrap_info",
+                "cli",
+                "uxc",
+                Some(credential_id),
+                data,
+                None,
+            ))
+        }
+        AuthBootstrapCommands::Refresh { credential_id } => {
+            let client = build_resilient_http_client(
+                std::time::Duration::from_secs(30),
+                "auth bootstrap refresh",
+            )?;
+            let mut profiles = Profiles::load_profiles()?;
+            let mut profile = profiles.get_profile(credential_id)?.clone();
+            profile.name = Some(credential_id.clone());
+            let refreshed = auth::refresh_bootstrap_profile(&mut profile, &client).await?;
+            profiles.set_profile(credential_id.clone(), profile.clone())?;
+            profiles.save_profiles()?;
+            let data = serde_json::to_value(json!({
+                "credential": credential_id,
+                "refreshed": refreshed,
+                "bootstrap": to_auth_bootstrap_view(&profile),
+            }))?;
+            Ok(OutputEnvelope::success(
+                "auth_bootstrap_refresh_result",
+                "cli",
+                "uxc",
+                Some(credential_id),
+                data,
+                None,
+            ))
+        }
+        AuthBootstrapCommands::Remove { credential_id } => {
+            let mut profiles = Profiles::load_profiles()?;
+            let mut profile = profiles.get_profile(credential_id)?.clone();
+            let had_bootstrap = profile.bootstrap.is_some() || profile.bootstrap_state.is_some();
+            profile.bootstrap = None;
+            profile.bootstrap_state = None;
+            if profile.auth_type == AuthType::Bearer && profile.secret_source.is_none() {
+                profile.api_key.clear();
+            }
+            profiles.set_profile(credential_id.clone(), profile)?;
+            profiles.save_profiles()?;
+            let data = serde_json::to_value(json!({
+                "credential": credential_id,
+                "removed": had_bootstrap,
+            }))?;
+            Ok(OutputEnvelope::success(
+                "auth_bootstrap_remove_result",
+                "cli",
+                "uxc",
+                Some(credential_id),
+                data,
+                None,
+            ))
+        }
     }
 }
 
@@ -3978,6 +4325,8 @@ async fn handle_auth_credential_command(
                     } else {
                         profile_obj.fields.is_empty()
                     }
+                } else if resolved_auth_type == AuthType::Bearer {
+                    profile_obj.fields.is_empty()
                 } else {
                     true
                 };
@@ -4014,9 +4363,21 @@ async fn handle_auth_credential_command(
                 _ => unreachable!("secret argument exclusivity is validated above"),
             }
 
+            if provided_secret_flags == 0
+                && profile_obj.api_key.is_empty()
+                && matches!(
+                    profile_obj.secret_source,
+                    Some(crate::auth::SecretSource::Literal { ref value }) if value.is_empty()
+                )
+            {
+                profile_obj.secret_source = None;
+            }
+
             if resolved_auth_type == AuthType::OAuth {
                 profile_obj.secret_source = None;
                 profile_obj.auth_path_prefix = None;
+                profile_obj.bootstrap = None;
+                profile_obj.bootstrap_state = None;
             } else {
                 profile_obj.oauth = None;
                 if resolved_auth_type != AuthType::ApiKey {
@@ -4051,6 +4412,10 @@ async fn handle_auth_credential_command(
                         crate::auth::validate_auth_path_prefix_template(prefix)
                             .map_err(|e| UxcError::InvalidArguments(e.to_string()))?,
                     );
+                }
+                if resolved_auth_type != AuthType::Bearer {
+                    profile_obj.bootstrap = None;
+                    profile_obj.bootstrap_state = None;
                 }
             }
 
@@ -4649,6 +5014,8 @@ fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
         has_refresh_token: oauth.refresh_token.is_some(),
     });
 
+    let bootstrap = to_auth_bootstrap_view(profile);
+
     AuthProfileView {
         name: name.to_string(),
         auth_type: profile.auth_type.to_string(),
@@ -4701,7 +5068,44 @@ fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
             }),
         description: profile.description.clone(),
         oauth,
+        bootstrap,
     }
+}
+
+fn to_auth_bootstrap_view(profile: &Profile) -> Option<AuthBootstrapView> {
+    let config = profile.bootstrap.as_ref()?;
+    Some(AuthBootstrapView {
+        token_endpoint: config.token_endpoint.clone(),
+        request_json_masked: "***".to_string(),
+        headers: if config.headers.is_empty() {
+            None
+        } else {
+            Some(
+                config
+                    .headers
+                    .iter()
+                    .map(|header| AuthHeaderView {
+                        name: header.name.clone(),
+                        value_masked: "***".to_string(),
+                    })
+                    .collect(),
+            )
+        },
+        access_token_pointer: config.access_token_pointer.clone(),
+        expires_in_pointer: config.expires_in_pointer.clone(),
+        token_type_pointer: config.token_type_pointer.clone(),
+        success_code_pointer: config.success_code_pointer.clone(),
+        success_code_value: config.success_code_value.clone(),
+        refresh_skew_seconds: config.refresh_skew_seconds,
+        token_present: profile
+            .bootstrap_state
+            .as_ref()
+            .is_some_and(|state| !state.access_token.is_empty()),
+        expires_at: profile
+            .bootstrap_state
+            .as_ref()
+            .and_then(|state| state.expires_at),
+    })
 }
 
 fn parse_oauth_flow(value: &str) -> Result<OAuthFlow> {
