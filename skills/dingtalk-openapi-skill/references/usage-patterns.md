@@ -11,13 +11,33 @@ dingtalk-openapi-cli -h
 
 ## Token Bootstrap
 
+Preferred path: let `uxc` manage app-token bootstrap and refresh from app credentials.
+
+```bash
+uxc auth credential set dingtalk-app \
+  --auth-type bearer \
+  --field app_key=env:DINGTALK_APP_KEY \
+  --field app_secret=env:DINGTALK_APP_SECRET
+
+uxc auth bootstrap set dingtalk-app \
+  --token-endpoint https://api.dingtalk.com/v1.0/oauth2/accessToken \
+  --header 'Content-Type=application/json' \
+  --request-json '{"appKey":"{{field:app_key}}","appSecret":"{{field:app_secret}}"}' \
+  --access-token-pointer /accessToken \
+  --expires-in-pointer /expireIn
+
+uxc auth bootstrap info dingtalk-app
+```
+
+Manual fallback:
+
 ```bash
 curl -sS https://api.dingtalk.com/v1.0/oauth2/accessToken \
   -H 'Content-Type: application/json' \
   -d '{"appKey":"dingxxxx","appSecret":"xxxx"}'
 ```
 
-Store the resulting `accessToken` in an environment variable before binding it into `uxc auth`.
+Store the resulting `accessToken` in an environment variable before binding it into `uxc auth` if you are using the manual fallback.
 
 ## Auth Setup
 

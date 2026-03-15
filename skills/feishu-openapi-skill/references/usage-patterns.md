@@ -13,6 +13,28 @@ For international Lark tenants, use the same schema against `https://open.larksu
 
 ## Token Bootstrap
 
+Preferred path: let `uxc` manage tenant-token bootstrap and refresh from app credentials.
+
+```bash
+uxc auth credential set feishu-tenant \
+  --auth-type bearer \
+  --field app_id=env:FEISHU_APP_ID \
+  --field app_secret=env:FEISHU_APP_SECRET
+
+uxc auth bootstrap set feishu-tenant \
+  --token-endpoint https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal \
+  --header 'Content-Type=application/json; charset=utf-8' \
+  --request-json '{"app_id":"{{field:app_id}}","app_secret":"{{field:app_secret}}"}' \
+  --access-token-pointer /tenant_access_token \
+  --expires-in-pointer /expire \
+  --success-code-pointer /code \
+  --success-code-value 0
+
+uxc auth bootstrap info feishu-tenant
+```
+
+Manual fallback:
+
 For Feishu tenants:
 
 ```bash
@@ -29,7 +51,7 @@ curl -sS https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/intern
   -d '{"app_id":"cli_xxx","app_secret":"xxxx"}'
 ```
 
-Store the resulting `tenant_access_token` in an environment variable before binding it into `uxc auth`.
+Store the resulting `tenant_access_token` in an environment variable before binding it into `uxc auth` if you are using the manual fallback.
 
 ## Auth Setup
 

@@ -8,7 +8,7 @@
 //! - Proper error handling and status code mapping
 
 use super::{Adapter, ExecutionResult, Operation, OperationDetail, Parameter, ProtocolType};
-use crate::auth::{oauth, AuthType, Profile};
+use crate::auth::{self, Profile};
 use crate::error::UxcError;
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -189,21 +189,16 @@ impl GrpcAdapter {
         *self.runtime_auth_profile.lock().await = Some(profile);
     }
 
-    async fn refresh_effective_oauth_profile(&self, force: bool) -> Result<Option<Profile>> {
+    async fn refresh_effective_auth_profile(&self, force: bool) -> Result<Option<Profile>> {
         let _refresh_guard = self.oauth_refresh_lock.lock().await;
         let mut profile = self.effective_auth_profile().await;
         if let Some(active) = profile.as_mut() {
-            if active.auth_type == AuthType::OAuth {
-                let refreshed = if force {
-                    oauth::refresh_oauth_profile(active, &self.oauth_http_client).await?;
-                    true
-                } else {
-                    oauth::maybe_refresh_oauth_profile(active, &self.oauth_http_client, 60).await?
-                };
-                if refreshed {
-                    crate::auth::persist_profile_if_named(active)?;
-                    self.set_effective_auth_profile(active.clone()).await;
-                }
+            let refreshed =
+                auth::refresh_effective_auth_profile(active, &self.oauth_http_client, force, 60)
+                    .await?;
+            if refreshed {
+                crate::auth::persist_profile_if_named(active)?;
+                self.set_effective_auth_profile(active.clone()).await;
             }
         }
         Ok(profile)
@@ -925,7 +920,7 @@ impl GrpcAdapter {
         let attempts = Self::grpcurl_attempts(original_url, target);
         let mut last_error = String::new();
 
-        let profile = self.refresh_effective_oauth_profile(false).await?;
+        let profile = self.refresh_effective_auth_profile(false).await?;
         let headers = if let Some(profile) = profile.as_ref() {
             profile.to_grpcurl_headers()?
         } else {
