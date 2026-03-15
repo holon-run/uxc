@@ -410,6 +410,55 @@ fn test_protocol_router_get_adapter_with_schema_url_override() {
 }
 
 #[test]
+fn test_protocol_router_gets_jsonrpc_adapter_with_openrpc_schema_url_override() {
+    let mut schema_server = mockito::Server::new();
+    let openrpc_doc = serde_json::json!({
+        "openrpc": "1.2.6",
+        "info": {
+            "title": "Ethereum JSON-RPC",
+            "version": "1.0.0"
+        },
+        "methods": [
+            {
+                "name": "eth_blockNumber",
+                "params": [],
+                "result": {
+                    "name": "blockNumber",
+                    "schema": { "type": "string" }
+                }
+            }
+        ]
+    });
+
+    let _schema = schema_server
+        .mock("GET", "/openrpc.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(openrpc_doc.to_string())
+        .create();
+
+    let base_url = "https://ethereum-rpc.publicnode.com".to_string();
+    let schema_url = format!("{}/openrpc.json", schema_server.url());
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async {
+        let router = ProtocolRouter::new();
+        let options = DetectionOptions {
+            schema_url: Some(schema_url),
+            auth_profile: None,
+            stdio_spawn_options: None,
+        };
+        router
+            .get_adapter_for_url_with_options(&base_url, &options)
+            .await
+    });
+
+    assert!(result.is_ok());
+    let adapter = result.unwrap();
+    assert_eq!(adapter.protocol_type(), ProtocolType::JsonRpc);
+}
+
+#[test]
 fn test_protocol_router_unsupported_url() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(async {

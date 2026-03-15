@@ -4127,7 +4127,10 @@ fn adapter_from_protocol(protocol: ProtocolType, options: &DetectionOptions) -> 
                 .with_schema_url_override(options.schema_url.clone()),
         ),
         ProtocolType::GRpc => AdapterEnum::GRpc(adapters::grpc::GrpcAdapter::new()),
-        ProtocolType::JsonRpc => AdapterEnum::JsonRpc(adapters::jsonrpc::JsonRpcAdapter::new()),
+        ProtocolType::JsonRpc => AdapterEnum::JsonRpc(
+            adapters::jsonrpc::JsonRpcAdapter::new()
+                .with_schema_url_override(options.schema_url.clone()),
+        ),
         ProtocolType::Mcp => {
             let mut adapter = adapters::mcp::McpAdapter::new();
             if let Some(spawn_options) = options.stdio_spawn_options.clone() {

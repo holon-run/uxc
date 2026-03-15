@@ -1,0 +1,3 @@
+display_name: "Ethereum JSON-RPC"
+short_description: "Read Ethereum execution RPC and manage eth_subscribe pubsub flows through UXC with the official execution OpenRPC schema."
+default_prompt: "Use $ethereum-jsonrpc-skill to discover and execute safe Ethereum execution JSON-RPC reads and eth_subscribe pubsub flows through UXC with the official execution OpenRPC schema, help-first inspection, and sink-based subscription handling."
