@@ -21,8 +21,6 @@ pub fn derive_socket_mode_open_endpoint(endpoint: &str) -> Result<String> {
         "/api/apps.connections.open".to_string()
     } else if path.ends_with("/apps.connections.open") {
         path.to_string()
-    } else if path.ends_with("/api") {
-        format!("{path}/apps.connections.open")
     } else {
         format!("{path}/apps.connections.open")
     };
@@ -59,6 +57,12 @@ pub struct SlackSocketModeHandler;
 impl SlackSocketModeHandler {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl Default for SlackSocketModeHandler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
