@@ -276,7 +276,11 @@ UXC 提供一个标准 skill（`uxc`）和若干官方场景化 wrapper skill。
 
 - [`notion-mcp-skill`](skills/notion-mcp-skill/SKILL.md)：提供带 OAuth 说明的 Notion MCP 流程指引
 - [`linear-graphql-skill`](skills/linear-graphql-skill/SKILL.md)：通过 GraphQL 操作 Linear 的 issue、project 和 team
-- [`discord-openapi-skill`](skills/discord-openapi-skill/SKILL.md)：通过 UXC + OpenAPI schema mapping 操作 Discord REST API
+- [`slack-openapi-skill`](skills/slack-openapi-skill/SKILL.md)：通过 UXC 操作 Slack Web API，并通过 `uxc subscribe` 接收 Socket Mode 事件
+- [`discord-openapi-skill`](skills/discord-openapi-skill/SKILL.md)：通过 UXC + OpenAPI schema mapping 操作 Discord REST API，并通过 `uxc subscribe` 接收 Gateway 事件
+- [`feishu-openapi-skill`](skills/feishu-openapi-skill/SKILL.md)：通过 UXC 操作飞书/Lark IM API，并使用自动 bootstrap 鉴权和长连接事件接收
+- [`telegram-openapi-skill`](skills/telegram-openapi-skill/SKILL.md)：通过 UXC 操作 Telegram Bot API，并通过轮询式 `uxc subscribe` 接收更新
+- [`matrix-openapi-skill`](skills/matrix-openapi-skill/SKILL.md)：通过 UXC 操作 Matrix Client-Server API，并通过 `/sync` 轮询跟踪房间时间线
 
 ### Crypto 与链上数据
 
@@ -303,7 +307,7 @@ npx -y skills@latest add holon-run/uxc --skill uxc --agent codex -y
 npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill context7-mcp-skill --skill deepwiki-mcp-skill --agent codex -y
 
 # 安装协作类 skill
-npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill discord-openapi-skill --agent codex -y
+npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill slack-openapi-skill --skill discord-openapi-skill --skill feishu-openapi-skill --skill telegram-openapi-skill --skill matrix-openapi-skill --agent codex -y
 
 # 安装 Crypto 与链上类 skill
 npx -y skills@latest add holon-run/uxc --skill bitquery-graphql-skill --skill binance-web3-openapi-skill --skill binance-spot-openapi-skill --skill binance-spot-websocket-skill --skill okx-exchange-websocket-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
@@ -323,7 +327,11 @@ clawhub --workdir ~/.openclaw --dir skills install deepwiki-mcp-skill
 # 安装协作类 skill
 clawhub --workdir ~/.openclaw --dir skills install notion-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install linear-graphql-skill
+clawhub --workdir ~/.openclaw --dir skills install slack-openapi-skill
 clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
+clawhub --workdir ~/.openclaw --dir skills install feishu-openapi-skill
+clawhub --workdir ~/.openclaw --dir skills install telegram-openapi-skill
+clawhub --workdir ~/.openclaw --dir skills install matrix-openapi-skill
 
 # 安装 Crypto 与链上类 skill
 clawhub --workdir ~/.openclaw --dir skills install binance-web3-openapi-skill

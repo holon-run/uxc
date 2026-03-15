@@ -281,7 +281,11 @@ Use `uxc` skill as the shared execution layer, and add wrappers when they fit yo
 
 - [`notion-mcp-skill`](skills/notion-mcp-skill/SKILL.md): operate Notion MCP workflows with OAuth-aware guidance
 - [`linear-graphql-skill`](skills/linear-graphql-skill/SKILL.md): operate Linear issues, projects, and teams through GraphQL
-- [`discord-openapi-skill`](skills/discord-openapi-skill/SKILL.md): operate Discord REST API via UXC and OpenAPI schema mapping
+- [`slack-openapi-skill`](skills/slack-openapi-skill/SKILL.md): operate Slack Web API and receive inbound Socket Mode events through `uxc subscribe`
+- [`discord-openapi-skill`](skills/discord-openapi-skill/SKILL.md): operate Discord REST API and receive Gateway events through `uxc subscribe`
+- [`feishu-openapi-skill`](skills/feishu-openapi-skill/SKILL.md): operate Feishu/Lark IM APIs with bootstrap-managed auth and long-connection event intake
+- [`telegram-openapi-skill`](skills/telegram-openapi-skill/SKILL.md): operate Telegram Bot API and receive updates through polling-based `uxc subscribe`
+- [`matrix-openapi-skill`](skills/matrix-openapi-skill/SKILL.md): operate Matrix Client-Server API and follow room timelines through `/sync` polling
 
 ### Crypto and Onchain Data
 
@@ -308,7 +312,7 @@ npx -y skills@latest add holon-run/uxc --skill uxc --agent codex -y
 npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill context7-mcp-skill --skill deepwiki-mcp-skill --agent codex -y
 
 # Add workspace skills
-npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill discord-openapi-skill --agent codex -y
+npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill slack-openapi-skill --skill discord-openapi-skill --skill feishu-openapi-skill --skill telegram-openapi-skill --skill matrix-openapi-skill --agent codex -y
 
 # Add crypto and onchain skills
 npx -y skills@latest add holon-run/uxc --skill bitquery-graphql-skill --skill binance-web3-openapi-skill --skill binance-spot-openapi-skill --skill binance-spot-websocket-skill --skill okx-exchange-websocket-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
@@ -328,7 +332,11 @@ clawhub --workdir ~/.openclaw --dir skills install deepwiki-mcp-skill
 # Add workspace skills
 clawhub --workdir ~/.openclaw --dir skills install notion-mcp-skill
 clawhub --workdir ~/.openclaw --dir skills install linear-graphql-skill
+clawhub --workdir ~/.openclaw --dir skills install slack-openapi-skill
 clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
+clawhub --workdir ~/.openclaw --dir skills install feishu-openapi-skill
+clawhub --workdir ~/.openclaw --dir skills install telegram-openapi-skill
+clawhub --workdir ~/.openclaw --dir skills install matrix-openapi-skill
 
 # Add crypto and onchain skills
 clawhub --workdir ~/.openclaw --dir skills install bitquery-graphql-skill
