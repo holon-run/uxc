@@ -331,7 +331,8 @@ Current real-world status is uneven by provider:
 
 ## Recommended Next Validation Order
 
-1. GoldRush only if the upstream MCP server later exposes `resources.subscribe`
+- No additional non-IM provider is currently prioritized for subscribe validation.
+- Revisit GoldRush only if the upstream MCP server later exposes `resources.subscribe`.
 
 ## Skill Documentation Implications
 
