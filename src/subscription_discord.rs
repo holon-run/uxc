@@ -167,6 +167,7 @@ impl DiscordGatewayHandler {
                     "message_type": "heartbeat_timeout",
                 })),
                 outbound_text_frames: Vec::new(),
+                outbound_binary_frames: Vec::new(),
                 stop_reason: Some("heartbeat_timeout".to_string()),
             });
         }
@@ -184,6 +185,7 @@ impl DiscordGatewayHandler {
                 "d": self.sequence
             })
             .to_string()],
+            outbound_binary_frames: Vec::new(),
             stop_reason: None,
         })
     }
@@ -270,6 +272,7 @@ impl WebSocketSessionHandler for DiscordGatewayHandler {
                     data: Some(value),
                     meta: Some(meta),
                     outbound_text_frames: outbound,
+                    outbound_binary_frames: Vec::new(),
                     stop_reason: None,
                 })
             }
@@ -296,6 +299,7 @@ impl WebSocketSessionHandler for DiscordGatewayHandler {
                     data: Some(value),
                     meta: Some(meta),
                     outbound_text_frames: Vec::new(),
+                    outbound_binary_frames: Vec::new(),
                     stop_reason: None,
                 })
             }
@@ -310,6 +314,7 @@ impl WebSocketSessionHandler for DiscordGatewayHandler {
                         "d": self.sequence
                     })
                     .to_string()],
+                    outbound_binary_frames: Vec::new(),
                     stop_reason: None,
                 })
             }
@@ -321,6 +326,7 @@ impl WebSocketSessionHandler for DiscordGatewayHandler {
                     data: None,
                     meta: Some(meta),
                     outbound_text_frames: Vec::new(),
+                    outbound_binary_frames: Vec::new(),
                     stop_reason: None,
                 })
             }
@@ -331,6 +337,7 @@ impl WebSocketSessionHandler for DiscordGatewayHandler {
                     data: Some(value),
                     meta: Some(meta),
                     outbound_text_frames: Vec::new(),
+                    outbound_binary_frames: Vec::new(),
                     stop_reason: Some("gateway_reconnect".to_string()),
                 })
             }
@@ -348,6 +355,7 @@ impl WebSocketSessionHandler for DiscordGatewayHandler {
                     data: Some(value),
                     meta: Some(meta),
                     outbound_text_frames: Vec::new(),
+                    outbound_binary_frames: Vec::new(),
                     stop_reason: Some("invalid_session".to_string()),
                 })
             }
@@ -356,6 +364,7 @@ impl WebSocketSessionHandler for DiscordGatewayHandler {
                 data: Some(value),
                 meta: Some(meta),
                 outbound_text_frames: Vec::new(),
+                outbound_binary_frames: Vec::new(),
                 stop_reason: None,
             }),
         }
@@ -372,6 +381,7 @@ impl WebSocketSessionHandler for DiscordGatewayHandler {
                 "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
             })),
             outbound_text_frames: Vec::new(),
+            outbound_binary_frames: Vec::new(),
             stop_reason: None,
         })
     }
@@ -400,6 +410,7 @@ impl WebSocketSessionHandler for DiscordGatewayHandler {
     async fn on_stop_requested(&mut self) -> Result<WebSocketStopOutput> {
         Ok(WebSocketStopOutput {
             outbound_text_frames: Vec::new(),
+            outbound_binary_frames: Vec::new(),
             stop_reason: Some("stopped".to_string()),
         })
     }

@@ -40,6 +40,7 @@ pub struct WebSocketHandlerOutput {
     pub data: Option<Value>,
     pub meta: Option<Value>,
     pub outbound_text_frames: Vec<String>,
+    pub outbound_binary_frames: Vec<Vec<u8>>,
     pub stop_reason: Option<String>,
 }
 
@@ -50,6 +51,7 @@ impl WebSocketHandlerOutput {
             data: None,
             meta: None,
             outbound_text_frames: Vec::new(),
+            outbound_binary_frames: Vec::new(),
             stop_reason: None,
         }
     }
@@ -58,6 +60,7 @@ impl WebSocketHandlerOutput {
 #[derive(Debug, Clone, Default)]
 pub struct WebSocketStopOutput {
     pub outbound_text_frames: Vec<String>,
+    pub outbound_binary_frames: Vec<Vec<u8>>,
     pub stop_reason: Option<String>,
 }
 
@@ -130,6 +133,7 @@ impl WebSocketSessionHandler for RawFrameHandler {
                 data: Some(value),
                 meta: Some(json!({"frame_type":"text_json"})),
                 outbound_text_frames: Vec::new(),
+                outbound_binary_frames: Vec::new(),
                 stop_reason: None,
             }),
             Err(_) => Ok(WebSocketHandlerOutput {
@@ -137,6 +141,7 @@ impl WebSocketSessionHandler for RawFrameHandler {
                 data: None,
                 meta: Some(json!({"frame_type":"text","text":text})),
                 outbound_text_frames: Vec::new(),
+                outbound_binary_frames: Vec::new(),
                 stop_reason: None,
             }),
         }
@@ -153,11 +158,35 @@ impl WebSocketSessionHandler for RawFrameHandler {
                 "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
             })),
             outbound_text_frames: Vec::new(),
+            outbound_binary_frames: Vec::new(),
             stop_reason: None,
         })
     }
 }
 
+async fn send_outbound_frames(
+    stream: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    outbound_text_frames: &[String],
+    outbound_binary_frames: &[Vec<u8>],
+) -> std::result::Result<(), WebSocketRunError> {
+    for frame in outbound_text_frames {
+        stream
+            .send(Message::Text(frame.clone()))
+            .await
+            .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket send failed: {}", err)))?;
+    }
+    for frame in outbound_binary_frames {
+        stream
+            .send(Message::Binary(frame.clone()))
+            .await
+            .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket send failed: {}", err)))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
 pub enum WebSocketRunError {
     Retry(anyhow::Error),
     Fatal(anyhow::Error),
@@ -202,11 +231,14 @@ async fn handle_stop_requested<H: WebSocketSessionHandler, O: WebSocketRuntimeOb
         .await
         .map_err(WebSocketRunError::Fatal)?;
     if let Some(stream) = stream {
-        for frame in &stop_output.outbound_text_frames {
-            if let Err(err) = stream.send(Message::Text(frame.clone())).await {
-                tracing::debug!("websocket cleanup send failed: {}", err);
-                break;
-            }
+        if let Err(err) = send_outbound_frames(
+            stream,
+            &stop_output.outbound_text_frames,
+            &stop_output.outbound_binary_frames,
+        )
+        .await
+        {
+            tracing::debug!("websocket cleanup send failed: {:?}", err);
         }
     }
     close_as_stopped(
@@ -332,14 +364,14 @@ async fn run_session_once<H: WebSocketSessionHandler, O: WebSocketRuntimeObserve
         .await
         .map_err(WebSocketRunError::Fatal)?;
 
-    for frame in &config.initial_text_frames {
-        stream
-            .send(Message::Text(frame.clone()))
-            .await
-            .map_err(|err| {
-                WebSocketRunError::Retry(anyhow!("websocket initial send failed: {}", err))
-            })?;
-    }
+    send_outbound_frames(&mut stream, &config.initial_text_frames, &[])
+        .await
+        .map_err(|err| match err {
+            WebSocketRunError::Retry(inner) => {
+                WebSocketRunError::Retry(anyhow!("websocket initial send failed: {}", inner))
+            }
+            other => other,
+        })?;
 
     match handler
         .on_open(&open_meta)
@@ -456,12 +488,12 @@ async fn apply_handler_output<O: WebSocketRuntimeObserver>(
     observer: &mut O,
     output: WebSocketHandlerOutput,
 ) -> std::result::Result<bool, WebSocketRunError> {
-    for frame in &output.outbound_text_frames {
-        stream
-            .send(Message::Text(frame.clone()))
-            .await
-            .map_err(|err| WebSocketRunError::Retry(anyhow!("websocket send failed: {}", err)))?;
-    }
+    send_outbound_frames(
+        stream,
+        &output.outbound_text_frames,
+        &output.outbound_binary_frames,
+    )
+    .await?;
     if output.data.is_some() || output.meta.is_some() {
         observer
             .emit("data", output.data, output.meta)

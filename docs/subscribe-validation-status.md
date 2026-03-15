@@ -294,14 +294,29 @@ Skill:
 
 - [skills/feishu-openapi-skill/SKILL.md](../skills/feishu-openapi-skill/SKILL.md)
 
-Current assessment:
+Validation result:
 
-- current skill scope is request/response only
-- platform event delivery exists, but no `uxc subscribe` validation has been completed yet
+- Feishu `app_id + app_secret` bootstrap through `uxc auth bootstrap` succeeded
+- live request/response IM calls succeeded after bootstrap-managed tenant token refresh
+- built-in `feishu_long_connection` transport succeeded against the live Feishu long-connection bootstrap endpoint
+- sink emitted `open` with the temporary Feishu WebSocket URL
+- real `im.message.receive_v1` events were delivered through the subscription job
+- live text messages sent to the bot in a `p2p` chat appeared as `data` events in the sink
+
+Observed runtime notes:
+
+- the transport opens a fresh temporary WebSocket URL from `/callback/ws/endpoint` on each connect attempt
+- event frames arrive as Feishu protobuf binary frames, not plain text JSON WebSocket messages
+- the runtime sends binary event acknowledgements and periodic ping control frames
+- validated live payloads included:
+  - `header.event_type = "im.message.receive_v1"`
+  - `event.message.chat_type = "p2p"`
+  - `event.message.message_type = "text"`
+  - `event.message.content`
 
 Status:
 
-- **not yet validated for subscribe**
+- **validated successfully**
 
 #### DingTalk Messaging
 
@@ -328,6 +343,7 @@ Current real-world status is uneven by provider:
 - Bitquery now proves the GraphQL WebSocket runtime works against a live provider, but provider-specific selection shape still matters
 - GoldRush shows that MCP tools and MCP resource subscriptions must be treated separately
 - Matrix now validates the room-scoped `/sync` polling path; remaining UX work is mainly around linked-command ergonomics
+- Feishu now validates a provider-aware long-connection transport for IM message intake
 
 ## Recommended Next Validation Order
 
@@ -341,4 +357,5 @@ Current documentation status after validation work:
 - Telegram skill can now describe daemon-backed polling subscribe as validated behavior
 - Matrix skill can now describe direct daemon-backed `/sync` polling subscribe as validated behavior
 - Bitquery skill can now describe `subscription/EVM` as validated, while still warning that subscriptions need an explicit `_select` and provider-appropriate shape
+- Feishu skill can now describe `feishu-long-connection` subscribe as validated behavior
 - GoldRush skill should not imply that current live MCP resources are subscribable unless upstream capability changes

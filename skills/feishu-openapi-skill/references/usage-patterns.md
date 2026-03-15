@@ -33,6 +33,8 @@ uxc auth bootstrap set feishu-tenant \
 uxc auth bootstrap info feishu-tenant
 ```
 
+For long-connection subscribe, keep this same credential because the transport needs the stored `app_id` and `app_secret` fields to open a fresh temporary WebSocket URL.
+
 Manual fallback:
 
 For Feishu tenants:
@@ -103,6 +105,30 @@ feishu-openapi-cli post:/im/v1/messages receive_id_type=open_id '{"receive_id":"
 # Reply to a message
 feishu-openapi-cli post:/im/v1/messages/{message_id}/reply '{"message_id":"om_xxx","content":"{\"text\":\"Reply from UXC\"}","msg_type":"text"}'
 ```
+
+## Long-Connection Subscribe
+
+Use `uxc subscribe` directly for inbound Feishu/Lark message intake:
+
+```bash
+uxc subscribe start https://open.feishu.cn/open-apis \
+  --transport feishu-long-connection \
+  --auth feishu-tenant \
+  --sink file:$HOME/.uxc/subscriptions/feishu.ndjson
+```
+
+What to expect:
+
+- the sink starts with an `open` event containing the temporary Feishu WebSocket URL
+- inbound bot-visible messages arrive as `data` events
+- real Feishu IM events use `data.header.event_type`, for example:
+  - `im.message.receive_v1`
+
+Important notes:
+
+- this transport is provider-aware; it is not a generic raw WebSocket JSON stream
+- the runtime handles temporary URL bootstrap, protobuf binary frames, event acknowledgements, and ping control frames automatically
+- use a credential that still has `app_id` and `app_secret` fields, even if request/response calls are already using bootstrap-managed bearer auth
 
 ## Fallback Equivalence
 

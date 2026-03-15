@@ -30,7 +30,6 @@ This skill covers an IM-focused request/response surface:
 
 This skill does **not** cover:
 
-- inbound event subscription receiver runtime
 - docs, bitable, approval, or non-IM product families
 - the full Feishu or Lark Open Platform surface
 
@@ -40,10 +39,16 @@ Feishu and Lark expose event-delivery models beyond plain request/response APIs,
 
 Current `uxc subscribe` status:
 
-- this skill is validated only for request/response IM operations
-- inbound event/message intake is **not** currently validated through `uxc subscribe`
+- request/response IM operations are validated
+- inbound message intake is validated through the built-in `feishu-long-connection` transport
+- live validation confirmed real `im.message.receive_v1` events delivered into the subscribe sink for a `p2p` bot chat
 
-Treat Feishu / Lark as future subscribe targets that will need provider-aware session behavior beyond this v1 OpenAPI wrapper.
+Important runtime notes:
+
+- `feishu-long-connection` is a provider-aware transport inside `uxc subscribe`; it is not a plain raw WebSocket stream
+- the runtime opens a temporary WebSocket URL from `/callback/ws/endpoint`
+- frames are protobuf binary messages, not text JSON
+- the runtime sends required event acknowledgements and ping control frames automatically
 
 ## Endpoint Choice
 
@@ -87,6 +92,8 @@ uxc auth binding add \
 ```
 
 For Lark, use the same bootstrap shape against the Lark host and bind the credential to `open.larksuite.com`.
+
+To use long-connection subscribe, the credential still needs `app_id` and `app_secret` fields because the transport opens its own temporary event URL outside the normal bearer-token request path.
 
 Manual fallback if you already have a tenant token:
 
@@ -169,6 +176,10 @@ uxc auth binding match https://open.feishu.cn/open-apis
    - positional JSON:
      `feishu-openapi-cli post:/im/v1/messages receive_id_type=chat_id '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"Hello from UXC\"}"}'`
 
+5. For inbound message intake, use `uxc subscribe` directly:
+   - `uxc subscribe start https://open.feishu.cn/open-apis --transport feishu-long-connection --auth feishu-tenant --sink file:$HOME/.uxc/subscriptions/feishu.ndjson`
+   - send a bot-visible message, then inspect the sink for `header.event_type = "im.message.receive_v1"`
+
 ## Operation Groups
 
 ### Chat Reads
@@ -194,10 +205,11 @@ uxc auth binding match https://open.feishu.cn/open-apis
 - Keep automation on the JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Prefer `uxc auth bootstrap` over manual token management. Manual `tenant_access_token` setup is still supported as a fallback.
+- `feishu-long-connection` requires the app credential fields `app_id` and `app_secret`; a plain bearer-only credential is not enough for event intake.
 - `post:/im/v1/messages` requires the `receive_id_type` query parameter and the body `content` field is a JSON-encoded string, not a nested JSON object.
 - `post:/im/v1/messages/{message_id}/reply` is for explicit replies to an existing message. Treat it as a high-risk write.
 - History reads only return chats and messages visible to the bot/app configuration. Auth success does not imply access to every chat.
-- Event subscription and callback verification are intentionally out of scope for this v1 skill.
+- Long-connection message intake is validated for Feishu bot chats; webhook-style callbacks and non-IM products are still out of scope.
 - `feishu-openapi-cli <operation> ...` is equivalent to `uxc https://open.feishu.cn/open-apis --schema-url <feishu_openapi_schema> <operation> ...`.
 
 ## References

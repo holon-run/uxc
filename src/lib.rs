@@ -17,6 +17,7 @@ pub mod output;
 pub mod protocol;
 pub mod schema_mapping;
 pub mod subscription_discord;
+pub mod subscription_feishu;
 pub mod subscription_graphql;
 pub mod subscription_jsonrpc;
 pub mod subscription_poll;

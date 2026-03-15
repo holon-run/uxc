@@ -182,6 +182,7 @@ impl GraphQLSubscriptionHandler {
             data: None,
             meta: None,
             outbound_text_frames: Vec::new(),
+            outbound_binary_frames: Vec::new(),
             stop_reason: None,
         }
     }
@@ -253,6 +254,7 @@ impl WebSocketSessionHandler for GraphQLSubscriptionHandler {
                     data: None,
                     meta: None,
                     outbound_text_frames: vec![self.subscribe_message()],
+                    outbound_binary_frames: Vec::new(),
                     stop_reason: None,
                 })
             }
@@ -267,6 +269,7 @@ impl WebSocketSessionHandler for GraphQLSubscriptionHandler {
                     data: payload.get("data").cloned(),
                     meta: Some(self.data_meta(&payload)),
                     outbound_text_frames: Vec::new(),
+                    outbound_binary_frames: Vec::new(),
                     stop_reason: None,
                 })
             }
@@ -279,6 +282,7 @@ impl WebSocketSessionHandler for GraphQLSubscriptionHandler {
                     data: None,
                     meta: None,
                     outbound_text_frames: Vec::new(),
+                    outbound_binary_frames: Vec::new(),
                     stop_reason: Some("complete".to_string()),
                 })
             }
@@ -292,6 +296,7 @@ impl WebSocketSessionHandler for GraphQLSubscriptionHandler {
                     "payload": value.get("payload").cloned().unwrap_or(Value::Null),
                 })
                 .to_string()],
+                outbound_binary_frames: Vec::new(),
                 stop_reason: None,
             }),
             "error" => Err(anyhow!(
@@ -312,6 +317,7 @@ impl WebSocketSessionHandler for GraphQLSubscriptionHandler {
     async fn on_stop_requested(&mut self) -> Result<WebSocketStopOutput> {
         Ok(WebSocketStopOutput {
             outbound_text_frames: vec![self.stop_message()],
+            outbound_binary_frames: Vec::new(),
             stop_reason: Some("stopped".to_string()),
         })
     }

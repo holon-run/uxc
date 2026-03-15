@@ -101,6 +101,7 @@ impl WebSocketSessionHandler for JsonRpcSubscriptionHandler {
                 data: None,
                 meta: None,
                 outbound_text_frames: Vec::new(),
+                outbound_binary_frames: Vec::new(),
                 stop_reason: None,
             });
         }
@@ -111,6 +112,7 @@ impl WebSocketSessionHandler for JsonRpcSubscriptionHandler {
                 data: None,
                 meta: None,
                 outbound_text_frames: Vec::new(),
+                outbound_binary_frames: Vec::new(),
                 stop_reason: None,
             });
         }
@@ -121,6 +123,7 @@ impl WebSocketSessionHandler for JsonRpcSubscriptionHandler {
                 data: None,
                 meta: None,
                 outbound_text_frames: Vec::new(),
+                outbound_binary_frames: Vec::new(),
                 stop_reason: None,
             });
         };
@@ -131,6 +134,7 @@ impl WebSocketSessionHandler for JsonRpcSubscriptionHandler {
                 data: None,
                 meta: None,
                 outbound_text_frames: Vec::new(),
+                outbound_binary_frames: Vec::new(),
                 stop_reason: None,
             });
         };
@@ -140,6 +144,7 @@ impl WebSocketSessionHandler for JsonRpcSubscriptionHandler {
                 data: None,
                 meta: None,
                 outbound_text_frames: Vec::new(),
+                outbound_binary_frames: Vec::new(),
                 stop_reason: None,
             });
         }
@@ -156,6 +161,7 @@ impl WebSocketSessionHandler for JsonRpcSubscriptionHandler {
             data,
             meta,
             outbound_text_frames: Vec::new(),
+            outbound_binary_frames: Vec::new(),
             stop_reason: None,
         })
     }
@@ -166,6 +172,7 @@ impl WebSocketSessionHandler for JsonRpcSubscriptionHandler {
             data: None,
             meta: None,
             outbound_text_frames: Vec::new(),
+            outbound_binary_frames: Vec::new(),
             stop_reason: None,
         })
     }
@@ -173,6 +180,7 @@ impl WebSocketSessionHandler for JsonRpcSubscriptionHandler {
     async fn on_stop_requested(&mut self) -> Result<WebSocketStopOutput> {
         Ok(WebSocketStopOutput {
             outbound_text_frames: self.unsubscribe_message().into_iter().collect(),
+            outbound_binary_frames: Vec::new(),
             stop_reason: Some("stopped".to_string()),
         })
     }
