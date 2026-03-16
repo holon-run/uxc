@@ -2,6 +2,9 @@
 //!
 //! Tests for daemon troubleshooting logs feature.
 
+mod common;
+
+use common::test_server_binary;
 use serial_test::serial;
 
 #[test]
@@ -149,6 +152,80 @@ fn daemon_log_contains_start_event() {
     );
 
     // Cleanup
+    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let _ = fs::remove_file(&log_file);
+}
+
+#[test]
+#[serial]
+fn daemon_log_contains_stdio_session_lifecycle_events() {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::thread;
+    use std::time::Duration;
+
+    let _ = uxc_command().arg("daemon").arg("stop").output();
+
+    let log_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        PathBuf::from(dir).join("uxc")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".uxc").join("daemon")
+    } else {
+        return;
+    };
+
+    let log_file = log_dir.join("daemon.log");
+    if log_file.exists() {
+        let _ = fs::remove_file(&log_file);
+    }
+
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} ok", bin.display());
+    let first = uxc_command()
+        .arg("--daemon-idle-ttl")
+        .arg("1")
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"seed"}"#)
+        .output()
+        .expect("first call should run");
+    assert!(first.status.success());
+
+    thread::sleep(Duration::from_millis(1500));
+
+    let second = uxc_command()
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"trigger"}"#)
+        .output()
+        .expect("second call should run");
+    assert!(second.status.success());
+
+    thread::sleep(Duration::from_millis(200));
+
+    let content = fs::read_to_string(&log_file).expect("should be able to read daemon log");
+    assert!(
+        content.contains("daemon_session_created"),
+        "log should contain daemon_session_created event"
+    );
+    assert!(
+        content.contains("daemon_session_removed"),
+        "log should contain daemon_session_removed event"
+    );
+    assert!(
+        content.contains("idle_reaped"),
+        "log should include idle_reaped removal reason"
+    );
+
     let _ = uxc_command().arg("daemon").arg("stop").output();
     let _ = fs::remove_file(&log_file);
 }
