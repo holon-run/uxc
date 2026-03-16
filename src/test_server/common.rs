@@ -25,6 +25,8 @@ pub enum Scenario {
     StructuredContent,
     /// tools/list changes after navigate and emits tools/list_changed notification
     DynamicToolset,
+    /// tools/call requires the arguments field to be present as an object, even when empty
+    EmptyObjectRequired,
     /// JSON-RPC WebSocket pubsub shape without explicit unsubscribe method
     SuiPubSub,
 }
@@ -43,9 +45,10 @@ impl Scenario {
             "tools_list_fail_after_first" => Ok(Self::ToolsListFailAfterFirst),
             "structured_content" => Ok(Self::StructuredContent),
             "dynamic_toolset" => Ok(Self::DynamicToolset),
+            "empty_object_required" => Ok(Self::EmptyObjectRequired),
             "sui_pubsub" => Ok(Self::SuiPubSub),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, dynamic_toolset, sui_pubsub",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, dynamic_toolset, empty_object_required, sui_pubsub",
                 s
             ),
         }

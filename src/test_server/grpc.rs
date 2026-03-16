@@ -25,6 +25,7 @@ impl addsvc::add_server::Add for AddService {
     ) -> std::result::Result<Response<addsvc::SumReply>, Status> {
         match self.scenario {
             Scenario::Ok
+            | Scenario::EmptyObjectRequired
             | Scenario::Legacy
             | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst

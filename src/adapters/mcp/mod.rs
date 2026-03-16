@@ -33,6 +33,10 @@ pub struct McpAdapter {
 }
 
 impl McpAdapter {
+    fn build_tool_arguments(args: HashMap<String, Value>) -> Option<Value> {
+        Some(Value::Object(args.into_iter().collect()))
+    }
+
     pub fn new() -> Self {
         Self {
             cache: None,
@@ -517,12 +521,7 @@ impl Adapter for McpAdapter {
             )
             .await?;
 
-            // Build arguments JSON
-            let arguments = if args.is_empty() {
-                None
-            } else {
-                Some(Value::Object(args.into_iter().collect()))
-            };
+            let arguments = Self::build_tool_arguments(args);
 
             let result = client.call_tool(operation, arguments).await?;
 
@@ -545,12 +544,7 @@ impl Adapter for McpAdapter {
             let transport = McpRemoteTransport::with_auth(resolved, self.auth_profile.clone())?;
             transport.initialize().await?;
 
-            // Build arguments JSON
-            let arguments = if args.is_empty() {
-                None
-            } else {
-                Some(Value::Object(args.into_iter().collect()))
-            };
+            let arguments = Self::build_tool_arguments(args);
 
             let result = transport.call_tool(operation, arguments).await?;
 
@@ -860,5 +854,11 @@ mod tests {
         let tools = McpAdapter::tools_from_schema(&schema);
         assert_eq!(tools.as_ref().map(Vec::len), Some(1));
         assert_eq!(tools.unwrap()[0].name, "search");
+    }
+
+    #[test]
+    fn build_tool_arguments_preserves_empty_object() {
+        let arguments = McpAdapter::build_tool_arguments(HashMap::new());
+        assert_eq!(arguments, Some(json!({})));
     }
 }
