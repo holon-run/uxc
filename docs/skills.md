@@ -384,11 +384,41 @@ clawhub sync --all --bump patch
 ### Remaining publish queue after the 2026-03-16 window
 
 - Next exchange coverage wave:
-  - `bybit-openapi-skill`
-  - `kraken-openapi-skill`
-  - `kucoin-openapi-skill`
-  - `bitget-openapi-skill`
-  - `mexc-openapi-skill`
+  - `upbit-openapi-skill`
+  - `coingecko-openapi-skill`
+  - `alchemy-openapi-skill`
+  - `chainbase-openapi-skill`
+  - `moralis-openapi-skill`
+- Next data / MCP wave:
+  - `blockscout-openapi-skill`
+  - `coinapi-openapi-skill`
+  - `birdeye-mcp-skill`
+  - `lifi-mcp-skill`
+  - `coinmarketcap-mcp-skill`
+- Next MCP / DeFi wave:
+  - `gate-mcp-skill`
+  - `crypto-com-mcp-skill`
+  - `defillama-openapi-skill`
+  - `defillama-prices-openapi-skill`
+  - `defillama-pro-openapi-skill`
+- Final remaining wave:
+  - `defillama-yields-openapi-skill`
+  - `goldrush-mcp-skill`
+  - `line-openapi-skill`
+  - `whatsapp-openapi-skill`
+
+## ClawHub Publish Log (2026-03-16, second window)
+
+- `clawhub whoami`: `jolestar`
+- Published in the current rate-limit window:
+  - `bybit-openapi-skill@1.0.0`
+  - `kraken-openapi-skill@1.0.0`
+  - `kucoin-openapi-skill@1.0.0`
+  - `bitget-openapi-skill@1.0.0`
+  - `mexc-openapi-skill@1.0.0`
+
+### Remaining publish queue after the 2026-03-16 second window
+
 - Next market / data wave:
   - `upbit-openapi-skill`
   - `coingecko-openapi-skill`
