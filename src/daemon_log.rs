@@ -46,7 +46,10 @@ pub enum DaemonEventType {
     CacheFallback,
 
     // Session management
+    DaemonSessionCreated,
     DaemonSessionReused,
+    DaemonSessionUnhealthy,
+    DaemonSessionRemoved,
 }
 
 /// Daemon log entry with redaction support

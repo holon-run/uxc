@@ -421,6 +421,30 @@ impl McpStdioTransport {
         self.child.id()
     }
 
+    pub fn child_has_exited(&mut self) -> Result<bool> {
+        Ok(self
+            .child
+            .try_wait()
+            .context("Failed to check MCP stdio child status")?
+            .is_some())
+    }
+
+    pub async fn recent_stderr_lines(&self, limit: usize) -> Vec<String> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let lines = self.stderr_lines.lock().await;
+        lines
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
     pub fn start_kill(&mut self) {
         // Best-effort: ensure cached/evicted MCP processes are terminated promptly.
         // Many MCP servers (including Node-based) will exit when their stdio is closed, but

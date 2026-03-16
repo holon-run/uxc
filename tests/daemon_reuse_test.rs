@@ -166,6 +166,120 @@ fn daemon_status_exposes_reuse_counter() {
 
 #[test]
 #[serial]
+fn daemon_sessions_lists_live_stdio_session_diagnostics() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} ok", bin.display());
+
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let call = uxc_command()
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"inspect"}"#)
+        .output()
+        .expect("call should run");
+    assert!(call.status.success());
+
+    let sessions = uxc_command()
+        .arg("daemon")
+        .arg("sessions")
+        .output()
+        .expect("daemon sessions should run");
+    assert!(sessions.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&sessions.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "daemon_sessions");
+    let sessions = json["data"]
+        .as_array()
+        .expect("session list should be an array");
+    assert_eq!(sessions.len(), 1, "expected one stdio session");
+    let session = &sessions[0];
+    assert_eq!(session["transport"], "stdio");
+    assert_eq!(session["protocol"], "mcp_stdio");
+    assert_eq!(session["state"], "ready");
+    assert_eq!(session["reuse_eligible"], true);
+    assert!(session["command_summary"]
+        .as_str()
+        .is_some_and(|value| value.contains("uxc-test-mcp-stdio-server")));
+    assert!(session["idle_ttl_secs"].as_u64().is_some());
+    assert!(session["idle_for_secs"].as_u64().is_some());
+    assert!(session.get("expires_in_secs").is_some());
+    assert!(session["daemon_exclusive"].as_array().is_some());
+    assert!(session["recent_stderr"].as_array().is_some());
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
+fn daemon_sessions_reports_active_state_for_busy_stdio_session() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} tool_call_timeout", bin.display());
+
+    let start = uxc_command()
+        .env("UXC_TEST_TIMEOUT_MS", "3000")
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let busy = std::thread::spawn(move || {
+        uxc_command()
+            .arg(&endpoint)
+            .arg("echo")
+            .arg("--input-json")
+            .arg(r#"{"message":"busy"}"#)
+            .output()
+            .expect("busy call should run")
+    });
+
+    let mut found_active = false;
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        let sessions = uxc_command()
+            .arg("daemon")
+            .arg("sessions")
+            .output()
+            .expect("daemon sessions should run");
+        if !sessions.status.success() {
+            continue;
+        }
+        let json: serde_json::Value =
+            serde_json::from_slice(&sessions.stdout).expect("valid daemon sessions json");
+        let entries = json["data"]
+            .as_array()
+            .expect("session list should be an array");
+        if entries
+            .iter()
+            .any(|session| session["state"].as_str() == Some("active"))
+        {
+            found_active = true;
+            break;
+        }
+    }
+    assert!(
+        found_active,
+        "expected daemon sessions to show an active stdio session"
+    );
+
+    let _ = busy.join().expect("busy thread should join");
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
 fn concurrent_cold_calls_share_stdio_session() {
     daemon_stop_best_effort();
 

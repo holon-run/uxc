@@ -125,6 +125,14 @@ impl McpStdioClient {
         self.transport.child_id()
     }
 
+    pub fn child_has_exited(&mut self) -> Result<bool> {
+        self.transport.child_has_exited()
+    }
+
+    pub async fn recent_stderr_lines(&self, limit: usize) -> Vec<String> {
+        self.transport.recent_stderr_lines(limit).await
+    }
+
     pub async fn kill_and_wait(&mut self, timeout: Duration) -> Result<()> {
         self.transport.kill_and_wait(timeout).await
     }

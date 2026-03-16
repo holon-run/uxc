@@ -271,11 +271,15 @@ pub struct DaemonSessionView {
     /// Opaque session identifier safe for display in CLI and JSON output.
     pub session_key: String,
     /// Transport family for the daemon-managed session.
+    pub transport: String,
+    /// Transport family for the daemon-managed session.
     pub protocol: String,
     /// Redacted endpoint associated with the live session.
     pub endpoint: String,
     /// Link name from the latest request metadata, if present.
     pub link_name: Option<String>,
+    /// Safe summary of the underlying stdio command.
+    pub command_summary: String,
     /// Child process id for stdio-backed sessions when available.
     pub child_pid: Option<u32>,
     /// Unix timestamp when the daemon created this live session.
@@ -284,10 +288,20 @@ pub struct DaemonSessionView {
     pub last_used_at_unix: u64,
     /// Effective idle TTL in seconds. `0` disables idle reaping for the session.
     pub idle_ttl_secs: u64,
+    /// Seconds since this session last served a request.
+    pub idle_for_secs: u64,
+    /// Seconds until idle reaping. `None` means this session does not expire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
     #[serde(default)]
     pub daemon_exclusive: Vec<String>,
-    /// Current liveness state; `live` means the session is present in the daemon cache.
+    /// Current liveness state for the live daemon cache entry.
     pub state: String,
+    pub reuse_eligible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error_summary: Option<String>,
+    #[serde(default)]
+    pub recent_stderr: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -342,12 +356,14 @@ struct ServerState {
 #[derive(Clone)]
 struct McpSessionManager {
     stdio: Arc<Mutex<HashMap<String, Arc<Mutex<McpStdioSession>>>>>,
+    stdio_snapshots: Arc<Mutex<HashMap<String, McpStdioSessionSnapshot>>>,
     stdio_init_locks: Arc<Mutex<HashMap<String, InitLockEntry>>>,
     stdio_exclusive_locks: Arc<Mutex<HashMap<String, InitLockEntry>>>,
     stdio_exclusive_owners: Arc<Mutex<HashMap<String, String>>>, // exclusive_key -> session_key
     stdio_session_exclusives: Arc<Mutex<HashMap<String, Vec<String>>>>, // session_key -> [exclusive_key]
     http: Arc<Mutex<HashMap<String, Arc<McpHttpSession>>>>,
     reuse_hits: Arc<Mutex<u64>>,
+    logger: Option<DaemonLogger>,
 }
 
 struct InitLockEntry {
@@ -361,12 +377,27 @@ struct McpStdioSession {
     tools_dirty: bool,
     last_used: Instant,
     last_used_at_unix: u64,
-    started_at_unix: u64,
     idle_ttl_secs: u64,
     child_pid: Option<u32>,
     link_name: Option<String>,
     endpoint: String,
     daemon_exclusive: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct McpStdioSessionSnapshot {
+    endpoint: String,
+    link_name: Option<String>,
+    command_summary: String,
+    child_pid: Option<u32>,
+    started_at_unix: u64,
+    last_used_at_unix: u64,
+    idle_ttl_secs: u64,
+    daemon_exclusive: Vec<String>,
+    in_flight_requests: u64,
+    reuse_eligible: bool,
+    last_error_summary: Option<String>,
+    recent_stderr: Vec<String>,
 }
 
 struct McpHttpSession {
@@ -463,16 +494,149 @@ impl McpStdioSession {
     }
 }
 
+impl McpStdioSessionSnapshot {
+    fn to_view(&self, session_key: &str, now_unix: u64) -> DaemonSessionView {
+        let idle_for_secs = now_unix.saturating_sub(self.last_used_at_unix);
+        let expires_in_secs = if self.idle_ttl_secs == 0 {
+            None
+        } else {
+            Some(self.idle_ttl_secs.saturating_sub(idle_for_secs))
+        };
+        DaemonSessionView {
+            session_key: display_session_key(session_key),
+            transport: "stdio".to_string(),
+            protocol: "mcp_stdio".to_string(),
+            endpoint: redact_sensitive(&self.endpoint),
+            link_name: self.link_name.clone(),
+            command_summary: self.command_summary.clone(),
+            child_pid: self.child_pid,
+            started_at_unix: self.started_at_unix,
+            last_used_at_unix: self.last_used_at_unix,
+            idle_ttl_secs: self.idle_ttl_secs,
+            idle_for_secs,
+            expires_in_secs,
+            daemon_exclusive: self.daemon_exclusive.clone(),
+            state: if self.in_flight_requests > 0 {
+                "active".to_string()
+            } else {
+                "ready".to_string()
+            },
+            reuse_eligible: self.reuse_eligible,
+            last_error_summary: self.last_error_summary.clone(),
+            recent_stderr: self.recent_stderr.clone(),
+        }
+    }
+}
+
+fn command_summary_from_endpoint(endpoint: &str) -> String {
+    match adapters::mcp::McpAdapter::parse_stdio_command(endpoint) {
+        Ok((command, args)) => {
+            let base = Path::new(&command)
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or(command);
+            if args.is_empty() {
+                redact_sensitive(&base)
+            } else {
+                format!("{} (+{} args)", redact_sensitive(&base), args.len())
+            }
+        }
+        Err(_) => endpoint
+            .split_whitespace()
+            .next()
+            .map(redact_sensitive)
+            .unwrap_or_else(|| "<unknown>".to_string()),
+    }
+}
+
+fn truncate_for_session_summary(value: &str) -> String {
+    const MAX: usize = 240;
+    if value.len() <= MAX {
+        value.to_string()
+    } else {
+        format!("{}...", &value[..MAX])
+    }
+}
+
 impl McpSessionManager {
-    fn new() -> Self {
+    fn new(logger: Option<DaemonLogger>) -> Self {
         Self {
             stdio: Arc::new(Mutex::new(HashMap::new())),
+            stdio_snapshots: Arc::new(Mutex::new(HashMap::new())),
             stdio_init_locks: Arc::new(Mutex::new(HashMap::new())),
             stdio_exclusive_locks: Arc::new(Mutex::new(HashMap::new())),
             stdio_exclusive_owners: Arc::new(Mutex::new(HashMap::new())),
             stdio_session_exclusives: Arc::new(Mutex::new(HashMap::new())),
             http: Arc::new(Mutex::new(HashMap::new())),
             reuse_hits: Arc::new(Mutex::new(0)),
+            logger,
+        }
+    }
+
+    async fn log_stdio_lifecycle(
+        &self,
+        event_type: DaemonEventType,
+        session_key: &str,
+        snapshot: &McpStdioSessionSnapshot,
+        reason: Option<&str>,
+        error: Option<&str>,
+    ) {
+        let Some(logger) = self.logger.as_ref() else {
+            return;
+        };
+        let mut meta = json!({
+            "session_key": display_session_key(session_key),
+            "link_name": snapshot.link_name,
+            "command_summary": snapshot.command_summary,
+            "daemon_exclusive": snapshot.daemon_exclusive,
+            "child_pid": snapshot.child_pid,
+            "idle_ttl_secs": snapshot.idle_ttl_secs,
+            "idle_for_secs": now_unix_secs().saturating_sub(snapshot.last_used_at_unix),
+            "reuse_eligible": snapshot.reuse_eligible,
+            "recent_stderr": snapshot.recent_stderr,
+        });
+        if let Some(reason) = reason {
+            meta["reason"] = json!(reason);
+        }
+        let mut entry = DaemonLogEntry::new(event_type)
+            .with_endpoint(snapshot.endpoint.clone())
+            .with_protocol("mcp_stdio".to_string())
+            .with_meta(meta);
+        if let Some(error) = error {
+            entry = entry.with_error(error.to_string());
+        }
+        let _ = logger.log(&entry).await;
+    }
+
+    async fn upsert_stdio_snapshot<F>(&self, session_key: &str, update: F)
+    where
+        F: FnOnce(&mut McpStdioSessionSnapshot),
+    {
+        let mut snapshots = self.stdio_snapshots.lock().await;
+        if let Some(snapshot) = snapshots.get_mut(session_key) {
+            update(snapshot);
+        }
+    }
+
+    async fn remove_stdio_snapshot(
+        &self,
+        session_key: &str,
+        reason: &'static str,
+        error: Option<String>,
+    ) {
+        let snapshot = {
+            let mut snapshots = self.stdio_snapshots.lock().await;
+            snapshots.remove(session_key)
+        };
+        if let Some(snapshot) = snapshot {
+            self.log_stdio_lifecycle(
+                DaemonEventType::DaemonSessionRemoved,
+                session_key,
+                &snapshot,
+                Some(reason),
+                error.as_deref(),
+            )
+            .await;
         }
     }
 
@@ -518,6 +682,7 @@ impl McpSessionManager {
             }
             for key in stdio_remove {
                 self.cleanup_stdio_exclusive_for_session_key(&key).await;
+                self.remove_stdio_snapshot(&key, "idle_reaped", None).await;
             }
         }
 
@@ -588,15 +753,70 @@ impl McpSessionManager {
             map.get(session_key).cloned()
         };
         if let Some(session) = existing {
-            *self.reuse_hits.lock().await += 1;
             let mut guard = session.lock().await;
-            guard.apply_request_metadata(&metadata);
-            drop(guard);
-            if !exclusive_keys.is_empty() {
-                self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
+            let child_exited = guard.client.child_has_exited().unwrap_or(false);
+            if child_exited {
+                let recent_stderr = guard.client.recent_stderr_lines(5).await;
+                drop(guard);
+                {
+                    let mut map = self.stdio.lock().await;
+                    map.remove(session_key);
+                }
+                self.cleanup_stdio_exclusive_for_session_key(session_key)
                     .await;
+                self.upsert_stdio_snapshot(session_key, |snapshot| {
+                    snapshot.reuse_eligible = false;
+                    snapshot.last_error_summary =
+                        Some("cached MCP stdio child already exited".to_string());
+                    snapshot.recent_stderr = recent_stderr;
+                })
+                .await;
+                self.remove_stdio_snapshot(
+                    session_key,
+                    "child_exited_before_reuse",
+                    Some("cached MCP stdio child already exited".to_string()),
+                )
+                .await;
+            } else {
+                *self.reuse_hits.lock().await += 1;
+                guard.apply_request_metadata(&metadata);
+                let recent_stderr = guard.client.recent_stderr_lines(5).await;
+                let endpoint = guard.endpoint.clone();
+                let link_name = guard.link_name.clone();
+                let child_pid = guard.child_pid;
+                let idle_ttl_secs = guard.idle_ttl_secs;
+                let last_used_at_unix = guard.last_used_at_unix;
+                let daemon_exclusive = guard.daemon_exclusive.clone();
+                drop(guard);
+                self.upsert_stdio_snapshot(session_key, |snapshot| {
+                    snapshot.endpoint = endpoint;
+                    snapshot.link_name = link_name;
+                    snapshot.child_pid = child_pid;
+                    snapshot.idle_ttl_secs = idle_ttl_secs;
+                    snapshot.last_used_at_unix = last_used_at_unix;
+                    snapshot.daemon_exclusive = daemon_exclusive;
+                    snapshot.recent_stderr = recent_stderr;
+                })
+                .await;
+                if let Some(snapshot) = {
+                    let snapshots = self.stdio_snapshots.lock().await;
+                    snapshots.get(session_key).cloned()
+                } {
+                    self.log_stdio_lifecycle(
+                        DaemonEventType::DaemonSessionReused,
+                        session_key,
+                        &snapshot,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+                if !exclusive_keys.is_empty() {
+                    self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
+                        .await;
+                }
+                return Ok((session, true));
             }
-            return Ok((session, true));
         }
 
         // Singleflight for stdio process initialization by endpoint key.
@@ -619,15 +839,70 @@ impl McpSessionManager {
             map.get(session_key).cloned()
         };
         if let Some(session) = existing {
-            *self.reuse_hits.lock().await += 1;
             let mut guard = session.lock().await;
-            guard.apply_request_metadata(&metadata);
-            drop(guard);
-            if !exclusive_keys.is_empty() {
-                self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
+            let child_exited = guard.client.child_has_exited().unwrap_or(false);
+            if child_exited {
+                let recent_stderr = guard.client.recent_stderr_lines(5).await;
+                drop(guard);
+                {
+                    let mut map = self.stdio.lock().await;
+                    map.remove(session_key);
+                }
+                self.cleanup_stdio_exclusive_for_session_key(session_key)
                     .await;
+                self.upsert_stdio_snapshot(session_key, |snapshot| {
+                    snapshot.reuse_eligible = false;
+                    snapshot.last_error_summary =
+                        Some("cached MCP stdio child already exited".to_string());
+                    snapshot.recent_stderr = recent_stderr;
+                })
+                .await;
+                self.remove_stdio_snapshot(
+                    session_key,
+                    "child_exited_before_reuse",
+                    Some("cached MCP stdio child already exited".to_string()),
+                )
+                .await;
+            } else {
+                *self.reuse_hits.lock().await += 1;
+                guard.apply_request_metadata(&metadata);
+                let recent_stderr = guard.client.recent_stderr_lines(5).await;
+                let endpoint = guard.endpoint.clone();
+                let link_name = guard.link_name.clone();
+                let child_pid = guard.child_pid;
+                let idle_ttl_secs = guard.idle_ttl_secs;
+                let last_used_at_unix = guard.last_used_at_unix;
+                let daemon_exclusive = guard.daemon_exclusive.clone();
+                drop(guard);
+                self.upsert_stdio_snapshot(session_key, |snapshot| {
+                    snapshot.endpoint = endpoint;
+                    snapshot.link_name = link_name;
+                    snapshot.child_pid = child_pid;
+                    snapshot.idle_ttl_secs = idle_ttl_secs;
+                    snapshot.last_used_at_unix = last_used_at_unix;
+                    snapshot.daemon_exclusive = daemon_exclusive;
+                    snapshot.recent_stderr = recent_stderr;
+                })
+                .await;
+                if let Some(snapshot) = {
+                    let snapshots = self.stdio_snapshots.lock().await;
+                    snapshots.get(session_key).cloned()
+                } {
+                    self.log_stdio_lifecycle(
+                        DaemonEventType::DaemonSessionReused,
+                        session_key,
+                        &snapshot,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+                if !exclusive_keys.is_empty() {
+                    self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
+                        .await;
+                }
+                return Ok((session, true));
             }
-            return Ok((session, true));
         }
 
         let client = adapters::mcp::McpStdioClient::connect_with_options(
@@ -637,22 +912,55 @@ impl McpSessionManager {
         )
         .await?;
         let created_at_unix = now_unix_secs();
+        let command_summary = command_summary_from_endpoint(metadata.endpoint);
+        let child_pid = client.child_id();
         let session = Arc::new(Mutex::new(McpStdioSession {
-            child_pid: client.child_id(),
+            child_pid,
             client,
             tools: None,
             tools_dirty: false,
             last_used: Instant::now(),
             last_used_at_unix: created_at_unix,
-            started_at_unix: created_at_unix,
             idle_ttl_secs: metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
             link_name: metadata.link_name.map(str::to_string),
             endpoint: metadata.endpoint.to_string(),
             daemon_exclusive: exclusive_keys.clone(),
         }));
 
-        let mut map = self.stdio.lock().await;
-        map.insert(session_key.to_string(), session.clone());
+        {
+            let mut map = self.stdio.lock().await;
+            map.insert(session_key.to_string(), session.clone());
+        }
+        self.stdio_snapshots.lock().await.insert(
+            session_key.to_string(),
+            McpStdioSessionSnapshot {
+                endpoint: metadata.endpoint.to_string(),
+                link_name: metadata.link_name.map(str::to_string),
+                command_summary,
+                child_pid,
+                started_at_unix: created_at_unix,
+                last_used_at_unix: created_at_unix,
+                idle_ttl_secs: metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
+                daemon_exclusive: exclusive_keys.clone(),
+                in_flight_requests: 0,
+                reuse_eligible: true,
+                last_error_summary: None,
+                recent_stderr: Vec::new(),
+            },
+        );
+        if let Some(snapshot) = {
+            let snapshots = self.stdio_snapshots.lock().await;
+            snapshots.get(session_key).cloned()
+        } {
+            self.log_stdio_lifecycle(
+                DaemonEventType::DaemonSessionCreated,
+                session_key,
+                &snapshot,
+                None,
+                None,
+            )
+            .await;
+        }
         if !exclusive_keys.is_empty() {
             self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
                 .await;
@@ -663,6 +971,55 @@ impl McpSessionManager {
     async fn get_stdio(&self, session_key: &str) -> Option<Arc<Mutex<McpStdioSession>>> {
         let map = self.stdio.lock().await;
         map.get(session_key).cloned()
+    }
+
+    async fn mark_stdio_request_started(&self, session_key: &str) {
+        self.upsert_stdio_snapshot(session_key, |snapshot| {
+            snapshot.in_flight_requests = snapshot.in_flight_requests.saturating_add(1);
+            snapshot.last_used_at_unix = now_unix_secs();
+        })
+        .await;
+    }
+
+    async fn mark_stdio_request_finished(
+        &self,
+        session_key: &str,
+        request_error: Option<&anyhow::Error>,
+        recent_stderr: Vec<String>,
+        child_exited: bool,
+    ) {
+        let mut unhealthy_reason = None;
+        self.upsert_stdio_snapshot(session_key, |snapshot| {
+            snapshot.in_flight_requests = snapshot.in_flight_requests.saturating_sub(1);
+            snapshot.last_used_at_unix = now_unix_secs();
+            snapshot.recent_stderr = recent_stderr.clone();
+            if let Some(err) = request_error {
+                snapshot.last_error_summary = Some(truncate_for_session_summary(&err.to_string()));
+            } else {
+                snapshot.last_error_summary = None;
+            }
+            if child_exited {
+                snapshot.reuse_eligible = false;
+                unhealthy_reason = Some("child_exited");
+            }
+        })
+        .await;
+        if let Some(reason) = unhealthy_reason {
+            let snapshot = {
+                let snapshots = self.stdio_snapshots.lock().await;
+                snapshots.get(session_key).cloned()
+            };
+            if let Some(snapshot) = snapshot {
+                self.log_stdio_lifecycle(
+                    DaemonEventType::DaemonSessionUnhealthy,
+                    session_key,
+                    &snapshot,
+                    Some(reason),
+                    request_error.map(|err| err.to_string()).as_deref(),
+                )
+                .await;
+            }
+        }
     }
 
     async fn acquire_stdio_exclusive_locks(
@@ -749,6 +1106,8 @@ impl McpSessionManager {
                         map.remove(&owner_session_key);
                     }
                     self.cleanup_stdio_exclusive_for_session_key(&owner_session_key)
+                        .await;
+                    self.remove_stdio_snapshot(&owner_session_key, "exclusive_evicted", None)
                         .await;
                 }
                 Err(_) => {
@@ -886,23 +1245,31 @@ impl McpSessionManager {
             let map = self.stdio.lock().await;
             map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
         };
-
-        let mut views = Vec::with_capacity(stdio_entries.len());
-        for (session_key, session) in stdio_entries {
-            let guard = session.lock().await;
-            views.push(DaemonSessionView {
-                session_key: display_session_key(&session_key),
-                protocol: "mcp_stdio".to_string(),
-                endpoint: redact_sensitive(&guard.endpoint),
-                link_name: guard.link_name.clone(),
-                child_pid: guard.child_pid,
-                started_at_unix: guard.started_at_unix,
-                last_used_at_unix: guard.last_used_at_unix,
-                idle_ttl_secs: guard.idle_ttl_secs,
-                daemon_exclusive: guard.daemon_exclusive.clone(),
-                state: "live".to_string(),
-            });
+        for (session_key, session) in &stdio_entries {
+            if let Ok(mut guard) = session.try_lock() {
+                let recent_stderr = guard.client.recent_stderr_lines(5).await;
+                let child_exited = guard.client.child_has_exited().unwrap_or(false);
+                self.upsert_stdio_snapshot(session_key, |snapshot| {
+                    snapshot.endpoint = guard.endpoint.clone();
+                    snapshot.link_name = guard.link_name.clone();
+                    snapshot.child_pid = guard.child_pid;
+                    snapshot.last_used_at_unix = guard.last_used_at_unix;
+                    snapshot.idle_ttl_secs = guard.idle_ttl_secs;
+                    snapshot.daemon_exclusive = guard.daemon_exclusive.clone();
+                    snapshot.recent_stderr = recent_stderr;
+                    if child_exited {
+                        snapshot.reuse_eligible = false;
+                    }
+                })
+                .await;
+            }
         }
+        let snapshots = self.stdio_snapshots.lock().await;
+        let now_unix = now_unix_secs();
+        let mut views = snapshots
+            .iter()
+            .map(|(session_key, snapshot)| snapshot.to_view(session_key, now_unix))
+            .collect::<Vec<_>>();
         views.sort_by(|a, b| a.session_key.cmp(&b.session_key));
         views
     }
@@ -1504,7 +1871,7 @@ impl DaemonRuntime {
                 started_at_unix: now_unix_secs(),
                 request_count: 0,
             })),
-            mcp: McpSessionManager::new(),
+            mcp: McpSessionManager::new(logger.clone()),
             subscriptions: SubscriptionManager::new(store_path)?,
             should_stop: Arc::new(RwLock::new(false)),
             schema_mapping_lock: Arc::new(Mutex::new(())),
@@ -1980,19 +2347,36 @@ impl DaemonRuntime {
                     },
                 )
                 .await?;
+            self.mcp.mark_stdio_request_started(&key).await;
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
             guard.last_used_at_unix = now_unix_secs();
-            let result = guard.client.call_tool(op, arguments).await?;
+            let result = guard.client.call_tool(op, arguments).await;
             let _ = guard
                 .mark_tools_dirty_from_notifications(endpoint, &cache)
                 .await;
-            Ok((
-                "call_result".to_string(),
-                Some(op.clone()),
-                adapters::mcp::convert_tool_result_to_value(&result),
-                reused,
-            ))
+            let recent_stderr = guard.client.recent_stderr_lines(5).await;
+            let child_exited = guard.client.child_has_exited().unwrap_or(false);
+            drop(guard);
+            match result {
+                Ok(result) => {
+                    self.mcp
+                        .mark_stdio_request_finished(&key, None, recent_stderr, child_exited)
+                        .await;
+                    Ok((
+                        "call_result".to_string(),
+                        Some(op.clone()),
+                        adapters::mcp::convert_tool_result_to_value(&result),
+                        reused,
+                    ))
+                }
+                Err(err) => {
+                    self.mcp
+                        .mark_stdio_request_finished(&key, Some(&err), recent_stderr, child_exited)
+                        .await;
+                    Err(err)
+                }
+            }
         } else {
             let resolved_transport =
                 resolve_mcp_http_endpoint(endpoint, auth_profile.clone()).await?;
@@ -5085,6 +5469,7 @@ async fn invoke_live_stdio_mcp_help(
         return Ok(None);
     };
 
+    runtime.mcp.mark_stdio_request_started(&session_key).await;
     let mut guard = session.lock().await;
     guard.apply_request_metadata(&StdioSessionRequestMetadata {
         idle_ttl_secs: request.options.daemon_idle_ttl,
@@ -5099,10 +5484,13 @@ async fn invoke_live_stdio_mcp_help(
         .await;
     let tools = guard
         .refresh_tools_if_needed(&request.endpoint, &cache)
-        .await?;
+        .await;
+    let recent_stderr = guard.client.recent_stderr_lines(5).await;
+    let child_exited = guard.client.child_has_exited().unwrap_or(false);
 
-    match request.action {
+    let response = match request.action {
         RuntimeAction::HostHelp => {
+            let tools = tools?;
             let operations = tools
                 .iter()
                 .map(operation_from_mcp_tool)
@@ -5123,6 +5511,7 @@ async fn invoke_live_stdio_mcp_help(
             Ok(Some(("host_help".to_string(), None, payload)))
         }
         RuntimeAction::OperationHelp => {
+            let tools = tools?;
             let op = request
                 .operation_id
                 .as_ref()
@@ -5138,7 +5527,14 @@ async fn invoke_live_stdio_mcp_help(
             )))
         }
         RuntimeAction::Execute => Ok(None),
-    }
+    };
+    drop(guard);
+    let request_error = response.as_ref().err();
+    runtime
+        .mcp
+        .mark_stdio_request_finished(&session_key, request_error, recent_stderr, child_exited)
+        .await;
+    response
 }
 
 async fn prepare_runtime_execute_args(
