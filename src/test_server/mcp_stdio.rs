@@ -164,6 +164,28 @@ pub fn run(scenario: Scenario) -> Result<()> {
                     )?;
                     continue;
                 }
+                if matches!(scenario, Scenario::EmptyObjectRequired) {
+                    respond(
+                        &mut out,
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "tools": [
+                                    {
+                                        "name": "empty_check",
+                                        "description": "Require an explicit empty object input",
+                                        "inputSchema": {
+                                            "type": "object",
+                                            "properties": {}
+                                        }
+                                    }
+                                ]
+                            }
+                        }),
+                    )?;
+                    continue;
+                }
                 respond(
                     &mut out,
                     json!({
@@ -192,6 +214,60 @@ pub fn run(scenario: Scenario) -> Result<()> {
                     writeln!(out, "{{bad-json")?;
                     out.flush()?;
                     return Ok(());
+                }
+
+                if matches!(scenario, Scenario::EmptyObjectRequired) {
+                    let tool_name = req
+                        .get("params")
+                        .and_then(|v| v.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if tool_name != "empty_check" {
+                        respond(
+                            &mut out,
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {"code": -32601, "message": "tool not found"}
+                            }),
+                        )?;
+                        continue;
+                    }
+
+                    let arguments = req.get("params").and_then(|v| v.get("arguments"));
+                    let is_object = arguments.map(Value::is_object).unwrap_or(false);
+                    if !is_object {
+                        respond(
+                            &mut out,
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {"code": -32602, "message": "arguments object required"}
+                            }),
+                        )?;
+                        continue;
+                    }
+
+                    respond(
+                        &mut out,
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [
+                                    {"type": "text", "text": "received-empty-object"}
+                                ],
+                                "structuredContent": {
+                                    "hasArgumentsObject": true,
+                                    "argumentCount": arguments
+                                        .and_then(Value::as_object)
+                                        .map(|obj| obj.len())
+                                        .unwrap_or_default()
+                                }
+                            }
+                        }),
+                    )?;
+                    continue;
                 }
 
                 let message = req

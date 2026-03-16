@@ -2283,11 +2283,7 @@ impl DaemonRuntime {
             .operation_id
             .as_ref()
             .ok_or_else(|| anyhow!("operation_id is required"))?;
-        let arguments = if args.is_empty() {
-            None
-        } else {
-            Some(Value::Object(args.into_iter().collect()))
-        };
+        let arguments = Some(Value::Object(args.into_iter().collect()));
 
         if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
             let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;

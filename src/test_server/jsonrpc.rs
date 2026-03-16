@@ -315,6 +315,7 @@ async fn execute_method(
 ) -> Result<JsonRpcResponse, StatusCode> {
     match state.scenario {
         Scenario::Ok
+        | Scenario::EmptyObjectRequired
         | Scenario::Legacy
         | Scenario::SuiPubSub
         | Scenario::ToolsListFailAfterFirst

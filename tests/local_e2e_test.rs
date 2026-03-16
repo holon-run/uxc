@@ -895,6 +895,33 @@ fn test_mcp_stdio_call_tool_includes_structured_content() {
 
 #[test]
 #[serial_test::serial]
+fn test_mcp_stdio_preserves_explicit_empty_object_arguments() {
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} empty_object_required", bin.display());
+
+    let result = run_uxc(&[&endpoint, "empty_check", "--input-json", r#"{}"#]);
+
+    assert!(
+        result.is_ok(),
+        "Failed to call MCP stdio tool with empty object args: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["content"][0]["text"], "received-empty-object");
+    assert_eq!(
+        json["data"]["structuredContent"]["hasArgumentsObject"],
+        true
+    );
+    assert_eq!(json["data"]["structuredContent"]["argumentCount"], 0);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_mcp_stdio_auth_required() {
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} auth_required", bin.display());
