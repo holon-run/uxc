@@ -466,3 +466,9 @@ clawhub sync --all --bump patch
   - `goldrush-mcp-skill`
   - `line-openapi-skill`
   - `whatsapp-openapi-skill`
+
+### Rate-limit note
+
+- Attempting the next 5-skill MCP/data wave immediately after the 2026-03-16 third window failed with:
+  - `Rate limit: max 5 new skills per hour. Please wait before publishing more.`
+- Resume from the `blockscout-openapi-skill` wave in the next allowed window.
