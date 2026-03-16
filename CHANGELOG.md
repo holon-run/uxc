@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-03-16
+
+### Fixed
+- Preserve explicit empty MCP object arguments (`{}`) instead of collapsing them into omitted arguments, fixing Chrome DevTools MCP tools and other optional-object MCP inputs.
+
 ## [0.12.1] - 2026-03-16
 
 > Note: `v0.12.0` was published, but it is not the recommended patch level for production use.
@@ -313,7 +318,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/holon-run/uxc/releases/tag/v0.12.2
 [0.12.1]: https://github.com/holon-run/uxc/releases/tag/v0.12.1
 [0.12.0]: https://github.com/holon-run/uxc/releases/tag/v0.12.0
 [0.11.1]: https://github.com/holon-run/uxc/releases/tag/v0.11.1
