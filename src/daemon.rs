@@ -270,9 +270,9 @@ pub struct DaemonStatus {
 pub struct DaemonSessionView {
     /// Opaque session identifier safe for display in CLI and JSON output.
     pub session_key: String,
-    /// Transport family for the daemon-managed session.
+    /// Transport family for the daemon-managed session (for example `stdio`).
     pub transport: String,
-    /// Transport family for the daemon-managed session.
+    /// Protocol identifier for the daemon-managed session (for example `mcp_stdio`).
     pub protocol: String,
     /// Redacted endpoint associated with the live session.
     pub endpoint: String,
@@ -551,11 +551,23 @@ fn command_summary_from_endpoint(endpoint: &str) -> String {
 
 fn truncate_for_session_summary(value: &str) -> String {
     const MAX: usize = 240;
-    if value.len() <= MAX {
+    if value.chars().count() <= MAX {
         value.to_string()
     } else {
-        format!("{}...", &value[..MAX])
+        let truncated = value
+            .char_indices()
+            .nth(MAX)
+            .map(|(idx, _)| &value[..idx])
+            .unwrap_or(value);
+        format!("{truncated}...")
     }
+}
+
+fn redact_recent_stderr(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| truncate_for_session_summary(&redact_sensitive(&line)))
+        .collect()
 }
 
 impl McpSessionManager {
@@ -586,14 +598,14 @@ impl McpSessionManager {
         };
         let mut meta = json!({
             "session_key": display_session_key(session_key),
-            "link_name": snapshot.link_name,
-            "command_summary": snapshot.command_summary,
-            "daemon_exclusive": snapshot.daemon_exclusive,
+            "link_name": snapshot.link_name.clone(),
+            "command_summary": snapshot.command_summary.clone(),
+            "daemon_exclusive": snapshot.daemon_exclusive.clone(),
             "child_pid": snapshot.child_pid,
             "idle_ttl_secs": snapshot.idle_ttl_secs,
             "idle_for_secs": now_unix_secs().saturating_sub(snapshot.last_used_at_unix),
             "reuse_eligible": snapshot.reuse_eligible,
-            "recent_stderr": snapshot.recent_stderr,
+            "recent_stderr": snapshot.recent_stderr.clone(),
         });
         if let Some(reason) = reason {
             meta["reason"] = json!(reason);
@@ -753,69 +765,11 @@ impl McpSessionManager {
             map.get(session_key).cloned()
         };
         if let Some(session) = existing {
-            let mut guard = session.lock().await;
-            let child_exited = guard.client.child_has_exited().unwrap_or(false);
-            if child_exited {
-                let recent_stderr = guard.client.recent_stderr_lines(5).await;
-                drop(guard);
-                {
-                    let mut map = self.stdio.lock().await;
-                    map.remove(session_key);
-                }
-                self.cleanup_stdio_exclusive_for_session_key(session_key)
-                    .await;
-                self.upsert_stdio_snapshot(session_key, |snapshot| {
-                    snapshot.reuse_eligible = false;
-                    snapshot.last_error_summary =
-                        Some("cached MCP stdio child already exited".to_string());
-                    snapshot.recent_stderr = recent_stderr;
-                })
-                .await;
-                self.remove_stdio_snapshot(
-                    session_key,
-                    "child_exited_before_reuse",
-                    Some("cached MCP stdio child already exited".to_string()),
-                )
-                .await;
-            } else {
-                *self.reuse_hits.lock().await += 1;
-                guard.apply_request_metadata(&metadata);
-                let recent_stderr = guard.client.recent_stderr_lines(5).await;
-                let endpoint = guard.endpoint.clone();
-                let link_name = guard.link_name.clone();
-                let child_pid = guard.child_pid;
-                let idle_ttl_secs = guard.idle_ttl_secs;
-                let last_used_at_unix = guard.last_used_at_unix;
-                let daemon_exclusive = guard.daemon_exclusive.clone();
-                drop(guard);
-                self.upsert_stdio_snapshot(session_key, |snapshot| {
-                    snapshot.endpoint = endpoint;
-                    snapshot.link_name = link_name;
-                    snapshot.child_pid = child_pid;
-                    snapshot.idle_ttl_secs = idle_ttl_secs;
-                    snapshot.last_used_at_unix = last_used_at_unix;
-                    snapshot.daemon_exclusive = daemon_exclusive;
-                    snapshot.recent_stderr = recent_stderr;
-                })
-                .await;
-                if let Some(snapshot) = {
-                    let snapshots = self.stdio_snapshots.lock().await;
-                    snapshots.get(session_key).cloned()
-                } {
-                    self.log_stdio_lifecycle(
-                        DaemonEventType::DaemonSessionReused,
-                        session_key,
-                        &snapshot,
-                        None,
-                        None,
-                    )
-                    .await;
-                }
-                if !exclusive_keys.is_empty() {
-                    self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
-                        .await;
-                }
-                return Ok((session, true));
+            if let Some(reused) = self
+                .try_reuse_existing_stdio_session(session_key, session, &metadata, &exclusive_keys)
+                .await?
+            {
+                return Ok(reused);
             }
         }
 
@@ -839,69 +793,11 @@ impl McpSessionManager {
             map.get(session_key).cloned()
         };
         if let Some(session) = existing {
-            let mut guard = session.lock().await;
-            let child_exited = guard.client.child_has_exited().unwrap_or(false);
-            if child_exited {
-                let recent_stderr = guard.client.recent_stderr_lines(5).await;
-                drop(guard);
-                {
-                    let mut map = self.stdio.lock().await;
-                    map.remove(session_key);
-                }
-                self.cleanup_stdio_exclusive_for_session_key(session_key)
-                    .await;
-                self.upsert_stdio_snapshot(session_key, |snapshot| {
-                    snapshot.reuse_eligible = false;
-                    snapshot.last_error_summary =
-                        Some("cached MCP stdio child already exited".to_string());
-                    snapshot.recent_stderr = recent_stderr;
-                })
-                .await;
-                self.remove_stdio_snapshot(
-                    session_key,
-                    "child_exited_before_reuse",
-                    Some("cached MCP stdio child already exited".to_string()),
-                )
-                .await;
-            } else {
-                *self.reuse_hits.lock().await += 1;
-                guard.apply_request_metadata(&metadata);
-                let recent_stderr = guard.client.recent_stderr_lines(5).await;
-                let endpoint = guard.endpoint.clone();
-                let link_name = guard.link_name.clone();
-                let child_pid = guard.child_pid;
-                let idle_ttl_secs = guard.idle_ttl_secs;
-                let last_used_at_unix = guard.last_used_at_unix;
-                let daemon_exclusive = guard.daemon_exclusive.clone();
-                drop(guard);
-                self.upsert_stdio_snapshot(session_key, |snapshot| {
-                    snapshot.endpoint = endpoint;
-                    snapshot.link_name = link_name;
-                    snapshot.child_pid = child_pid;
-                    snapshot.idle_ttl_secs = idle_ttl_secs;
-                    snapshot.last_used_at_unix = last_used_at_unix;
-                    snapshot.daemon_exclusive = daemon_exclusive;
-                    snapshot.recent_stderr = recent_stderr;
-                })
-                .await;
-                if let Some(snapshot) = {
-                    let snapshots = self.stdio_snapshots.lock().await;
-                    snapshots.get(session_key).cloned()
-                } {
-                    self.log_stdio_lifecycle(
-                        DaemonEventType::DaemonSessionReused,
-                        session_key,
-                        &snapshot,
-                        None,
-                        None,
-                    )
-                    .await;
-                }
-                if !exclusive_keys.is_empty() {
-                    self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
-                        .await;
-                }
-                return Ok((session, true));
+            if let Some(reused) = self
+                .try_reuse_existing_stdio_session(session_key, session, &metadata, &exclusive_keys)
+                .await?
+            {
+                return Ok(reused);
             }
         }
 
@@ -973,6 +869,80 @@ impl McpSessionManager {
         map.get(session_key).cloned()
     }
 
+    async fn try_reuse_existing_stdio_session(
+        &self,
+        session_key: &str,
+        session: Arc<Mutex<McpStdioSession>>,
+        metadata: &StdioSessionRequestMetadata<'_>,
+        exclusive_keys: &[String],
+    ) -> Result<Option<(Arc<Mutex<McpStdioSession>>, bool)>> {
+        let mut guard = session.lock().await;
+        let child_exited = guard.client.child_has_exited().unwrap_or(false);
+        if child_exited {
+            let recent_stderr = redact_recent_stderr(guard.client.recent_stderr_lines(5).await);
+            drop(guard);
+            {
+                let mut map = self.stdio.lock().await;
+                map.remove(session_key);
+            }
+            self.cleanup_stdio_exclusive_for_session_key(session_key)
+                .await;
+            self.upsert_stdio_snapshot(session_key, |snapshot| {
+                snapshot.reuse_eligible = false;
+                snapshot.last_error_summary =
+                    Some("cached MCP stdio child already exited".to_string());
+                snapshot.recent_stderr = recent_stderr;
+            })
+            .await;
+            self.remove_stdio_snapshot(
+                session_key,
+                "child_exited_before_reuse",
+                Some("cached MCP stdio child already exited".to_string()),
+            )
+            .await;
+            return Ok(None);
+        }
+
+        *self.reuse_hits.lock().await += 1;
+        guard.apply_request_metadata(metadata);
+        let recent_stderr = redact_recent_stderr(guard.client.recent_stderr_lines(5).await);
+        let endpoint = guard.endpoint.clone();
+        let link_name = guard.link_name.clone();
+        let child_pid = guard.child_pid;
+        let idle_ttl_secs = guard.idle_ttl_secs;
+        let last_used_at_unix = guard.last_used_at_unix;
+        let daemon_exclusive = guard.daemon_exclusive.clone();
+        drop(guard);
+        self.upsert_stdio_snapshot(session_key, |snapshot| {
+            snapshot.endpoint = endpoint;
+            snapshot.link_name = link_name;
+            snapshot.child_pid = child_pid;
+            snapshot.idle_ttl_secs = idle_ttl_secs;
+            snapshot.last_used_at_unix = last_used_at_unix;
+            snapshot.daemon_exclusive = daemon_exclusive;
+            snapshot.recent_stderr = recent_stderr;
+        })
+        .await;
+        if let Some(snapshot) = {
+            let snapshots = self.stdio_snapshots.lock().await;
+            snapshots.get(session_key).cloned()
+        } {
+            self.log_stdio_lifecycle(
+                DaemonEventType::DaemonSessionReused,
+                session_key,
+                &snapshot,
+                None,
+                None,
+            )
+            .await;
+        }
+        if !exclusive_keys.is_empty() {
+            self.register_stdio_exclusive_keys(session_key, exclusive_keys)
+                .await;
+        }
+        Ok(Some((session, true)))
+    }
+
     async fn mark_stdio_request_started(&self, session_key: &str) {
         self.upsert_stdio_snapshot(session_key, |snapshot| {
             snapshot.in_flight_requests = snapshot.in_flight_requests.saturating_add(1);
@@ -992,7 +962,7 @@ impl McpSessionManager {
         self.upsert_stdio_snapshot(session_key, |snapshot| {
             snapshot.in_flight_requests = snapshot.in_flight_requests.saturating_sub(1);
             snapshot.last_used_at_unix = now_unix_secs();
-            snapshot.recent_stderr = recent_stderr.clone();
+            snapshot.recent_stderr = redact_recent_stderr(recent_stderr.clone());
             if let Some(err) = request_error {
                 snapshot.last_error_summary = Some(truncate_for_session_summary(&err.to_string()));
             } else {
@@ -1247,7 +1217,7 @@ impl McpSessionManager {
         };
         for (session_key, session) in &stdio_entries {
             if let Ok(mut guard) = session.try_lock() {
-                let recent_stderr = guard.client.recent_stderr_lines(5).await;
+                let recent_stderr = redact_recent_stderr(guard.client.recent_stderr_lines(5).await);
                 let child_exited = guard.client.child_has_exited().unwrap_or(false);
                 self.upsert_stdio_snapshot(session_key, |snapshot| {
                     snapshot.endpoint = guard.endpoint.clone();
@@ -5487,46 +5457,47 @@ async fn invoke_live_stdio_mcp_help(
         .await;
     let recent_stderr = guard.client.recent_stderr_lines(5).await;
     let child_exited = guard.client.child_has_exited().unwrap_or(false);
+    let service = live_stdio_service_summary(&guard.client);
 
-    let response = match request.action {
-        RuntimeAction::HostHelp => {
-            let tools = tools?;
-            let operations = tools
-                .iter()
-                .map(operation_from_mcp_tool)
-                .collect::<Vec<_>>();
-            let summaries = operations
-                .iter()
-                .map(|op| to_operation_summary("mcp", op))
-                .collect::<Vec<_>>();
-            let mut payload = json!({
-                "operations": summaries,
-                "count": summaries.len(),
-                "examples": host_help_examples(request.options.link_name.as_deref()),
-            });
-            let service = live_stdio_service_summary(&guard.client);
-            if let Some(service) = service {
-                payload["service"] = serde_json::to_value(service)?;
+    let response = match tools {
+        Ok(tools) => match request.action {
+            RuntimeAction::HostHelp => {
+                let operations = tools
+                    .iter()
+                    .map(operation_from_mcp_tool)
+                    .collect::<Vec<_>>();
+                let summaries = operations
+                    .iter()
+                    .map(|op| to_operation_summary("mcp", op))
+                    .collect::<Vec<_>>();
+                let mut payload = json!({
+                    "operations": summaries,
+                    "count": summaries.len(),
+                    "examples": host_help_examples(request.options.link_name.as_deref()),
+                });
+                if let Some(service) = service {
+                    payload["service"] = serde_json::to_value(service)?;
+                }
+                Ok(Some(("host_help".to_string(), None, payload)))
             }
-            Ok(Some(("host_help".to_string(), None, payload)))
-        }
-        RuntimeAction::OperationHelp => {
-            let tools = tools?;
-            let op = request
-                .operation_id
-                .as_ref()
-                .ok_or_else(|| anyhow!("operation_id is required"))?;
-            let tool = tools
-                .iter()
-                .find(|tool| tool.name == *op)
-                .ok_or_else(|| UxcError::OperationNotFound(op.clone()))?;
-            Ok(Some((
-                "operation_detail".to_string(),
-                Some(op.clone()),
-                serde_json::to_value(operation_detail_from_mcp_tool(tool))?,
-            )))
-        }
-        RuntimeAction::Execute => Ok(None),
+            RuntimeAction::OperationHelp => {
+                let op = request
+                    .operation_id
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("operation_id is required"))?;
+                let tool = tools
+                    .iter()
+                    .find(|tool| tool.name == *op)
+                    .ok_or_else(|| UxcError::OperationNotFound(op.clone()))?;
+                Ok(Some((
+                    "operation_detail".to_string(),
+                    Some(op.clone()),
+                    serde_json::to_value(operation_detail_from_mcp_tool(tool))?,
+                )))
+            }
+            RuntimeAction::Execute => Ok(None),
+        },
+        Err(err) => Err(err),
     };
     drop(guard);
     let request_error = response.as_ref().err();
