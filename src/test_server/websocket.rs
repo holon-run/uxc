@@ -46,9 +46,7 @@ async fn handle_websocket_socket(kind: String, mut socket: WebSocket) {
             }
             let _ = socket
                 .send(Message::Text(
-                    json!({ "received_frames": received_frames })
-                        .to_string()
-                        .into(),
+                    json!({ "received_frames": received_frames }).to_string(),
                 ))
                 .await;
             tokio::time::sleep(Duration::from_millis(100)).await;

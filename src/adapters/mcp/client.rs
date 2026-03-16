@@ -121,6 +121,10 @@ impl McpStdioClient {
         self.instructions.as_deref()
     }
 
+    pub fn child_id(&self) -> Option<u32> {
+        self.transport.child_id()
+    }
+
     pub async fn kill_and_wait(&mut self, timeout: Duration) -> Result<()> {
         self.transport.kill_and_wait(timeout).await
     }

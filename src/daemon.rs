@@ -41,6 +41,8 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 #[cfg(unix)]
 use std::process::Stdio;
@@ -81,6 +83,11 @@ const ERR_OAUTH_REFRESH_FAILED: i32 = -32013;
 const ERR_OAUTH_SCOPE_INSUFFICIENT: i32 = -32014;
 const ERR_RUNTIME_GENERIC: i32 = -32030;
 
+#[cfg(unix)]
+unsafe extern "C" {
+    fn setsid() -> std::ffi::c_int;
+}
+
 pub fn daemon_supported() -> bool {
     cfg!(unix)
 }
@@ -116,6 +123,8 @@ pub struct RuntimeInvokeOptions {
     pub schema_mapping_file: Option<String>,
     #[serde(default)]
     pub daemon_exclusive: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_idle_ttl: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +266,30 @@ pub struct DaemonStatus {
     pub log_file: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonSessionView {
+    /// Opaque session identifier safe for display in CLI and JSON output.
+    pub session_key: String,
+    /// Transport family for the daemon-managed session.
+    pub protocol: String,
+    /// Redacted endpoint associated with the live session.
+    pub endpoint: String,
+    /// Link name from the latest request metadata, if present.
+    pub link_name: Option<String>,
+    /// Child process id for stdio-backed sessions when available.
+    pub child_pid: Option<u32>,
+    /// Unix timestamp when the daemon created this live session.
+    pub started_at_unix: u64,
+    /// Unix timestamp when the daemon last served a request through this session.
+    pub last_used_at_unix: u64,
+    /// Effective idle TTL in seconds. `0` disables idle reaping for the session.
+    pub idle_ttl_secs: u64,
+    #[serde(default)]
+    pub daemon_exclusive: Vec<String>,
+    /// Current liveness state; `live` means the session is present in the daemon cache.
+    pub state: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonRpcRequest {
     jsonrpc: String,
@@ -327,11 +360,42 @@ struct McpStdioSession {
     tools: Option<Vec<adapters::mcp::types::Tool>>,
     tools_dirty: bool,
     last_used: Instant,
+    last_used_at_unix: u64,
+    started_at_unix: u64,
+    idle_ttl_secs: u64,
+    child_pid: Option<u32>,
+    link_name: Option<String>,
+    endpoint: String,
+    daemon_exclusive: Vec<String>,
 }
 
 struct McpHttpSession {
     transport: adapters::mcp::McpRemoteTransport,
     last_used: Arc<Mutex<Instant>>,
+}
+
+struct StdioSessionRequestMetadata<'a> {
+    idle_ttl_secs: Option<u64>,
+    link_name: Option<&'a str>,
+    endpoint: &'a str,
+    exclusive_keys: &'a [String],
+}
+
+fn resolve_stdio_request_metadata(
+    metadata: &StdioSessionRequestMetadata<'_>,
+    existing_exclusive_keys: &[String],
+) -> (u64, Option<String>, String, Vec<String>) {
+    let daemon_exclusive = if metadata.exclusive_keys.is_empty() {
+        existing_exclusive_keys.to_vec()
+    } else {
+        metadata.exclusive_keys.to_vec()
+    };
+    (
+        metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
+        metadata.link_name.map(str::to_string),
+        metadata.endpoint.to_string(),
+        daemon_exclusive,
+    )
 }
 
 #[derive(Clone, Default)]
@@ -362,6 +426,15 @@ struct PersistedSubscriptionStore {
 }
 
 impl McpStdioSession {
+    fn apply_request_metadata(&mut self, metadata: &StdioSessionRequestMetadata<'_>) {
+        let (idle_ttl_secs, link_name, endpoint, daemon_exclusive) =
+            resolve_stdio_request_metadata(metadata, &self.daemon_exclusive);
+        self.idle_ttl_secs = idle_ttl_secs;
+        self.link_name = link_name;
+        self.endpoint = endpoint;
+        self.daemon_exclusive = daemon_exclusive;
+    }
+
     async fn refresh_tools_if_needed(
         &mut self,
         _endpoint: &str,
@@ -404,8 +477,7 @@ impl McpSessionManager {
     }
 
     async fn cleanup_idle(&self) {
-        let cutoff = Instant::now() - Duration::from_secs(MCP_IDLE_TTL_SECS);
-
+        let http_cutoff = Instant::now() - Duration::from_secs(MCP_IDLE_TTL_SECS);
         let stdio_entries: Vec<(String, Arc<Mutex<McpStdioSession>>)> = {
             let map = self.stdio.lock().await;
             map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
@@ -415,6 +487,10 @@ impl McpSessionManager {
             // Use try_lock to avoid blocking on sessions that may be held across .await in invoke_mcp.
             // If a session is busy, we'll check it again in the next cleanup cycle.
             if let Ok(mut guard) = session.try_lock() {
+                if guard.idle_ttl_secs == 0 {
+                    continue;
+                }
+                let cutoff = Instant::now() - Duration::from_secs(guard.idle_ttl_secs);
                 if guard.last_used < cutoff {
                     // Idle cleanup is best-effort: even if shutdown waiting fails, we still drop
                     // the cached session so cleanup can make forward progress on the next cycle.
@@ -466,7 +542,7 @@ impl McpSessionManager {
         let mut http_remove = Vec::new();
         for (key, session) in &http_entries {
             let last = *session.last_used.lock().await;
-            if last < cutoff {
+            if last < http_cutoff {
                 http_remove.push(key.clone());
             }
         }
@@ -484,9 +560,15 @@ impl McpSessionManager {
         command: &str,
         args: &[String],
         spawn_options: &adapters::mcp::StdioSpawnOptions,
-        exclusive_keys: &[String],
+        metadata: StdioSessionRequestMetadata<'_>,
     ) -> Result<(Arc<Mutex<McpStdioSession>>, bool)> {
-        let exclusive_keys = normalize_exclusive_keys(exclusive_keys);
+        let exclusive_keys = normalize_exclusive_keys(metadata.exclusive_keys);
+        let metadata = StdioSessionRequestMetadata {
+            idle_ttl_secs: metadata.idle_ttl_secs,
+            link_name: metadata.link_name,
+            endpoint: metadata.endpoint,
+            exclusive_keys: &exclusive_keys,
+        };
 
         // If exclusives are requested, enforce/claim them before returning an existing session
         // so the invariant holds even when the session was created without exclusives.
@@ -501,16 +583,20 @@ impl McpSessionManager {
                 .await?;
         }
 
-        {
+        let existing = {
             let map = self.stdio.lock().await;
-            if let Some(s) = map.get(session_key) {
-                *self.reuse_hits.lock().await += 1;
-                if !exclusive_keys.is_empty() {
-                    self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
-                        .await;
-                }
-                return Ok((s.clone(), true));
+            map.get(session_key).cloned()
+        };
+        if let Some(session) = existing {
+            *self.reuse_hits.lock().await += 1;
+            let mut guard = session.lock().await;
+            guard.apply_request_metadata(&metadata);
+            drop(guard);
+            if !exclusive_keys.is_empty() {
+                self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
+                    .await;
             }
+            return Ok((session, true));
         }
 
         // Singleflight for stdio process initialization by endpoint key.
@@ -528,16 +614,20 @@ impl McpSessionManager {
         };
         let _guard = key_lock.lock().await;
 
-        {
+        let existing = {
             let map = self.stdio.lock().await;
-            if let Some(s) = map.get(session_key) {
-                *self.reuse_hits.lock().await += 1;
-                if !exclusive_keys.is_empty() {
-                    self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
-                        .await;
-                }
-                return Ok((s.clone(), true));
+            map.get(session_key).cloned()
+        };
+        if let Some(session) = existing {
+            *self.reuse_hits.lock().await += 1;
+            let mut guard = session.lock().await;
+            guard.apply_request_metadata(&metadata);
+            drop(guard);
+            if !exclusive_keys.is_empty() {
+                self.register_stdio_exclusive_keys(session_key, &exclusive_keys)
+                    .await;
             }
+            return Ok((session, true));
         }
 
         let client = adapters::mcp::McpStdioClient::connect_with_options(
@@ -546,11 +636,19 @@ impl McpSessionManager {
             spawn_options.clone(),
         )
         .await?;
+        let created_at_unix = now_unix_secs();
         let session = Arc::new(Mutex::new(McpStdioSession {
+            child_pid: client.child_id(),
             client,
             tools: None,
             tools_dirty: false,
             last_used: Instant::now(),
+            last_used_at_unix: created_at_unix,
+            started_at_unix: created_at_unix,
+            idle_ttl_secs: metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
+            link_name: metadata.link_name.map(str::to_string),
+            endpoint: metadata.endpoint.to_string(),
+            daemon_exclusive: exclusive_keys.clone(),
         }));
 
         let mut map = self.stdio.lock().await;
@@ -781,6 +879,32 @@ impl McpSessionManager {
         let http_count = self.http.lock().await.len();
         let reuse_hits = *self.reuse_hits.lock().await;
         (stdio_count, http_count, reuse_hits)
+    }
+
+    async fn session_views(&self) -> Vec<DaemonSessionView> {
+        let stdio_entries: Vec<(String, Arc<Mutex<McpStdioSession>>)> = {
+            let map = self.stdio.lock().await;
+            map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
+        };
+
+        let mut views = Vec::with_capacity(stdio_entries.len());
+        for (session_key, session) in stdio_entries {
+            let guard = session.lock().await;
+            views.push(DaemonSessionView {
+                session_key: display_session_key(&session_key),
+                protocol: "mcp_stdio".to_string(),
+                endpoint: redact_sensitive(&guard.endpoint),
+                link_name: guard.link_name.clone(),
+                child_pid: guard.child_pid,
+                started_at_unix: guard.started_at_unix,
+                last_used_at_unix: guard.last_used_at_unix,
+                idle_ttl_secs: guard.idle_ttl_secs,
+                daemon_exclusive: guard.daemon_exclusive.clone(),
+                state: "live".to_string(),
+            });
+        }
+        views.sort_by(|a, b| a.session_key.cmp(&b.session_key));
+        views
     }
 }
 
@@ -1707,6 +1831,10 @@ impl DaemonRuntime {
         }
     }
 
+    pub async fn session_views(&self) -> Vec<DaemonSessionView> {
+        self.mcp.session_views().await
+    }
+
     pub async fn subscribe_start(
         &self,
         request: SubscribeStartRequest,
@@ -1844,11 +1972,17 @@ impl DaemonRuntime {
                     &cmd,
                     &cmd_args,
                     &spawn_options,
-                    &request.options.daemon_exclusive,
+                    StdioSessionRequestMetadata {
+                        idle_ttl_secs: request.options.daemon_idle_ttl,
+                        link_name: request.options.link_name.as_deref(),
+                        endpoint,
+                        exclusive_keys: &request.options.daemon_exclusive,
+                    },
                 )
                 .await?;
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
+            guard.last_used_at_unix = now_unix_secs();
             let result = guard.client.call_tool(op, arguments).await?;
             let _ = guard
                 .mark_tools_dirty_from_notifications(endpoint, &cache)
@@ -3759,6 +3893,17 @@ pub async fn daemon_status_client() -> Result<DaemonStatus> {
 }
 
 #[cfg(unix)]
+pub async fn daemon_sessions_client() -> Result<Vec<DaemonSessionView>> {
+    let value = client_call("daemon.sessions", None).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn daemon_sessions_client() -> Result<Vec<DaemonSessionView>> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
 pub async fn daemon_stop_client() -> Result<()> {
     let _ = client_call("daemon.shutdown", None).await?;
     Ok(())
@@ -3844,15 +3989,30 @@ async fn start_daemon_process() -> Result<()> {
 
     if got_lock {
         let current_exe = std::env::current_exe().context("Cannot resolve current executable")?;
-        let _child = std::process::Command::new(current_exe)
+        let mut child_cmd = std::process::Command::new(current_exe);
+        child_cmd
             .arg("daemon")
             .arg("_serve")
             // Avoid corrupting coverage artifacts when parent test runners
             // terminate long-lived daemon processes in CI.
             .env_remove("LLVM_PROFILE_FILE")
+            .current_dir(&dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: the child process does not touch shared Rust state after fork; it only
+        // requests a new session id before exec so the daemon survives parent cleanup.
+        unsafe {
+            child_cmd.pre_exec(|| {
+                // Detach from the invoking process group so parent shell cleanup after
+                // the command exits does not also terminate the daemon.
+                if setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let _child = child_cmd
             .spawn()
             .context("Failed to spawn daemon process")?;
     }
@@ -4038,6 +4198,15 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 jsonrpc: JSONRPC_VERSION.to_string(),
                 id: req.id,
                 result: Some(serde_json::to_value(status)?),
+                error: None,
+            }
+        }
+        "daemon.sessions" => {
+            let sessions = runtime.session_views().await;
+            JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: req.id,
+                result: Some(serde_json::to_value(sessions)?),
                 error: None,
             }
         }
@@ -4243,6 +4412,10 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
 
 pub async fn daemon_status_local() -> Result<DaemonStatus> {
     daemon_status_client().await
+}
+
+pub async fn daemon_sessions_local() -> Result<Vec<DaemonSessionView>> {
+    daemon_sessions_client().await
 }
 
 pub async fn daemon_start_local() -> Result<EnsureDaemonOutcome> {
@@ -4524,6 +4697,15 @@ fn stdio_session_key(
         auth_fingerprint(profile),
         stdio_env_fingerprint(inject_env, profile)?
     ))
+}
+
+fn display_session_key(session_key: &str) -> String {
+    let digest = Sha256::digest(session_key.as_bytes());
+    let short_hash = digest[..8]
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>();
+    format!("stdio:{}", short_hash)
 }
 
 fn build_stdio_spawn_options(
@@ -4904,7 +5086,14 @@ async fn invoke_live_stdio_mcp_help(
     };
 
     let mut guard = session.lock().await;
+    guard.apply_request_metadata(&StdioSessionRequestMetadata {
+        idle_ttl_secs: request.options.daemon_idle_ttl,
+        link_name: request.options.link_name.as_deref(),
+        endpoint: &request.endpoint,
+        exclusive_keys: &request.options.daemon_exclusive,
+    });
     guard.last_used = Instant::now();
+    guard.last_used_at_unix = now_unix_secs();
     let _ = guard
         .mark_tools_dirty_from_notifications(&request.endpoint, &cache)
         .await;
@@ -5245,6 +5434,7 @@ mod tests {
                 link_name: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
             },
         };
 
@@ -5252,6 +5442,51 @@ mod tests {
             openapi_runtime_endpoint(&request).as_deref(),
             Some("https://testnet.binance.vision/api/v3/account")
         );
+    }
+
+    #[test]
+    fn display_session_key_redacts_raw_endpoint_material() {
+        let session_key = "stdio:https://example.com?token=secret:auth:env";
+        let display = display_session_key(session_key);
+        assert!(display.starts_with("stdio:"));
+        assert!(!display.contains("example.com"));
+        assert!(!display.contains("secret"));
+    }
+
+    #[test]
+    fn resolve_stdio_request_metadata_resets_ttl_and_link_name_from_current_request() {
+        let (idle_ttl_secs, link_name, endpoint, daemon_exclusive) = resolve_stdio_request_metadata(
+            &StdioSessionRequestMetadata {
+                idle_ttl_secs: None,
+                link_name: None,
+                endpoint: "https://new.example.com",
+                exclusive_keys: &[],
+            },
+            &["/tmp/profile".to_string()],
+        );
+
+        assert_eq!(idle_ttl_secs, MCP_IDLE_TTL_SECS);
+        assert_eq!(link_name, None);
+        assert_eq!(endpoint, "https://new.example.com");
+        assert_eq!(daemon_exclusive, vec!["/tmp/profile".to_string()]);
+    }
+
+    #[test]
+    fn resolve_stdio_request_metadata_accepts_zero_ttl_override() {
+        let (idle_ttl_secs, link_name, endpoint, daemon_exclusive) = resolve_stdio_request_metadata(
+            &StdioSessionRequestMetadata {
+                idle_ttl_secs: Some(0),
+                link_name: Some("board-link"),
+                endpoint: "https://new.example.com",
+                exclusive_keys: &["/tmp/new-profile".to_string()],
+            },
+            &[],
+        );
+
+        assert_eq!(idle_ttl_secs, 0);
+        assert_eq!(link_name, Some("board-link".to_string()));
+        assert_eq!(endpoint, "https://new.example.com");
+        assert_eq!(daemon_exclusive, vec!["/tmp/new-profile".to_string()]);
     }
 
     #[test]
@@ -5272,6 +5507,7 @@ mod tests {
                 link_name: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
             },
         };
 
@@ -5342,6 +5578,7 @@ mod tests {
                 link_name: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
             },
         };
 
@@ -5369,6 +5606,7 @@ mod tests {
                 link_name: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
             },
         };
 
@@ -5477,6 +5715,7 @@ mod tests {
                 link_name: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
             },
         }
     }

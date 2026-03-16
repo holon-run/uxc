@@ -84,6 +84,10 @@ struct Cli {
     #[arg(long = "daemon-exclusive", global = true, value_name = "KEY")]
     daemon_exclusive: Vec<String>,
 
+    /// Idle TTL in seconds for reused MCP stdio daemon sessions (0 disables idle reaping).
+    #[arg(long = "daemon-idle-ttl", global = true, value_name = "SECONDS")]
+    daemon_idle_ttl: Option<u64>,
+
     /// Explicit credential ID for this request (overrides endpoint binding auto-match)
     #[arg(long, global = true)]
     auth: Option<String>,
@@ -191,6 +195,8 @@ enum DaemonCommands {
     Stop,
     /// Show daemon status
     Status,
+    /// List MCP daemon sessions
+    Sessions,
     /// Restart daemon process (stop if running, then start)
     Restart,
     /// Internal daemon server entrypoint
@@ -883,6 +889,7 @@ struct LinkCreateData {
     schema_url: Option<String>,
     credential: Option<String>,
     inject_env: Vec<String>,
+    daemon_idle_ttl: Option<u64>,
 }
 
 struct LinkCommandOptions<'a> {
@@ -893,6 +900,7 @@ struct LinkCommandOptions<'a> {
     inject_env: &'a [InjectEnvSpec],
     force: bool,
     daemon_exclusive: &'a [String],
+    daemon_idle_ttl: Option<u64>,
 }
 
 #[tokio::main]
@@ -1020,6 +1028,7 @@ fn normalize_global_args(raw_args: Vec<String>) -> Vec<String> {
                 | "--cache-ttl"
                 | "--schema-url"
                 | "--daemon-exclusive"
+                | "--daemon-idle-ttl"
                 | "--inject-env"
         );
         let is_global_inline = arg.starts_with("--format=")
@@ -1027,6 +1036,7 @@ fn normalize_global_args(raw_args: Vec<String>) -> Vec<String> {
             || arg.starts_with("--cache-ttl=")
             || arg.starts_with("--schema-url=")
             || arg.starts_with("--daemon-exclusive=")
+            || arg.starts_with("--daemon-idle-ttl=")
             || arg.starts_with("--inject-env=");
 
         if is_global_bool || is_global_inline {
@@ -1074,6 +1084,7 @@ fn is_global_kv_arg(arg: &str) -> bool {
             | "--cache-ttl"
             | "--schema-url"
             | "--daemon-exclusive"
+            | "--daemon-idle-ttl"
             | "--inject-env"
     )
 }
@@ -1084,6 +1095,7 @@ fn is_global_inline_arg(arg: &str) -> bool {
         || arg.starts_with("--cache-ttl=")
         || arg.starts_with("--schema-url=")
         || arg.starts_with("--daemon-exclusive=")
+        || arg.starts_with("--daemon-idle-ttl=")
         || arg.starts_with("--inject-env=")
 }
 
@@ -1298,6 +1310,7 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             DaemonCommands::Start => Some(vec!["daemon", "start"]),
             DaemonCommands::Stop => Some(vec!["daemon", "stop"]),
             DaemonCommands::Status => Some(vec!["daemon", "status"]),
+            DaemonCommands::Sessions => Some(vec!["daemon", "sessions"]),
             DaemonCommands::Restart => Some(vec!["daemon", "restart"]),
             DaemonCommands::Serve => Some(vec!["daemon", "_serve"]),
         },
@@ -1312,9 +1325,81 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
 }
 
 fn normalize_endpoint_url(input: &str) -> String {
-    match infer_scheme_for_endpoint(input) {
+    let normalized = match infer_scheme_for_endpoint(input) {
         Some(scheme) => format!("{}://{}", scheme, input),
         None => input.to_string(),
+    };
+    absolutize_stdio_command_endpoint(&normalized)
+}
+
+fn absolutize_stdio_command_endpoint(input: &str) -> String {
+    if !adapters::mcp::McpAdapter::is_stdio_command(input) {
+        return input.to_string();
+    }
+
+    let parts = adapters::mcp::transport::parse_command(input);
+    let Some((command, args)) = parts.split_first() else {
+        return input.to_string();
+    };
+
+    let Some(absolute_command) = absolutize_stdio_command_path(command) else {
+        return input.to_string();
+    };
+
+    let mut rebuilt = Vec::with_capacity(parts.len());
+    rebuilt.push(absolute_command);
+    rebuilt.extend(args.iter().cloned());
+    rebuilt
+        .into_iter()
+        .map(|part| quote_stdio_command_part(&part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn absolutize_stdio_command_path(command: &str) -> Option<String> {
+    if command.contains("://") {
+        return None;
+    }
+
+    let expanded = if command == "~" || command.starts_with("~/") || command.starts_with("~\\") {
+        let home = resolve_home_dir()?;
+        if command == "~" {
+            home
+        } else {
+            home.join(command[2..].replace('\\', "/"))
+        }
+    } else {
+        let path = PathBuf::from(command);
+        if path.is_absolute() {
+            return None;
+        }
+        let looks_like_path = command.starts_with("./")
+            || command.starts_with("../")
+            || command.contains('/')
+            || command.contains('\\');
+        if !looks_like_path {
+            return None;
+        }
+        std::env::current_dir().ok()?.join(path)
+    };
+
+    Some(
+        fs::canonicalize(&expanded)
+            .unwrap_or(expanded)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+fn quote_stdio_command_part(part: &str) -> String {
+    if part.is_empty()
+        || part.chars().any(char::is_whitespace)
+        || part.contains('\'')
+        || part.contains('"')
+    {
+        shell_single_quote(part)
+    } else {
+        part.to_string()
     }
 }
 
@@ -1427,6 +1512,7 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
             inject_env: &inject_env,
             force: *force,
             daemon_exclusive: &exclusive,
+            daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
         };
         return handle_link_command(name, host, options).await;
     }
@@ -1509,6 +1595,7 @@ async fn execute_endpoint_via_daemon(
             link_name: std::env::var("UXC_LINK_NAME").ok(),
             schema_mapping_file: std::env::var("UXC_SCHEMA_MAPPINGS_FILE").ok(),
             daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
+            daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
         },
     };
 
@@ -1606,7 +1693,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             path: "uxc link".to_string(),
             about: "Create a host-bound shortcut command".to_string(),
             usage:
-                "uxc link <name> <host> [--dir <dir>] [--schema-url <url>] [--credential <credential_id>] [--inject-env NAME={{secret}} ...] [--daemon-exclusive <key> ...] [--force]"
+                "uxc link <name> <host> [--dir <dir>] [--schema-url <url>] [--credential <credential_id>] [--inject-env NAME={{secret}} ...] [--daemon-exclusive <key> ...] [--daemon-idle-ttl <seconds>] [--force]"
                     .to_string(),
             commands: vec![],
             notes: vec![
@@ -1616,23 +1703,26 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                     .to_string(),
                 "Use --daemon-exclusive to declare shared state keys that should be exclusive across MCP stdio sessions."
                     .to_string(),
+                "Use --daemon-idle-ttl to override daemon stdio idle cleanup per link; 0 disables idle reaping for that linked session."
+                    .to_string(),
             ],
             examples: vec![
                 "uxc link petcli petstore3.swagger.io/api/v3".to_string(),
                 "uxc link discord-openapi-cli https://discord.com/api/v10 --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json".to_string(),
                 "uxc link thegraph-mcp-cli \"/bin/zsh -lc 'npx -y mcp-remote --header \\\"Authorization: Bearer ${THEGRAPH_API_KEY}\\\" https://subgraphs.mcp.thegraph.com/sse'\" --credential thegraph --inject-env THEGRAPH_API_KEY={{secret}}".to_string(),
-                "uxc link --daemon-exclusive ~/.uxc/playwright-profile playwright-mcp-ui \"npx -y @playwright/mcp@latest --user-data-dir ~/.uxc/playwright-profile\"".to_string(),
+                "uxc link --daemon-exclusive ~/.uxc/playwright-profile --daemon-idle-ttl 0 playwright-mcp-ui \"npx -y @playwright/mcp@latest --user-data-dir ~/.uxc/playwright-profile\"".to_string(),
                 "petcli -h".to_string(),
             ],
         },
         ["daemon"] => HelpData {
             path: "uxc daemon".to_string(),
             about: "Manage local runtime daemon".to_string(),
-            usage: "uxc daemon <start|stop|status|restart>".to_string(),
+            usage: "uxc daemon <start|stop|status|sessions|restart>".to_string(),
             commands: commands(&[
                 ("start", "Start daemon process"),
                 ("stop", "Stop daemon process"),
                 ("status", "Show daemon status"),
+                ("sessions", "List daemon MCP sessions"),
                 ("restart", "Restart daemon process"),
             ]),
             notes: vec![
@@ -1669,6 +1759,17 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: vec![],
             notes: vec![],
             examples: vec!["uxc daemon status".to_string()],
+        },
+        ["daemon", "sessions"] => HelpData {
+            path: "uxc daemon sessions".to_string(),
+            about: "List daemon MCP sessions".to_string(),
+            usage: "uxc daemon sessions".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Shows stdio daemon session metadata, including per-session idle TTL where 0 disables idle reaping."
+                    .to_string(),
+            ],
+            examples: vec!["uxc daemon sessions".to_string()],
         },
         ["daemon", "restart"] => HelpData {
             path: "uxc daemon restart".to_string(),
@@ -2937,6 +3038,7 @@ async fn handle_link_command(
         persisted_credential,
         options.inject_env,
         options.daemon_exclusive,
+        options.daemon_idle_ttl,
     );
     let target_exists_before = target_path.exists();
     write_link_file(&target_path, launcher.as_bytes(), options.force)?;
@@ -2955,6 +3057,7 @@ async fn handle_link_command(
             .iter()
             .map(InjectEnvSpec::as_cli_arg)
             .collect(),
+        daemon_idle_ttl: options.daemon_idle_ttl,
     })?;
 
     Ok(OutputEnvelope::success(
@@ -2990,10 +3093,12 @@ fn build_link_launcher(
     credential: Option<&str>,
     inject_env: &[InjectEnvSpec],
     daemon_exclusive: &[String],
+    daemon_idle_ttl: Option<u64>,
 ) -> String {
     const LINK_SENTINEL: &str = "# Generated by uxc link; do not edit by hand";
 
     let exclusive = daemon_exclusive.join(";");
+    let idle_ttl = daemon_idle_ttl.map(|value| value.to_string());
 
     #[cfg(windows)]
     {
@@ -3004,6 +3109,14 @@ fn build_link_launcher(
             "REM UXC_DAEMON_EXCLUSIVE is empty".to_string()
         } else {
             format!("set \"UXC_DAEMON_EXCLUSIVE={}\"", escaped_exclusive)
+        };
+        let idle_ttl_line = if let Some(idle_ttl) = idle_ttl.as_deref() {
+            format!(
+                "set \"UXC_DAEMON_IDLE_TTL={}\"",
+                windows_batch_escape(idle_ttl)
+            )
+        } else {
+            "REM UXC_DAEMON_IDLE_TTL is empty".to_string()
         };
         let mut base_command = format!("uxc \"{}\"", escaped);
         if let Some(credential) = credential {
@@ -3025,20 +3138,25 @@ fn build_link_launcher(
             })
             .unwrap_or_else(|| format!("{} %*\r\n", base_command));
         return format!(
-            "@echo off\r\nREM {}\r\nset \"UXC_LINK_NAME={}\"\r\n{}\r\n{}",
-            LINK_SENTINEL, escaped_name, exclusive_line, schema_logic
+            "@echo off\r\nREM {}\r\nset \"UXC_LINK_NAME={}\"\r\n{}\r\n{}\r\n{}",
+            LINK_SENTINEL, escaped_name, exclusive_line, idle_ttl_line, schema_logic
         );
     }
     #[cfg(not(windows))]
     {
-        let exclusive_line = if exclusive.is_empty() {
+        let exclusive_prefix = if exclusive.is_empty() {
             String::new()
         } else {
             format!("UXC_DAEMON_EXCLUSIVE={} ", shell_single_quote(&exclusive))
         };
+        let idle_ttl_prefix = idle_ttl
+            .as_deref()
+            .map(|value| format!("UXC_DAEMON_IDLE_TTL={} ", shell_single_quote(value)))
+            .unwrap_or_default();
         let mut exec_prefix = format!(
-            "{}UXC_LINK_NAME={} exec uxc {}",
-            exclusive_line,
+            "{}{}UXC_LINK_NAME={} exec uxc {}",
+            exclusive_prefix,
+            idle_ttl_prefix,
             shell_single_quote(name),
             shell_single_quote(host)
         );
@@ -3125,6 +3243,27 @@ fn collect_daemon_exclusive_keys(cli: &Cli) -> Result<Vec<String>> {
     keys.sort();
     keys.dedup();
     Ok(keys)
+}
+
+fn collect_daemon_idle_ttl(cli: &Cli) -> Result<Option<u64>> {
+    if let Some(value) = cli.daemon_idle_ttl {
+        return Ok(Some(value));
+    }
+
+    let Ok(raw) = std::env::var("UXC_DAEMON_IDLE_TTL") else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let ttl = trimmed.parse::<u64>().map_err(|_| {
+        UxcError::InvalidArguments(format!(
+            "Invalid UXC_DAEMON_IDLE_TTL value '{}': expected non-negative integer seconds",
+            trimmed
+        ))
+    })?;
+    Ok(Some(ttl))
 }
 
 fn collect_inject_env_specs(cli: &Cli) -> Result<Vec<InjectEnvSpec>> {
@@ -3608,6 +3747,17 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
                 None,
             ))
         }
+        DaemonCommands::Sessions => {
+            let sessions = daemon::daemon_sessions_local().await?;
+            Ok(OutputEnvelope::success(
+                "daemon_sessions",
+                "cli",
+                "uxc",
+                None,
+                serde_json::to_value(sessions)?,
+                None,
+            ))
+        }
         DaemonCommands::Restart => {
             let stopped = daemon::daemon_stop_local().await?;
             let outcome = daemon::daemon_start_local().await?;
@@ -3971,6 +4121,7 @@ async fn handle_subscribe_command(
                     link_name: std::env::var("UXC_LINK_NAME").ok(),
                     schema_mapping_file: None,
                     daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
+                    daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
                 },
             };
             let data = serde_json::to_value(daemon::subscribe_start_client(&request).await?)?;
@@ -5190,10 +5341,19 @@ fn parse_oauth_flow(value: &str) -> Result<OAuthFlow> {
 #[cfg(test)]
 mod tests {
     use super::{
-        infer_scheme_for_endpoint, link_target_path, normalize_endpoint_url, resolve_home_dir,
-        resolve_link_dir, shell_single_quote, validate_link_name,
+        build_link_launcher, collect_daemon_idle_ttl, infer_scheme_for_endpoint, link_target_path,
+        normalize_endpoint_url, resolve_home_dir, resolve_link_dir, shell_single_quote,
+        validate_link_name, Cli,
     };
+    use clap::Parser;
     use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir;
+
+    fn process_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn infer_scheme_for_public_host() {
@@ -5294,5 +5454,68 @@ mod tests {
         {
             assert_eq!(link_target_path(dir, "petcli"), dir.join("petcli"));
         }
+    }
+
+    #[test]
+    fn build_link_launcher_persists_daemon_idle_ttl() {
+        let launcher = build_link_launcher(
+            "board-webmcp-ui",
+            "example.com",
+            None,
+            None,
+            &[],
+            &["~/.uxc/profile".to_string()],
+            Some(0),
+        );
+        assert!(launcher.contains("UXC_DAEMON_IDLE_TTL"));
+        assert!(launcher.contains("0"));
+    }
+
+    #[test]
+    fn collect_daemon_idle_ttl_prefers_flag_over_env() {
+        let _guard = process_lock().lock().unwrap();
+        // SAFETY: tests serialize access to process env with a mutex.
+        unsafe {
+            std::env::set_var("UXC_DAEMON_IDLE_TTL", "15");
+        }
+        let cli = Cli::parse_from(["uxc", "--daemon-idle-ttl", "0", "example.com", "-h"]);
+        assert_eq!(collect_daemon_idle_ttl(&cli).unwrap(), Some(0));
+        // SAFETY: tests serialize access to process env with a mutex.
+        unsafe {
+            std::env::remove_var("UXC_DAEMON_IDLE_TTL");
+        }
+    }
+
+    #[test]
+    fn collect_daemon_idle_ttl_reads_env_when_flag_missing() {
+        let _guard = process_lock().lock().unwrap();
+        // SAFETY: tests serialize access to process env with a mutex.
+        unsafe {
+            std::env::set_var("UXC_DAEMON_IDLE_TTL", "42");
+        }
+        let cli = Cli::parse_from(["uxc", "example.com", "-h"]);
+        assert_eq!(collect_daemon_idle_ttl(&cli).unwrap(), Some(42));
+        // SAFETY: tests serialize access to process env with a mutex.
+        unsafe {
+            std::env::remove_var("UXC_DAEMON_IDLE_TTL");
+        }
+    }
+
+    #[test]
+    fn normalize_endpoint_url_absolutizes_relative_stdio_command_paths() {
+        let _guard = process_lock().lock().unwrap();
+        let cwd = std::env::current_dir().expect("current dir should resolve");
+        let temp = tempdir().expect("tempdir should be created");
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir should exist");
+        let bin_path = bin_dir.join("uxc-test-mcp-stdio-server");
+        std::fs::write(&bin_path, "#!/bin/sh\n").expect("dummy bin should be written");
+        std::env::set_current_dir(temp.path()).expect("should switch cwd");
+
+        let normalized = normalize_endpoint_url("bin/uxc-test-mcp-stdio-server ok");
+
+        std::env::set_current_dir(cwd).expect("should restore cwd");
+        assert!(normalized.contains(bin_path.to_string_lossy().as_ref()));
+        assert!(normalized.ends_with(" ok"));
     }
 }

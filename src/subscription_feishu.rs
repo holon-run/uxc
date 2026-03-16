@@ -164,6 +164,8 @@ struct FeishuEventAssembly {
     parts: Vec<Option<Vec<u8>>>,
 }
 
+type FeishuMergedEventPayload = (Value, String, Option<String>, usize);
+
 pub struct FeishuLongConnectionHandler {
     service_id: i32,
     ping_interval: Duration,
@@ -243,7 +245,7 @@ impl FeishuLongConnectionHandler {
         &mut self,
         headers: &HashMap<String, String>,
         payload: Vec<u8>,
-    ) -> Result<Option<(Value, String, Option<String>, usize)>> {
+    ) -> Result<Option<FeishuMergedEventPayload>> {
         let message_id = headers
             .get(FEISHU_HEADER_MESSAGE_ID)
             .cloned()

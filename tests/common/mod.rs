@@ -8,12 +8,35 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+fn cargo_target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target"))
+}
+
+fn current_profile_bin_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let deps_dir = exe.parent()?;
+    deps_dir.parent().map(PathBuf::from)
+}
+
+fn sibling_bin(name: &str) -> Option<PathBuf> {
+    let candidate = current_profile_bin_dir()?.join(name);
+    candidate.exists().then_some(candidate)
+}
+
 /// Path to the uxc binary
 pub fn uxc_binary() -> PathBuf {
-    if std::path::Path::new("target/debug/uxc").exists() {
-        PathBuf::from("target/debug/uxc")
-    } else if std::path::Path::new("target/release/uxc").exists() {
-        PathBuf::from("target/release/uxc")
+    if let Some(path) = sibling_bin("uxc") {
+        return path;
+    }
+    let target_dir = cargo_target_dir();
+    let debug_bin = target_dir.join("debug").join("uxc");
+    let release_bin = target_dir.join("release").join("uxc");
+    if debug_bin.exists() {
+        debug_bin
+    } else if release_bin.exists() {
+        release_bin
     } else {
         // Build it first
         let status = Command::new("cargo")
@@ -21,7 +44,7 @@ pub fn uxc_binary() -> PathBuf {
             .status()
             .expect("Failed to build uxc binary");
         assert!(status.success(), "Failed to build uxc binary");
-        PathBuf::from("target/debug/uxc")
+        debug_bin
     }
 }
 
@@ -29,19 +52,18 @@ pub fn uxc_binary() -> PathBuf {
 pub fn test_server_binary(name: &str) -> PathBuf {
     static BUILT_SERVERS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     let built = BUILT_SERVERS.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let bin_name = format!("uxc-test-{}-server", name);
+
+    if let Some(path) = sibling_bin(&bin_name) {
+        return path;
+    }
 
     // Build each protocol test server once per test process.
     {
         let mut guard = built.lock().expect("lock test server build cache");
         if !guard.contains(name) {
             let status = Command::new("cargo")
-                .args([
-                    "build",
-                    "--bin",
-                    &format!("uxc-test-{}-server", name),
-                    "--features",
-                    "test-server",
-                ])
+                .args(["build", "--bin", &bin_name, "--features", "test-server"])
                 .status()
                 .unwrap_or_else(|_| panic!("Failed to build {} test server", name));
             assert!(status.success(), "Failed to build {} test server", name);
@@ -49,12 +71,13 @@ pub fn test_server_binary(name: &str) -> PathBuf {
         }
     }
 
-    let release_bin_path = format!("target/release/uxc-test-{}-server", name);
-    if std::path::Path::new(&release_bin_path).exists() {
-        return PathBuf::from(release_bin_path);
+    let target_dir = cargo_target_dir();
+    let release_bin_path = target_dir.join("release").join(&bin_name);
+    if release_bin_path.exists() {
+        return release_bin_path;
     }
 
-    PathBuf::from(format!("target/debug/uxc-test-{}-server", name))
+    target_dir.join("debug").join(bin_name)
 }
 
 /// Handle to a running test server process
