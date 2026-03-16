@@ -1,28 +1,31 @@
 # Usage Patterns
 
 This skill defaults to a live-browser stdio endpoint:
-`npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics`
+`npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics`
 
 This skill defaults to fixed link command `chrome-devtools-mcp-cli`.
 Create it when missing:
 
 ```bash
 command -v chrome-devtools-mcp-cli
-uxc link chrome-devtools-mcp-cli "npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics"
+uxc link chrome-devtools-mcp-cli "npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics"
 ```
 
 ## Live Chrome Setup
 
-Use this skill when you already have a debuggable Chrome instance running on `http://127.0.0.1:9222`.
+Use this skill when you already have Chrome 144+ running with remote debugging enabled from `chrome://inspect/#remote-debugging`.
 
 ```bash
 chrome-devtools-mcp-cli -h
 ```
 
-If you are on Chrome 144+ and have enabled remote debugging from `chrome://inspect/#remote-debugging`, you can also use auto-connect:
+## Explicit Port-Based Attachment
+
+Use this mode when you intentionally launch Chrome with `--remote-debugging-port=9222`.
 
 ```bash
-uxc "npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics" -h
+command -v chrome-devtools-mcp-port
+uxc link chrome-devtools-mcp-port "npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics"
 ```
 
 ## Isolated Fallback
@@ -110,5 +113,5 @@ Rely on envelope fields:
 
 ## Fallback Equivalence
 
-- `chrome-devtools-mcp-cli <operation> ...` is equivalent to `uxc "npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics" <operation> ...`.
+- `chrome-devtools-mcp-cli <operation> ...` is equivalent to `uxc "npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics" <operation> ...`.
 - If link setup is temporarily unavailable, use the direct `uxc "<endpoint>" ...` form as fallback.

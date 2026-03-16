@@ -13,7 +13,7 @@ Reuse the `uxc` skill for generic MCP discovery, daemon reuse, JSON envelope par
 
 - `uxc` is installed and available in `PATH`.
 - `npx` is available in `PATH` (Node.js installed).
-- Chrome is running locally with remote debugging enabled if you use the default live-browser flow.
+- Chrome 144+ is running locally with remote debugging enabled from `chrome://inspect/#remote-debugging` if you use the default live-browser flow.
 - Network access is available for first-time `chrome-devtools-mcp` package fetch.
 
 ## Core Workflow (Chrome DevTools MCP-Specific)
@@ -24,6 +24,8 @@ Endpoint candidate inputs before finalizing:
 - Reliable non-interactive form:
   - `npx -y chrome-devtools-mcp@latest`
 - Default live-browser endpoint for this skill:
+  - `npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics`
+- Explicit browser-url endpoint:
   - `npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics`
 - Fallback isolated endpoint:
   - `npx -y chrome-devtools-mcp@latest --headless --isolated --no-usage-statistics`
@@ -34,7 +36,7 @@ Endpoint candidate inputs before finalizing:
    - Official source:
      - `https://github.com/ChromeDevTools/chrome-devtools-mcp`
    - probe candidate endpoints with:
-     - `uxc "npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics" -h`
+     - `uxc "npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics" -h`
    - Confirm protocol is MCP stdio (`protocol == "mcp"` in envelope).
 2. Detect auth requirement explicitly:
    - Run host help or a minimal read call and inspect envelope.
@@ -43,7 +45,10 @@ Endpoint candidate inputs before finalizing:
 3. Use a fixed link command by default:
    - `command -v chrome-devtools-mcp-cli`
    - If missing, create it:
-     - `uxc link chrome-devtools-mcp-cli "npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics"`
+     - `uxc link chrome-devtools-mcp-cli "npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics"`
+   - Optional explicit browser-url link:
+     - `command -v chrome-devtools-mcp-port`
+     - `uxc link chrome-devtools-mcp-port "npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics"`
    - Optional isolated fallback link:
      - `command -v chrome-devtools-mcp-isolated`
      - `uxc link chrome-devtools-mcp-isolated "npx -y chrome-devtools-mcp@latest --headless --isolated --no-usage-statistics"`
@@ -69,6 +74,8 @@ Endpoint candidate inputs before finalizing:
 - Keep automation on the JSON output envelope; do not rely on `--text`.
 - Use `chrome-devtools-mcp-cli` as the default command path.
 - Prefer the live-browser default endpoint when you need real logged-in state, current tabs, network diagnostics, console inspection, or performance analysis.
+- Prefer `--autoConnect` first when browser-side remote debugging is available.
+- Use `chrome-devtools-mcp-port` only when you intentionally run a Chrome instance with `--remote-debugging-port=9222`.
 - If no debuggable Chrome is available, fallback to `chrome-devtools-mcp-isolated`.
 - Prefer `take_snapshot` over screenshots for model-action loops.
 - Prefer `list_network_requests` / `get_network_request` over raw script evaluation when inspecting network behavior.

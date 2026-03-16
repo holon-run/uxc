@@ -43,20 +43,28 @@ if ! rg -q '^description:\s*.+' "${SKILL_FILE}"; then
   fail "SKILL.md frontmatter must define a description"
 fi
 
-if ! rg -q 'npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
-  fail "docs must include fixed live Chrome DevTools MCP endpoint"
+if ! rg -q 'npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "docs must include fixed live Chrome DevTools MCP autoConnect endpoint"
 fi
 
 if ! rg -q 'command -v chrome-devtools-mcp-cli' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail "docs must include default link existence check"
 fi
 
-if ! rg -q 'uxc link chrome-devtools-mcp-cli "npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics"' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+if ! rg -q 'uxc link chrome-devtools-mcp-cli "npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics"' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail "docs must include fixed link creation command"
+fi
+
+if ! rg -q 'chrome-devtools-mcp-port' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "docs must include optional browserUrl link"
 fi
 
 if ! rg -q 'chrome-devtools-mcp-isolated' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail "docs must include optional isolated fallback link"
+fi
+
+if ! rg -q -- '--autoConnect' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+  fail "docs must include autoConnect mode"
 fi
 
 if ! rg -q -- '--browserUrl http://127.0.0.1:9222' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
@@ -103,7 +111,7 @@ if ! rg -q 'references/usage-patterns.md' "${SKILL_FILE}"; then
   fail "SKILL.md must reference usage-patterns.md"
 fi
 
-if ! rg -q 'equivalent to `uxc "npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222 --no-usage-statistics"' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
+if ! rg -q 'equivalent to `uxc "npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics"' "${SKILL_FILE}" "${SKILL_DIR}/references/usage-patterns.md"; then
   fail "docs must include fallback equivalence guidance"
 fi
 
