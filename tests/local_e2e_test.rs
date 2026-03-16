@@ -913,7 +913,10 @@ fn test_mcp_stdio_preserves_explicit_empty_object_arguments() {
     assert_eq!(json["ok"], true);
     assert_eq!(json["protocol"], "mcp");
     assert_eq!(json["data"]["content"][0]["text"], "received-empty-object");
-    assert_eq!(json["data"]["structuredContent"]["hasArgumentsObject"], true);
+    assert_eq!(
+        json["data"]["structuredContent"]["hasArgumentsObject"],
+        true
+    );
     assert_eq!(json["data"]["structuredContent"]["argumentCount"], 0);
 }
 

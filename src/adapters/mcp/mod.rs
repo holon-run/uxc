@@ -19,8 +19,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
-#[cfg(test)]
-pub use transport::MockStdioExecutor;
 pub use transport::StdioSpawnOptions;
 
 pub struct McpAdapter {
