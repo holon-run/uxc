@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-03-16
+
+> Note: `v0.12.0` was published, but it is not the recommended patch level for production use.
+> Upgrade to `v0.12.1`.
+
+### Changed
+- Improved daemon-backed MCP stdio stability and observability with per-link idle TTL controls and richer live session inspection via `uxc daemon sessions`.
+
+### Fixed
+- Avoid reusing cached stdio sessions whose child process has already exited.
+- Improved daemon session lifecycle logging and unhealthy-session diagnostics for stdio MCP reuse behavior.
+
 ## [0.12.0] - 2026-03-15
 
 ### Added
@@ -301,7 +313,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/holon-run/uxc/releases/tag/v0.12.1
 [0.12.0]: https://github.com/holon-run/uxc/releases/tag/v0.12.0
 [0.11.1]: https://github.com/holon-run/uxc/releases/tag/v0.11.1
 [0.11.0]: https://github.com/holon-run/uxc/releases/tag/v0.11.0
