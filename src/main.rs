@@ -1325,9 +1325,81 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
 }
 
 fn normalize_endpoint_url(input: &str) -> String {
-    match infer_scheme_for_endpoint(input) {
+    let normalized = match infer_scheme_for_endpoint(input) {
         Some(scheme) => format!("{}://{}", scheme, input),
         None => input.to_string(),
+    };
+    absolutize_stdio_command_endpoint(&normalized)
+}
+
+fn absolutize_stdio_command_endpoint(input: &str) -> String {
+    if !adapters::mcp::McpAdapter::is_stdio_command(input) {
+        return input.to_string();
+    }
+
+    let parts = adapters::mcp::transport::parse_command(input);
+    let Some((command, args)) = parts.split_first() else {
+        return input.to_string();
+    };
+
+    let Some(absolute_command) = absolutize_stdio_command_path(command) else {
+        return input.to_string();
+    };
+
+    let mut rebuilt = Vec::with_capacity(parts.len());
+    rebuilt.push(absolute_command);
+    rebuilt.extend(args.iter().cloned());
+    rebuilt
+        .into_iter()
+        .map(|part| quote_stdio_command_part(&part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn absolutize_stdio_command_path(command: &str) -> Option<String> {
+    if command.contains("://") {
+        return None;
+    }
+
+    let expanded = if command == "~" || command.starts_with("~/") || command.starts_with("~\\") {
+        let home = resolve_home_dir()?;
+        if command == "~" {
+            home
+        } else {
+            home.join(command[2..].replace('\\', "/"))
+        }
+    } else {
+        let path = PathBuf::from(command);
+        if path.is_absolute() {
+            return None;
+        }
+        let looks_like_path = command.starts_with("./")
+            || command.starts_with("../")
+            || command.contains('/')
+            || command.contains('\\');
+        if !looks_like_path {
+            return None;
+        }
+        std::env::current_dir().ok()?.join(path)
+    };
+
+    Some(
+        fs::canonicalize(&expanded)
+            .unwrap_or(expanded)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+fn quote_stdio_command_part(part: &str) -> String {
+    if part.is_empty()
+        || part.chars().any(char::is_whitespace)
+        || part.contains('\'')
+        || part.contains('"')
+    {
+        shell_single_quote(part)
+    } else {
+        part.to_string()
     }
 }
 
@@ -5276,8 +5348,9 @@ mod tests {
     use clap::Parser;
     use std::path::Path;
     use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir;
 
-    fn env_lock() -> &'static Mutex<()> {
+    fn process_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
@@ -5400,7 +5473,7 @@ mod tests {
 
     #[test]
     fn collect_daemon_idle_ttl_prefers_flag_over_env() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = process_lock().lock().unwrap();
         // SAFETY: tests serialize access to process env with a mutex.
         unsafe {
             std::env::set_var("UXC_DAEMON_IDLE_TTL", "15");
@@ -5415,7 +5488,7 @@ mod tests {
 
     #[test]
     fn collect_daemon_idle_ttl_reads_env_when_flag_missing() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = process_lock().lock().unwrap();
         // SAFETY: tests serialize access to process env with a mutex.
         unsafe {
             std::env::set_var("UXC_DAEMON_IDLE_TTL", "42");
@@ -5426,5 +5499,23 @@ mod tests {
         unsafe {
             std::env::remove_var("UXC_DAEMON_IDLE_TTL");
         }
+    }
+
+    #[test]
+    fn normalize_endpoint_url_absolutizes_relative_stdio_command_paths() {
+        let _guard = process_lock().lock().unwrap();
+        let cwd = std::env::current_dir().expect("current dir should resolve");
+        let temp = tempdir().expect("tempdir should be created");
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir should exist");
+        let bin_path = bin_dir.join("uxc-test-mcp-stdio-server");
+        std::fs::write(&bin_path, "#!/bin/sh\n").expect("dummy bin should be written");
+        std::env::set_current_dir(temp.path()).expect("should switch cwd");
+
+        let normalized = normalize_endpoint_url("bin/uxc-test-mcp-stdio-server ok");
+
+        std::env::set_current_dir(cwd).expect("should restore cwd");
+        assert!(normalized.contains(bin_path.to_string_lossy().as_ref()));
+        assert!(normalized.ends_with(" ok"));
     }
 }
