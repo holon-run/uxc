@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chrome DevTools MCP"
+  short_description: "Drive Chrome DevTools MCP via UXC for page, network, console, and performance inspection"
+  default_prompt: "Use $chrome-devtools-mcp-skill to inspect pages, console output, network activity, and performance through Chrome DevTools MCP over UXC with help-first discovery and safe action guardrails."
