@@ -470,5 +470,8 @@ clawhub sync --all --bump patch
 ### Rate-limit note
 
 - Attempting the next 5-skill MCP/data wave immediately after the 2026-03-16 third window failed with:
-  - `Rate limit: max 5 new skills per hour. Please wait before publishing more.`
-- Resume from the `blockscout-openapi-skill` wave in the next allowed window.
+  - `Rate limit: max 20 new skills per 24 hours. Please wait before publishing more.`
+- The effective policy is therefore:
+  - `max 5 new skills per hour`
+  - `max 20 new skills per 24 hours`
+- Resume from the `blockscout-openapi-skill` wave after the 24-hour window resets.
