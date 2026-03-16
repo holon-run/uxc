@@ -1,6 +1,6 @@
 ---
 name: chrome-devtools-mcp-skill
-description: Use Chrome DevTools MCP through UXC over local stdio for page navigation, DOM/a11y snapshots, network inspection, console inspection, and performance tooling, with a safe default isolated headless Chrome launch and optional attachment to an existing Chrome instance.
+description: Use Chrome DevTools MCP through UXC over local stdio for page navigation, DOM/a11y snapshots, network inspection, console inspection, and performance tooling, with a live-browser autoConnect default and optional browserUrl or isolated fallback modes.
 ---
 
 # Chrome DevTools MCP Skill

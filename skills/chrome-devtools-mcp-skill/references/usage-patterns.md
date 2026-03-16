@@ -3,7 +3,7 @@
 This skill defaults to a live-browser stdio endpoint:
 `npx -y chrome-devtools-mcp@latest --autoConnect --no-usage-statistics`
 
-This skill defaults to fixed link command `chrome-devtools-mcp-cli`.
+This skill defaults to the fixed link command `chrome-devtools-mcp-cli`.
 Create it when missing:
 
 ```bash
@@ -13,7 +13,7 @@ uxc link chrome-devtools-mcp-cli "npx -y chrome-devtools-mcp@latest --autoConnec
 
 ## Live Chrome Setup
 
-Use this skill when you already have Chrome 144+ running with remote debugging enabled from `chrome://inspect/#remote-debugging`.
+Use this skill when your Chrome build exposes remote debugging settings at `chrome://inspect/#remote-debugging` and you have enabled them there.
 
 ```bash
 chrome-devtools-mcp-cli -h
