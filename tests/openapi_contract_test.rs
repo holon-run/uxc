@@ -8,6 +8,7 @@
 
 use serde_json::json;
 use std::collections::HashMap;
+use std::fs;
 use uxc::adapters::openapi::OpenAPIAdapter;
 use uxc::adapters::Adapter;
 use uxc::auth::{AuthQueryParam, AuthType, Profile};
@@ -609,6 +610,79 @@ fn test_openapi_request_body_with_multiple_content_types() {
         let schema = detail.input_schema.unwrap();
         assert!(schema["content"]["application/json"].is_object());
         assert!(schema["content"]["multipart/form-data"].is_object());
+    });
+}
+
+#[test]
+fn test_openapi_executes_multipart_request_body() {
+    run_async(|mut server| {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("avatar.txt");
+        fs::write(&file_path, "provider fixture body").unwrap();
+
+        let openapi_doc = serde_json::json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Feishu-like Upload", "version": "1.0" },
+            "paths": {
+                "/open-apis/im/v1/images": {
+                    "post": {
+                        "operationId": "uploadImage",
+                        "requestBody": {
+                            "required": true,
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["image_type", "image"],
+                                        "properties": {
+                                            "image_type": { "type": "string" },
+                                            "image": { "type": "string", "format": "binary" }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "OK" } }
+                    }
+                }
+            }
+        });
+
+        let _schema = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&openapi_doc.to_string())
+            .create();
+
+        let _execute = server
+            .mock("POST", "/open-apis/im/v1/images")
+            .match_header(
+                "content-type",
+                mockito::Matcher::Regex(r"multipart/form-data; boundary=".to_string()),
+            )
+            .match_body(mockito::Matcher::Regex(
+                r#"(?s)name="image"; filename="avatar\.txt".*provider fixture body.*name="image_type".*message"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true}"#)
+            .create();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = OpenAPIAdapter::new();
+        let mut args = HashMap::new();
+        args.insert("image_type".to_string(), json!("message"));
+        args.insert("image".to_string(), json!(file_path.display().to_string()));
+        let result = rt
+            .block_on(async {
+                adapter
+                    .execute(&server.url(), "post:/open-apis/im/v1/images", args)
+                    .await
+            })
+            .unwrap();
+
+        assert_eq!(result.data["ok"], true);
     });
 }
 
