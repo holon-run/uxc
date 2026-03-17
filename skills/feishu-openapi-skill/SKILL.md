@@ -24,6 +24,7 @@ This skill covers an IM-focused request/response surface:
 
 - chat lookup
 - chat member lookup
+- image and file upload for IM sends
 - message send and reply
 - selected message history reads
 - basic user lookup through contact APIs
@@ -162,6 +163,8 @@ uxc auth binding match https://open.feishu.cn/open-apis
 
 2. Inspect operation schema first:
    - `feishu-openapi-cli get:/im/v1/chats -h`
+   - `feishu-openapi-cli post:/im/v1/images -h`
+   - `feishu-openapi-cli post:/im/v1/files -h`
    - `feishu-openapi-cli post:/im/v1/messages -h`
    - `feishu-openapi-cli get:/im/v1/messages -h`
 
@@ -173,6 +176,8 @@ uxc auth binding match https://open.feishu.cn/open-apis
 4. Execute with key/value or positional JSON:
    - key/value:
      `feishu-openapi-cli get:/im/v1/messages container_id_type=chat container_id=oc_xxx page_size=20`
+   - multipart upload:
+     `feishu-openapi-cli post:/im/v1/images image_type=message image=/tmp/example.png`
    - positional JSON:
      `feishu-openapi-cli post:/im/v1/messages receive_id_type=chat_id '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"Hello from UXC\"}"}'`
 
@@ -195,6 +200,11 @@ uxc auth binding match https://open.feishu.cn/open-apis
 - `post:/im/v1/messages`
 - `post:/im/v1/messages/{message_id}/reply`
 
+### Uploads
+
+- `post:/im/v1/images`
+- `post:/im/v1/files`
+
 ### User Lookup
 
 - `get:/contact/v3/users/{user_id}`
@@ -206,7 +216,11 @@ uxc auth binding match https://open.feishu.cn/open-apis
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Prefer `uxc auth bootstrap` over manual token management. Manual `tenant_access_token` setup is still supported as a fallback.
 - `feishu-long-connection` requires the app credential fields `app_id` and `app_secret`; a plain bearer-only credential is not enough for event intake.
+- `post:/im/v1/images` and `post:/im/v1/files` use `multipart/form-data`. File fields must be local path strings; help output marks them as multipart file fields.
 - `post:/im/v1/messages` requires the `receive_id_type` query parameter and the body `content` field is a JSON-encoded string, not a nested JSON object.
+- Upload first, then send by returned key:
+  - image sends use `msg_type=image` with `content='{\"image_key\":\"img_xxx\"}'`
+  - file sends use `msg_type=file` with `content='{\"file_key\":\"file_xxx\"}'`
 - `post:/im/v1/messages/{message_id}/reply` is for explicit replies to an existing message. Treat it as a high-risk write.
 - History reads only return chats and messages visible to the bot/app configuration. Auth success does not imply access to every chat.
 - Long-connection message intake is validated for Feishu bot chats; webhook-style callbacks and non-IM products are still out of scope.

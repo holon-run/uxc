@@ -102,13 +102,18 @@
     },
     "/sendPhoto": {
       "post": {
-        "summary": "Send a photo by file_id or HTTP URL",
+        "summary": "Send a photo by file_id, HTTP URL, or local multipart upload",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SendPhotoRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/SendPhotoMultipartRequest"
               }
             }
           }
@@ -122,13 +127,18 @@
     },
     "/sendDocument": {
       "post": {
-        "summary": "Send a document by file_id or HTTP URL",
+        "summary": "Send a document by file_id, HTTP URL, or local multipart upload",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SendDocumentRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/SendDocumentMultipartRequest"
               }
             }
           }
@@ -182,13 +192,18 @@
     },
     "/setWebhook": {
       "post": {
-        "summary": "Configure webhook delivery without certificate upload",
+        "summary": "Configure webhook delivery, optionally with multipart certificate upload",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SetWebhookRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/SetWebhookMultipartRequest"
               }
             }
           }
@@ -299,6 +314,36 @@
         },
         "additionalProperties": true
       },
+      "SendPhotoMultipartRequest": {
+        "type": "object",
+        "required": [
+          "chat_id",
+          "photo"
+        ],
+        "properties": {
+          "chat_id": {
+            "$ref": "#/components/schemas/ChatId"
+          },
+          "photo": {
+            "type": "string",
+            "format": "binary",
+            "description": "Local file path to upload as the photo body"
+          },
+          "caption": {
+            "type": "string"
+          },
+          "parse_mode": {
+            "type": "string"
+          },
+          "disable_notification": {
+            "type": "boolean"
+          },
+          "protect_content": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
       "SendDocumentRequest": {
         "type": "object",
         "required": [
@@ -330,6 +375,36 @@
           }
         },
         "additionalProperties": true
+      },
+      "SendDocumentMultipartRequest": {
+        "type": "object",
+        "required": [
+          "chat_id",
+          "document"
+        ],
+        "properties": {
+          "chat_id": {
+            "$ref": "#/components/schemas/ChatId"
+          },
+          "document": {
+            "type": "string",
+            "format": "binary",
+            "description": "Local file path to upload as the document body"
+          },
+          "caption": {
+            "type": "string"
+          },
+          "parse_mode": {
+            "type": "string"
+          },
+          "disable_notification": {
+            "type": "boolean"
+          },
+          "protect_content": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
       },
       "InputMediaItem": {
         "type": "object",
@@ -439,6 +514,35 @@
           }
         },
         "additionalProperties": true
+      },
+      "SetWebhookMultipartRequest": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "certificate": {
+            "type": "string",
+            "format": "binary",
+            "description": "Local PEM certificate file path for self-signed webhook setups"
+          },
+          "ip_address": {
+            "type": "string"
+          },
+          "max_connections": {
+            "type": "integer"
+          },
+          "drop_pending_updates": {
+            "type": "boolean"
+          },
+          "secret_token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "DeleteWebhookRequest": {
         "type": "object",

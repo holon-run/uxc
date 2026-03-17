@@ -64,8 +64,17 @@ uxc subscribe start https://api.telegram.org post:/getUpdates \
 # Send a text message
 telegram-openapi-cli post:/sendMessage '{"chat_id":"CHAT_ID","text":"Hello from UXC"}'
 
-# Send a photo by existing file_id or HTTP URL only
+# Send a photo by existing file_id or HTTP URL
 telegram-openapi-cli post:/sendPhoto '{"chat_id":"CHAT_ID","photo":"https://example.com/photo.jpg","caption":"From UXC"}'
+
+# Send a photo by local multipart upload
+telegram-openapi-cli post:/sendPhoto chat_id=CHAT_ID photo=/tmp/photo.jpg caption="Uploaded by UXC"
+
+# Send a document by local multipart upload
+telegram-openapi-cli post:/sendDocument chat_id=CHAT_ID document=/tmp/report.pdf caption="Report"
+
+# Configure a webhook with a self-signed certificate file
+telegram-openapi-cli post:/setWebhook url=https://example.com/telegram-webhook certificate=/tmp/public.pem secret_token=secret123
 ```
 
 ## Fallback Equivalence

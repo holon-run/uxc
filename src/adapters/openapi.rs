@@ -1022,6 +1022,53 @@ impl OpenAPIAdapter {
                     Self::json_body_from_remaining_with_explicit(&mut remaining, explicit_body)?;
                 (Some(json_body), None, None)
             }
+            RequestBodyConfig::JsonOrMultipart(spec) => {
+                if Self::multipart_should_be_preferred(explicit_body.as_ref(), &remaining, spec) {
+                    if explicit_body.is_none() && remaining.is_empty() && form_pairs.is_empty() {
+                        if let Some(name) = &missing_required_body_param {
+                            anyhow::bail!("Missing required parameter '{}'", name);
+                        }
+                    }
+                    if !form_pairs.is_empty() {
+                        if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
+                            if !remaining.is_empty() {
+                                anyhow::bail!(
+                                    "Cannot mix 'body' with form arguments for this operation"
+                                );
+                            }
+                            form_pairs.extend(Self::form_pairs_from_value(body)?);
+                        } else {
+                            form_pairs.extend(Self::query_pairs_from_remaining(&mut remaining)?);
+                        }
+                        let multipart_object = Map::from_iter(
+                            form_pairs
+                                .into_iter()
+                                .map(|(key, value)| (key, Value::String(value))),
+                        );
+                        let multipart_body =
+                            Self::multipart_body_from_value(Value::Object(multipart_object), spec)?;
+                        (None, None, Some(multipart_body))
+                    } else {
+                        let multipart_body = Self::multipart_body_from_remaining_with_explicit(
+                            &mut remaining,
+                            explicit_body,
+                            spec,
+                        )?;
+                        (None, None, Some(multipart_body))
+                    }
+                } else {
+                    if explicit_body.is_none() && remaining.is_empty() {
+                        if let Some(name) = &missing_required_body_param {
+                            anyhow::bail!("Missing required parameter '{}'", name);
+                        }
+                    }
+                    let json_body = Self::json_body_from_remaining_with_explicit(
+                        &mut remaining,
+                        explicit_body,
+                    )?;
+                    (Some(json_body), None, None)
+                }
+            }
             RequestBodyConfig::Multipart(spec) => {
                 if explicit_body.is_none() && remaining.is_empty() && form_pairs.is_empty() {
                     if let Some(name) = &missing_required_body_param {
@@ -1136,13 +1183,17 @@ impl OpenAPIAdapter {
         else {
             return Ok(Some(RequestBodyConfig::None));
         };
+        let multipart_spec = Self::multipart_spec_from_oas3(operation_spec, root)?;
         if content.contains_key("application/json") {
+            if let Some(spec) = multipart_spec {
+                return Ok(Some(RequestBodyConfig::JsonOrMultipart(spec)));
+            }
             return Ok(Some(RequestBodyConfig::Json));
         }
         if content.contains_key("application/x-www-form-urlencoded") {
             return Ok(Some(RequestBodyConfig::FormUrlEncoded));
         }
-        if let Some(spec) = Self::multipart_spec_from_oas3(operation_spec, root)? {
+        if let Some(spec) = multipart_spec {
             return Ok(Some(RequestBodyConfig::Multipart(spec)));
         }
         if content.len() == 1 {
@@ -1366,6 +1417,41 @@ impl OpenAPIAdapter {
         Ok(PreparedMultipartBody { parts })
     }
 
+    fn multipart_should_be_preferred(
+        explicit_body: Option<&Value>,
+        remaining: &HashMap<String, Value>,
+        spec: &MultipartRequestSpec,
+    ) -> bool {
+        let file_fields = spec
+            .fields
+            .iter()
+            .filter_map(|(name, kind)| match kind {
+                MultipartFieldKind::File => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if file_fields.is_empty() {
+            return false;
+        }
+
+        if let Some(Value::Object(object)) = explicit_body {
+            for field in &file_fields {
+                if let Some(Value::String(path)) = object.get(*field) {
+                    if Path::new(path).exists() {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        file_fields.iter().any(|field| {
+            remaining
+                .get(*field)
+                .and_then(|value| value.as_str())
+                .is_some_and(|path| Path::new(path).exists())
+        })
+    }
+
     async fn materialize_multipart_body(
         body: &PreparedMultipartBody,
     ) -> Result<RuntimeMultipartBody> {
@@ -1584,6 +1670,7 @@ struct PreparedRequest {
 enum RequestBodyConfig {
     None,
     Json,
+    JsonOrMultipart(MultipartRequestSpec),
     FormUrlEncoded,
     Multipart(MultipartRequestSpec),
 }
@@ -1964,6 +2051,55 @@ mod tests {
   "info": { "title": "Test", "version": "1.0.0" },
   "paths": {}
 }"#
+    }
+
+    #[tokio::test]
+    async fn request_body_config_prefers_json_or_multipart_when_both_are_present() {
+        let root = json!({
+            "openapi": "3.0.0",
+            "paths": {
+                "/upload": {
+                    "post": {
+                        "requestBody": {
+                            "required": true,
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "caption": { "type": "string" },
+                                            "file": { "type": "string" }
+                                        }
+                                    }
+                                },
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "caption": { "type": "string" },
+                                            "file": { "type": "string", "format": "binary" }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "responses": { "200": { "description": "ok" } }
+                    }
+                }
+            }
+        });
+
+        let operation_spec = &root["paths"]["/upload"]["post"];
+        let config = OpenAPIAdapter::request_body_config_from_oas3(operation_spec, &root)
+            .unwrap()
+            .unwrap();
+
+        match config {
+            RequestBodyConfig::JsonOrMultipart(spec) => {
+                assert!(matches!(spec.fields.get("file"), Some(MultipartFieldKind::File)));
+            }
+            other => panic!("expected JsonOrMultipart, got {:?}", other),
+        }
     }
 
     #[tokio::test]

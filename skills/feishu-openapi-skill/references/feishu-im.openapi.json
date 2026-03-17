@@ -314,6 +314,46 @@
         }
       }
     },
+    "/im/v1/images": {
+      "post": {
+        "summary": "Upload an image and receive an image_key",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadImageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Image upload response"
+          }
+        }
+      }
+    },
+    "/im/v1/files": {
+      "post": {
+        "summary": "Upload a file and receive a file_key",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadFileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "File upload response"
+          }
+        }
+      }
+    },
     "/contact/v3/users/{user_id}": {
       "get": {
         "summary": "Get one user profile",
@@ -460,6 +500,56 @@
           "uuid": {
             "type": "string",
             "description": "Optional client-generated idempotency token"
+          }
+        },
+        "additionalProperties": false
+      },
+      "UploadImageRequest": {
+        "type": "object",
+        "required": [
+          "image_type",
+          "image"
+        ],
+        "properties": {
+          "image_type": {
+            "type": "string",
+            "enum": [
+              "message"
+            ],
+            "description": "Image upload purpose. Use message for IM sends."
+          },
+          "image": {
+            "type": "string",
+            "format": "binary",
+            "description": "Local image file path to upload"
+          }
+        },
+        "additionalProperties": false
+      },
+      "UploadFileRequest": {
+        "type": "object",
+        "required": [
+          "file_type",
+          "file_name",
+          "file"
+        ],
+        "properties": {
+          "file_type": {
+            "type": "string",
+            "description": "File upload type. Use stream for general file uploads."
+          },
+          "file_name": {
+            "type": "string",
+            "description": "Original filename shown in Feishu"
+          },
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "description": "Local file path to upload"
+          },
+          "duration": {
+            "type": "integer",
+            "description": "Optional duration in milliseconds for audio or video uploads"
           }
         },
         "additionalProperties": false
