@@ -1653,6 +1653,55 @@ fn test_mcp_stdio_subscribe_start_status_stop_writes_file() {
 
 #[test]
 #[serial_test::serial]
+fn test_mcp_stdio_subscribe_with_read_resource_writes_snapshots() {
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} ok", bin.display());
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("mcp-subscribe-read.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "--resource-uri",
+            "test://resource",
+            "--read-resource",
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(start.is_ok(), "MCP subscribe start failed: {:?}", start);
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    assert_eq!(start_json["ok"], true);
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_match_count(
+            &sink_path,
+            r#""event_kind":"snapshot""#,
+            2,
+            Duration::from_secs(5)
+        ),
+        "MCP subscribe sink did not receive snapshot events"
+    );
+    assert!(
+        wait_for_file_contains(
+            &sink_path,
+            r#""mimeType":"application/json""#,
+            Duration::from_secs(5)
+        ),
+        "MCP subscribe sink did not capture resource payloads"
+    );
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(stop.is_ok(), "MCP subscribe stop failed: {:?}", stop);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_mcp_http_subscribe_start_status_stop_writes_file() {
     let server = start_test_server("mcp-http", "ok");
     let endpoint = mcp_http_endpoint(&server.addr);
@@ -1702,6 +1751,59 @@ fn test_mcp_http_subscribe_start_status_stop_writes_file() {
     let stop_json: serde_json::Value = serde_json::from_str(&stop.unwrap()).unwrap();
     assert_eq!(stop_json["ok"], true);
     assert_eq!(stop_json["data"]["stopped"], true);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_mcp_http_subscribe_with_read_resource_writes_snapshots() {
+    let server = start_test_server("mcp-http", "ok");
+    let endpoint = mcp_http_endpoint(&server.addr);
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("mcp-http-subscribe-read.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "--resource-uri",
+            "test://resource",
+            "--read-resource",
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(
+        start.is_ok(),
+        "MCP HTTP subscribe start failed: {:?}",
+        start
+    );
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    assert_eq!(start_json["ok"], true);
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_match_count(
+            &sink_path,
+            r#""event_kind":"snapshot""#,
+            2,
+            Duration::from_secs(5)
+        ),
+        "MCP HTTP subscribe sink did not receive snapshot events"
+    );
+    assert!(
+        wait_for_file_contains(
+            &sink_path,
+            r#""mimeType":"application/json""#,
+            Duration::from_secs(5)
+        ),
+        "MCP HTTP subscribe sink did not capture resource payloads"
+    );
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(stop.is_ok(), "MCP HTTP subscribe stop failed: {:?}", stop);
 }
 
 #[test]

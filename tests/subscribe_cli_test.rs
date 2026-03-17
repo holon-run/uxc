@@ -88,6 +88,30 @@ fn subscribe_rejects_poll_config_without_poll_mode() {
 
 #[test]
 #[serial]
+fn subscribe_rejects_read_resource_without_resource_uri() {
+    let (temp, mut command) = isolated_uxc_command();
+    let sink = format!("file:{}", temp.path().join("events.ndjson").display());
+    let output = command
+        .arg("subscribe")
+        .arg("start")
+        .arg("https://example.com/stream")
+        .arg("--read-resource")
+        .arg("--sink")
+        .arg(&sink)
+        .output()
+        .expect("subscribe start should run");
+    assert!(!output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "INVALID_ARGUMENT");
+    assert!(json["error"]["message"]
+        .as_str()
+        .is_some_and(|msg| msg.contains("--read-resource requires --resource-uri")));
+}
+
+#[test]
+#[serial]
 fn subscribe_rejects_websocket_transport_with_operation_id() {
     let (temp, mut command) = isolated_uxc_command();
     let sink = format!("file:{}", temp.path().join("events.ndjson").display());

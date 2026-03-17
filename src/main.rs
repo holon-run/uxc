@@ -232,6 +232,10 @@ enum SubscribeCommands {
         #[arg(long = "resource-uri", value_name = "URI")]
         resource_uri: Option<String>,
 
+        /// For MCP resource subscriptions, emit resource snapshots by calling resources/read
+        #[arg(long = "read-resource")]
+        read_resource: bool,
+
         /// Explicit stream transport hint
         #[arg(long, value_enum)]
         transport: Option<SubscribeTransportArg>,
@@ -1797,6 +1801,8 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                     .to_string(),
                 "Stream mode covers raw HTTP JSON streams, GraphQL subscriptions, JSON-RPC pubsub over WebSocket, explicit raw WebSocket streams, Slack Socket Mode, and MCP resource subscriptions; poll mode repeatedly executes a normal operation and emits only new items."
                     .to_string(),
+                "For MCP resource subscriptions, add --read-resource if the sink should also capture resources/read snapshots after each update notification."
+                    .to_string(),
             ],
             examples: vec![
                 "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
@@ -1810,8 +1816,8 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"newHeads\"]}' --sink file:/tmp/heads.ndjson".to_string(),
                 "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"request_cursor_arg\":\"cursor\",\"response_cursor_pointer\":\"/next_cursor\",\"checkpoint_strategy\":{\"type\":\"cursor_only\"}}' --sink file:/tmp/poll.ndjson".to_string(),
                 "uxc subscribe start https://api.telegram.org post:/getUpdates --mode poll --poll-config '{\"interval_secs\":2,\"extract_items_pointer\":\"/result\",\"request_cursor_arg\":\"offset\",\"cursor_from_item_pointer\":\"/update_id\",\"cursor_transform\":\"increment\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/update_id\"}}' --sink file:/tmp/telegram.ndjson".to_string(),
-                "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --sink file:/tmp/mcp-http.ndjson".to_string(),
-                "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --sink file:/tmp/mcp.ndjson".to_string(),
+                "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --read-resource --sink file:/tmp/mcp-http.ndjson".to_string(),
+                "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --read-resource --sink file:/tmp/mcp.ndjson".to_string(),
                 "uxc subscribe list".to_string(),
                 "uxc subscribe status sub_123".to_string(),
                 "uxc subscribe stop sub_123".to_string(),
@@ -1820,7 +1826,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["subscribe", "start"] => HelpData {
             path: "uxc subscribe start".to_string(),
             about: "Start a background subscription job".to_string(),
-            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--ephemeral] [--transport websocket|discord-gateway|slack-socket-mode|feishu-long-connection] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>]".to_string(),
+            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--ephemeral] [--transport websocket|discord-gateway|slack-socket-mode|feishu-long-connection] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>] [--read-resource]".to_string(),
             commands: vec![],
             notes: vec![
                 "For raw HTTP streams, omit <operation_id> and use <endpoint> as the final stream URL.".to_string(),
@@ -1831,7 +1837,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "Raw WebSocket sink events preserve frame type in meta: JSON text frames populate data, plain text frames populate meta.text, and binary frames populate meta.base64.".to_string(),
                 "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint, reuses auth/cache behavior, and automatically falls back between modern and legacy GraphQL websocket profiles.".to_string(),
                 "For JSON-RPC pubsub, pass a ws:// or wss:// endpoint plus a method ending in _subscribe; send raw JSON-RPC params through '{\"params\":...}'.".to_string(),
-                "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>.".to_string(),
+                "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>; add --read-resource to append resources/read snapshots alongside update notifications.".to_string(),
                 "For poll mode, pass a normal operation ID plus --mode poll and --poll-config '{...}'; poll config controls interval, extraction, checkpoint strategy, and optional item-derived request cursors.".to_string(),
                 "Subscriptions are durable by default. Use --ephemeral when the job should not auto-resume after daemon restart.".to_string(),
             ],
@@ -1847,8 +1853,8 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"logs\",{\"address\":\"0xabc\"}]}' --sink file:/tmp/logs.ndjson".to_string(),
                 "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}' --sink file:/tmp/events.ndjson".to_string(),
                 "uxc subscribe start https://api.telegram.org post:/getUpdates --mode poll --poll-config '{\"interval_secs\":2,\"extract_items_pointer\":\"/result\",\"request_cursor_arg\":\"offset\",\"cursor_from_item_pointer\":\"/update_id\",\"cursor_transform\":\"increment\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/update_id\"}}' --sink file:/tmp/telegram.ndjson".to_string(),
-                "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --sink file:/tmp/mcp-http.ndjson".to_string(),
-                "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --sink file:/tmp/mcp.ndjson".to_string(),
+                "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --read-resource --sink file:/tmp/mcp-http.ndjson".to_string(),
+                "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --read-resource --sink file:/tmp/mcp.ndjson".to_string(),
             ],
         },
         ["subscribe", "list"] => HelpData {
@@ -3824,6 +3830,7 @@ async fn handle_subscribe_command(
             input_json,
             sink,
             resource_uri,
+            read_resource,
             transport,
             subprotocols,
             init_frames,
@@ -3977,6 +3984,12 @@ async fn handle_subscribe_command(
                     .into());
                 }
             }
+            if *read_resource && resource_uri.is_none() {
+                return Err(UxcError::InvalidArguments(
+                    "--read-resource requires --resource-uri".to_string(),
+                )
+                .into());
+            }
             let (normalized_args, normalized_input_json) = match transport_operation_id.as_ref() {
                 Some(op) => {
                     let mut explicit_args = Vec::new();
@@ -4102,6 +4115,7 @@ async fn handle_subscribe_command(
                 operation_id: transport_operation_id,
                 args: args_map,
                 resource_uri: resource_uri.clone(),
+                read_resource: *read_resource,
                 transport_hint,
                 subprotocols: subprotocols.clone(),
                 initial_text_frames: init_frames.clone(),
