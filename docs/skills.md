@@ -450,12 +450,7 @@ clawhub sync --all --bump patch
 ### Remaining publish queue after the 2026-03-16 third window
 
 - Next data / MCP wave:
-  - `blockscout-openapi-skill`
-  - `coinapi-openapi-skill`
-  - `birdeye-mcp-skill`
-  - `lifi-mcp-skill`
-  - `coinmarketcap-mcp-skill`
-- Next MCP / DeFi wave:
+  - `chrome-devtools-mcp-skill`
   - `gate-mcp-skill`
   - `crypto-com-mcp-skill`
   - `defillama-openapi-skill`
@@ -475,3 +470,32 @@ clawhub sync --all --bump patch
   - `max 5 new skills per hour`
   - `max 20 new skills per 24 hours`
 - Resume from the `blockscout-openapi-skill` wave after the 24-hour window resets.
+
+## ClawHub Publish Log (2026-03-17)
+
+- `clawhub whoami`: `jolestar`
+- Published in the current rate-limit window:
+  - `blockscout-openapi-skill@1.0.0`
+  - `coinapi-openapi-skill@1.0.0`
+  - `birdeye-mcp-skill@1.0.0`
+  - `lifi-mcp-skill@1.0.0`
+  - `coinmarketcap-mcp-skill@1.0.0`
+- Follow-up note:
+  - `chrome-devtools-mcp-skill` was discovered as another unpublished skill and validated successfully.
+  - Immediate publish attempt failed with:
+    - `Rate limit: max 5 new skills per hour. Please wait before publishing more.`
+
+### Remaining publish queue after the 2026-03-17 window
+
+- Next MCP / DevTools / DeFi wave:
+  - `chrome-devtools-mcp-skill`
+  - `gate-mcp-skill`
+  - `crypto-com-mcp-skill`
+  - `defillama-openapi-skill`
+  - `defillama-prices-openapi-skill`
+- Next DeFi / messaging tail wave:
+  - `defillama-pro-openapi-skill`
+  - `defillama-yields-openapi-skill`
+  - `goldrush-mcp-skill`
+  - `line-openapi-skill`
+  - `whatsapp-openapi-skill`
