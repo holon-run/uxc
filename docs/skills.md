@@ -512,3 +512,22 @@ clawhub sync --all --bump patch
   - `goldrush-mcp-skill`
   - `line-openapi-skill`
   - `whatsapp-openapi-skill`
+
+## ClawHub Publish Log (2026-03-17, final window)
+
+- `clawhub whoami`: `jolestar`
+- Published in the current rate-limit window:
+  - `defillama-pro-openapi-skill@1.0.0`
+  - `defillama-yields-openapi-skill@1.0.0`
+  - `goldrush-mcp-skill@1.0.0`
+  - `line-openapi-skill@1.0.0`
+  - `whatsapp-openapi-skill@1.0.0`
+- Post-publish verification:
+  - `clawhub sync --dry-run` returned `Nothing to sync`
+  - `clawhub inspect` for these new skills may temporarily return
+    `Skill is hidden while security scan is pending`
+  - this is expected and does not indicate a failed upload
+
+## Current registry sync state
+
+- As of the final 2026-03-17 window, all local `skills/*` packages are synced to ClawHub.
