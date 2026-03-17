@@ -458,11 +458,17 @@ impl OpenAPIAdapter {
     fn parse_parameter(parameter: &Value, root: &Value) -> Option<Parameter> {
         let resolved = Self::dereference_value(parameter, root);
         let name = resolved.get("name").and_then(|n| n.as_str())?;
+        let is_swagger2_file = resolved.get("in").and_then(|v| v.as_str()) == Some("formData")
+            && resolved.get("type").and_then(|v| v.as_str()) == Some("file");
         let param_type = resolved
             .get("schema")
             .map(|schema| Self::schema_type_hint(schema, root))
             .or_else(|| {
-                if resolved.get("content").is_some() {
+                if is_swagger2_file {
+                    Some("file".to_string())
+                } else if let Some(type_name) = resolved.get("type").and_then(|v| v.as_str()) {
+                    Some(type_name.to_string())
+                } else if resolved.get("content").is_some() {
                     Some("object".to_string())
                 } else {
                     None
@@ -482,6 +488,62 @@ impl OpenAPIAdapter {
                 .and_then(|d| d.as_str())
                 .map(|s| s.to_string()),
         })
+    }
+
+    fn multipart_file_fields(schema: &Value, root: &Value) -> Vec<String> {
+        let resolved = Self::dereference_value(schema, root);
+        let Some(properties) = resolved
+            .get("properties")
+            .and_then(|value| value.as_object())
+        else {
+            return Vec::new();
+        };
+
+        let mut fields = properties
+            .iter()
+            .filter_map(|(name, property_schema)| {
+                matches!(
+                    Self::multipart_field_kind(property_schema, root),
+                    MultipartFieldKind::File
+                )
+                .then_some(name.clone())
+            })
+            .collect::<Vec<_>>();
+        fields.sort();
+        fields
+    }
+
+    fn multipart_field_kind(schema: &Value, root: &Value) -> MultipartFieldKind {
+        let resolved = Self::dereference_value(schema, root);
+        if resolved.get("type").and_then(|value| value.as_str()) == Some("array")
+            && resolved.get("items").is_some_and(|items| {
+                matches!(
+                    Self::multipart_field_kind(items, root),
+                    MultipartFieldKind::File
+                )
+            })
+        {
+            return MultipartFieldKind::Unsupported(
+                "multipart arrays of files are not supported yet".to_string(),
+            );
+        }
+
+        match resolved.get("type").and_then(|value| value.as_str()) {
+            Some("string") => {
+                if resolved.get("format").and_then(|value| value.as_str()) == Some("binary") {
+                    MultipartFieldKind::File
+                } else {
+                    MultipartFieldKind::Text
+                }
+            }
+            Some("object") => MultipartFieldKind::Unsupported(
+                "nested multipart objects are not supported yet".to_string(),
+            ),
+            Some("array") => MultipartFieldKind::Unsupported(
+                "multipart arrays are not supported yet".to_string(),
+            ),
+            _ => MultipartFieldKind::Text,
+        }
     }
 
     fn collect_parameters(
@@ -517,6 +579,95 @@ impl OpenAPIAdapter {
         }
 
         parameters
+    }
+
+    fn multipart_spec_from_oas3(
+        operation_spec: &Value,
+        root: &Value,
+    ) -> Result<Option<MultipartRequestSpec>> {
+        let Some(request_body_raw) = operation_spec.get("requestBody") else {
+            return Ok(None);
+        };
+        let request_body = Self::dereference_value(request_body_raw, root);
+        let Some(media_spec) = request_body
+            .get("content")
+            .and_then(|value| value.as_object())
+            .and_then(|content| content.get("multipart/form-data"))
+        else {
+            return Ok(None);
+        };
+        let schema = media_spec
+            .get("schema")
+            .ok_or_else(|| anyhow::anyhow!("multipart/form-data request body is missing schema"))?;
+        let resolved = Self::dereference_value(schema, root);
+        let properties = resolved
+            .get("properties")
+            .and_then(|value| value.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let required = resolved
+            .get("required")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|name| name.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let allow_unknown_fields = resolved
+            .get("additionalProperties")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+
+        let mut fields = HashMap::new();
+        for (name, property_schema) in properties {
+            fields.insert(name, Self::multipart_field_kind(&property_schema, root));
+        }
+
+        Ok(Some(MultipartRequestSpec {
+            fields,
+            required,
+            allow_unknown_fields,
+        }))
+    }
+
+    fn multipart_spec_from_swagger2(
+        path_item: &Value,
+        operation_spec: &Value,
+        root: &Value,
+    ) -> MultipartRequestSpec {
+        let mut fields = HashMap::new();
+        let mut required = Vec::new();
+        for parameter in Self::collect_effective_operation_parameters(path_item, operation_spec) {
+            let resolved = Self::dereference_value(parameter, root);
+            if resolved.get("in").and_then(|value| value.as_str()) != Some("formData") {
+                continue;
+            }
+            let Some(name) = resolved.get("name").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if resolved
+                .get("required")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                required.push(name.to_string());
+            }
+            let kind = if resolved.get("type").and_then(|value| value.as_str()) == Some("file") {
+                MultipartFieldKind::File
+            } else {
+                MultipartFieldKind::Text
+            };
+            fields.insert(name.to_string(), kind);
+        }
+        required.sort();
+
+        MultipartRequestSpec {
+            fields,
+            required,
+            allow_unknown_fields: false,
+        }
     }
 
     fn expand_schema(
@@ -635,6 +786,19 @@ impl OpenAPIAdapter {
             }
             if let Some(example) = media_spec.get("example") {
                 media_obj.insert("example".to_string(), example.clone());
+            }
+            if media_type == "multipart/form-data" {
+                let file_fields = Self::multipart_file_fields(schema, root);
+                if !file_fields.is_empty() {
+                    media_obj.insert(
+                        "x-uxc-file-fields".to_string(),
+                        Value::Array(file_fields.into_iter().map(Value::String).collect()),
+                    );
+                    media_obj.insert(
+                        "x-uxc-file-input".to_string(),
+                        Value::String("local_path_string".to_string()),
+                    );
+                }
             }
             content_map.insert(media_type.clone(), Value::Object(media_obj));
         }
@@ -830,8 +994,8 @@ impl OpenAPIAdapter {
         }
 
         let body_config = Self::request_body_config(path_item, operation_spec, root)?;
-        let (json_body, form_body) = match body_config {
-            RequestBodyConfig::None => (None, None),
+        let (json_body, form_body, multipart_body) = match &body_config {
+            RequestBodyConfig::None => (None, None, None),
             RequestBodyConfig::FormUrlEncoded => {
                 if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
                     if !remaining.is_empty() || !form_pairs.is_empty() {
@@ -846,7 +1010,7 @@ impl OpenAPIAdapter {
                     }
                     form_pairs.extend(Self::query_pairs_from_remaining(&mut remaining)?);
                 }
-                (None, Some(form_pairs))
+                (None, Some(form_pairs), None)
             }
             RequestBodyConfig::Json => {
                 if explicit_body.is_none() && remaining.is_empty() {
@@ -856,12 +1020,41 @@ impl OpenAPIAdapter {
                 }
                 let json_body =
                     Self::json_body_from_remaining_with_explicit(&mut remaining, explicit_body)?;
-                (Some(json_body), None)
+                (Some(json_body), None, None)
             }
-            RequestBodyConfig::UnsupportedMultipart => {
-                anyhow::bail!(
-                    "Unsupported OpenAPI request body content type 'multipart/form-data'. Supported: application/json, application/x-www-form-urlencoded"
-                );
+            RequestBodyConfig::Multipart(spec) => {
+                if explicit_body.is_none() && remaining.is_empty() && form_pairs.is_empty() {
+                    if let Some(name) = &missing_required_body_param {
+                        anyhow::bail!("Missing required parameter '{}'", name);
+                    }
+                }
+                if !form_pairs.is_empty() {
+                    if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
+                        if !remaining.is_empty() {
+                            anyhow::bail!(
+                                "Cannot mix 'body' with form arguments for this operation"
+                            );
+                        }
+                        form_pairs.extend(Self::form_pairs_from_value(body)?);
+                    } else {
+                        form_pairs.extend(Self::query_pairs_from_remaining(&mut remaining)?);
+                    }
+                    let multipart_object = Map::from_iter(
+                        form_pairs
+                            .into_iter()
+                            .map(|(key, value)| (key, Value::String(value))),
+                    );
+                    let multipart_body =
+                        Self::multipart_body_from_value(Value::Object(multipart_object), spec)?;
+                    (None, None, Some(multipart_body))
+                } else {
+                    let multipart_body = Self::multipart_body_from_remaining_with_explicit(
+                        &mut remaining,
+                        explicit_body,
+                        spec,
+                    )?;
+                    (None, None, Some(multipart_body))
+                }
             }
         };
 
@@ -875,6 +1068,7 @@ impl OpenAPIAdapter {
                     query_pairs,
                     json_body: Some(body),
                     form_body: None,
+                    multipart_body: None,
                 });
             }
 
@@ -892,6 +1086,7 @@ impl OpenAPIAdapter {
             query_pairs,
             json_body,
             form_body,
+            multipart_body,
         })
     }
 
@@ -947,13 +1142,13 @@ impl OpenAPIAdapter {
         if content.contains_key("application/x-www-form-urlencoded") {
             return Ok(Some(RequestBodyConfig::FormUrlEncoded));
         }
-        if content.contains_key("multipart/form-data") {
-            return Ok(Some(RequestBodyConfig::UnsupportedMultipart));
+        if let Some(spec) = Self::multipart_spec_from_oas3(operation_spec, root)? {
+            return Ok(Some(RequestBodyConfig::Multipart(spec)));
         }
         if content.len() == 1 {
             if let Some(kind) = content.keys().next() {
                 anyhow::bail!(
-                    "Unsupported OpenAPI request body content type '{}'. Supported: application/json, application/x-www-form-urlencoded",
+                    "Unsupported OpenAPI request body content type '{}'. Supported: application/json, application/x-www-form-urlencoded, multipart/form-data",
                     kind
                 );
             }
@@ -1017,14 +1212,8 @@ impl OpenAPIAdapter {
             {
                 return Ok(RequestBodyConfig::FormUrlEncoded);
             }
-            if consumes
-                .iter()
-                .any(|item| item.as_str() == Some("multipart/form-data"))
-            {
-                return Ok(RequestBodyConfig::UnsupportedMultipart);
-            }
             anyhow::bail!(
-                "Unsupported Swagger 2.0 body content type '{}'. Supported: application/json, application/x-www-form-urlencoded",
+                "Unsupported Swagger 2.0 body content type '{}'. Supported: application/json, application/x-www-form-urlencoded, multipart/form-data",
                 consumes
                     .iter()
                     .filter_map(|item| item.as_str())
@@ -1038,7 +1227,9 @@ impl OpenAPIAdapter {
                 .iter()
                 .any(|item| item.as_str() == Some("multipart/form-data"))
         {
-            return Ok(RequestBodyConfig::UnsupportedMultipart);
+            return Ok(RequestBodyConfig::Multipart(
+                Self::multipart_spec_from_swagger2(path_item, operation_spec, root),
+            ));
         }
 
         Ok(RequestBodyConfig::FormUrlEncoded)
@@ -1075,6 +1266,161 @@ impl OpenAPIAdapter {
             object.insert(name, value);
         }
         Ok(Value::Object(object))
+    }
+
+    fn multipart_body_from_remaining_with_explicit(
+        remaining: &mut HashMap<String, Value>,
+        explicit_body: Option<Value>,
+        spec: &MultipartRequestSpec,
+    ) -> Result<PreparedMultipartBody> {
+        let body_value = if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
+            if !remaining.is_empty() {
+                anyhow::bail!(
+                    "Cannot mix explicit request body with other request body arguments: {}",
+                    remaining.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+            body
+        } else {
+            let mut object = Map::new();
+            for (name, value) in remaining.drain() {
+                object.insert(name, value);
+            }
+            Value::Object(object)
+        };
+
+        Self::multipart_body_from_value(body_value, spec)
+    }
+
+    fn multipart_body_from_value(
+        value: Value,
+        spec: &MultipartRequestSpec,
+    ) -> Result<PreparedMultipartBody> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("Multipart request body must be an object"))?;
+        let mut keys = object.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+
+        let mut seen = HashSet::new();
+        let mut parts = Vec::with_capacity(keys.len());
+        for key in keys {
+            let part_value = object
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Missing multipart field '{}'", key))?;
+            seen.insert(key.clone());
+            let kind = spec
+                .fields
+                .get(&key)
+                .cloned()
+                .unwrap_or(MultipartFieldKind::Text);
+            match kind {
+                MultipartFieldKind::Text => {
+                    parts.push(PreparedMultipartPart::Text {
+                        name: key.clone(),
+                        value: Self::value_to_string(&part_value, &key)?,
+                    });
+                }
+                MultipartFieldKind::File => {
+                    let path = part_value.as_str().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Multipart file field '{}' must be provided as a local file path string",
+                            key
+                        )
+                    })?;
+                    parts.push(PreparedMultipartPart::File {
+                        name: key.clone(),
+                        path: PathBuf::from(path),
+                    });
+                }
+                MultipartFieldKind::Unsupported(reason) => {
+                    anyhow::bail!("Multipart field '{}' is not supported: {}", key, reason);
+                }
+            }
+        }
+
+        let missing = spec
+            .required
+            .iter()
+            .filter(|name| !seen.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            anyhow::bail!("Missing required parameter '{}'", missing.join(", "));
+        }
+
+        if !spec.allow_unknown_fields {
+            let unknown = seen
+                .into_iter()
+                .filter(|name| !spec.fields.contains_key(name))
+                .collect::<Vec<_>>();
+            if !unknown.is_empty() {
+                anyhow::bail!(
+                    "Unexpected arguments for operation request body: {}",
+                    unknown.join(", ")
+                );
+            }
+        }
+
+        Ok(PreparedMultipartBody { parts })
+    }
+
+    async fn materialize_multipart_body(
+        body: &PreparedMultipartBody,
+    ) -> Result<RuntimeMultipartBody> {
+        let mut parts = Vec::with_capacity(body.parts.len());
+        for part in &body.parts {
+            match part {
+                PreparedMultipartPart::Text { name, value } => {
+                    parts.push(RuntimeMultipartPart::Text {
+                        name: name.clone(),
+                        value: value.clone(),
+                    });
+                }
+                PreparedMultipartPart::File { name, path } => {
+                    let bytes = tokio::fs::read(path).await.with_context(|| {
+                        format!(
+                            "Failed to read multipart file field '{}' from '{}'",
+                            name,
+                            path.display()
+                        )
+                    })?;
+                    let file_name = path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| name.clone());
+                    parts.push(RuntimeMultipartPart::File {
+                        name: name.clone(),
+                        file_name,
+                        bytes,
+                    });
+                }
+            }
+        }
+
+        Ok(RuntimeMultipartBody { parts })
+    }
+
+    fn build_multipart_form(body: &RuntimeMultipartBody) -> reqwest::multipart::Form {
+        let mut form = reqwest::multipart::Form::new();
+        for part in &body.parts {
+            form = match part {
+                RuntimeMultipartPart::Text { name, value } => {
+                    form.text(name.clone(), value.clone())
+                }
+                RuntimeMultipartPart::File {
+                    name,
+                    file_name,
+                    bytes,
+                } => form.part(
+                    name.clone(),
+                    reqwest::multipart::Part::bytes(bytes.clone()).file_name(file_name.clone()),
+                ),
+            };
+        }
+        form
     }
 
     fn strip_schema_endpoint(url: &str) -> String {
@@ -1231,14 +1577,58 @@ struct PreparedRequest {
     query_pairs: Vec<(String, String)>,
     json_body: Option<Value>,
     form_body: Option<Vec<(String, String)>>,
+    multipart_body: Option<PreparedMultipartBody>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum RequestBodyConfig {
     None,
     Json,
     FormUrlEncoded,
-    UnsupportedMultipart,
+    Multipart(MultipartRequestSpec),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MultipartRequestSpec {
+    fields: HashMap<String, MultipartFieldKind>,
+    required: Vec<String>,
+    allow_unknown_fields: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MultipartFieldKind {
+    Text,
+    File,
+    Unsupported(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreparedMultipartBody {
+    parts: Vec<PreparedMultipartPart>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreparedMultipartPart {
+    Text { name: String, value: String },
+    File { name: String, path: PathBuf },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeMultipartBody {
+    parts: Vec<RuntimeMultipartPart>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeMultipartPart {
+    Text {
+        name: String,
+        value: String,
+    },
+    File {
+        name: String,
+        file_name: String,
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1434,6 +1824,10 @@ impl Adapter for OpenAPIAdapter {
         let prepared_query_pairs = prepared.query_pairs.clone();
         let prepared_json_body = prepared.json_body.clone();
         let prepared_form_body = prepared.form_body.clone();
+        let prepared_multipart_body = match prepared.multipart_body.as_ref() {
+            Some(body) => Some(Self::materialize_multipart_body(body).await?),
+            None => None,
+        };
         let auth_requirement = Self::operation_auth_requirement(operation_spec, &schema);
         let should_apply_auth = !matches!(auth_requirement, OperationAuthRequirement::Public);
 
@@ -1483,6 +1877,8 @@ impl Adapter for OpenAPIAdapter {
                     req = req.json(body);
                 } else if let Some(body) = &prepared_form_body {
                     req = req.form(body);
+                } else if let Some(body) = &prepared_multipart_body {
+                    req = req.multipart(Self::build_multipart_form(body));
                 }
                 Ok(req)
             })
@@ -2306,17 +2702,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_swagger2_multipart_file_returns_unsupported_error() {
+    async fn execute_swagger2_multipart_file_uploads_file_body() {
         let mut server = mockito::Server::new_async().await;
         let schema_url = format!("{}/v2/swagger.json", server.url());
+        let host = server
+            .url()
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .to_string();
         let _schema = server
             .mock("GET", "/v2/swagger.json")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
-                r#"{
+                json!({
                   "swagger": "2.0",
-                  "host": "127.0.0.1:1234",
+                  "host": host,
                   "basePath": "/v2",
                   "schemes": ["http"],
                   "paths": {
@@ -2331,26 +2732,45 @@ mod tests {
                       }
                     }
                   }
-                }"#,
+                })
+                .to_string(),
             )
             .expect(2)
             .create_async()
             .await;
 
+        let _upload = server
+            .mock("POST", "/v2/pet/123/uploadImage")
+            .match_header(
+                "content-type",
+                mockito::Matcher::Regex(r"multipart/form-data; boundary=".to_string()),
+            )
+            .match_body(mockito::Matcher::Regex(
+                r#"(?s)name="file"; filename="dummy\.txt".*hello multipart swagger2"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
         let adapter = OpenAPIAdapter::new().with_schema_url_override(Some(schema_url.clone()));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("dummy.txt");
+        std::fs::write(&file_path, "hello multipart swagger2").unwrap();
 
         let mut args = HashMap::new();
         args.insert("petId".to_string(), Value::Number(123.into()));
-        args.insert("file".to_string(), Value::String("dummy.txt".to_string()));
-        let err = adapter
+        args.insert(
+            "file".to_string(),
+            Value::String(file_path.display().to_string()),
+        );
+        let result = adapter
             .execute(&schema_url, "post:/pet/{petId}/uploadImage", args)
             .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("multipart/form-data"),
-            "unexpected error: {}",
-            err
-        );
+            .unwrap();
+        assert_eq!(result.data["ok"], true);
     }
 
     #[test]
@@ -2574,6 +2994,108 @@ mod tests {
                 ("side".to_string(), "BUY".to_string()),
                 ("symbol".to_string(), "BTCUSDT".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn prepare_request_oas3_multipart_tracks_text_and_file_parts() {
+        let root = json!({});
+        let path_item = json!({});
+        let operation = json!({
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["caption", "file"],
+                            "properties": {
+                                "caption": { "type": "string" },
+                                "file": { "type": "string", "format": "binary" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let mut args = HashMap::new();
+        args.insert("caption".to_string(), Value::String("hello".to_string()));
+        args.insert(
+            "file".to_string(),
+            Value::String("/tmp/test.txt".to_string()),
+        );
+
+        let prepared = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://example.com",
+            "/upload",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        assert!(prepared.json_body.is_none());
+        assert!(prepared.form_body.is_none());
+        assert_eq!(
+            prepared.multipart_body,
+            Some(PreparedMultipartBody {
+                parts: vec![
+                    PreparedMultipartPart::Text {
+                        name: "caption".to_string(),
+                        value: "hello".to_string(),
+                    },
+                    PreparedMultipartPart::File {
+                        name: "file".to_string(),
+                        path: PathBuf::from("/tmp/test.txt"),
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn prepare_request_oas3_multipart_rejects_non_string_file_field() {
+        let root = json!({});
+        let path_item = json!({});
+        let operation = json!({
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["file"],
+                            "properties": {
+                                "file": { "type": "string", "format": "binary" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let mut args = HashMap::new();
+        args.insert("file".to_string(), Value::Bool(true));
+
+        let err = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://example.com",
+            "/upload",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("must be provided as a local file path string"),
+            "unexpected error: {}",
+            err
         );
     }
 }

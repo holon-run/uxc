@@ -111,10 +111,17 @@ fn normalize_jsonrpc_schema(detail: &OperationDetail) -> Option<NormalizedSchema
 fn normalize_openapi_schema(detail: &OperationDetail) -> Option<NormalizedSchema> {
     if let Some(schema) = detail.input_schema.as_ref() {
         if let Some(content) = schema.get("content").and_then(Value::as_object) {
-            if let Some(json_schema) = content
-                .get("application/json")
-                .and_then(|entry| entry.get("schema"))
-            {
+            for media_type in [
+                "application/json",
+                "application/x-www-form-urlencoded",
+                "multipart/form-data",
+            ] {
+                let Some(json_schema) = content
+                    .get(media_type)
+                    .and_then(|entry| entry.get("schema"))
+                else {
+                    continue;
+                };
                 return Some(NormalizedSchema {
                     root: json_schema.clone(),
                     strict_unknown_fields: false,

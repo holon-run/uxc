@@ -839,6 +839,71 @@ fn operation_help_includes_openapi_request_body_schema() {
 
 #[test]
 #[serial]
+fn operation_help_marks_openapi_multipart_file_fields() {
+    let mut server = mockito::Server::new();
+    let _schema = server
+        .mock("GET", "/openapi.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r##"{
+  "openapi": "3.0.0",
+  "info": { "title": "test", "version": "1.0.0" },
+  "paths": {
+    "/upload": {
+      "post": {
+        "summary": "upload file",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "caption": { "type": "string" },
+                  "file": { "type": "string", "format": "binary" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"##,
+        )
+        .create();
+
+    let output = uxc_command()
+        .arg(server.url())
+        .arg("--no-cache")
+        .arg("post:/upload")
+        .arg("-h")
+        .output()
+        .expect("failed to run uxc");
+
+    assert!(
+        output.status.success(),
+        "command should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(
+        json["data"]["input_schema"]["content"]["multipart/form-data"]["x-uxc-file-fields"][0],
+        "file"
+    );
+    assert_eq!(
+        json["data"]["input_schema"]["content"]["multipart/form-data"]["x-uxc-file-input"],
+        "local_path_string"
+    );
+}
+
+#[test]
+#[serial]
 fn text_and_format_flags_are_mutually_exclusive() {
     let output = uxc_command()
         .arg("--format")
