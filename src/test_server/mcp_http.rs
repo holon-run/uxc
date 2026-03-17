@@ -151,6 +151,23 @@ async fn mcp_handler(
             state.resource_event_seq.store(0, Ordering::SeqCst);
             json!({})
         }
+        "resources/read" => {
+            let uri = req
+                .params
+                .get("uri")
+                .and_then(Value::as_str)
+                .unwrap_or("test://resource");
+            let value = state.resource_event_seq.load(Ordering::SeqCst);
+            json!({
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": json!({
+                    "uri": uri,
+                    "value": value
+                })
+                .to_string()
+            })
+        }
         "resources/unsubscribe" => {
             state.resource_subscribed.store(false, Ordering::SeqCst);
             state.resource_event_seq.store(0, Ordering::SeqCst);

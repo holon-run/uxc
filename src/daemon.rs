@@ -1,3 +1,4 @@
+use crate::adapters::mcp::types::{JsonRpcNotification, ResourceContents};
 use crate::adapters::{
     self, Adapter, AdapterEnum, DetectionOptions, Operation, ProtocolDetector, ProtocolType,
 };
@@ -158,6 +159,8 @@ pub struct SubscribeStartRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<HashMap<String, Value>>,
     pub resource_uri: Option<String>,
+    #[serde(default)]
+    pub read_resource: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_hint: Option<SubscriptionTransportHint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -249,6 +252,29 @@ struct SubscriptionEventEnvelope {
     data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<Value>,
+}
+
+fn should_read_mcp_resource_snapshot(notification: &JsonRpcNotification) -> bool {
+    notification.method == "notifications/resources/updated"
+}
+
+async fn append_mcp_resource_snapshot(
+    sink: &mut tokio::fs::File,
+    view: &Arc<Mutex<SubscriptionJobView>>,
+    seq: &mut u64,
+    reason: &str,
+    resource_contents: ResourceContents,
+) -> Result<()> {
+    append_subscription_event(
+        sink,
+        view,
+        seq,
+        "mcp_resource",
+        "snapshot",
+        Some(serde_json::to_value(resource_contents)?),
+        Some(json!({ "reason": reason })),
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4105,6 +4131,10 @@ async fn run_mcp_subscription_job(
         Some(json!({ "resource_uri": resource_uri })),
     )
     .await?;
+    if request.read_resource {
+        let contents = client.read_resource(resource_uri).await?;
+        append_mcp_resource_snapshot(&mut sink, &view, &mut seq, "initial_read", contents).await?;
+    }
 
     loop {
         tokio::select! {
@@ -4139,6 +4169,34 @@ async fn run_mcp_subscription_job(
                         notification.params.clone(),
                         Some(json!({"method": notification.method})),
                     ).await?;
+                    if request.read_resource && should_read_mcp_resource_snapshot(&notification) {
+                        match client.read_resource(resource_uri).await {
+                            Ok(contents) => {
+                                append_mcp_resource_snapshot(
+                                    &mut sink,
+                                    &view,
+                                    &mut seq,
+                                    "resource_updated",
+                                    contents,
+                                )
+                                .await?;
+                            }
+                            Err(err) => {
+                                let msg = format!("failed to read resource after update: {}", err);
+                                append_subscription_event(
+                                    &mut sink,
+                                    &view,
+                                    &mut seq,
+                                    "mcp_resource",
+                                    "error",
+                                    None,
+                                    Some(json!({ "message": msg, "resource_uri": resource_uri })),
+                                )
+                                .await?;
+                                update_subscription_view(&view, None, Some(msg), false).await;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4187,6 +4245,10 @@ async fn run_mcp_http_subscription_job(
         })),
     )
     .await?;
+    if request.read_resource {
+        let contents = transport.read_resource(resource_uri).await?;
+        append_mcp_resource_snapshot(&mut sink, &view, &mut seq, "initial_read", contents).await?;
+    }
 
     loop {
         tokio::select! {
@@ -4225,6 +4287,34 @@ async fn run_mcp_http_subscription_job(
                         notification.params.clone(),
                         Some(json!({"method": notification.method})),
                     ).await?;
+                    if request.read_resource && should_read_mcp_resource_snapshot(&notification) {
+                        match transport.read_resource(resource_uri).await {
+                            Ok(contents) => {
+                                append_mcp_resource_snapshot(
+                                    &mut sink,
+                                    &view,
+                                    &mut seq,
+                                    "resource_updated",
+                                    contents,
+                                )
+                                .await?;
+                            }
+                            Err(err) => {
+                                let msg = format!("failed to read resource after update: {}", err);
+                                append_subscription_event(
+                                    &mut sink,
+                                    &view,
+                                    &mut seq,
+                                    "mcp_resource",
+                                    "error",
+                                    None,
+                                    Some(json!({ "message": msg, "resource_uri": resource_uri })),
+                                )
+                                .await?;
+                                update_subscription_view(&view, None, Some(msg), false).await;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -6062,6 +6152,7 @@ mod tests {
             operation_id: None,
             args: None,
             resource_uri: None,
+            read_resource: false,
             transport_hint: Some(SubscriptionTransportHint::Websocket),
             subprotocols: Vec::new(),
             initial_text_frames: Vec::new(),

@@ -18,6 +18,7 @@ pub fn run(scenario: Scenario) -> Result<()> {
     let mut tools_list_calls: u64 = 0;
     let mut dynamic_tools_enabled = false;
     let mut resource_subscribed = false;
+    let mut resource_value: u64 = 0;
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -362,6 +363,7 @@ pub fn run(scenario: Scenario) -> Result<()> {
             }
             "resources/subscribe" => {
                 resource_subscribed = true;
+                resource_value = 1;
                 respond(
                     &mut out,
                     json!({
@@ -377,10 +379,11 @@ pub fn run(scenario: Scenario) -> Result<()> {
                         "method": "notifications/resources/updated",
                         "params": {
                             "uri": req.get("params").and_then(|v| v.get("uri")).cloned().unwrap_or(json!("unknown")),
-                            "value": 1
+                            "value": resource_value
                         }
                     }),
                 )?;
+                resource_value = 2;
                 respond(
                     &mut out,
                     json!({
@@ -388,13 +391,37 @@ pub fn run(scenario: Scenario) -> Result<()> {
                         "method": "notifications/resources/updated",
                         "params": {
                             "uri": req.get("params").and_then(|v| v.get("uri")).cloned().unwrap_or(json!("unknown")),
-                            "value": 2
+                            "value": resource_value
+                        }
+                    }),
+                )?;
+            }
+            "resources/read" => {
+                let uri = req
+                    .get("params")
+                    .and_then(|v| v.get("uri"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("test://resource");
+                respond(
+                    &mut out,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "uri": uri,
+                            "mimeType": "application/json",
+                            "text": json!({
+                                "uri": uri,
+                                "value": resource_value
+                            })
+                            .to_string()
                         }
                     }),
                 )?;
             }
             "resources/unsubscribe" => {
                 resource_subscribed = false;
+                resource_value = 0;
                 respond(
                     &mut out,
                     json!({

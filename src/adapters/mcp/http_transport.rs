@@ -1482,6 +1482,14 @@ impl LegacySseTransport {
         Ok(response.tools)
     }
 
+    async fn read_resource(&self, uri: &str) -> Result<ResourceContents> {
+        let params = serde_json::json!({
+            "uri": uri
+        });
+        let result = self.send_request("resources/read", Some(params)).await?;
+        serde_json::from_value(result).context("Failed to parse resources/read result")
+    }
+
     async fn call_tool(&self, name: &str, arguments: Option<JsonValue>) -> Result<ToolCallResult> {
         let params = match arguments {
             Some(arguments) => serde_json::json!({
@@ -1764,6 +1772,13 @@ impl McpRemoteTransport {
         match self {
             Self::Streamable(transport) => transport.call_tool(name, arguments).await,
             Self::Legacy(transport) => transport.call_tool(name, arguments).await,
+        }
+    }
+
+    pub async fn read_resource(&self, uri: &str) -> Result<ResourceContents> {
+        match self {
+            Self::Streamable(transport) => transport.read_resource(uri).await,
+            Self::Legacy(transport) => transport.read_resource(uri).await,
         }
     }
 
