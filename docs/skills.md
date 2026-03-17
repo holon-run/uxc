@@ -487,13 +487,26 @@ clawhub sync --all --bump patch
 
 ### Remaining publish queue after the 2026-03-17 window
 
-- Next MCP / DevTools / DeFi wave:
-  - `chrome-devtools-mcp-skill`
-  - `gate-mcp-skill`
-  - `crypto-com-mcp-skill`
-  - `defillama-openapi-skill`
-  - `defillama-prices-openapi-skill`
-- Next DeFi / messaging tail wave:
+ - Next DeFi / messaging tail wave:
+  - `defillama-pro-openapi-skill`
+  - `defillama-yields-openapi-skill`
+  - `goldrush-mcp-skill`
+  - `line-openapi-skill`
+  - `whatsapp-openapi-skill`
+
+## ClawHub Publish Log (2026-03-17, second window)
+
+- `clawhub whoami`: `jolestar`
+- Published in the current rate-limit window:
+  - `chrome-devtools-mcp-skill@1.0.0`
+  - `gate-mcp-skill@1.0.0`
+  - `crypto-com-mcp-skill@1.0.0`
+  - `defillama-openapi-skill@1.0.0`
+  - `defillama-prices-openapi-skill@1.0.0`
+
+### Remaining publish queue after the 2026-03-17 second window
+
+- Final remaining wave:
   - `defillama-pro-openapi-skill`
   - `defillama-yields-openapi-skill`
   - `goldrush-mcp-skill`
