@@ -300,61 +300,43 @@ See [`docs/skills.md`](docs/skills.md) for publish history, validation notes, an
 </details>
 
 <details>
-<summary>Exchange and Market Data</summary>
+<summary>Crypto and Web3</summary>
 
+- [`alchemy-openapi-skill`](skills/alchemy-openapi-skill/SKILL.md): query Alchemy prices and market endpoints through OpenAPI
 - [`binance-spot-openapi-skill`](skills/binance-spot-openapi-skill/SKILL.md): operate Binance Spot public market data and signed account/order flows through OpenAPI
 - [`binance-spot-websocket-skill`](skills/binance-spot-websocket-skill/SKILL.md): subscribe to Binance Spot public trade, ticker, depth, and book-ticker streams via raw WebSocket
 - [`binance-web3-openapi-skill`](skills/binance-web3-openapi-skill/SKILL.md): query Binance Web3 token discovery, rankings, smart money, audits, and address positions through OpenAPI
+- [`birdeye-mcp-skill`](skills/birdeye-mcp-skill/SKILL.md): use Birdeye MCP for token discovery and market reads
 - [`bitget-openapi-skill`](skills/bitget-openapi-skill/SKILL.md): operate Bitget exchange APIs through OpenAPI
+- [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md): query Bitquery GraphQL for trades, transfers, holders, balances, and realtime subscription flows
+- [`blockscout-openapi-skill`](skills/blockscout-openapi-skill/SKILL.md): read Blockscout explorer data through OpenAPI
 - [`bybit-openapi-skill`](skills/bybit-openapi-skill/SKILL.md): operate Bybit exchange APIs through OpenAPI
+- [`chainbase-openapi-skill`](skills/chainbase-openapi-skill/SKILL.md): query Chainbase Web3 data APIs through OpenAPI
 - [`coinapi-openapi-skill`](skills/coinapi-openapi-skill/SKILL.md): read CoinAPI market data through OpenAPI
 - [`coinbase-openapi-skill`](skills/coinbase-openapi-skill/SKILL.md): operate Coinbase Advanced Trade APIs through OpenAPI
 - [`coingecko-openapi-skill`](skills/coingecko-openapi-skill/SKILL.md): read CoinGecko public market data through OpenAPI
-- [`kraken-openapi-skill`](skills/kraken-openapi-skill/SKILL.md): operate Kraken exchange APIs through OpenAPI
-- [`kucoin-openapi-skill`](skills/kucoin-openapi-skill/SKILL.md): operate KuCoin exchange APIs through OpenAPI
-- [`mexc-openapi-skill`](skills/mexc-openapi-skill/SKILL.md): operate MEXC exchange APIs through OpenAPI
-- [`okx-exchange-websocket-skill`](skills/okx-exchange-websocket-skill/SKILL.md): subscribe to OKX public exchange ticker, trade, book, and candle channels via raw WebSocket
-- [`upbit-openapi-skill`](skills/upbit-openapi-skill/SKILL.md): operate Upbit exchange APIs through OpenAPI
-
-</details>
-
-<details>
-<summary>Onchain Data, RPC, and Analytics</summary>
-
-- [`alchemy-openapi-skill`](skills/alchemy-openapi-skill/SKILL.md): query Alchemy prices and market endpoints through OpenAPI
-- [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md): query Bitquery GraphQL for trades, transfers, holders, balances, and realtime subscription flows
-- [`blockscout-openapi-skill`](skills/blockscout-openapi-skill/SKILL.md): read Blockscout explorer data through OpenAPI
-- [`chainbase-openapi-skill`](skills/chainbase-openapi-skill/SKILL.md): query Chainbase Web3 data APIs through OpenAPI
-- [`ethereum-jsonrpc-skill`](skills/ethereum-jsonrpc-skill/SKILL.md): use Ethereum JSON-RPC via curated OpenRPC metadata
-- [`moralis-openapi-skill`](skills/moralis-openapi-skill/SKILL.md): query Moralis Web3 Data APIs through OpenAPI
-- [`sui-jsonrpc-skill`](skills/sui-jsonrpc-skill/SKILL.md): use Sui JSON-RPC via curated OpenRPC metadata
-
-</details>
-
-<details>
-<summary>MCP and Aggregation Skills</summary>
-
-- [`birdeye-mcp-skill`](skills/birdeye-mcp-skill/SKILL.md): use Birdeye MCP for token discovery and market reads
 - [`coinmarketcap-mcp-skill`](skills/coinmarketcap-mcp-skill/SKILL.md): use CoinMarketCap MCP for quotes, market overview, and narratives
 - [`crypto-com-mcp-skill`](skills/crypto-com-mcp-skill/SKILL.md): use Crypto.com MCP for exchange market data
-- [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md): discover blockchain tables, run SQL, fetch results, and build charts via Dune MCP
-- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md): investigate addresses, token holders, and contracts via Etherscan MCP
-- [`gate-mcp-skill`](skills/gate-mcp-skill/SKILL.md): use Gate MCP for exchange market data and discovery workflows
-- [`goldrush-mcp-skill`](skills/goldrush-mcp-skill/SKILL.md): use GoldRush MCP for wallet, market, and token workflows
-- [`lifi-mcp-skill`](skills/lifi-mcp-skill/SKILL.md): use LI.FI MCP for cross-chain route discovery and execution planning
-- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md): query OKX MCP for token, market, wallet, and swap workflows
-- [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md): discover subgraphs, inspect schemas, and execute GraphQL via The Graph Subgraph MCP bridge
-- [`thegraph-token-mcp-skill`](skills/thegraph-token-mcp-skill/SKILL.md): query token, wallet, transfer, holder, and market data via The Graph Token API MCP
-
-</details>
-
-<details>
-<summary>DefiLlama Skills</summary>
-
 - [`defillama-openapi-skill`](skills/defillama-openapi-skill/SKILL.md): use DefiLlama public APIs through OpenAPI
 - [`defillama-prices-openapi-skill`](skills/defillama-prices-openapi-skill/SKILL.md): query DefiLlama prices APIs through OpenAPI
 - [`defillama-pro-openapi-skill`](skills/defillama-pro-openapi-skill/SKILL.md): use DefiLlama Pro APIs through OpenAPI
 - [`defillama-yields-openapi-skill`](skills/defillama-yields-openapi-skill/SKILL.md): query DefiLlama yields APIs through OpenAPI
+- [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md): discover blockchain tables, run SQL, fetch results, and build charts via Dune MCP
+- [`ethereum-jsonrpc-skill`](skills/ethereum-jsonrpc-skill/SKILL.md): use Ethereum JSON-RPC via curated OpenRPC metadata
+- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md): investigate addresses, token holders, and contracts via Etherscan MCP
+- [`gate-mcp-skill`](skills/gate-mcp-skill/SKILL.md): use Gate MCP for exchange market data and discovery workflows
+- [`goldrush-mcp-skill`](skills/goldrush-mcp-skill/SKILL.md): use GoldRush MCP for wallet, market, and token workflows
+- [`kraken-openapi-skill`](skills/kraken-openapi-skill/SKILL.md): operate Kraken exchange APIs through OpenAPI
+- [`kucoin-openapi-skill`](skills/kucoin-openapi-skill/SKILL.md): operate KuCoin exchange APIs through OpenAPI
+- [`lifi-mcp-skill`](skills/lifi-mcp-skill/SKILL.md): use LI.FI MCP for cross-chain route discovery and execution planning
+- [`mexc-openapi-skill`](skills/mexc-openapi-skill/SKILL.md): operate MEXC exchange APIs through OpenAPI
+- [`moralis-openapi-skill`](skills/moralis-openapi-skill/SKILL.md): query Moralis Web3 Data APIs through OpenAPI
+- [`okx-exchange-websocket-skill`](skills/okx-exchange-websocket-skill/SKILL.md): subscribe to OKX public exchange ticker, trade, book, and candle channels via raw WebSocket
+- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md): query OKX MCP for token, market, wallet, and swap workflows
+- [`sui-jsonrpc-skill`](skills/sui-jsonrpc-skill/SKILL.md): use Sui JSON-RPC via curated OpenRPC metadata
+- [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md): discover subgraphs, inspect schemas, and execute GraphQL via The Graph Subgraph MCP bridge
+- [`thegraph-token-mcp-skill`](skills/thegraph-token-mcp-skill/SKILL.md): query token, wallet, transfer, holder, and market data via The Graph Token API MCP
+- [`upbit-openapi-skill`](skills/upbit-openapi-skill/SKILL.md): operate Upbit exchange APIs through OpenAPI
 
 </details>
 

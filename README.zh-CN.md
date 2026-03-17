@@ -295,61 +295,43 @@ UXC 提供一个标准 skill（`uxc`）和若干官方场景化 wrapper skill。
 </details>
 
 <details>
-<summary>交易所与市场数据</summary>
+<summary>Crypto 与 Web3</summary>
 
+- [`alchemy-openapi-skill`](skills/alchemy-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Alchemy 价格与市场接口
 - [`binance-spot-openapi-skill`](skills/binance-spot-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Binance Spot 公共市场数据与签名账户/订单接口
 - [`binance-spot-websocket-skill`](skills/binance-spot-websocket-skill/SKILL.md)：通过原始 WebSocket 订阅 Binance Spot 的成交、ticker、深度与最优买卖盘流
 - [`binance-web3-openapi-skill`](skills/binance-web3-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Binance Web3 的代币发现、榜单、聪明钱、审计与地址持仓
+- [`birdeye-mcp-skill`](skills/birdeye-mcp-skill/SKILL.md)：通过 Birdeye MCP 执行代币发现与市场读取
 - [`bitget-openapi-skill`](skills/bitget-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Bitget 交易所接口
+- [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md)：通过 Bitquery GraphQL 查询链上交易、转账、持仓、余额与实时订阅
+- [`blockscout-openapi-skill`](skills/blockscout-openapi-skill/SKILL.md)：通过 OpenAPI 读取 Blockscout 浏览器数据
 - [`bybit-openapi-skill`](skills/bybit-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Bybit 交易所接口
+- [`chainbase-openapi-skill`](skills/chainbase-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Chainbase Web3 数据接口
 - [`coinapi-openapi-skill`](skills/coinapi-openapi-skill/SKILL.md)：通过 OpenAPI 读取 CoinAPI 市场数据
 - [`coinbase-openapi-skill`](skills/coinbase-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Coinbase Advanced Trade 接口
 - [`coingecko-openapi-skill`](skills/coingecko-openapi-skill/SKILL.md)：通过 OpenAPI 读取 CoinGecko 公共市场数据
-- [`kraken-openapi-skill`](skills/kraken-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Kraken 交易所接口
-- [`kucoin-openapi-skill`](skills/kucoin-openapi-skill/SKILL.md)：通过 OpenAPI 操作 KuCoin 交易所接口
-- [`mexc-openapi-skill`](skills/mexc-openapi-skill/SKILL.md)：通过 OpenAPI 操作 MEXC 交易所接口
-- [`okx-exchange-websocket-skill`](skills/okx-exchange-websocket-skill/SKILL.md)：通过原始 WebSocket 订阅 OKX 公共交易所 ticker、成交、盘口与 K 线频道
-- [`upbit-openapi-skill`](skills/upbit-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Upbit 交易所接口
-
-</details>
-
-<details>
-<summary>链上数据、RPC 与分析</summary>
-
-- [`alchemy-openapi-skill`](skills/alchemy-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Alchemy 价格与市场接口
-- [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md)：通过 Bitquery GraphQL 查询链上交易、转账、持仓、余额与实时订阅
-- [`blockscout-openapi-skill`](skills/blockscout-openapi-skill/SKILL.md)：通过 OpenAPI 读取 Blockscout 浏览器数据
-- [`chainbase-openapi-skill`](skills/chainbase-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Chainbase Web3 数据接口
-- [`ethereum-jsonrpc-skill`](skills/ethereum-jsonrpc-skill/SKILL.md)：通过整理后的 OpenRPC 元数据使用 Ethereum JSON-RPC
-- [`moralis-openapi-skill`](skills/moralis-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Moralis Web3 Data 接口
-- [`sui-jsonrpc-skill`](skills/sui-jsonrpc-skill/SKILL.md)：通过整理后的 OpenRPC 元数据使用 Sui JSON-RPC
-
-</details>
-
-<details>
-<summary>MCP 与聚合类 Skills</summary>
-
-- [`birdeye-mcp-skill`](skills/birdeye-mcp-skill/SKILL.md)：通过 Birdeye MCP 执行代币发现与市场读取
 - [`coinmarketcap-mcp-skill`](skills/coinmarketcap-mcp-skill/SKILL.md)：通过 CoinMarketCap MCP 获取报价、市场总览与叙事信息
 - [`crypto-com-mcp-skill`](skills/crypto-com-mcp-skill/SKILL.md)：通过 Crypto.com MCP 获取交易所市场数据
-- [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md)：通过 Dune MCP 发现链上表、执行 SQL、获取结果并生成图表
-- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md)：通过 Etherscan MCP 调查地址、持币人和合约信息
-- [`gate-mcp-skill`](skills/gate-mcp-skill/SKILL.md)：通过 Gate MCP 获取交易所市场数据与发现流程
-- [`goldrush-mcp-skill`](skills/goldrush-mcp-skill/SKILL.md)：通过 GoldRush MCP 执行钱包、市场与 token 工作流
-- [`lifi-mcp-skill`](skills/lifi-mcp-skill/SKILL.md)：通过 LI.FI MCP 执行跨链路线发现与执行规划
-- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md)：通过 OKX MCP 执行 token、市场、钱包、换汇等流程
-- [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md)：通过 The Graph Subgraph MCP bridge 发现 subgraph、查看 schema 并执行 GraphQL
-- [`thegraph-token-mcp-skill`](skills/thegraph-token-mcp-skill/SKILL.md)：通过 The Graph Token API MCP 查询 token、钱包、转账、持仓人与市场数据
-
-</details>
-
-<details>
-<summary>DefiLlama Skills</summary>
-
 - [`defillama-openapi-skill`](skills/defillama-openapi-skill/SKILL.md)：通过 OpenAPI 使用 DefiLlama 公共接口
 - [`defillama-prices-openapi-skill`](skills/defillama-prices-openapi-skill/SKILL.md)：通过 OpenAPI 查询 DefiLlama 价格接口
 - [`defillama-pro-openapi-skill`](skills/defillama-pro-openapi-skill/SKILL.md)：通过 OpenAPI 使用 DefiLlama Pro 接口
 - [`defillama-yields-openapi-skill`](skills/defillama-yields-openapi-skill/SKILL.md)：通过 OpenAPI 查询 DefiLlama 收益率接口
+- [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md)：通过 Dune MCP 发现链上表、执行 SQL、获取结果并生成图表
+- [`ethereum-jsonrpc-skill`](skills/ethereum-jsonrpc-skill/SKILL.md)：通过整理后的 OpenRPC 元数据使用 Ethereum JSON-RPC
+- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md)：通过 Etherscan MCP 调查地址、持币人和合约信息
+- [`gate-mcp-skill`](skills/gate-mcp-skill/SKILL.md)：通过 Gate MCP 获取交易所市场数据与发现流程
+- [`goldrush-mcp-skill`](skills/goldrush-mcp-skill/SKILL.md)：通过 GoldRush MCP 执行钱包、市场与 token 工作流
+- [`kraken-openapi-skill`](skills/kraken-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Kraken 交易所接口
+- [`kucoin-openapi-skill`](skills/kucoin-openapi-skill/SKILL.md)：通过 OpenAPI 操作 KuCoin 交易所接口
+- [`lifi-mcp-skill`](skills/lifi-mcp-skill/SKILL.md)：通过 LI.FI MCP 执行跨链路线发现与执行规划
+- [`mexc-openapi-skill`](skills/mexc-openapi-skill/SKILL.md)：通过 OpenAPI 操作 MEXC 交易所接口
+- [`moralis-openapi-skill`](skills/moralis-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Moralis Web3 Data 接口
+- [`okx-exchange-websocket-skill`](skills/okx-exchange-websocket-skill/SKILL.md)：通过原始 WebSocket 订阅 OKX 公共交易所 ticker、成交、盘口与 K 线频道
+- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md)：通过 OKX MCP 执行 token、市场、钱包、换汇等流程
+- [`sui-jsonrpc-skill`](skills/sui-jsonrpc-skill/SKILL.md)：通过整理后的 OpenRPC 元数据使用 Sui JSON-RPC
+- [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md)：通过 The Graph Subgraph MCP bridge 发现 subgraph、查看 schema 并执行 GraphQL
+- [`thegraph-token-mcp-skill`](skills/thegraph-token-mcp-skill/SKILL.md)：通过 The Graph Token API MCP 查询 token、钱包、转账、持仓人与市场数据
+- [`upbit-openapi-skill`](skills/upbit-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Upbit 交易所接口
 
 </details>
 
