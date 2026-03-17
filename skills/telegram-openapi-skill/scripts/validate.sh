@@ -30,8 +30,11 @@ rg -q 'command -v telegram-openapi-cli' "${SKILL_FILE}" || fail 'missing link-fi
 rg -q 'uxc link telegram-openapi-cli https://api.telegram.org --schema-url ' "${SKILL_FILE}" || fail 'missing fixed link create command with schema-url'
 rg -q 'telegram-openapi-cli -h' "${SKILL_FILE}" || fail 'missing help-first host discovery example'
 rg -q 'telegram-openapi-cli get:/getMe -h' "${SKILL_FILE}" || fail 'missing operation-level help example'
+rg -q 'telegram-openapi-cli post:/sendPhoto -h' "${SKILL_FILE}" || fail 'missing multipart photo help example'
+rg -q 'telegram-openapi-cli post:/sendDocument -h' "${SKILL_FILE}" || fail 'missing multipart document help example'
 rg -q -- '--path-prefix-template "/bot\{\{secret\}\}"' "${SKILL_FILE}" || fail 'missing Telegram path auth setup'
 rg -q 'uxc auth binding match https://api.telegram.org' "${SKILL_FILE}" || fail 'missing binding match check'
+rg -q 'multipart/form-data' "${SKILL_FILE}" || fail 'missing multipart guidance'
 rg -q 'positional JSON' "${SKILL_FILE}" || fail 'missing positional JSON guidance'
 
 if rg -q -- "--args\\s+'\\{" "${SKILL_FILE}" "${USAGE_FILE}"; then

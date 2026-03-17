@@ -69,6 +69,48 @@ fn multipart_openapi_schema() -> String {
     .to_string()
 }
 
+fn mixed_json_and_multipart_openapi_schema() -> String {
+    serde_json::json!({
+        "openapi": "3.0.0",
+        "info": { "title": "mixed upload", "version": "1.0.0" },
+        "paths": {
+            "/upload": {
+                "post": {
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["caption", "file"],
+                                    "properties": {
+                                        "caption": { "type": "string" },
+                                        "file": { "type": "string" }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            },
+                            "multipart/form-data": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["caption", "file"],
+                                    "properties": {
+                                        "caption": { "type": "string" },
+                                        "file": { "type": "string", "format": "binary" }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    },
+                    "responses": { "200": { "description": "ok" } }
+                }
+            }
+        }
+    })
+    .to_string()
+}
+
 #[test]
 fn key_value_arguments_are_coerced_before_openapi_execution() {
     let mut server = Server::new();
@@ -213,6 +255,41 @@ fn positional_json_arguments_are_coerced_before_multipart_openapi_execution() {
             r#"{{"caption":"hello json","count":"42","file":"{}"}}"#,
             file_path.display()
         ))
+        .assert()
+        .success();
+}
+
+#[test]
+fn local_file_path_prefers_multipart_when_operation_supports_json_and_multipart() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let file_path = temp_dir.path().join("mixed.txt");
+    fs::write(&file_path, "prefer multipart").unwrap();
+
+    let mut server = Server::new();
+    let _schema = server
+        .mock("GET", "/openapi.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(mixed_json_and_multipart_openapi_schema())
+        .create();
+
+    let _execute = server
+        .mock("POST", "/upload")
+        .match_header(
+            "content-type",
+            Matcher::Regex(r"multipart/form-data; boundary=".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"ok":true}"#)
+        .create();
+
+    uxc()
+        .arg(server.url())
+        .arg("--no-cache")
+        .arg("post:/upload")
+        .arg("caption=hello")
+        .arg(format!("file={}", file_path.display()))
         .assert()
         .success();
 }

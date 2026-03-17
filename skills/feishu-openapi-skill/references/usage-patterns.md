@@ -96,8 +96,20 @@ feishu-openapi-cli get:/contact/v3/users/{user_id} user_id=ou_xxx user_id_type=o
 ## Write Examples (Confirm Intent First)
 
 ```bash
+# Upload an image and capture the returned image_key
+feishu-openapi-cli post:/im/v1/images image_type=message image=/tmp/example.png
+
+# Upload a file and capture the returned file_key
+feishu-openapi-cli post:/im/v1/files file_type=stream file_name=report.txt file=/tmp/report.txt
+
 # Send a text message to a chat
 feishu-openapi-cli post:/im/v1/messages receive_id_type=chat_id '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"Hello from UXC\"}"}'
+
+# Send an image message using a previously uploaded image_key
+feishu-openapi-cli post:/im/v1/messages receive_id_type=chat_id '{"receive_id":"oc_xxx","msg_type":"image","content":"{\"image_key\":\"img_xxx\"}"}'
+
+# Send a file message using a previously uploaded file_key
+feishu-openapi-cli post:/im/v1/messages receive_id_type=chat_id '{"receive_id":"oc_xxx","msg_type":"file","content":"{\"file_key\":\"file_xxx\"}"}'
 
 # Send a text message to a user by open_id
 feishu-openapi-cli post:/im/v1/messages receive_id_type=open_id '{"receive_id":"ou_xxx","msg_type":"text","content":"{\"text\":\"Hello from UXC\"}"}'

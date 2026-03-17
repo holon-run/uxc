@@ -23,14 +23,13 @@ This skill covers a lean bot core surface:
 
 - bot identity and chat lookup
 - text sends
-- media sends by `file_id` or HTTP URL
+- media sends by `file_id`, HTTP URL, or local multipart upload
 - polling via `getUpdates`
 - webhook setup/status/delete operations
 
 This skill does **not** cover:
 
-- multipart new-file uploads
-- self-signed webhook certificate upload
+- multipart media groups with `attach://` file arrays
 - generic webhook ingestion/runtime hosting
 - the full Telegram Bot API surface
 
@@ -71,6 +70,8 @@ uxc auth binding match https://api.telegram.org/getMe
 2. Inspect operation schema first:
    - `telegram-openapi-cli get:/getMe -h`
    - `telegram-openapi-cli post:/sendMessage -h`
+   - `telegram-openapi-cli post:/sendPhoto -h`
+   - `telegram-openapi-cli post:/sendDocument -h`
    - `telegram-openapi-cli post:/getUpdates -h`
 
 3. Prefer read/setup validation before writes:
@@ -81,6 +82,8 @@ uxc auth binding match https://api.telegram.org/getMe
 4. Execute operations with key/value or positional JSON:
    - key/value:
      `telegram-openapi-cli post:/sendMessage chat_id=CHAT_ID text="Hello from uxc"`
+   - multipart upload:
+     `telegram-openapi-cli post:/sendPhoto chat_id=CHAT_ID photo=/tmp/photo.jpg caption="Uploaded by uxc"`
    - positional JSON:
      `telegram-openapi-cli post:/sendMessage '{"chat_id":"CHAT_ID","text":"Hello from uxc"}'`
    - daemon-backed polling subscribe:
@@ -143,7 +146,9 @@ Observed runtime behavior:
   - `checkpoint_strategy.type` should usually be `item_key` with `item_key_pointer=/update_id`
 - `uxc auth binding match` should be checked against a concrete Telegram method URL such as `https://api.telegram.org/getMe`, because auth is applied through a path-prefix template that expands to `/bot<TOKEN>/...`.
 - `sendPhoto`, `sendDocument`, and `sendMediaGroup` in this skill accept existing `file_id` values or HTTP URLs only; they do not upload new local files.
-- `setWebhook` in this skill does not support certificate upload for self-signed certs.
+- `sendPhoto` and `sendDocument` also support `multipart/form-data` local file uploads. File fields must be local path strings.
+- `sendMediaGroup` still stays JSON-only in this skill because current multipart v1 does not model the `media` array plus `attach://` file set cleanly.
+- `setWebhook` supports multipart certificate upload for self-signed certs through the `certificate` file field.
 - Treat `post:/sendMessage`, all `send*` operations, and webhook-changing operations as write/high-risk actions; require explicit user confirmation before execution.
 - `telegram-openapi-cli <operation> ...` is equivalent to `uxc https://api.telegram.org --schema-url <telegram_openapi_schema> <operation> ...`.
 
