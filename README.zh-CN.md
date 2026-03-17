@@ -258,21 +258,28 @@ UXC 提供一个标准 skill（`uxc`）和若干官方场景化 wrapper skill。
 - [`playwright-mcp-skill`](skills/playwright-mcp-skill/SKILL.md)：通过 `uxc` 在 MCP stdio 上做浏览器自动化
 - [`context7-mcp-skill`](skills/context7-mcp-skill/SKILL.md)：查询最新库文档与示例
 
-### 核心能力
+完整发布记录、安装状态和维护说明见 [`docs/skills.md`](docs/skills.md)。
+
+<details>
+<summary>核心与 Skill 编写</summary>
 
 - [`uxc`](skills/uxc/SKILL.md)：标准的 schema 发现与多协议执行层
 - [`uxc-skill-creator`](skills/uxc-skill-creator/SKILL.md)：创建 UXC skill 的模板与工作流指南
 
-### 浏览器自动化
+</details>
+
+<details>
+<summary>浏览器自动化与文档</summary>
 
 - [`playwright-mcp-skill`](skills/playwright-mcp-skill/SKILL.md)：通过 `uxc` 在 MCP stdio 上运行 `@playwright/mcp`
-
-### 知识与文档
-
+- [`chrome-devtools-mcp-skill`](skills/chrome-devtools-mcp-skill/SKILL.md)：通过 `uxc` 驱动 Chrome DevTools MCP
 - [`context7-mcp-skill`](skills/context7-mcp-skill/SKILL.md)：查询最新库文档与示例
 - [`deepwiki-mcp-skill`](skills/deepwiki-mcp-skill/SKILL.md)：查询仓库文档并回答代码库问题
 
-### 协作与工作流
+</details>
+
+<details>
+<summary>协作与消息系统</summary>
 
 - [`notion-mcp-skill`](skills/notion-mcp-skill/SKILL.md)：提供带 OAuth 说明的 Notion MCP 流程指引
 - [`linear-graphql-skill`](skills/linear-graphql-skill/SKILL.md)：通过 GraphQL 操作 Linear 的 issue、project 和 team
@@ -281,71 +288,103 @@ UXC 提供一个标准 skill（`uxc`）和若干官方场景化 wrapper skill。
 - [`feishu-openapi-skill`](skills/feishu-openapi-skill/SKILL.md)：通过 UXC 操作飞书/Lark IM API，并使用自动 bootstrap 鉴权和长连接事件接收
 - [`telegram-openapi-skill`](skills/telegram-openapi-skill/SKILL.md)：通过 UXC 操作 Telegram Bot API，并通过轮询式 `uxc subscribe` 接收更新
 - [`matrix-openapi-skill`](skills/matrix-openapi-skill/SKILL.md)：通过 UXC 操作 Matrix Client-Server API，并通过 `/sync` 轮询跟踪房间时间线
+- [`dingtalk-openapi-skill`](skills/dingtalk-openapi-skill/SKILL.md)：通过 UXC 操作钉钉 OpenAPI，并使用 app bootstrap 鉴权
+- [`line-openapi-skill`](skills/line-openapi-skill/SKILL.md)：通过 UXC 操作 LINE Messaging API 请求/响应流程
+- [`whatsapp-openapi-skill`](skills/whatsapp-openapi-skill/SKILL.md)：通过 UXC 操作 WhatsApp Cloud API 请求/响应流程
 
-### Crypto 与链上数据
+</details>
 
-- [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md)：通过 Bitquery GraphQL 查询链上交易、转账、持币人、余额与市场结构，使用 OAuth client credentials 鉴权
-- [`binance-web3-openapi-skill`](skills/binance-web3-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Binance Web3 的代币发现、榜单、聪明钱、审计与地址持仓
+<details>
+<summary>交易所与市场数据</summary>
+
 - [`binance-spot-openapi-skill`](skills/binance-spot-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Binance Spot 公共市场数据与签名账户/订单接口
 - [`binance-spot-websocket-skill`](skills/binance-spot-websocket-skill/SKILL.md)：通过原始 WebSocket 订阅 Binance Spot 的成交、ticker、深度与最优买卖盘流
-- [`okx-exchange-websocket-skill`](skills/okx-exchange-websocket-skill/SKILL.md)：通过原始 WebSocket 订阅 OKX 公共交易所的 ticker、成交、盘口与 K 线频道
-- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md)：通过 OKX MCP 执行 token、市场、钱包、换汇等流程
+- [`binance-web3-openapi-skill`](skills/binance-web3-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Binance Web3 的代币发现、榜单、聪明钱、审计与地址持仓
+- [`bitget-openapi-skill`](skills/bitget-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Bitget 交易所接口
+- [`bybit-openapi-skill`](skills/bybit-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Bybit 交易所接口
+- [`coinapi-openapi-skill`](skills/coinapi-openapi-skill/SKILL.md)：通过 OpenAPI 读取 CoinAPI 市场数据
+- [`coinbase-openapi-skill`](skills/coinbase-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Coinbase Advanced Trade 接口
+- [`coingecko-openapi-skill`](skills/coingecko-openapi-skill/SKILL.md)：通过 OpenAPI 读取 CoinGecko 公共市场数据
+- [`kraken-openapi-skill`](skills/kraken-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Kraken 交易所接口
+- [`kucoin-openapi-skill`](skills/kucoin-openapi-skill/SKILL.md)：通过 OpenAPI 操作 KuCoin 交易所接口
+- [`mexc-openapi-skill`](skills/mexc-openapi-skill/SKILL.md)：通过 OpenAPI 操作 MEXC 交易所接口
+- [`okx-exchange-websocket-skill`](skills/okx-exchange-websocket-skill/SKILL.md)：通过原始 WebSocket 订阅 OKX 公共交易所 ticker、成交、盘口与 K 线频道
+- [`upbit-openapi-skill`](skills/upbit-openapi-skill/SKILL.md)：通过 OpenAPI 操作 Upbit 交易所接口
+
+</details>
+
+<details>
+<summary>链上数据、RPC 与分析</summary>
+
+- [`alchemy-openapi-skill`](skills/alchemy-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Alchemy 价格与市场接口
+- [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md)：通过 Bitquery GraphQL 查询链上交易、转账、持仓、余额与实时订阅
+- [`blockscout-openapi-skill`](skills/blockscout-openapi-skill/SKILL.md)：通过 OpenAPI 读取 Blockscout 浏览器数据
+- [`chainbase-openapi-skill`](skills/chainbase-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Chainbase Web3 数据接口
+- [`ethereum-jsonrpc-skill`](skills/ethereum-jsonrpc-skill/SKILL.md)：通过整理后的 OpenRPC 元数据使用 Ethereum JSON-RPC
+- [`moralis-openapi-skill`](skills/moralis-openapi-skill/SKILL.md)：通过 OpenAPI 查询 Moralis Web3 Data 接口
+- [`sui-jsonrpc-skill`](skills/sui-jsonrpc-skill/SKILL.md)：通过整理后的 OpenRPC 元数据使用 Sui JSON-RPC
+
+</details>
+
+<details>
+<summary>MCP 与聚合类 Skills</summary>
+
+- [`birdeye-mcp-skill`](skills/birdeye-mcp-skill/SKILL.md)：通过 Birdeye MCP 执行代币发现与市场读取
+- [`coinmarketcap-mcp-skill`](skills/coinmarketcap-mcp-skill/SKILL.md)：通过 CoinMarketCap MCP 获取报价、市场总览与叙事信息
+- [`crypto-com-mcp-skill`](skills/crypto-com-mcp-skill/SKILL.md)：通过 Crypto.com MCP 获取交易所市场数据
 - [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md)：通过 Dune MCP 发现链上表、执行 SQL、获取结果并生成图表
+- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md)：通过 Etherscan MCP 调查地址、持币人和合约信息
+- [`gate-mcp-skill`](skills/gate-mcp-skill/SKILL.md)：通过 Gate MCP 获取交易所市场数据与发现流程
+- [`goldrush-mcp-skill`](skills/goldrush-mcp-skill/SKILL.md)：通过 GoldRush MCP 执行钱包、市场与 token 工作流
+- [`lifi-mcp-skill`](skills/lifi-mcp-skill/SKILL.md)：通过 LI.FI MCP 执行跨链路线发现与执行规划
+- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md)：通过 OKX MCP 执行 token、市场、钱包、换汇等流程
 - [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md)：通过 The Graph Subgraph MCP bridge 发现 subgraph、查看 schema 并执行 GraphQL
 - [`thegraph-token-mcp-skill`](skills/thegraph-token-mcp-skill/SKILL.md)：通过 The Graph Token API MCP 查询 token、钱包、转账、持仓人与市场数据
-- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md)：通过 Etherscan MCP 调查地址、持币人和合约信息
+
+</details>
+
+<details>
+<summary>DefiLlama Skills</summary>
+
+- [`defillama-openapi-skill`](skills/defillama-openapi-skill/SKILL.md)：通过 OpenAPI 使用 DefiLlama 公共接口
+- [`defillama-prices-openapi-skill`](skills/defillama-prices-openapi-skill/SKILL.md)：通过 OpenAPI 查询 DefiLlama 价格接口
+- [`defillama-pro-openapi-skill`](skills/defillama-pro-openapi-skill/SKILL.md)：通过 OpenAPI 使用 DefiLlama Pro 接口
+- [`defillama-yields-openapi-skill`](skills/defillama-yields-openapi-skill/SKILL.md)：通过 OpenAPI 查询 DefiLlama 收益率接口
+
+</details>
 
 ### Skill 安装方式
+
+技能目录名就是安装用的 skill id，可同时用于 `npx skills` 和 ClawHub。
 
 使用 `npx skills` 从本仓库安装：
 
 ```bash
-# 先安装共享执行层
+# 仅安装共享执行层
 npx -y skills@latest add holon-run/uxc --skill uxc --agent codex -y
 
-# 安装浏览器和知识类 skill
-npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill context7-mcp-skill --skill deepwiki-mcp-skill --agent codex -y
-
-# 安装协作类 skill
-npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill slack-openapi-skill --skill discord-openapi-skill --skill feishu-openapi-skill --skill telegram-openapi-skill --skill matrix-openapi-skill --agent codex -y
-
-# 安装 Crypto 与链上类 skill
-npx -y skills@latest add holon-run/uxc --skill bitquery-graphql-skill --skill binance-web3-openapi-skill --skill binance-spot-openapi-skill --skill binance-spot-websocket-skill --skill okx-exchange-websocket-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
+# 从本仓库安装任意一组 skill
+npx -y skills@latest add holon-run/uxc \
+  --skill uxc \
+  --skill slack-openapi-skill \
+  --skill discord-openapi-skill \
+  --skill bitquery-graphql-skill \
+  --agent codex -y
 ```
 
 使用 ClawHub 安装已发布的 skill：
 
 ```bash
-# 先安装共享执行层
+# 仅安装共享执行层
 clawhub --workdir ~/.openclaw --dir skills install uxc
 
-# 安装浏览器和知识类 skill
-clawhub --workdir ~/.openclaw --dir skills install playwright-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install context7-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install deepwiki-mcp-skill
-
-# 安装协作类 skill
-clawhub --workdir ~/.openclaw --dir skills install notion-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install linear-graphql-skill
+# 通过 slug/目录名安装任意已发布 skill
 clawhub --workdir ~/.openclaw --dir skills install slack-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install feishu-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install telegram-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install matrix-openapi-skill
-
-# 安装 Crypto 与链上类 skill
-clawhub --workdir ~/.openclaw --dir skills install binance-web3-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install binance-spot-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install binance-spot-websocket-skill
-clawhub --workdir ~/.openclaw --dir skills install okx-exchange-websocket-skill
-clawhub --workdir ~/.openclaw --dir skills install okx-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install dune-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install thegraph-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install thegraph-token-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install etherscan-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install chrome-devtools-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install defillama-openapi-skill
 ```
 
-安装和维护规则见 [`docs/skills.md`](docs/skills.md)。
+完整发布记录和维护规则见 [`docs/skills.md`](docs/skills.md)。
 
 ## 输出与帮助约定
 

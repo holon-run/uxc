@@ -263,21 +263,28 @@ Use `uxc` skill as the shared execution layer, and add wrappers when they fit yo
 - [`playwright-mcp-skill`](skills/playwright-mcp-skill/SKILL.md): browser automation over MCP stdio through `uxc`
 - [`context7-mcp-skill`](skills/context7-mcp-skill/SKILL.md): current library documentation and examples over MCP
 
-### Core
+See [`docs/skills.md`](docs/skills.md) for publish history, validation notes, and ClawHub maintenance details.
+
+<details>
+<summary>Core and Skill Authoring</summary>
 
 - [`uxc`](skills/uxc/SKILL.md): canonical schema discovery and multi-protocol execution layer
 - [`uxc-skill-creator`](skills/uxc-skill-creator/SKILL.md): templates and workflow guidance for building new UXC-based skills
 
-### Browser Automation
+</details>
+
+<details>
+<summary>Browser Automation and Documentation</summary>
 
 - [`playwright-mcp-skill`](skills/playwright-mcp-skill/SKILL.md): run `@playwright/mcp` over MCP stdio through `uxc`
-
-### Knowledge and Docs
-
+- [`chrome-devtools-mcp-skill`](skills/chrome-devtools-mcp-skill/SKILL.md): drive Chrome DevTools MCP through `uxc`
 - [`context7-mcp-skill`](skills/context7-mcp-skill/SKILL.md): query up-to-date library documentation and examples
 - [`deepwiki-mcp-skill`](skills/deepwiki-mcp-skill/SKILL.md): query repository documentation and ask codebase questions
 
-### Workspace and Collaboration
+</details>
+
+<details>
+<summary>Workspace and Messaging</summary>
 
 - [`notion-mcp-skill`](skills/notion-mcp-skill/SKILL.md): operate Notion MCP workflows with OAuth-aware guidance
 - [`linear-graphql-skill`](skills/linear-graphql-skill/SKILL.md): operate Linear issues, projects, and teams through GraphQL
@@ -286,72 +293,103 @@ Use `uxc` skill as the shared execution layer, and add wrappers when they fit yo
 - [`feishu-openapi-skill`](skills/feishu-openapi-skill/SKILL.md): operate Feishu/Lark IM APIs with bootstrap-managed auth and long-connection event intake
 - [`telegram-openapi-skill`](skills/telegram-openapi-skill/SKILL.md): operate Telegram Bot API and receive updates through polling-based `uxc subscribe`
 - [`matrix-openapi-skill`](skills/matrix-openapi-skill/SKILL.md): operate Matrix Client-Server API and follow room timelines through `/sync` polling
+- [`dingtalk-openapi-skill`](skills/dingtalk-openapi-skill/SKILL.md): operate DingTalk OpenAPI workflows with app bootstrap auth guidance
+- [`line-openapi-skill`](skills/line-openapi-skill/SKILL.md): operate LINE Messaging API request/response workflows
+- [`whatsapp-openapi-skill`](skills/whatsapp-openapi-skill/SKILL.md): operate WhatsApp Cloud API request/response workflows
 
-### Crypto and Onchain Data
+</details>
 
-- [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md): query Bitquery GraphQL for onchain trades, transfers, holders, balances, and market structure with OAuth client credentials
-- [`binance-web3-openapi-skill`](skills/binance-web3-openapi-skill/SKILL.md): query Binance Web3 token discovery, rankings, smart money, audits, and address positions through OpenAPI
+<details>
+<summary>Exchange and Market Data</summary>
+
 - [`binance-spot-openapi-skill`](skills/binance-spot-openapi-skill/SKILL.md): operate Binance Spot public market data and signed account/order flows through OpenAPI
 - [`binance-spot-websocket-skill`](skills/binance-spot-websocket-skill/SKILL.md): subscribe to Binance Spot public trade, ticker, depth, and book-ticker streams via raw WebSocket
+- [`binance-web3-openapi-skill`](skills/binance-web3-openapi-skill/SKILL.md): query Binance Web3 token discovery, rankings, smart money, audits, and address positions through OpenAPI
+- [`bitget-openapi-skill`](skills/bitget-openapi-skill/SKILL.md): operate Bitget exchange APIs through OpenAPI
+- [`bybit-openapi-skill`](skills/bybit-openapi-skill/SKILL.md): operate Bybit exchange APIs through OpenAPI
+- [`coinapi-openapi-skill`](skills/coinapi-openapi-skill/SKILL.md): read CoinAPI market data through OpenAPI
+- [`coinbase-openapi-skill`](skills/coinbase-openapi-skill/SKILL.md): operate Coinbase Advanced Trade APIs through OpenAPI
+- [`coingecko-openapi-skill`](skills/coingecko-openapi-skill/SKILL.md): read CoinGecko public market data through OpenAPI
+- [`kraken-openapi-skill`](skills/kraken-openapi-skill/SKILL.md): operate Kraken exchange APIs through OpenAPI
+- [`kucoin-openapi-skill`](skills/kucoin-openapi-skill/SKILL.md): operate KuCoin exchange APIs through OpenAPI
+- [`mexc-openapi-skill`](skills/mexc-openapi-skill/SKILL.md): operate MEXC exchange APIs through OpenAPI
 - [`okx-exchange-websocket-skill`](skills/okx-exchange-websocket-skill/SKILL.md): subscribe to OKX public exchange ticker, trade, book, and candle channels via raw WebSocket
-- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md): query OKX MCP for token, market, wallet, and swap workflows
+- [`upbit-openapi-skill`](skills/upbit-openapi-skill/SKILL.md): operate Upbit exchange APIs through OpenAPI
+
+</details>
+
+<details>
+<summary>Onchain Data, RPC, and Analytics</summary>
+
+- [`alchemy-openapi-skill`](skills/alchemy-openapi-skill/SKILL.md): query Alchemy prices and market endpoints through OpenAPI
+- [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md): query Bitquery GraphQL for trades, transfers, holders, balances, and realtime subscription flows
+- [`blockscout-openapi-skill`](skills/blockscout-openapi-skill/SKILL.md): read Blockscout explorer data through OpenAPI
+- [`chainbase-openapi-skill`](skills/chainbase-openapi-skill/SKILL.md): query Chainbase Web3 data APIs through OpenAPI
+- [`ethereum-jsonrpc-skill`](skills/ethereum-jsonrpc-skill/SKILL.md): use Ethereum JSON-RPC via curated OpenRPC metadata
+- [`moralis-openapi-skill`](skills/moralis-openapi-skill/SKILL.md): query Moralis Web3 Data APIs through OpenAPI
+- [`sui-jsonrpc-skill`](skills/sui-jsonrpc-skill/SKILL.md): use Sui JSON-RPC via curated OpenRPC metadata
+
+</details>
+
+<details>
+<summary>MCP and Aggregation Skills</summary>
+
+- [`birdeye-mcp-skill`](skills/birdeye-mcp-skill/SKILL.md): use Birdeye MCP for token discovery and market reads
+- [`coinmarketcap-mcp-skill`](skills/coinmarketcap-mcp-skill/SKILL.md): use CoinMarketCap MCP for quotes, market overview, and narratives
+- [`crypto-com-mcp-skill`](skills/crypto-com-mcp-skill/SKILL.md): use Crypto.com MCP for exchange market data
 - [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md): discover blockchain tables, run SQL, fetch results, and build charts via Dune MCP
+- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md): investigate addresses, token holders, and contracts via Etherscan MCP
+- [`gate-mcp-skill`](skills/gate-mcp-skill/SKILL.md): use Gate MCP for exchange market data and discovery workflows
+- [`goldrush-mcp-skill`](skills/goldrush-mcp-skill/SKILL.md): use GoldRush MCP for wallet, market, and token workflows
+- [`lifi-mcp-skill`](skills/lifi-mcp-skill/SKILL.md): use LI.FI MCP for cross-chain route discovery and execution planning
+- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md): query OKX MCP for token, market, wallet, and swap workflows
 - [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md): discover subgraphs, inspect schemas, and execute GraphQL via The Graph Subgraph MCP bridge
 - [`thegraph-token-mcp-skill`](skills/thegraph-token-mcp-skill/SKILL.md): query token, wallet, transfer, holder, and market data via The Graph Token API MCP
-- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md): investigate addresses, token holders, and contracts via Etherscan MCP
+
+</details>
+
+<details>
+<summary>DefiLlama Skills</summary>
+
+- [`defillama-openapi-skill`](skills/defillama-openapi-skill/SKILL.md): use DefiLlama public APIs through OpenAPI
+- [`defillama-prices-openapi-skill`](skills/defillama-prices-openapi-skill/SKILL.md): query DefiLlama prices APIs through OpenAPI
+- [`defillama-pro-openapi-skill`](skills/defillama-pro-openapi-skill/SKILL.md): use DefiLlama Pro APIs through OpenAPI
+- [`defillama-yields-openapi-skill`](skills/defillama-yields-openapi-skill/SKILL.md): query DefiLlama yields APIs through OpenAPI
+
+</details>
 
 ### Install Skills
+
+Use the skill folder name as the skill id for both `npx skills` and ClawHub.
 
 Install from this repository using `npx skills`:
 
 ```bash
-# Start with the shared execution layer
+# Install the shared execution layer only
 npx -y skills@latest add holon-run/uxc --skill uxc --agent codex -y
 
-# Add browser and knowledge skills
-npx -y skills@latest add holon-run/uxc --skill playwright-mcp-skill --skill context7-mcp-skill --skill deepwiki-mcp-skill --agent codex -y
-
-# Add workspace skills
-npx -y skills@latest add holon-run/uxc --skill notion-mcp-skill --skill linear-graphql-skill --skill slack-openapi-skill --skill discord-openapi-skill --skill feishu-openapi-skill --skill telegram-openapi-skill --skill matrix-openapi-skill --agent codex -y
-
-# Add crypto and onchain skills
-npx -y skills@latest add holon-run/uxc --skill bitquery-graphql-skill --skill binance-web3-openapi-skill --skill binance-spot-openapi-skill --skill binance-spot-websocket-skill --skill okx-exchange-websocket-skill --skill okx-mcp-skill --skill dune-mcp-skill --skill thegraph-mcp-skill --skill thegraph-token-mcp-skill --skill etherscan-mcp-skill --agent codex -y
+# Install any selected bundle of skills from this repo
+npx -y skills@latest add holon-run/uxc \
+  --skill uxc \
+  --skill slack-openapi-skill \
+  --skill discord-openapi-skill \
+  --skill bitquery-graphql-skill \
+  --agent codex -y
 ```
 
 Install published skills from ClawHub:
 
 ```bash
-# Start with the shared execution layer
+# Install the shared execution layer only
 clawhub --workdir ~/.openclaw --dir skills install uxc
 
-# Add browser and knowledge skills
-clawhub --workdir ~/.openclaw --dir skills install playwright-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install context7-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install deepwiki-mcp-skill
-
-# Add workspace skills
-clawhub --workdir ~/.openclaw --dir skills install notion-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install linear-graphql-skill
+# Install any selected published skill by its folder/slug name
 clawhub --workdir ~/.openclaw --dir skills install slack-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install discord-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install feishu-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install telegram-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install matrix-openapi-skill
-
-# Add crypto and onchain skills
-clawhub --workdir ~/.openclaw --dir skills install bitquery-graphql-skill
-clawhub --workdir ~/.openclaw --dir skills install binance-web3-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install binance-spot-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install binance-spot-websocket-skill
-clawhub --workdir ~/.openclaw --dir skills install okx-exchange-websocket-skill
-clawhub --workdir ~/.openclaw --dir skills install okx-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install dune-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install thegraph-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install thegraph-token-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install etherscan-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install chrome-devtools-mcp-skill
+clawhub --workdir ~/.openclaw --dir skills install defillama-openapi-skill
 ```
 
-See [`docs/skills.md`](docs/skills.md) for install methods and maintenance rules.
+See [`docs/skills.md`](docs/skills.md) for the complete publish log and maintenance rules.
 
 ## Output and Help Conventions
 
