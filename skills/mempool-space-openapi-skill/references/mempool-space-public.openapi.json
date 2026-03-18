@@ -1,0 +1,311 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "mempool.space Public API",
+    "version": "1.0.0",
+    "description": "Curated mempool.space public Bitcoin and Lightning explorer operations for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://mempool.space/api"
+    }
+  ],
+  "paths": {
+    "/v1/fees/recommended": {
+      "get": {
+        "operationId": "getRecommendedFees",
+        "summary": "Get recommended Bitcoin fee rates",
+        "responses": {
+          "200": {
+            "description": "Recommended fee rates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mempool": {
+      "get": {
+        "operationId": "getMempoolSummary",
+        "summary": "Get aggregate mempool state",
+        "responses": {
+          "200": {
+            "description": "Mempool summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/blocks/tip/height": {
+      "get": {
+        "operationId": "getBlockTipHeight",
+        "summary": "Get the current block tip height",
+        "responses": {
+          "200": {
+            "description": "Block tip height",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/address/{address}": {
+      "get": {
+        "operationId": "getAddressSummary",
+        "summary": "Get Bitcoin address summary",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Address summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tx/{txid}/status": {
+      "get": {
+        "operationId": "getTransactionStatus",
+        "summary": "Get Bitcoin transaction confirmation status",
+        "parameters": [
+          {
+            "name": "txid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transaction status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/lightning/statistics/latest": {
+      "get": {
+        "operationId": "getLatestLightningStatistics",
+        "summary": "Get latest Lightning network statistics",
+        "responses": {
+          "200": {
+            "description": "Lightning statistics snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/lightning/search": {
+      "get": {
+        "operationId": "searchLightningNodesAndChannels",
+        "summary": "Search Lightning nodes and channels",
+        "parameters": [
+          {
+            "name": "searchText",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lightning search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/lightning/nodes/rankings": {
+      "get": {
+        "operationId": "getLightningNodeRankings",
+        "summary": "Get top Lightning node rankings",
+        "responses": {
+          "200": {
+            "description": "Lightning node rankings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/lightning/nodes/{public_key}": {
+      "get": {
+        "operationId": "getLightningNode",
+        "summary": "Get one Lightning node by public key",
+        "parameters": [
+          {
+            "name": "public_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lightning node detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/lightning/channels": {
+      "get": {
+        "operationId": "getLightningChannelsForNode",
+        "summary": "Get Lightning channels for a node",
+        "parameters": [
+          {
+            "name": "public_key",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "index",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": -1
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "active",
+                "closed"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lightning channels for node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/lightning/channels/{short_id}": {
+      "get": {
+        "operationId": "getLightningChannel",
+        "summary": "Get one Lightning channel by id",
+        "parameters": [
+          {
+            "name": "short_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lightning channel detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {}
+  }
+}
