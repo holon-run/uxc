@@ -1,0 +1,4 @@
+interface:
+  display_name: "NEAR JSON-RPC"
+  short_description: "Operate NEAR mainnet JSON-RPC reads via UXC with a provider-aware public RPC default"
+  default_prompt: "Use $near-jsonrpc-skill to discover and execute NEAR JSON-RPC read-only operations through UXC with a provider-aware public RPC default and deprecated-endpoint guardrails."
