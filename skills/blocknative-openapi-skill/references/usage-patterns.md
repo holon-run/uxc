@@ -55,6 +55,16 @@ blocknative-openapi-cli get:/gasprices/distribution \
   chainid=1
 ```
 
+## Error Handling Pattern
+
+```bash
+# Keep error inspection at the UXC envelope level before debugging provider-specific fields
+blocknative-openapi-cli get:/gasprices/basefee-estimates | jq '{ok, error, data}'
+
+# If auth is missing or invalid, inspect .error first before assuming the endpoint is unavailable
+blocknative-openapi-cli get:/gasprices/distribution chainid=1 | jq '.error'
+```
+
 ## Fallback Equivalence
 
 - `blocknative-openapi-cli <operation> ...` is equivalent to

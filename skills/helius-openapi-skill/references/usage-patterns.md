@@ -42,6 +42,10 @@ helius-openapi-cli get:/v1/wallet/{wallet}/identity \
 helius-openapi-cli post:/v1/wallet/batch-identity \
   addresses:='["HXsKP7wrBWaQ8T2Vtjry3Nj3oUgwYcqq9vrHDM12G664"]'
 
+# If your shell does not preserve :='[...]' quoting well, pass the same body as bare JSON
+helius-openapi-cli post:/v1/wallet/batch-identity \
+  '{"addresses":["HXsKP7wrBWaQ8T2Vtjry3Nj3oUgwYcqq9vrHDM12G664"]}'
+
 # Read balances with a small page size first
 helius-openapi-cli get:/v1/wallet/{wallet}/balances \
   wallet=HXsKP7wrBWaQ8T2Vtjry3Nj3oUgwYcqq9vrHDM12G664 \
