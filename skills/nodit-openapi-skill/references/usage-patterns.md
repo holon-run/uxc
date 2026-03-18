@@ -38,6 +38,9 @@ uxc auth binding match https://web3.nodit.io
 nodit-openapi-cli post:/v1/multichain/lookupEntities \
   input=near
 
+# If this returns HTTP 429 TOO_MANY_REQUESTS, do not treat it as auth failure.
+# Back off and continue with chain-specific reads when the target chain is already known.
+
 # Read native balance for an EVM account
 nodit-openapi-cli post:/v1/{chain}/{network}/native/getNativeBalanceByAccount \
   chain=ethereum \
