@@ -119,7 +119,7 @@ impl ArgumentParser {
         args: Vec<String>,
         json_payload: Option<String>,
     ) -> Result<HashMap<String, Value>> {
-        let mut args_map = HashMap::new();
+        let mut args_map = serde_json::Map::new();
 
         if let Some(json_str) = json_payload {
             let value: Value = serde_json::from_str(&json_str)
@@ -138,12 +138,150 @@ impl ArgumentParser {
             for arg in args {
                 let parts: Vec<&str> = arg.splitn(2, '=').collect();
                 if parts.len() == 2 {
-                    args_map.insert(parts[0].to_string(), serde_json::json!(parts[1]));
+                    Self::insert_argument_path(
+                        &mut args_map,
+                        parts[0],
+                        serde_json::json!(parts[1]),
+                    )?;
                 }
             }
         }
 
-        Ok(args_map)
+        Ok(args_map.into_iter().collect())
+    }
+
+    fn insert_argument_path(
+        root: &mut serde_json::Map<String, Value>,
+        raw_key: &str,
+        value: Value,
+    ) -> Result<()> {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        enum PathSegment {
+            Key(String),
+            Index(usize),
+        }
+
+        fn parse_segments(raw_key: &str) -> Result<Vec<PathSegment>> {
+            let mut segments = Vec::new();
+            let mut current = String::new();
+            let chars: Vec<char> = raw_key.chars().collect();
+            let mut index = 0;
+
+            while index < chars.len() {
+                match chars[index] {
+                    '.' => {
+                        if !current.is_empty() {
+                            segments.push(PathSegment::Key(std::mem::take(&mut current)));
+                        }
+                        index += 1;
+                    }
+                    '[' => {
+                        if !current.is_empty() {
+                            segments.push(PathSegment::Key(std::mem::take(&mut current)));
+                        }
+                        index += 1;
+                        let start = index;
+                        while index < chars.len() && chars[index] != ']' {
+                            index += 1;
+                        }
+                        if index >= chars.len() {
+                            return Err(UxcError::InvalidArguments(format!(
+                                "Invalid argument path '{}': missing closing ']'",
+                                raw_key
+                            ))
+                            .into());
+                        }
+                        let index_value: usize = raw_key[start..index].parse().map_err(|_| {
+                            UxcError::InvalidArguments(format!(
+                                "Invalid argument path '{}': array index must be an integer",
+                                raw_key
+                            ))
+                        })?;
+                        segments.push(PathSegment::Index(index_value));
+                        index += 1;
+                    }
+                    char => {
+                        current.push(char);
+                        index += 1;
+                    }
+                }
+            }
+
+            if !current.is_empty() {
+                segments.push(PathSegment::Key(current));
+            }
+
+            if segments.is_empty() {
+                return Err(
+                    UxcError::InvalidArguments("Argument key cannot be empty".to_string()).into(),
+                );
+            }
+
+            Ok(segments)
+        }
+
+        fn insert_segments(
+            target: &mut Value,
+            segments: &[PathSegment],
+            value: Value,
+        ) -> Result<()> {
+            if segments.is_empty() {
+                *target = value;
+                return Ok(());
+            }
+
+            match &segments[0] {
+                PathSegment::Key(key) => {
+                    if !target.is_object() {
+                        if target.is_null() {
+                            *target = Value::Object(serde_json::Map::new());
+                        } else {
+                            return Err(UxcError::InvalidArguments(format!(
+                                "Argument path conflict at '{}'",
+                                key
+                            ))
+                            .into());
+                        }
+                    }
+                    let object = target.as_object_mut().expect("object just initialized");
+                    let entry = object.entry(key.clone()).or_insert(Value::Null);
+                    insert_segments(entry, &segments[1..], value)
+                }
+                PathSegment::Index(index) => {
+                    if !target.is_array() {
+                        if target.is_null() {
+                            *target = Value::Array(Vec::new());
+                        } else {
+                            return Err(UxcError::InvalidArguments(format!(
+                                "Argument path conflict at index [{}]",
+                                index
+                            ))
+                            .into());
+                        }
+                    }
+                    let array = target.as_array_mut().expect("array just initialized");
+                    while array.len() <= *index {
+                        array.push(Value::Null);
+                    }
+                    insert_segments(&mut array[*index], &segments[1..], value)
+                }
+            }
+        }
+
+        let segments = parse_segments(raw_key)?;
+        let root_key = match &segments[0] {
+            PathSegment::Key(key) => key.clone(),
+            PathSegment::Index(_) => {
+                return Err(UxcError::InvalidArguments(format!(
+                    "Invalid argument path '{}': root must be an object key",
+                    raw_key
+                ))
+                .into())
+            }
+        };
+
+        let entry = root.entry(root_key).or_insert(Value::Null);
+        insert_segments(entry, &segments[1..], value)
     }
 }
 
@@ -329,6 +467,43 @@ mod tests {
     fn test_parse_arguments_json_not_object() {
         let json = r#"["array", "not", "object"]"#;
         let result = ArgumentParser::parse_arguments(vec![], Some(json.to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_arguments_with_nested_object_paths() {
+        let args = vec![
+            "prompt=summarize this".to_string(),
+            "attachment.source.kind=file".to_string(),
+            "attachment.source.path=/tmp/a.pdf".to_string(),
+        ];
+        let result = ArgumentParser::parse_arguments(args, None).unwrap();
+
+        assert_eq!(result.get("prompt").unwrap(), "summarize this");
+        assert_eq!(result["attachment"]["source"]["kind"], "file");
+        assert_eq!(result["attachment"]["source"]["path"], "/tmp/a.pdf");
+    }
+
+    #[test]
+    fn test_parse_arguments_with_array_paths() {
+        let args = vec![
+            "attachments[0].source.kind=file".to_string(),
+            "attachments[0].source.path=/tmp/a.pdf".to_string(),
+            "attachments[1].source.kind=file".to_string(),
+            "attachments[1].source.path=/tmp/b.pdf".to_string(),
+        ];
+        let result = ArgumentParser::parse_arguments(args, None).unwrap();
+
+        assert_eq!(result["attachments"][0]["source"]["kind"], "file");
+        assert_eq!(result["attachments"][0]["source"]["path"], "/tmp/a.pdf");
+        assert_eq!(result["attachments"][1]["source"]["kind"], "file");
+        assert_eq!(result["attachments"][1]["source"]["path"], "/tmp/b.pdf");
+    }
+
+    #[test]
+    fn test_parse_arguments_rejects_invalid_root_array_path() {
+        let args = vec!["[0].path=/tmp/a.pdf".to_string()];
+        let result = ArgumentParser::parse_arguments(args, None);
         assert!(result.is_err());
     }
 

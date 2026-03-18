@@ -744,6 +744,30 @@ mod tests {
         assert_eq!(output["structuredContent"]["count"], 1);
     }
 
+    #[test]
+    fn convert_tool_result_preserves_local_artifact_paths() {
+        let result = types::ToolCallResult {
+            content: vec![],
+            isError: Some(false),
+            structuredContent: Some(json!({
+                "ok": true,
+                "artifacts": [
+                    {
+                        "kind": "file",
+                        "name": "report.csv",
+                        "path": "/tmp/webmcp-artifacts/report.csv"
+                    }
+                ]
+            })),
+        };
+
+        let output = convert_tool_result_to_value(&result);
+        assert_eq!(
+            output["structuredContent"]["artifacts"][0]["path"],
+            "/tmp/webmcp-artifacts/report.csv"
+        );
+    }
+
     fn initialize_response() -> &'static str {
         r#"{
   "jsonrpc": "2.0",
