@@ -264,6 +264,7 @@ fn local_file_path_prefers_multipart_when_operation_supports_json_and_multipart(
     let temp_dir = tempfile::tempdir().unwrap();
     let file_path = temp_dir.path().join("mixed.txt");
     fs::write(&file_path, "prefer multipart").unwrap();
+    let isolated_home = tempfile::tempdir().unwrap();
 
     let mut server = Server::new();
     let _schema = server
@@ -279,12 +280,17 @@ fn local_file_path_prefers_multipart_when_operation_supports_json_and_multipart(
             "content-type",
             Matcher::Regex(r"multipart/form-data; boundary=".to_string()),
         )
+        .match_body(Matcher::Regex(
+            r#"(?s)name="caption".*hello.*name="file"; filename="mixed\.txt".*prefer multipart"#
+                .to_string(),
+        ))
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(r#"{"ok":true}"#)
         .create();
 
     uxc()
+        .env("HOME", isolated_home.path())
         .arg(server.url())
         .arg("--no-cache")
         .arg("post:/upload")

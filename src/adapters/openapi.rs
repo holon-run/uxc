@@ -1437,7 +1437,7 @@ impl OpenAPIAdapter {
         if let Some(Value::Object(object)) = explicit_body {
             for field in &file_fields {
                 if let Some(Value::String(path)) = object.get(*field) {
-                    if Path::new(path).exists() {
+                    if Path::new(path).is_file() {
                         return true;
                     }
                 }
@@ -1448,7 +1448,7 @@ impl OpenAPIAdapter {
             remaining
                 .get(*field)
                 .and_then(|value| value.as_str())
-                .is_some_and(|path| Path::new(path).exists())
+                .is_some_and(|path| Path::new(path).is_file())
         })
     }
 
@@ -2096,7 +2096,10 @@ mod tests {
 
         match config {
             RequestBodyConfig::JsonOrMultipart(spec) => {
-                assert!(matches!(spec.fields.get("file"), Some(MultipartFieldKind::File)));
+                assert!(matches!(
+                    spec.fields.get("file"),
+                    Some(MultipartFieldKind::File)
+                ));
             }
             other => panic!("expected JsonOrMultipart, got {:?}", other),
         }
