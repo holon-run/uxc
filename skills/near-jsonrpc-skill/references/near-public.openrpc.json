@@ -1,0 +1,165 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "NEAR Public JSON-RPC",
+    "version": "1.0.0",
+    "description": "Curated OpenRPC schema for the NEAR read-only methods wrapped by near-jsonrpc-skill."
+  },
+  "methods": [
+    {
+      "name": "status",
+      "summary": "Get node and chain status.",
+      "params": [],
+      "result": {
+        "name": "status",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "query",
+      "summary": "Run a read-only state query with a JSON object request.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "request_type",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "finality",
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "name": "block_id",
+          "schema": {}
+        },
+        {
+          "name": "account_id",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "method_name",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "args_base64",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "prefix_base64",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "public_key",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "include_proof",
+          "schema": {
+            "type": "boolean"
+          }
+        }
+      ],
+      "result": {
+        "name": "query_result",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "block",
+      "summary": "Get block details by finality, height, or hash.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "finality",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "block_id",
+          "schema": {}
+        }
+      ],
+      "result": {
+        "name": "block",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "chunk",
+      "summary": "Get chunk details by chunk id.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "chunk_id",
+          "required": true,
+          "schema": {}
+        }
+      ],
+      "result": {
+        "name": "chunk",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "gas_price",
+      "summary": "Get gas price for the latest block or a specific block.",
+      "paramStructure": "by-position",
+      "params": [
+        {
+          "name": "block_id",
+          "schema": {}
+        }
+      ],
+      "result": {
+        "name": "gas_price",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "validators",
+      "summary": "Get validator information for the latest epoch or a specific epoch reference.",
+      "paramStructure": "by-position",
+      "params": [
+        {
+          "name": "epoch_reference",
+          "schema": {}
+        }
+      ],
+      "result": {
+        "name": "validators",
+        "schema": {
+          "type": "object"
+        }
+      }
+    }
+  ]
+}
