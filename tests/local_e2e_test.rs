@@ -1775,7 +1775,11 @@ fn test_mcp_stdio_subscribe_shares_daemon_session_with_tool_calls() {
     let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
 
     assert!(
-        wait_for_file_contains(&sink_path, r#""event_kind":"open""#, Duration::from_secs(10)),
+        wait_for_file_contains(
+            &sink_path,
+            r#""event_kind":"open""#,
+            Duration::from_secs(10)
+        ),
         "MCP subscribe sink did not record the open event before the shared-session tool call"
     );
     assert!(

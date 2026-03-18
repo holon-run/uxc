@@ -332,9 +332,7 @@ async fn mcp_event_stream(
         let scenario = state.scenario;
         async move {
             if matches!(scenario, Scenario::SessionScopedResource) {
-                let Some(session_id) = session_id.clone() else {
-                    return None;
-                };
+                let session_id = session_id.clone()?;
                 let value = {
                     let sessions = session_resources.lock().expect("session resource map");
                     let entry = sessions.get(&session_id)?;

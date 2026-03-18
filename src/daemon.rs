@@ -463,6 +463,7 @@ struct McpHttpSession {
     transport: adapters::mcp::McpRemoteTransport,
     notifications: Mutex<SessionNotificationFanout>,
     resource_subscriptions: Mutex<HashMap<String, usize>>,
+    resource_subscription_ops: Mutex<()>,
     lookup_key: String,
     last_used: Mutex<Instant>,
 }
@@ -723,6 +724,7 @@ impl McpHttpSession {
     }
 
     async fn ensure_resource_subscription(&self, uri: &str) -> Result<()> {
+        let _op_guard = self.resource_subscription_ops.lock().await;
         let mut subscriptions = self.resource_subscriptions.lock().await;
         if let Some(count) = subscriptions.get_mut(uri) {
             *count = count.saturating_add(1);
@@ -740,6 +742,7 @@ impl McpHttpSession {
     }
 
     async fn release_resource_subscription(&self, uri: &str) -> Result<()> {
+        let _op_guard = self.resource_subscription_ops.lock().await;
         let mut subscriptions = self.resource_subscriptions.lock().await;
         let Some(count) = subscriptions.get_mut(uri) else {
             return Ok(());
@@ -1509,13 +1512,18 @@ impl McpSessionManager {
         resolved: &adapters::mcp::ResolvedMcpHttpTransport,
         auth_profile: Option<Profile>,
     ) -> Result<(Arc<McpHttpSession>, bool)> {
-        {
+        let existing = {
             let map = self.http.lock().await;
-            if let Some(s) = map.get(key) {
-                *self.reuse_hits.lock().await += 1;
-                s.mark_used().await;
-                return Ok((s.clone(), true));
+            map.get(key).cloned()
+        };
+        if let Some(session) = existing {
+            {
+                let mut lookup = self.http_lookup.lock().await;
+                lookup.insert(lookup_key.to_string(), key.to_string());
             }
+            *self.reuse_hits.lock().await += 1;
+            session.mark_used().await;
+            return Ok((session, true));
         }
 
         let transport =
@@ -1525,6 +1533,7 @@ impl McpSessionManager {
             transport,
             notifications: Mutex::new(SessionNotificationFanout::default()),
             resource_subscriptions: Mutex::new(HashMap::new()),
+            resource_subscription_ops: Mutex::new(()),
             lookup_key: lookup_key.to_string(),
             last_used: Mutex::new(Instant::now()),
         });
@@ -4588,12 +4597,14 @@ async fn run_mcp_subscription_job(
         .await?;
     }
 
-    let run_result: Result<()> = loop {
+    let run_result: Result<()> = 'run: loop {
         tokio::select! {
             stop_requested = subscription_stop_requested(&mut stop_rx) => {
                 if stop_requested {
-                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "mcp_resource").await?;
-                    break Ok(());
+                    match close_subscription_as_stopped(&mut sink, &view, &mut seq, "mcp_resource").await {
+                        Ok(()) => break 'run Ok(()),
+                        Err(err) => break 'run Err(err),
+                    }
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
@@ -4605,7 +4616,7 @@ async fn run_mcp_subscription_job(
                 };
                 cursor = next_cursor;
                 for notification in notifications {
-                    append_subscription_event(
+                    if let Err(err) = append_subscription_event(
                         &mut sink,
                         &view,
                         &mut seq,
@@ -4613,7 +4624,9 @@ async fn run_mcp_subscription_job(
                         "data",
                         notification.params.clone(),
                         Some(json!({"method": notification.method})),
-                    ).await?;
+                    ).await {
+                        break 'run Err(err);
+                    }
                     if request.read_resource && should_read_mcp_resource_snapshot(&notification) {
                         let read_result = {
                             let mut guard = session.lock().await;
@@ -4621,7 +4634,7 @@ async fn run_mcp_subscription_job(
                                 .read_resource(resource_uri, &request.endpoint, Some(&cache))
                                 .await
                         };
-                        append_mcp_resource_read_result(
+                        if let Err(err) = append_mcp_resource_read_result(
                             &mut sink,
                             &view,
                             &mut seq,
@@ -4630,7 +4643,9 @@ async fn run_mcp_subscription_job(
                             "failed to read resource after update",
                             read_result,
                         )
-                        .await?;
+                        .await {
+                            break 'run Err(err);
+                        }
                     }
                 }
             }
@@ -4732,22 +4747,24 @@ async fn run_mcp_http_subscription_job(
         .await?;
     }
 
-    let run_result: Result<()> = loop {
+    let run_result: Result<()> = 'run: loop {
         tokio::select! {
             stop_requested = subscription_stop_requested(&mut stop_rx) => {
                 if stop_requested {
-                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "mcp_resource").await?;
-                    break Ok(());
+                    match close_subscription_as_stopped(&mut sink, &view, &mut seq, "mcp_resource").await {
+                        Ok(()) => break 'run Ok(()),
+                        Err(err) => break 'run Err(err),
+                    }
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 let (notifications, next_cursor, stream_error) = session.notifications_since(cursor).await;
                 cursor = next_cursor;
                 if let Some(err) = stream_error {
-                    break Err(anyhow!("MCP HTTP subscription stream failed: {}", err));
+                    break 'run Err(anyhow!("MCP HTTP subscription stream failed: {}", err));
                 }
                 for notification in notifications {
-                    append_subscription_event(
+                    if let Err(err) = append_subscription_event(
                         &mut sink,
                         &view,
                         &mut seq,
@@ -4755,10 +4772,12 @@ async fn run_mcp_http_subscription_job(
                         "data",
                         notification.params.clone(),
                         Some(json!({"method": notification.method})),
-                    ).await?;
+                    ).await {
+                        break 'run Err(err);
+                    }
                     if request.read_resource && should_read_mcp_resource_snapshot(&notification) {
                         let read_result = session.read_resource(resource_uri).await;
-                        append_mcp_resource_read_result(
+                        if let Err(err) = append_mcp_resource_read_result(
                             &mut sink,
                             &view,
                             &mut seq,
@@ -4767,7 +4786,9 @@ async fn run_mcp_http_subscription_job(
                             "failed to read resource after update",
                             read_result,
                         )
-                        .await?;
+                        .await {
+                            break 'run Err(err);
+                        }
                     }
                 }
             }
