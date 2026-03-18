@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nodit Web3 Data API"
+  short_description: "Operate Nodit's multichain entity, account, and token reads via UXC + curated OpenAPI schema"
+  default_prompt: "Use $nodit-openapi-skill to discover and execute Nodit Web3 Data API read-only operations through UXC with X-API-KEY auth and overlap-aware guardrails."
