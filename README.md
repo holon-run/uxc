@@ -171,6 +171,14 @@ Use only these endpoint forms:
 - `uxc <host> <operation_id> -h`
 - `uxc <host> <operation_id> key=value` or `uxc <host> <operation_id> '{...}'`
 
+For nested object or array inputs, key-value mode also supports dotted and indexed paths:
+
+```bash
+uxc <host> <operation_id> \
+  prompt="summarize this file" \
+  attachmentPaths[0]=/tmp/spec.pdf
+```
+
 ## Protocol Examples (One Each)
 
 Operation ID conventions:
