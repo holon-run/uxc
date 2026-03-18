@@ -487,17 +487,13 @@ mod tests {
     #[test]
     fn test_parse_arguments_with_array_paths() {
         let args = vec![
-            "attachments[0].source.kind=file".to_string(),
-            "attachments[0].source.path=/tmp/a.pdf".to_string(),
-            "attachments[1].source.kind=file".to_string(),
-            "attachments[1].source.path=/tmp/b.pdf".to_string(),
+            "attachmentPaths[0]=/tmp/a.pdf".to_string(),
+            "attachmentPaths[1]=/tmp/b.pdf".to_string(),
         ];
         let result = ArgumentParser::parse_arguments(args, None).unwrap();
 
-        assert_eq!(result["attachments"][0]["source"]["kind"], "file");
-        assert_eq!(result["attachments"][0]["source"]["path"], "/tmp/a.pdf");
-        assert_eq!(result["attachments"][1]["source"]["kind"], "file");
-        assert_eq!(result["attachments"][1]["source"]["path"], "/tmp/b.pdf");
+        assert_eq!(result["attachmentPaths"][0], "/tmp/a.pdf");
+        assert_eq!(result["attachmentPaths"][1], "/tmp/b.pdf");
     }
 
     #[test]

@@ -176,8 +176,7 @@ For nested object or array inputs, key-value mode also supports dotted and index
 ```bash
 uxc <host> <operation_id> \
   prompt="summarize this file" \
-  attachments[0].source.kind=file \
-  attachments[0].source.path=/tmp/spec.pdf
+  attachmentPaths[0]=/tmp/spec.pdf
 ```
 
 ## Protocol Examples (One Each)
