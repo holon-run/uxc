@@ -245,6 +245,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
+            | Scenario::SessionScopedResource
             | Scenario::DynamicToolset => Ok(Json(json!({"status": "ok"})).into_response()),
             Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
             Scenario::Malformed => {
@@ -272,6 +273,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
+            | Scenario::SessionScopedResource
             | Scenario::DynamicToolset => {
                 let users = vec![
                     json!({"id": 1, "name": "Alice", "email": "alice@example.com"}),
@@ -305,6 +307,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
+            | Scenario::SessionScopedResource
             | Scenario::DynamicToolset => {
                 let name = payload
                     .get("name")
@@ -346,6 +349,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
+            | Scenario::SessionScopedResource
             | Scenario::DynamicToolset => {
                 if id == 1 {
                     Ok(
@@ -383,6 +387,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
+            | Scenario::SessionScopedResource
             | Scenario::DynamicToolset => {
                 let body = Body::from_stream(stream::iter(vec![
                     Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
@@ -430,6 +435,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
+            | Scenario::SessionScopedResource
             | Scenario::DynamicToolset => {
                 let response = match query.cursor.as_deref() {
                     None => json!({
@@ -477,6 +483,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ToolCallTimeout
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
+            | Scenario::SessionScopedResource
             | Scenario::DynamicToolset => {
                 let response = match query.offset {
                     None | Some(0) => json!({

@@ -68,6 +68,9 @@ pub enum ProbeAuthFailureCode {
 pub struct McpHttpTransport {
     /// HTTP client
     client: Client,
+    /// Dedicated client for the long-lived SSE event stream so it does not
+    /// contend with regular JSON-RPC POST requests on the same session.
+    event_stream_client: Client,
     /// Server URL
     server_url: String,
     /// Request ID counter
@@ -159,9 +162,14 @@ impl McpHttpTransport {
 
         let client =
             build_resilient_http_client(std::time::Duration::from_secs(30), "MCP HTTP transport")?;
+        let event_stream_client = build_resilient_http_client(
+            std::time::Duration::from_secs(LEGACY_SSE_STREAM_TIMEOUT_SECS),
+            "MCP HTTP event stream",
+        )?;
 
         Ok(Self {
             client,
+            event_stream_client,
             server_url: url,
             next_id: Arc::new(Mutex::new(1i64)),
             session_id: Arc::new(Mutex::new(None)),
@@ -1012,8 +1020,6 @@ impl McpHttpTransport {
     }
 
     pub async fn subscribe_resource(&self, uri: &str) -> Result<()> {
-        self.ensure_event_stream().await?;
-
         let params = serde_json::json!({
             "uri": uri
         });
@@ -1151,7 +1157,7 @@ impl McpHttpTransport {
         let resolved = Self::resolve_request_auth("GET", &self.server_url, profile.as_ref())?;
 
         let mut req = self
-            .client
+            .event_stream_client
             .get(&resolved.url)
             .header("Accept", "text/event-stream");
         if let Some(session_id) = session_id {
@@ -1786,6 +1792,13 @@ impl McpRemoteTransport {
         match self {
             Self::Streamable(transport) => transport.subscribe_resource(uri).await,
             Self::Legacy(transport) => transport.subscribe_resource(uri).await,
+        }
+    }
+
+    pub async fn ensure_notification_stream(&self) -> Result<()> {
+        match self {
+            Self::Streamable(transport) => transport.ensure_event_stream().await,
+            Self::Legacy(_) => Ok(()),
         }
     }
 

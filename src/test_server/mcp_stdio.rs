@@ -188,6 +188,31 @@ pub fn run(scenario: Scenario) -> Result<()> {
                     )?;
                     continue;
                 }
+                if matches!(scenario, Scenario::SessionScopedResource) {
+                    respond(
+                        &mut out,
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "tools": [
+                                    {
+                                        "name": "set_resource",
+                                        "description": "Set the current resource value for this MCP session",
+                                        "inputSchema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "value": {"type": "integer"}
+                                            },
+                                            "required": ["value"]
+                                        }
+                                    }
+                                ]
+                            }
+                        }),
+                    )?;
+                    continue;
+                }
                 respond(
                     &mut out,
                     json!({
@@ -265,6 +290,63 @@ pub fn run(scenario: Scenario) -> Result<()> {
                                         .and_then(Value::as_object)
                                         .map(|obj| obj.len())
                                         .unwrap_or_default()
+                                }
+                            }
+                        }),
+                    )?;
+                    continue;
+                }
+
+                if matches!(scenario, Scenario::SessionScopedResource) {
+                    let tool_name = req
+                        .get("params")
+                        .and_then(|v| v.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if tool_name != "set_resource" {
+                        respond(
+                            &mut out,
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {"code": -32601, "message": "tool not found"}
+                            }),
+                        )?;
+                        continue;
+                    }
+
+                    resource_value = req
+                        .get("params")
+                        .and_then(|v| v.get("arguments"))
+                        .and_then(|v| v.get("value"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+
+                    if resource_subscribed {
+                        respond(
+                            &mut out,
+                            json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/resources/updated",
+                                "params": {
+                                    "uri": "test://resource",
+                                    "value": resource_value
+                                }
+                            }),
+                        )?;
+                    }
+
+                    respond(
+                        &mut out,
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [
+                                    {"type": "text", "text": format!("resource={}", resource_value)}
+                                ],
+                                "structuredContent": {
+                                    "value": resource_value
                                 }
                             }
                         }),
@@ -364,6 +446,17 @@ pub fn run(scenario: Scenario) -> Result<()> {
             }
             "resources/subscribe" => {
                 resource_subscribed = true;
+                if matches!(scenario, Scenario::SessionScopedResource) {
+                    respond(
+                        &mut out,
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {}
+                        }),
+                    )?;
+                    continue;
+                }
                 resource_value = 1;
                 respond(
                     &mut out,
