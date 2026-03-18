@@ -49,6 +49,8 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Wrapper for NEAR JSON-RPC reads via UXC + provider-aware public RPC default and deprecated-endpoint guardrails.
 - `skills/hive-mcp-skill`
   - Wrapper for Hive Intelligence official remote MCP workflows via UXC as a broad crypto discovery and convenience layer.
+- `skills/nodit-openapi-skill`
+  - Wrapper for Nodit Web3 Data API entity, account, and token reads via UXC + curated OpenAPI schema and API-key auth.
 - `skills/alchemy-openapi-skill`
   - Wrapper for Alchemy Prices API read workflows via UXC + curated OpenAPI schema and path-templated API-key auth.
 - `skills/chainbase-openapi-skill`
@@ -93,7 +95,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/coingecko-openapi-skill`, `skills/defillama-openapi-skill`, `skills/blockscout-openapi-skill`, `skills/chainbase-openapi-skill`, `skills/moralis-openapi-skill`, `skills/alchemy-openapi-skill`, `skills/coinapi-openapi-skill`, `skills/dexscreener-openapi-skill`, `skills/helius-openapi-skill`, `skills/blocknative-openapi-skill`, `skills/near-jsonrpc-skill`, `skills/hive-mcp-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/coingecko-openapi-skill`, `skills/defillama-openapi-skill`, `skills/blockscout-openapi-skill`, `skills/chainbase-openapi-skill`, `skills/moralis-openapi-skill`, `skills/alchemy-openapi-skill`, `skills/coinapi-openapi-skill`, `skills/dexscreener-openapi-skill`, `skills/helius-openapi-skill`, `skills/blocknative-openapi-skill`, `skills/near-jsonrpc-skill`, `skills/hive-mcp-skill`, `skills/nodit-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -222,6 +224,12 @@ bash skills/near-jsonrpc-skill/scripts/validate.sh
 
 ```bash
 bash skills/hive-mcp-skill/scripts/validate.sh
+```
+
+- Validate Nodit wrapper docs when touched:
+
+```bash
+bash skills/nodit-openapi-skill/scripts/validate.sh
 ```
 
 - Validate Alchemy wrapper docs when touched:
