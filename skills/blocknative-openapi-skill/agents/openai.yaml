@@ -1,0 +1,4 @@
+interface:
+  display_name: "Blocknative Gas Platform"
+  short_description: "Operate Blocknative gas price and fee intelligence reads via UXC + curated OpenAPI schema"
+  default_prompt: "Use $blocknative-openapi-skill to discover and execute Blocknative gas intelligence read-only operations through UXC with Authorization header auth and polling guardrails."
