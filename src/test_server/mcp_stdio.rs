@@ -19,6 +19,7 @@ pub fn run(scenario: Scenario) -> Result<()> {
     let mut dynamic_tools_enabled = false;
     let mut resource_subscribed = false;
     let mut resource_value: u64 = 0;
+    let mut resource_read_failed_once = false;
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -402,19 +403,34 @@ pub fn run(scenario: Scenario) -> Result<()> {
                     .and_then(|v| v.get("uri"))
                     .and_then(Value::as_str)
                     .unwrap_or("test://resource");
+                if matches!(scenario, Scenario::ResourceReadFailOnce) && !resource_read_failed_once
+                {
+                    resource_read_failed_once = true;
+                    respond(
+                        &mut out,
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {"code": -32003, "message": "resource read failed once"}
+                        }),
+                    )?;
+                    continue;
+                }
                 respond(
                     &mut out,
                     json!({
                         "jsonrpc": "2.0",
                         "id": id,
                         "result": {
-                            "uri": uri,
-                            "mimeType": "application/json",
-                            "text": json!({
+                            "contents": [{
                                 "uri": uri,
-                                "value": resource_value
-                            })
-                            .to_string()
+                                "mimeType": "application/json",
+                                "text": json!({
+                                    "uri": uri,
+                                    "value": resource_value
+                                })
+                                .to_string()
+                            }]
                         }
                     }),
                 )?;

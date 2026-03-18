@@ -2,6 +2,7 @@
 
 #![allow(non_snake_case)]
 
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -206,6 +207,25 @@ pub struct ResourceContents {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blob: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadResourceResponse {
+    pub contents: Vec<ResourceContents>,
+}
+
+pub fn parse_read_resource_result(result: JsonValue) -> Result<ResourceContents> {
+    if let Ok(contents) = serde_json::from_value::<ResourceContents>(result.clone()) {
+        return Ok(contents);
+    }
+
+    let response: ReadResourceResponse =
+        serde_json::from_value(result).context("Failed to parse resources/read result")?;
+    response
+        .contents
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("resources/read response contained no contents"))
 }
 
 /// Prompt definition

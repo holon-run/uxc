@@ -334,6 +334,7 @@ async fn execute_query(
         | Scenario::ToolsListFailAfterFirst
         | Scenario::ToolCallTimeout
         | Scenario::StructuredContent
+        | Scenario::ResourceReadFailOnce
         | Scenario::DynamicToolset => {
             // Introspection query
             if query.contains("__schema") || query.contains("__type(") {

@@ -277,6 +277,35 @@ async fn append_mcp_resource_snapshot(
     .await
 }
 
+async fn append_mcp_resource_read_result(
+    sink: &mut tokio::fs::File,
+    view: &Arc<Mutex<SubscriptionJobView>>,
+    seq: &mut u64,
+    resource_uri: &str,
+    reason: &str,
+    error_context: &str,
+    read_result: Result<ResourceContents>,
+) -> Result<()> {
+    match read_result {
+        Ok(contents) => append_mcp_resource_snapshot(sink, view, seq, reason, contents).await,
+        Err(err) => {
+            let msg = format!("{}: {}", error_context, err);
+            append_subscription_event(
+                sink,
+                view,
+                seq,
+                "mcp_resource",
+                "error",
+                None,
+                Some(json!({ "message": msg, "resource_uri": resource_uri })),
+            )
+            .await?;
+            update_subscription_view(view, None, Some(msg), false).await;
+            Ok(())
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
     pub running: bool,
@@ -4132,8 +4161,16 @@ async fn run_mcp_subscription_job(
     )
     .await?;
     if request.read_resource {
-        let contents = client.read_resource(resource_uri).await?;
-        append_mcp_resource_snapshot(&mut sink, &view, &mut seq, "initial_read", contents).await?;
+        append_mcp_resource_read_result(
+            &mut sink,
+            &view,
+            &mut seq,
+            resource_uri,
+            "initial_read",
+            "failed to read initial resource snapshot",
+            client.read_resource(resource_uri).await,
+        )
+        .await?;
     }
 
     loop {
@@ -4170,32 +4207,16 @@ async fn run_mcp_subscription_job(
                         Some(json!({"method": notification.method})),
                     ).await?;
                     if request.read_resource && should_read_mcp_resource_snapshot(&notification) {
-                        match client.read_resource(resource_uri).await {
-                            Ok(contents) => {
-                                append_mcp_resource_snapshot(
-                                    &mut sink,
-                                    &view,
-                                    &mut seq,
-                                    "resource_updated",
-                                    contents,
-                                )
-                                .await?;
-                            }
-                            Err(err) => {
-                                let msg = format!("failed to read resource after update: {}", err);
-                                append_subscription_event(
-                                    &mut sink,
-                                    &view,
-                                    &mut seq,
-                                    "mcp_resource",
-                                    "error",
-                                    None,
-                                    Some(json!({ "message": msg, "resource_uri": resource_uri })),
-                                )
-                                .await?;
-                                update_subscription_view(&view, None, Some(msg), false).await;
-                            }
-                        }
+                        append_mcp_resource_read_result(
+                            &mut sink,
+                            &view,
+                            &mut seq,
+                            resource_uri,
+                            "resource_updated",
+                            "failed to read resource after update",
+                            client.read_resource(resource_uri).await,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -4246,8 +4267,16 @@ async fn run_mcp_http_subscription_job(
     )
     .await?;
     if request.read_resource {
-        let contents = transport.read_resource(resource_uri).await?;
-        append_mcp_resource_snapshot(&mut sink, &view, &mut seq, "initial_read", contents).await?;
+        append_mcp_resource_read_result(
+            &mut sink,
+            &view,
+            &mut seq,
+            resource_uri,
+            "initial_read",
+            "failed to read initial resource snapshot",
+            transport.read_resource(resource_uri).await,
+        )
+        .await?;
     }
 
     loop {
@@ -4288,32 +4317,16 @@ async fn run_mcp_http_subscription_job(
                         Some(json!({"method": notification.method})),
                     ).await?;
                     if request.read_resource && should_read_mcp_resource_snapshot(&notification) {
-                        match transport.read_resource(resource_uri).await {
-                            Ok(contents) => {
-                                append_mcp_resource_snapshot(
-                                    &mut sink,
-                                    &view,
-                                    &mut seq,
-                                    "resource_updated",
-                                    contents,
-                                )
-                                .await?;
-                            }
-                            Err(err) => {
-                                let msg = format!("failed to read resource after update: {}", err);
-                                append_subscription_event(
-                                    &mut sink,
-                                    &view,
-                                    &mut seq,
-                                    "mcp_resource",
-                                    "error",
-                                    None,
-                                    Some(json!({ "message": msg, "resource_uri": resource_uri })),
-                                )
-                                .await?;
-                                update_subscription_view(&view, None, Some(msg), false).await;
-                            }
-                        }
+                        append_mcp_resource_read_result(
+                            &mut sink,
+                            &view,
+                            &mut seq,
+                            resource_uri,
+                            "resource_updated",
+                            "failed to read resource after update",
+                            transport.read_resource(resource_uri).await,
+                        )
+                        .await?;
                     }
                 }
             }
