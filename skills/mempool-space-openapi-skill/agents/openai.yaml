@@ -1,0 +1,4 @@
+interface:
+  display_name: "mempool.space Public API"
+  short_description: "Operate mempool.space Bitcoin fee, mempool, address, transaction, and Lightning explorer reads via UXC + curated OpenAPI schema"
+  default_prompt: "Use $mempool-space-openapi-skill to discover and execute mempool.space public Bitcoin and Lightning read-only operations through UXC with public no-auth access and explorer-focused guardrails."
