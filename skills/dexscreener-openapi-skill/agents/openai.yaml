@@ -1,0 +1,4 @@
+interface:
+  display_name: "DexScreener API"
+  short_description: "Operate DexScreener public market and DEX pair reads via UXC + curated OpenAPI schema"
+  default_prompt: "Use $dexscreener-openapi-skill to discover and execute DexScreener public read-only market data operations through UXC with a curated OpenAPI schema and no-auth setup."

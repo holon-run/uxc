@@ -1,0 +1,354 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "DexScreener Public API",
+    "version": "1.0.0",
+    "description": "Curated public DexScreener market data operations for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://api.dexscreener.com"
+    }
+  ],
+  "paths": {
+    "/token-profiles/latest/v1": {
+      "get": {
+        "operationId": "getTokenProfilesLatestV1",
+        "summary": "Get latest token profiles",
+        "responses": {
+          "200": {
+            "description": "Latest token profiles",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TokenProfile"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/token-boosts/latest/v1": {
+      "get": {
+        "operationId": "getTokenBoostsLatestV1",
+        "summary": "Get latest token boosts",
+        "responses": {
+          "200": {
+            "description": "Latest token boosts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TokenBoost"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/token-boosts/top/v1": {
+      "get": {
+        "operationId": "getTokenBoostsTopV1",
+        "summary": "Get top token boosts",
+        "responses": {
+          "200": {
+            "description": "Top token boosts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TokenBoost"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/latest/dex/search": {
+      "get": {
+        "operationId": "getLatestDexSearch",
+        "summary": "Search pairs by query",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Free-text token, symbol, or pair query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pair search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/latest/dex/pairs/{chainId}/{pairId}": {
+      "get": {
+        "operationId": "getLatestDexPairsByChainAndPair",
+        "summary": "Get pair market data by chain and pair address",
+        "parameters": [
+          {
+            "name": "chainId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pairId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pair lookup result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tokens/v1/{chainId}/{tokenAddresses}": {
+      "get": {
+        "operationId": "getTokensV1ByChainAndAddresses",
+        "summary": "Get token market rows by chain and token addresses",
+        "parameters": [
+          {
+            "name": "chainId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tokenAddresses",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "One token address or a comma-separated list of token addresses"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token market rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Pair"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Link": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "TokenRef": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          }
+        }
+      },
+      "TokenProfile": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "chainId": {
+            "type": "string"
+          },
+          "tokenAddress": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "icon": {
+            "type": "string"
+          },
+          "header": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Link"
+            }
+          }
+        }
+      },
+      "TokenBoost": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "chainId": {
+            "type": "string"
+          },
+          "tokenAddress": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "icon": {
+            "type": "string"
+          },
+          "header": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "amount": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "totalAmount": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Link"
+            }
+          }
+        }
+      },
+      "Pair": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "chainId": {
+            "type": "string"
+          },
+          "dexId": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "pairAddress": {
+            "type": "string"
+          },
+          "baseToken": {
+            "$ref": "#/components/schemas/TokenRef"
+          },
+          "quoteToken": {
+            "$ref": "#/components/schemas/TokenRef"
+          },
+          "priceNative": {
+            "type": "string"
+          },
+          "priceUsd": {
+            "type": "string"
+          },
+          "liquidity": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "fdv": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "marketCap": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "boosts": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "PairListResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "schemaVersion": {
+            "type": "string"
+          },
+          "pairs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Pair"
+            }
+          }
+        }
+      }
+    }
+  }
+}
