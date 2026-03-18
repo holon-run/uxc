@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hive Intelligence MCP"
+  short_description: "Use Hive's official remote crypto MCP as a broad discovery and convenience layer via UXC"
+  default_prompt: "Use $hive-mcp-skill to discover and execute Hive Intelligence MCP operations through UXC as a broad crypto convenience layer, inspecting endpoint schemas before invocation."
