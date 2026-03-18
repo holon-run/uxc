@@ -544,7 +544,11 @@ mod tests {
 
     #[test]
     fn test_parse_arguments_rejects_empty_path_segments() {
-        for raw_key in [".attachmentPaths[0]", "attachmentPaths.", "attachmentPaths..name"] {
+        for raw_key in [
+            ".attachmentPaths[0]",
+            "attachmentPaths.",
+            "attachmentPaths..name",
+        ] {
             let result =
                 ArgumentParser::parse_arguments(vec![format!("{raw_key}=/tmp/a.pdf")], None);
             assert!(result.is_err(), "expected invalid path for {raw_key}");
