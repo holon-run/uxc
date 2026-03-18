@@ -1,0 +1,4 @@
+interface:
+  display_name: "Helius Wallet API"
+  short_description: "Operate Helius Solana wallet intelligence reads via UXC + curated OpenAPI schema"
+  default_prompt: "Use $helius-openapi-skill to discover and execute Helius Wallet API read-only operations through UXC with X-Api-Key auth and beta-surface guardrails."

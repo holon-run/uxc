@@ -1,0 +1,422 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Helius Wallet API",
+    "version": "1.0.0",
+    "description": "Curated Helius Wallet API beta operations for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://api.helius.xyz"
+    }
+  ],
+  "paths": {
+    "/v1/wallet/{wallet}/identity": {
+      "get": {
+        "operationId": "getWalletIdentity",
+        "summary": "Get wallet identity",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Wallet identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Identity"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/batch-identity": {
+      "post": {
+        "operationId": "postWalletBatchIdentity",
+        "summary": "Batch wallet identity lookup",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "addresses"
+                ],
+                "properties": {
+                  "addresses": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Wallet identities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Identity"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/{wallet}/balances": {
+      "get": {
+        "operationId": "getWalletBalances",
+        "summary": "Get wallet balances",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "showZeroBalance",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "showNative",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "showNfts",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Wallet balances",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BalancesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/{wallet}/history": {
+      "get": {
+        "operationId": "getWalletHistory",
+        "summary": "Get wallet history",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tokenAccounts",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Wallet history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedDataResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/{wallet}/transfers": {
+      "get": {
+        "operationId": "getWalletTransfers",
+        "summary": "Get wallet transfers",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Wallet transfers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedDataResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallet/{wallet}/funded-by": {
+      "get": {
+        "operationId": "getWalletFundedBy",
+        "summary": "Get wallet funding source",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Wallet funding source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FundedBy"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "XApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Api-Key"
+      }
+    },
+    "schemas": {
+      "Identity": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "BalanceRow": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "mint": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "balance": {
+            "type": [
+              "number",
+              "string",
+              "null"
+            ]
+          },
+          "usdValue": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "pricePerToken": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        }
+      },
+      "BalancesResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "wallet": {
+            "type": "string"
+          },
+          "totalUsdValue": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "page": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "balances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BalanceRow"
+            }
+          }
+        }
+      },
+      "PaginatedDataResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "pagination": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "FundedBy": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "funder": {
+            "type": "string"
+          },
+          "funderName": {
+            "type": "string"
+          },
+          "funderType": {
+            "type": "string"
+          },
+          "amount": {
+            "type": [
+              "number",
+              "string",
+              "null"
+            ]
+          },
+          "timestamp": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "signature": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "XApiKey": []
+    }
+  ]
+}
