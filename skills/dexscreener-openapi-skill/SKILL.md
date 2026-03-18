@@ -76,6 +76,7 @@ DexScreener public reads in this skill do not require authentication.
 - Treat this v1 skill as read-only. Do not imply order entry, swaps, or wallet operations.
 - Keep `q` focused to a token, pair, chain, or symbol rather than broad crawler-style searches.
 - For `tokenAddresses`, start with a single address or a short comma-separated list before scaling up.
+- DexScreener enforces endpoint-specific rate limits. Profile and boost endpoints are typically lower-throughput than pair and token lookup endpoints, so cache aggressively when polling discovery feeds.
 - DexScreener data is market-observation oriented and may be noisier on long-tail tokens than curated exchange-only feeds.
 - `dexscreener-openapi-cli <operation> ...` is equivalent to `uxc https://api.dexscreener.com --schema-url <dexscreener_openapi_schema> <operation> ...`.
 

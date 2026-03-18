@@ -66,7 +66,10 @@ uxc auth binding match https://api.helius.xyz
 1. Use the fixed link command by default:
    - `command -v helius-openapi-cli`
    - If missing, create it:
-     `uxc link helius-openapi-cli https://api.helius.xyz --schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/helius-openapi-skill/references/helius-wallet.openapi.json`
+     ```bash
+     uxc link helius-openapi-cli https://api.helius.xyz \
+       --schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/helius-openapi-skill/references/helius-wallet.openapi.json
+     ```
    - `helius-openapi-cli -h`
 
 2. Inspect operation schema first:
@@ -83,6 +86,7 @@ uxc auth binding match https://api.helius.xyz
    - `helius-openapi-cli post:/v1/wallet/batch-identity addresses:='["HXsKP7wrBWaQ8T2Vtjry3Nj3oUgwYcqq9vrHDM12G664"]'`
    - `helius-openapi-cli get:/v1/wallet/{wallet}/history wallet=HXsKP7wrBWaQ8T2Vtjry3Nj3oUgwYcqq9vrHDM12G664 limit=20`
    - `helius-openapi-cli get:/v1/wallet/{wallet}/transfers wallet=HXsKP7wrBWaQ8T2Vtjry3Nj3oUgwYcqq9vrHDM12G664 limit=20`
+   - For `addresses:='[...]'`, keep shell quoting in mind. If your shell mangles that form, pass the JSON array as a bare positional payload instead.
 
 ## Operation Groups
 

@@ -35,6 +35,7 @@ rg -q 'uxc link nodit-openapi-cli https://web3.nodit.io --schema-url ' "${SKILL_
 rg -F -q 'nodit-openapi-cli post:/v1/multichain/lookupEntities -h' "${SKILL_FILE}" || fail 'missing operation-level help example'
 rg -q -- '--api-key-header X-API-KEY' "${SKILL_FILE}" || fail 'missing api key setup'
 rg -q 'overlaps with `Chainbase`, `Alchemy`, and `Moralis`' "${SKILL_FILE}" || fail 'missing overlap guardrail'
+rg -q 'HTTP 429 TOO_MANY_REQUESTS' "${SKILL_FILE}" "${USAGE_FILE}" || fail 'missing rate-limit guardrail'
 
 if rg -q -- "--args\\s+'\\{" "${SKILL_FILE}" "${USAGE_FILE}"; then
   fail 'found banned legacy JSON argument pattern'

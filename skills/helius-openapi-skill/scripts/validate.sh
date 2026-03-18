@@ -32,7 +32,8 @@ rg -q '^name:\s*helius-openapi-skill\s*$' "${SKILL_FILE}" || fail 'invalid skill
 rg -q '^description:\s*.+' "${SKILL_FILE}" || fail 'missing description'
 
 rg -q 'command -v helius-openapi-cli' "${SKILL_FILE}" || fail 'missing link-first command check'
-rg -q 'uxc link helius-openapi-cli https://api.helius.xyz --schema-url ' "${SKILL_FILE}" || fail 'missing fixed link create command with schema-url'
+rg -q 'uxc link helius-openapi-cli https://api.helius.xyz' "${SKILL_FILE}" || fail 'missing fixed link create command'
+rg -q -- '--schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/helius-openapi-skill/references/helius-wallet.openapi.json' "${SKILL_FILE}" || fail 'missing schema-url guidance'
 rg -F -q 'helius-openapi-cli post:/v1/wallet/batch-identity -h' "${SKILL_FILE}" || fail 'missing operation-level help example'
 rg -q -- '--api-key-header X-Api-Key' "${SKILL_FILE}" || fail 'missing api key setup'
 rg -q 'uxc auth binding match https://api.helius.xyz' "${SKILL_FILE}" || fail 'missing binding match check'

@@ -100,7 +100,7 @@ uxc auth binding match https://api.blocknative.com
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Treat this v1 skill as read-only. Do not imply transaction sending or execution support.
 - `blockprices` can be polled without auth on some plans, but `basefee-estimates` and `distribution` require a valid key. Standardize on auth so mixed workflows do not fail mid-run.
-- These endpoints update at most once per second on paid plans and more slowly on free plans; avoid tight polling loops that only return stale data.
+- These endpoints update at most once per second on paid plans and more slowly on free plans. For automation, start around one poll every 5 to 10 seconds and only tighten that interval when you specifically need fresher paid-plan data.
 - `distribution` is Ethereum-mainnet focused in the current docs. Do not assume multi-chain coverage there just because `blockprices` supports many chains.
 - Keep `confidenceLevels` narrow and explicit when you do not need the full default ladder.
 - `blocknative-openapi-cli <operation> ...` is equivalent to `uxc https://api.blocknative.com --schema-url <blocknative_openapi_schema> <operation> ...`.

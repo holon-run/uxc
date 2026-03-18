@@ -13,6 +13,7 @@ Reuse the `uxc` skill for shared execution, auth, and error-handling guidance.
 
 - `uxc` is installed and available in `PATH`.
 - Network access to `https://web3.nodit.io`.
+- Network access to `https://raw.githubusercontent.com` when using the hosted schema URL directly.
 - Access to the curated OpenAPI schema URL:
   - `https://raw.githubusercontent.com/holon-run/uxc/main/skills/nodit-openapi-skill/references/nodit-web3.openapi.json`
 - A Nodit API key.
@@ -78,6 +79,8 @@ uxc auth binding match https://web3.nodit.io
    - `nodit-openapi-cli post:/v1/{chain}/{network}/native/getNativeBalanceByAccount chain=ethereum network=mainnet accountAddress=0xd8da6bf26964af9d7eed9e03e53415d37aa96045`
    - `nodit-openapi-cli post:/v1/{chain}/{network}/token/getTokenContractMetadataByContracts chain=ethereum network=mainnet contractAddresses:='[\"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\"]'`
 
+If `lookupEntities` returns `HTTP 429 TOO_MANY_REQUESTS`, treat it as a plan/tier rate-limit signal rather than an auth failure. Back off and continue with chain-specific reads when you already know the target network.
+
 4. Execute with key/value parameters:
    - `nodit-openapi-cli post:/v1/{chain}/{network}/token/getTokenPricesByContracts chain=ethereum network=mainnet contractAddresses:='[\"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48\"]'`
    - `nodit-openapi-cli post:/v1/{chain}/{network}/blockchain/getTransactionsByAccount chain=ethereum network=mainnet accountAddress=0xd8da6bf26964af9d7eed9e03e53415d37aa96045 limit=20`
@@ -101,6 +104,8 @@ uxc auth binding match https://web3.nodit.io
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Treat this v1 skill as read-only.
 - Nodit overlaps with `Chainbase`, `Alchemy`, and `Moralis` in some account and token workflows. Prefer Nodit when its multi-chain ergonomics or endpoint shape is a better fit for the task, not by default for every wallet query.
+- A concrete good fit is `lookupEntities`, where Nodit can quickly normalize an input string before you decide which chain-specific follow-up read to call.
+- `lookupEntities` may hit tight plan limits before other reads do. If you get `HTTP 429 TOO_MANY_REQUESTS`, back off, avoid hot-loop retries, and skip straight to chain-specific reads when the chain is already known.
 - Keep `contractAddresses` lists short in v1 and stay well under the documented per-call maximums.
 - For long transaction histories, start with small `limit` values and paginate deliberately.
 - `nodit-openapi-cli <operation> ...` is equivalent to `uxc https://web3.nodit.io --schema-url <nodit_openapi_schema> <operation> ...`.
