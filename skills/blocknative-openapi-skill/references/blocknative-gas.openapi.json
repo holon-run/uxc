@@ -1,0 +1,322 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Blocknative Gas Platform",
+    "version": "1.0.0",
+    "description": "Curated Blocknative gas intelligence operations for UXC."
+  },
+  "servers": [
+    {
+      "url": "https://api.blocknative.com"
+    }
+  ],
+  "paths": {
+    "/chains": {
+      "get": {
+        "operationId": "getChains",
+        "summary": "List supported chains",
+        "responses": {
+          "200": {
+            "description": "Supported chains",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Chain"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gasprices/blockprices": {
+      "get": {
+        "operationId": "getGasPriceBlockPrices",
+        "summary": "Get gas price confidence estimates",
+        "parameters": [
+          {
+            "name": "chainid",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "system",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "confidenceLevels",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated confidence levels such as 70,90,99"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Gas price block estimates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlockPricesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gasprices/basefee-estimates": {
+      "get": {
+        "operationId": "getBaseFeeEstimates",
+        "summary": "Get base fee and blob fee estimates",
+        "responses": {
+          "200": {
+            "description": "Base fee estimates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BaseFeeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gasprices/distribution": {
+      "get": {
+        "operationId": "getGasDistribution",
+        "summary": "Get pending gas distribution",
+        "parameters": [
+          {
+            "name": "chainid",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Gas distribution",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DistributionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AuthorizationHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization"
+      }
+    },
+    "schemas": {
+      "Chain": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "arch": {
+            "type": "string"
+          },
+          "chainId": {
+            "type": "integer"
+          },
+          "label": {
+            "type": "string"
+          },
+          "system": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "EstimatedPrice": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "confidence": {
+            "type": "number"
+          },
+          "price": {
+            "type": "number"
+          },
+          "maxPriorityFeePerGas": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "maxFeePerGas": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        }
+      },
+      "BlockPrice": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "blockNumber": {
+            "type": "integer"
+          },
+          "estimatedTransactionCount": {
+            "type": "integer"
+          },
+          "baseFeePerGas": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "blobBaseFeePerGas": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "estimatedPrices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EstimatedPrice"
+            }
+          }
+        }
+      },
+      "BlockPricesResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "system": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "maxPrice": {
+            "type": "number"
+          },
+          "currentBlockNumber": {
+            "type": "integer"
+          },
+          "msSinceLastBlock": {
+            "type": "integer"
+          },
+          "blockPrices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlockPrice"
+            }
+          }
+        }
+      },
+      "BaseFeeResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "system": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "currentBlockNumber": {
+            "type": "integer"
+          },
+          "msSinceLastBlock": {
+            "type": "integer"
+          },
+          "baseFeePerGas": {
+            "type": "number"
+          },
+          "blobBaseFeePerGas": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "estimatedBaseFees": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "DistributionResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "system": {
+            "type": "string"
+          },
+          "network": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "maxPrice": {
+            "type": "number"
+          },
+          "currentBlockNumber": {
+            "type": "integer"
+          },
+          "msSinceLastBlock": {
+            "type": "integer"
+          },
+          "topNDistribution": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "AuthorizationHeader": []
+    }
+  ]
+}
