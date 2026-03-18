@@ -322,6 +322,7 @@ async fn execute_method(
         | Scenario::ToolCallTimeout
         | Scenario::StructuredContent
         | Scenario::ResourceReadFailOnce
+        | Scenario::SessionScopedResource
         | Scenario::DynamicToolset => {
             let result = match method {
                 "rpc.discover" => schema_value(state.scenario),

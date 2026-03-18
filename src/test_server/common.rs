@@ -31,6 +31,8 @@ pub enum Scenario {
     EmptyObjectRequired,
     /// JSON-RPC WebSocket pubsub shape without explicit unsubscribe method
     SuiPubSub,
+    /// Resource state is scoped to a single MCP session/instance
+    SessionScopedResource,
 }
 
 impl Scenario {
@@ -50,8 +52,9 @@ impl Scenario {
             "dynamic_toolset" => Ok(Self::DynamicToolset),
             "empty_object_required" => Ok(Self::EmptyObjectRequired),
             "sui_pubsub" => Ok(Self::SuiPubSub),
+            "session_scoped_resource" => Ok(Self::SessionScopedResource),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, resource_read_fail_once, dynamic_toolset, empty_object_required, sui_pubsub",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, resource_read_fail_once, dynamic_toolset, empty_object_required, sui_pubsub, session_scoped_resource",
                 s
             ),
         }

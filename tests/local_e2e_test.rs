@@ -1750,6 +1750,110 @@ fn test_mcp_stdio_subscribe_with_read_resource_initial_failure_keeps_running() {
 
 #[test]
 #[serial_test::serial]
+fn test_mcp_stdio_subscribe_shares_daemon_session_with_tool_calls() {
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} session_scoped_resource", bin.display());
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("mcp-subscribe-session-shared.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "--resource-uri",
+            "test://resource",
+            "--read-resource",
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(start.is_ok(), "MCP subscribe start failed: {:?}", start);
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""event_kind":"open""#, Duration::from_secs(10)),
+        "MCP subscribe sink did not record the open event before the shared-session tool call"
+    );
+    assert!(
+        wait_for_file_contains(
+            &sink_path,
+            r#""event_kind":"snapshot""#,
+            Duration::from_secs(10),
+        ),
+        "MCP subscribe sink did not capture the initial session-scoped resource snapshot"
+    );
+
+    let call = run_uxc_in_home(
+        &[&endpoint, "set_resource", "--input-json", r#"{"value":7}"#],
+        &test_home,
+    );
+    assert!(call.is_ok(), "shared-session tool call failed: {:?}", call);
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""value":7"#, Duration::from_secs(5)),
+        "MCP subscribe sink did not observe the updated session-scoped resource value"
+    );
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(stop.is_ok(), "MCP subscribe stop failed: {:?}", stop);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_mcp_http_subscribe_shares_daemon_session_with_tool_calls() {
+    let server = start_test_server("mcp-http", "session_scoped_resource");
+    let endpoint = format!("http://{}/mcp", server.addr);
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("mcp-http-session-shared.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "--resource-uri",
+            "test://resource",
+            "--read-resource",
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(start.is_ok(), "MCP subscribe start failed: {:?}", start);
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""event_kind":"open""#, Duration::from_secs(5)),
+        "MCP HTTP subscribe sink did not record the open event before the shared-session tool call"
+    );
+    assert!(
+        wait_for_file_contains(&sink_path, r#""value":0"#, Duration::from_secs(5)),
+        "MCP HTTP subscribe sink did not capture the initial session-scoped resource snapshot"
+    );
+
+    let call = run_uxc_in_home(
+        &[&endpoint, "set_resource", "--input-json", r#"{"value":7}"#],
+        &test_home,
+    );
+    assert!(call.is_ok(), "shared-session tool call failed: {:?}", call);
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""value":7"#, Duration::from_secs(5)),
+        "MCP HTTP subscribe sink did not observe the updated session-scoped resource value"
+    );
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(stop.is_ok(), "MCP subscribe stop failed: {:?}", stop);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_mcp_http_subscribe_start_status_stop_writes_file() {
     let server = start_test_server("mcp-http", "ok");
     let endpoint = mcp_http_endpoint(&server.addr);

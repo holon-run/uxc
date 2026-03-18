@@ -38,7 +38,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
@@ -75,6 +75,7 @@ const SUBSCRIPTION_STOP_TIMEOUT_SECS: u64 = 5;
 const SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
 const SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS: u64 = 30;
 const SUBSCRIPTION_MAX_BUFFER_BYTES: usize = 1024 * 1024;
+const MCP_NOTIFICATION_HISTORY_LIMIT: usize = 256;
 const SUB_STATUS_STOPPED_AFTER_RESTART: &str = "stopped_after_restart";
 const SUB_STATUS_RESUME_FAILED: &str = "resume_failed";
 const ERR_PROTOCOL_DETECTION: i32 = -32010;
@@ -417,6 +418,7 @@ struct McpSessionManager {
     stdio_exclusive_owners: Arc<Mutex<HashMap<String, String>>>, // exclusive_key -> session_key
     stdio_session_exclusives: Arc<Mutex<HashMap<String, Vec<String>>>>, // session_key -> [exclusive_key]
     http: Arc<Mutex<HashMap<String, Arc<McpHttpSession>>>>,
+    http_lookup: Arc<Mutex<HashMap<String, String>>>, // raw endpoint/auth key -> resolved session key
     reuse_hits: Arc<Mutex<u64>>,
     logger: Option<DaemonLogger>,
 }
@@ -430,6 +432,8 @@ struct McpStdioSession {
     client: adapters::mcp::McpStdioClient,
     tools: Option<Vec<adapters::mcp::types::Tool>>,
     tools_dirty: bool,
+    notifications: SessionNotificationFanout,
+    resource_subscriptions: HashMap<String, usize>,
     last_used: Instant,
     last_used_at_unix: u64,
     idle_ttl_secs: u64,
@@ -457,7 +461,23 @@ struct McpStdioSessionSnapshot {
 
 struct McpHttpSession {
     transport: adapters::mcp::McpRemoteTransport,
-    last_used: Arc<Mutex<Instant>>,
+    notifications: Mutex<SessionNotificationFanout>,
+    resource_subscriptions: Mutex<HashMap<String, usize>>,
+    lookup_key: String,
+    last_used: Mutex<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct FanoutNotification {
+    seq: u64,
+    notification: JsonRpcNotification,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionNotificationFanout {
+    next_seq: u64,
+    notifications: VecDeque<FanoutNotification>,
+    stream_error: Option<String>,
 }
 
 struct StdioSessionRequestMetadata<'a> {
@@ -540,12 +560,214 @@ impl McpStdioSession {
         endpoint: &str,
         cache: &Arc<dyn Cache>,
     ) -> bool {
-        if self.client.take_tool_list_changed().await {
-            self.tools_dirty = true;
-            let _ = cache.invalidate(endpoint);
-            return true;
+        let was_dirty = self.tools_dirty;
+        let _ = self.sync_notifications(endpoint, Some(cache)).await;
+        !was_dirty && self.tools_dirty
+    }
+
+    fn record_notifications(
+        &mut self,
+        notifications: Vec<JsonRpcNotification>,
+        endpoint: &str,
+        cache: Option<&Arc<dyn Cache>>,
+    ) -> Vec<JsonRpcNotification> {
+        for notification in &notifications {
+            if notification.method == "notifications/tools/list_changed" {
+                self.tools_dirty = true;
+                if let Some(cache) = cache {
+                    let _ = cache.invalidate(endpoint);
+                }
+            }
         }
-        false
+        self.notifications.extend(notifications.clone());
+        notifications
+    }
+
+    async fn sync_notifications(
+        &mut self,
+        endpoint: &str,
+        cache: Option<&Arc<dyn Cache>>,
+    ) -> Vec<JsonRpcNotification> {
+        let notifications = self.client.drain_notifications().await;
+        self.record_notifications(notifications, endpoint, cache)
+    }
+
+    async fn notifications_since(
+        &mut self,
+        cursor: u64,
+        endpoint: &str,
+        cache: Option<&Arc<dyn Cache>>,
+    ) -> (Vec<JsonRpcNotification>, u64) {
+        let _ = self.sync_notifications(endpoint, cache).await;
+        self.notifications.since(cursor)
+    }
+
+    async fn ensure_resource_subscription(
+        &mut self,
+        uri: &str,
+        endpoint: &str,
+        cache: Option<&Arc<dyn Cache>>,
+    ) -> Result<()> {
+        if let Some(count) = self.resource_subscriptions.get_mut(uri) {
+            *count = count.saturating_add(1);
+            return Ok(());
+        }
+        self.client.subscribe_resource(uri).await?;
+        self.resource_subscriptions.insert(uri.to_string(), 1);
+        let _ = self.sync_notifications(endpoint, cache).await;
+        Ok(())
+    }
+
+    async fn release_resource_subscription(
+        &mut self,
+        uri: &str,
+        endpoint: &str,
+        cache: Option<&Arc<dyn Cache>>,
+    ) -> Result<()> {
+        let Some(count) = self.resource_subscriptions.get_mut(uri) else {
+            return Ok(());
+        };
+        if *count > 1 {
+            *count -= 1;
+            return Ok(());
+        }
+        self.resource_subscriptions.remove(uri);
+        self.client.unsubscribe_resource(uri).await?;
+        let _ = self.sync_notifications(endpoint, cache).await;
+        Ok(())
+    }
+
+    async fn read_resource(
+        &mut self,
+        uri: &str,
+        endpoint: &str,
+        cache: Option<&Arc<dyn Cache>>,
+    ) -> Result<ResourceContents> {
+        let result = self.client.read_resource(uri).await;
+        let _ = self.sync_notifications(endpoint, cache).await;
+        result
+    }
+}
+
+impl SessionNotificationFanout {
+    fn extend(&mut self, notifications: Vec<JsonRpcNotification>) {
+        for notification in notifications {
+            self.next_seq = self.next_seq.saturating_add(1);
+            self.notifications.push_back(FanoutNotification {
+                seq: self.next_seq,
+                notification,
+            });
+            while self.notifications.len() > MCP_NOTIFICATION_HISTORY_LIMIT {
+                self.notifications.pop_front();
+            }
+        }
+    }
+
+    fn since(&self, cursor: u64) -> (Vec<JsonRpcNotification>, u64) {
+        let notifications = self
+            .notifications
+            .iter()
+            .filter(|entry| entry.seq > cursor)
+            .map(|entry| entry.notification.clone())
+            .collect();
+        (notifications, self.next_seq)
+    }
+
+    fn set_stream_error(&mut self, error: String) {
+        if self.stream_error.is_none() {
+            self.stream_error = Some(error);
+        }
+    }
+
+    fn clear_stream_error(&mut self) {
+        self.stream_error = None;
+    }
+
+    fn stream_error(&self) -> Option<String> {
+        self.stream_error.clone()
+    }
+}
+
+impl McpHttpSession {
+    async fn drain_pending_notifications(&self) -> Vec<JsonRpcNotification> {
+        if let Err(err) = self.transport.ensure_notification_stream().await {
+            self.notifications
+                .lock()
+                .await
+                .set_stream_error(err.to_string());
+            return Vec::new();
+        }
+        self.collect_pending_notifications().await
+    }
+
+    async fn collect_pending_notifications(&self) -> Vec<JsonRpcNotification> {
+        if let Some(error) = self.transport.take_stream_error().await {
+            self.notifications.lock().await.set_stream_error(error);
+        }
+        let notifications = self.transport.drain_notifications().await;
+        self.notifications
+            .lock()
+            .await
+            .extend(notifications.clone());
+        notifications
+    }
+
+    async fn notifications_since(
+        &self,
+        cursor: u64,
+    ) -> (Vec<JsonRpcNotification>, u64, Option<String>) {
+        let _ = self.drain_pending_notifications().await;
+        let notifications = self.notifications.lock().await;
+        let (items, next_cursor) = notifications.since(cursor);
+        (items, next_cursor, notifications.stream_error())
+    }
+
+    async fn ensure_resource_subscription(&self, uri: &str) -> Result<()> {
+        let mut subscriptions = self.resource_subscriptions.lock().await;
+        if let Some(count) = subscriptions.get_mut(uri) {
+            *count = count.saturating_add(1);
+            return Ok(());
+        }
+        drop(subscriptions);
+        self.notifications.lock().await.clear_stream_error();
+        self.transport.subscribe_resource(uri).await?;
+        self.resource_subscriptions
+            .lock()
+            .await
+            .insert(uri.to_string(), 1);
+        let _ = self.collect_pending_notifications().await;
+        Ok(())
+    }
+
+    async fn release_resource_subscription(&self, uri: &str) -> Result<()> {
+        let mut subscriptions = self.resource_subscriptions.lock().await;
+        let Some(count) = subscriptions.get_mut(uri) else {
+            return Ok(());
+        };
+        if *count > 1 {
+            *count -= 1;
+            return Ok(());
+        }
+        subscriptions.remove(uri);
+        let no_more_subscriptions = subscriptions.is_empty();
+        drop(subscriptions);
+        let unsubscribe_result = self.transport.unsubscribe_resource(uri).await;
+        if no_more_subscriptions {
+            self.transport.shutdown_notification_stream().await;
+            self.notifications.lock().await.clear_stream_error();
+        }
+        let _ = self.collect_pending_notifications().await;
+        unsubscribe_result
+    }
+
+    async fn read_resource(&self, uri: &str) -> Result<ResourceContents> {
+        let result = self.transport.read_resource(uri).await;
+        let _ = self.collect_pending_notifications().await;
+        result
+    }
+
+    async fn mark_used(&self) {
+        *self.last_used.lock().await = Instant::now();
     }
 }
 
@@ -635,6 +857,7 @@ impl McpSessionManager {
             stdio_exclusive_owners: Arc::new(Mutex::new(HashMap::new())),
             stdio_session_exclusives: Arc::new(Mutex::new(HashMap::new())),
             http: Arc::new(Mutex::new(HashMap::new())),
+            http_lookup: Arc::new(Mutex::new(HashMap::new())),
             reuse_hits: Arc::new(Mutex::new(0)),
             logger,
         }
@@ -773,15 +996,27 @@ impl McpSessionManager {
         };
         let mut http_remove = Vec::new();
         for (key, session) in &http_entries {
-            let last = *session.last_used.lock().await;
-            if last < http_cutoff {
+            let last_used = *session.last_used.lock().await;
+            if last_used < http_cutoff {
                 http_remove.push(key.clone());
             }
         }
         if !http_remove.is_empty() {
-            let mut map = self.http.lock().await;
-            for key in http_remove {
-                map.remove(&key);
+            let removed_lookup_keys = {
+                let mut map = self.http.lock().await;
+                let mut removed = Vec::new();
+                for key in http_remove {
+                    if let Some(session) = map.remove(&key) {
+                        removed.push(session.lookup_key.clone());
+                    }
+                }
+                removed
+            };
+            if !removed_lookup_keys.is_empty() {
+                let mut lookup = self.http_lookup.lock().await;
+                for lookup_key in removed_lookup_keys {
+                    lookup.remove(&lookup_key);
+                }
             }
         }
     }
@@ -870,6 +1105,8 @@ impl McpSessionManager {
             client,
             tools: None,
             tools_dirty: false,
+            notifications: SessionNotificationFanout::default(),
+            resource_subscriptions: HashMap::new(),
             last_used: Instant::now(),
             last_used_at_unix: created_at_unix,
             idle_ttl_secs: metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
@@ -1230,8 +1467,44 @@ impl McpSessionManager {
         }
     }
 
+    async fn get_http_by_lookup_key(
+        &self,
+        lookup_key: &str,
+    ) -> Option<(Arc<McpHttpSession>, bool)> {
+        let session_key = {
+            let lookup = self.http_lookup.lock().await;
+            lookup.get(lookup_key).cloned()
+        }?;
+        let session = {
+            let map = self.http.lock().await;
+            map.get(&session_key).cloned()
+        };
+        if let Some(session) = session {
+            *self.reuse_hits.lock().await += 1;
+            session.mark_used().await;
+            return Some((session, true));
+        }
+
+        let mut lookup = self.http_lookup.lock().await;
+        lookup.remove(lookup_key);
+        None
+    }
+
+    async fn has_http_by_lookup_key(&self, lookup_key: &str) -> bool {
+        let session_key = {
+            let lookup = self.http_lookup.lock().await;
+            lookup.get(lookup_key).cloned()
+        };
+        let Some(session_key) = session_key else {
+            return false;
+        };
+        let map = self.http.lock().await;
+        map.contains_key(&session_key)
+    }
+
     async fn get_or_create_http(
         &self,
+        lookup_key: &str,
         key: &str,
         resolved: &adapters::mcp::ResolvedMcpHttpTransport,
         auth_profile: Option<Profile>,
@@ -1240,7 +1513,7 @@ impl McpSessionManager {
             let map = self.http.lock().await;
             if let Some(s) = map.get(key) {
                 *self.reuse_hits.lock().await += 1;
-                *s.last_used.lock().await = Instant::now();
+                s.mark_used().await;
                 return Ok((s.clone(), true));
             }
         }
@@ -1250,11 +1523,20 @@ impl McpSessionManager {
         transport.initialize().await?;
         let session = Arc::new(McpHttpSession {
             transport,
-            last_used: Arc::new(Mutex::new(Instant::now())),
+            notifications: Mutex::new(SessionNotificationFanout::default()),
+            resource_subscriptions: Mutex::new(HashMap::new()),
+            lookup_key: lookup_key.to_string(),
+            last_used: Mutex::new(Instant::now()),
         });
 
-        let mut map = self.http.lock().await;
-        map.insert(key.to_string(), session.clone());
+        {
+            let mut map = self.http.lock().await;
+            map.insert(key.to_string(), session.clone());
+        }
+        {
+            let mut lookup = self.http_lookup.lock().await;
+            lookup.insert(lookup_key.to_string(), key.to_string());
+        }
         Ok((session, false))
     }
 
@@ -1598,6 +1880,7 @@ impl SubscriptionManager {
             let result = match request_clone.mode {
                 SubscriptionMode::Stream => {
                     run_stream_subscription_job(
+                        &runtime_clone,
                         &job_id_clone,
                         &request_clone,
                         sink_path,
@@ -1979,6 +2262,48 @@ impl DaemonRuntime {
             stdio_spawn_options: stdio_spawn_options.clone(),
         };
 
+        if let Some((kind, operation, data, reused)) = self
+            .try_invoke_existing_mcp_execute_without_detection(
+                &request,
+                root_auth_profile.clone(),
+                stdio_spawn_options.clone(),
+                cache_for_mcp.clone(),
+            )
+            .await?
+        {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            if reused {
+                self.log(
+                    DaemonLogEntry::new(DaemonEventType::DaemonSessionReused)
+                        .with_request_id(request.request_id.clone())
+                        .with_endpoint(request.endpoint.clone()),
+                )
+                .await;
+            }
+            self.log(
+                DaemonLogEntry::new(DaemonEventType::RuntimeInvokeSuccess)
+                    .with_request_id(request.request_id.clone())
+                    .with_endpoint(request.endpoint.clone())
+                    .with_operation_id(request.operation_id.clone().unwrap_or_default())
+                    .with_protocol("mcp".to_string())
+                    .with_duration_ms(duration_ms),
+            )
+            .await;
+            return Ok(RuntimeInvokeResponse {
+                protocol: "mcp".to_string(),
+                endpoint: request.endpoint,
+                kind,
+                operation,
+                data,
+                duration_ms: Some(duration_ms),
+                meta: RuntimeMeta {
+                    schema_involved: Some(true),
+                    daemon_session_reused: Some(reused),
+                    ..Default::default()
+                },
+            });
+        }
+
         let resolved = resolve_adapter_with_schema_cache(
             &request.endpoint,
             &detection_options,
@@ -2325,6 +2650,49 @@ impl DaemonRuntime {
         cache::create_cache(cfg)
     }
 
+    async fn try_invoke_existing_mcp_execute_without_detection(
+        &self,
+        request: &RuntimeInvokeRequest,
+        auth_profile: Option<Profile>,
+        precomputed_stdio_spawn_options: Option<adapters::mcp::StdioSpawnOptions>,
+        cache: Arc<dyn Cache>,
+    ) -> Result<Option<(String, Option<String>, Value, bool)>> {
+        if !matches!(request.action, RuntimeAction::Execute) {
+            return Ok(None);
+        }
+
+        let has_live_session = if adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+            let key = stdio_session_key(
+                &request.endpoint,
+                auth_profile.as_ref(),
+                &request.options.inject_env,
+            )?;
+            self.mcp.get_stdio(&key).await.is_some()
+        } else if adapters::mcp::McpAdapter::is_http_url(&request.endpoint) {
+            let lookup_key = http_session_lookup_key(&request.endpoint, auth_profile.as_ref());
+            self.mcp.has_http_by_lookup_key(&lookup_key).await
+        } else {
+            false
+        };
+
+        if !has_live_session {
+            return Ok(None);
+        }
+
+        // Preserve daemon-managed MCP session semantics for endpoints whose discovery surface is
+        // bound to the existing session. We intentionally forward the already-parsed CLI args.
+        let result = self
+            .invoke_mcp_execute(
+                request,
+                request.args.clone().unwrap_or_default(),
+                auth_profile,
+                precomputed_stdio_spawn_options,
+                cache,
+            )
+            .await?;
+        Ok(Some(result))
+    }
+
     async fn invoke_mcp_execute(
         &self,
         request: &RuntimeInvokeRequest,
@@ -2399,20 +2767,27 @@ impl DaemonRuntime {
                 }
             }
         } else {
-            let resolved_transport =
-                resolve_mcp_http_endpoint(endpoint, auth_profile.clone()).await?;
-            let key = format!(
-                "http:{:?}:{}:{}",
-                resolved_transport.mode,
-                resolved_transport.connect_url,
-                auth_fingerprint(auth_profile.as_ref())
-            );
-            let (session, reused) = self
-                .mcp
-                .get_or_create_http(&key, &resolved_transport, auth_profile)
-                .await?;
-            *session.last_used.lock().await = Instant::now();
+            let lookup_key = http_session_lookup_key(endpoint, auth_profile.as_ref());
+            let (session, reused) = if let Some((session, reused)) =
+                self.mcp.get_http_by_lookup_key(&lookup_key).await
+            {
+                (session, reused)
+            } else {
+                let resolved_transport =
+                    resolve_mcp_http_endpoint(endpoint, auth_profile.clone()).await?;
+                let key = format!(
+                    "http:{:?}:{}:{}",
+                    resolved_transport.mode,
+                    resolved_transport.connect_url,
+                    auth_fingerprint(auth_profile.as_ref())
+                );
+                self.mcp
+                    .get_or_create_http(&lookup_key, &key, &resolved_transport, auth_profile)
+                    .await?
+            };
+            session.mark_used().await;
             let result = session.transport.call_tool(op, arguments).await?;
+            let _ = session.collect_pending_notifications().await;
             Ok((
                 "call_result".to_string(),
                 Some(op.clone()),
@@ -2975,6 +3350,7 @@ fn graphql_retry_supports_fallback(profile: GraphQLWebSocketProfile, err: &anyho
 }
 
 async fn run_stream_subscription_job(
+    runtime: &DaemonRuntime,
     job_id: &str,
     request: &SubscribeStartRequest,
     sink_path: PathBuf,
@@ -3023,7 +3399,7 @@ async fn run_stream_subscription_job(
     }
 
     if request.resource_uri.is_some() {
-        return run_mcp_subscription_job(job_id, request, sink_path, view, stop_rx).await;
+        return run_mcp_subscription_job(runtime, job_id, request, sink_path, view, stop_rx).await;
     }
 
     run_http_subscription_job(job_id, request, sink_path, view, stop_rx).await
@@ -4118,6 +4494,7 @@ async fn run_poll_subscription_job(
 }
 
 async fn run_mcp_subscription_job(
+    runtime: &DaemonRuntime,
     _job_id: &str,
     request: &SubscribeStartRequest,
     sink_path: PathBuf,
@@ -4129,27 +4506,59 @@ async fn run_mcp_subscription_job(
         .as_ref()
         .ok_or_else(|| anyhow!("resource_uri is required for MCP subscriptions"))?;
     if adapters::mcp::McpAdapter::is_http_url(&request.endpoint) {
-        return run_mcp_http_subscription_job(request, sink_path, view, resource_uri, stop_rx)
-            .await;
+        return run_mcp_http_subscription_job(
+            runtime,
+            request,
+            sink_path,
+            view,
+            resource_uri,
+            stop_rx,
+        )
+        .await;
     }
     if !adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
         bail!("MCP subscriptions require a stdio command or http(s) MCP endpoint");
     }
     let auth_profile =
         auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+    let cache = runtime.build_cache(&request.options)?;
     let spawn_options =
         build_stdio_spawn_options(&request.endpoint, &request.options, auth_profile.as_ref())?
             .unwrap_or_default();
     let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(&request.endpoint)?;
-    let mut client =
-        adapters::mcp::McpStdioClient::connect_with_options(&cmd, &cmd_args, spawn_options).await?;
-    if !client.supports_resource_subscribe() {
-        bail!("MCP server does not support resources.subscribe");
+    let session_key = stdio_session_key(
+        &request.endpoint,
+        auth_profile.as_ref(),
+        &request.options.inject_env,
+    )?;
+    let (session, _) = runtime
+        .mcp
+        .get_or_create_stdio(
+            &session_key,
+            &cmd,
+            &cmd_args,
+            &spawn_options,
+            StdioSessionRequestMetadata {
+                idle_ttl_secs: request.options.daemon_idle_ttl,
+                link_name: request.options.link_name.as_deref(),
+                endpoint: &request.endpoint,
+                exclusive_keys: &request.options.daemon_exclusive,
+            },
+        )
+        .await?;
+    {
+        let mut guard = session.lock().await;
+        if !guard.client.supports_resource_subscribe() {
+            bail!("MCP server does not support resources.subscribe");
+        }
+        guard
+            .ensure_resource_subscription(resource_uri, &request.endpoint, Some(&cache))
+            .await?;
     }
-    client.subscribe_resource(resource_uri).await?;
 
     let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
+    let mut cursor = 0u64;
     append_subscription_event(
         &mut sink,
         &view,
@@ -4161,6 +4570,12 @@ async fn run_mcp_subscription_job(
     )
     .await?;
     if request.read_resource {
+        let read_result = {
+            let mut guard = session.lock().await;
+            guard
+                .read_resource(resource_uri, &request.endpoint, Some(&cache))
+                .await
+        };
         append_mcp_resource_read_result(
             &mut sink,
             &view,
@@ -4168,34 +4583,27 @@ async fn run_mcp_subscription_job(
             resource_uri,
             "initial_read",
             "failed to read initial resource snapshot",
-            client.read_resource(resource_uri).await,
+            read_result,
         )
         .await?;
     }
 
-    loop {
+    let run_result: Result<()> = loop {
         tokio::select! {
             stop_requested = subscription_stop_requested(&mut stop_rx) => {
                 if stop_requested {
-                    if let Err(err) = client.unsubscribe_resource(resource_uri).await {
-                        let msg = format!("failed to unsubscribe resource before shutdown: {}", err);
-                        append_subscription_event(
-                            &mut sink,
-                            &view,
-                            &mut seq,
-                            "mcp_resource",
-                            "error",
-                            None,
-                            Some(json!({ "message": msg })),
-                        ).await?;
-                        update_subscription_view(&view, None, Some(msg), false).await;
-                    }
                     close_subscription_as_stopped(&mut sink, &view, &mut seq, "mcp_resource").await?;
-                    return Ok(());
+                    break Ok(());
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                let notifications = client.drain_notifications().await;
+                let (notifications, next_cursor) = {
+                    let mut guard = session.lock().await;
+                    guard
+                        .notifications_since(cursor, &request.endpoint, Some(&cache))
+                        .await
+                };
+                cursor = next_cursor;
                 for notification in notifications {
                     append_subscription_event(
                         &mut sink,
@@ -4207,6 +4615,12 @@ async fn run_mcp_subscription_job(
                         Some(json!({"method": notification.method})),
                     ).await?;
                     if request.read_resource && should_read_mcp_resource_snapshot(&notification) {
+                        let read_result = {
+                            let mut guard = session.lock().await;
+                            guard
+                                .read_resource(resource_uri, &request.endpoint, Some(&cache))
+                                .await
+                        };
                         append_mcp_resource_read_result(
                             &mut sink,
                             &view,
@@ -4214,17 +4628,44 @@ async fn run_mcp_subscription_job(
                             resource_uri,
                             "resource_updated",
                             "failed to read resource after update",
-                            client.read_resource(resource_uri).await,
+                            read_result,
                         )
                         .await?;
                     }
                 }
             }
         }
+    };
+
+    let unsubscribe_result = {
+        let mut guard = session.lock().await;
+        guard
+            .release_resource_subscription(resource_uri, &request.endpoint, Some(&cache))
+            .await
+    };
+    if let Err(err) = unsubscribe_result {
+        let msg = format!("failed to unsubscribe resource before shutdown: {}", err);
+        append_subscription_event(
+            &mut sink,
+            &view,
+            &mut seq,
+            "mcp_resource",
+            "error",
+            None,
+            Some(json!({ "message": msg })),
+        )
+        .await?;
+        update_subscription_view(&view, None, Some(msg.clone()), false).await;
+        if run_result.is_ok() {
+            return Err(err);
+        }
     }
+
+    run_result
 }
 
 async fn run_mcp_http_subscription_job(
+    runtime: &DaemonRuntime,
     request: &SubscribeStartRequest,
     sink_path: PathBuf,
     view: Arc<Mutex<SubscriptionJobView>>,
@@ -4233,25 +4674,30 @@ async fn run_mcp_http_subscription_job(
 ) -> Result<()> {
     let auth_profile =
         auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
-    let resolved_transport =
-        resolve_mcp_http_endpoint(&request.endpoint, auth_profile.clone()).await?;
-    let transport =
-        adapters::mcp::McpRemoteTransport::with_auth(resolved_transport.clone(), auth_profile)?;
-    let init = transport.initialize().await?;
-    let supports_resource_subscribe = init
-        .capabilities
-        .resources
-        .as_ref()
-        .and_then(|resources| resources.subscribe)
-        .unwrap_or(false);
-    if !supports_resource_subscribe {
-        bail!("MCP server does not support resources.subscribe");
-    }
-
-    transport.subscribe_resource(resource_uri).await?;
+    let lookup_key = http_session_lookup_key(&request.endpoint, auth_profile.as_ref());
+    let (session, resolved_transport) =
+        if let Some((session, _)) = runtime.mcp.get_http_by_lookup_key(&lookup_key).await {
+            (session, None)
+        } else {
+            let resolved_transport =
+                resolve_mcp_http_endpoint(&request.endpoint, auth_profile.clone()).await?;
+            let session_key = format!(
+                "http:{:?}:{}:{}",
+                resolved_transport.mode,
+                resolved_transport.connect_url,
+                auth_fingerprint(auth_profile.as_ref())
+            );
+            let (session, _) = runtime
+                .mcp
+                .get_or_create_http(&lookup_key, &session_key, &resolved_transport, auth_profile)
+                .await?;
+            (session, Some(resolved_transport))
+        };
+    session.ensure_resource_subscription(resource_uri).await?;
 
     let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
+    let mut cursor = 0u64;
     append_subscription_event(
         &mut sink,
         &view,
@@ -4261,12 +4707,19 @@ async fn run_mcp_http_subscription_job(
         None,
         Some(json!({
             "resource_uri": resource_uri,
-            "transport_mode": format!("{:?}", resolved_transport.mode),
-            "connect_url": redact_endpoint(&resolved_transport.connect_url),
+            "transport_mode": resolved_transport
+                .as_ref()
+                .map(|value| format!("{:?}", value.mode))
+                .unwrap_or_else(|| "reused".to_string()),
+            "connect_url": resolved_transport
+                .as_ref()
+                .map(|value| redact_endpoint(&value.connect_url))
+                .unwrap_or_else(|| redact_endpoint(&request.endpoint)),
         })),
     )
     .await?;
     if request.read_resource {
+        let read_result = session.read_resource(resource_uri).await;
         append_mcp_resource_read_result(
             &mut sink,
             &view,
@@ -4274,39 +4727,26 @@ async fn run_mcp_http_subscription_job(
             resource_uri,
             "initial_read",
             "failed to read initial resource snapshot",
-            transport.read_resource(resource_uri).await,
+            read_result,
         )
         .await?;
     }
 
-    loop {
+    let run_result: Result<()> = loop {
         tokio::select! {
             stop_requested = subscription_stop_requested(&mut stop_rx) => {
                 if stop_requested {
-                    if let Err(err) = transport.unsubscribe_resource(resource_uri).await {
-                        let msg = format!("failed to unsubscribe resource before shutdown: {}", err);
-                        append_subscription_event(
-                            &mut sink,
-                            &view,
-                            &mut seq,
-                            "mcp_resource",
-                            "error",
-                            None,
-                            Some(json!({ "message": msg })),
-                        ).await?;
-                        update_subscription_view(&view, None, Some(msg), false).await;
-                    }
-                    transport.shutdown_notification_stream().await;
                     close_subscription_as_stopped(&mut sink, &view, &mut seq, "mcp_resource").await?;
-                    return Ok(());
+                    break Ok(());
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                if let Some(err) = transport.take_stream_error().await {
-                    transport.shutdown_notification_stream().await;
-                    return Err(anyhow!("MCP HTTP subscription stream failed: {}", err));
+                let (notifications, next_cursor, stream_error) = session.notifications_since(cursor).await;
+                cursor = next_cursor;
+                if let Some(err) = stream_error {
+                    break Err(anyhow!("MCP HTTP subscription stream failed: {}", err));
                 }
-                for notification in transport.drain_notifications().await {
+                for notification in notifications {
                     append_subscription_event(
                         &mut sink,
                         &view,
@@ -4317,6 +4757,7 @@ async fn run_mcp_http_subscription_job(
                         Some(json!({"method": notification.method})),
                     ).await?;
                     if request.read_resource && should_read_mcp_resource_snapshot(&notification) {
+                        let read_result = session.read_resource(resource_uri).await;
                         append_mcp_resource_read_result(
                             &mut sink,
                             &view,
@@ -4324,14 +4765,35 @@ async fn run_mcp_http_subscription_job(
                             resource_uri,
                             "resource_updated",
                             "failed to read resource after update",
-                            transport.read_resource(resource_uri).await,
+                            read_result,
                         )
                         .await?;
                     }
                 }
             }
         }
+    };
+
+    let unsubscribe_result = session.release_resource_subscription(resource_uri).await;
+    if let Err(err) = unsubscribe_result {
+        let msg = format!("failed to unsubscribe resource before shutdown: {}", err);
+        append_subscription_event(
+            &mut sink,
+            &view,
+            &mut seq,
+            "mcp_resource",
+            "error",
+            None,
+            Some(json!({ "message": msg })),
+        )
+        .await?;
+        update_subscription_view(&view, None, Some(msg.clone()), false).await;
+        if run_result.is_ok() {
+            return Err(err);
+        }
     }
+
+    run_result
 }
 
 #[cfg(unix)]
@@ -5150,6 +5612,10 @@ fn stdio_session_key(
         auth_fingerprint(profile),
         stdio_env_fingerprint(inject_env, profile)?
     ))
+}
+
+fn http_session_lookup_key(endpoint: &str, profile: Option<&Profile>) -> String {
+    format!("http_lookup:{}:{}", endpoint, auth_fingerprint(profile))
 }
 
 fn display_session_key(session_key: &str) -> String {
