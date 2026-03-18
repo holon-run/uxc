@@ -3990,6 +3990,12 @@ async fn handle_subscribe_command(
                 )
                 .into());
             }
+            if *read_resource && !matches!(mode, SubscribeModeArg::Stream) {
+                return Err(UxcError::InvalidArguments(
+                    "--read-resource is only valid with --mode stream".to_string(),
+                )
+                .into());
+            }
             let (normalized_args, normalized_input_json) = match transport_operation_id.as_ref() {
                 Some(op) => {
                     let mut explicit_args = Vec::new();

@@ -259,10 +259,7 @@ impl McpStdioClient {
             .await
             .context(format!("Failed to read resource '{}'", uri))?;
 
-        let contents: ResourceContents =
-            serde_json::from_value(result).context("Failed to parse resource contents")?;
-
-        Ok(contents)
+        parse_read_resource_result(result).context("Failed to parse resource contents")
     }
 
     pub async fn subscribe_resource(&mut self, uri: &str) -> Result<()> {
@@ -555,23 +552,9 @@ mod tests {
             .await
             .unwrap();
 
-        // The response structure has a "contents" array, so we need to handle that
-        let result = client
-            .transport
-            .send_request(
-                "resources/read",
-                Some(serde_json::json!({"uri": "test://resource"})),
-            )
-            .await
-            .unwrap();
+        let result = client.read_resource("test://resource").await.unwrap();
 
-        // Parse the contents array
-        let contents_array = result.get("contents").and_then(|v| v.as_array()).unwrap();
-        let first_content = &contents_array[0];
-        assert_eq!(
-            first_content.get("uri").unwrap().as_str().unwrap(),
-            "test://resource"
-        );
+        assert_eq!(result.uri, "test://resource");
     }
 
     #[tokio::test]

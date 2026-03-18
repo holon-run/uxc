@@ -1008,7 +1008,7 @@ impl McpHttpTransport {
 
         let result = self.send_request("resources/read", Some(params)).await?;
 
-        serde_json::from_value(result).context("Failed to parse resources/read result")
+        parse_read_resource_result(result)
     }
 
     pub async fn subscribe_resource(&self, uri: &str) -> Result<()> {
@@ -1487,7 +1487,7 @@ impl LegacySseTransport {
             "uri": uri
         });
         let result = self.send_request("resources/read", Some(params)).await?;
-        serde_json::from_value(result).context("Failed to parse resources/read result")
+        parse_read_resource_result(result)
     }
 
     async fn call_tool(&self, name: &str, arguments: Option<JsonValue>) -> Result<ToolCallResult> {
@@ -2855,6 +2855,37 @@ data: invalid json
 
     #[tokio::test]
     async fn read_resource_succeeds() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":1,
+                "result":{
+                    "contents":[{
+                        "uri":"file:///test.txt",
+                        "text":"Resource content"
+                    }]
+                }
+            }"#,
+            )
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::new(server.url()).unwrap();
+
+        let result = transport.read_resource("file:///test.txt").await;
+        assert!(result.is_ok());
+        let resource = result.unwrap();
+        assert_eq!(resource.text, Some("Resource content".to_string()));
+    }
+
+    #[tokio::test]
+    async fn read_resource_accepts_legacy_single_object_shape() {
         let mut server = mockito::Server::new_async().await;
 
         let _mock = server

@@ -29,6 +29,7 @@ struct ServerState {
     tools_list_calls: Arc<AtomicU64>,
     resource_subscribed: Arc<AtomicBool>,
     resource_event_seq: Arc<AtomicU64>,
+    resource_read_failed_once: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,15 +158,27 @@ async fn mcp_handler(
                 .get("uri")
                 .and_then(Value::as_str)
                 .unwrap_or("test://resource");
+            if matches!(state.scenario, Scenario::ResourceReadFailOnce)
+                && !state.resource_read_failed_once.swap(true, Ordering::SeqCst)
+            {
+                return Ok(Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "error": {"code": -32003, "message": "resource read failed once"}
+                }))
+                .into_response());
+            }
             let value = state.resource_event_seq.load(Ordering::SeqCst);
             json!({
-                "uri": uri,
-                "mimeType": "application/json",
-                "text": json!({
+                "contents": [{
                     "uri": uri,
-                    "value": value
-                })
-                .to_string()
+                    "mimeType": "application/json",
+                    "text": json!({
+                        "uri": uri,
+                        "value": value
+                    })
+                    .to_string()
+                }]
             })
         }
         "resources/unsubscribe" => {
@@ -249,6 +262,7 @@ pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
         tools_list_calls: Arc::new(AtomicU64::new(0)),
         resource_subscribed: Arc::new(AtomicBool::new(false)),
         resource_event_seq: Arc::new(AtomicU64::new(0)),
+        resource_read_failed_once: Arc::new(AtomicBool::new(false)),
     });
 
     info!("MCP HTTP test server listening on http://{}", addr);

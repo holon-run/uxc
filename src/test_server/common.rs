@@ -23,6 +23,8 @@ pub enum Scenario {
     ToolsListFailAfterFirst,
     /// tools/call returns content + structuredContent payload
     StructuredContent,
+    /// First resources/read fails, later reads succeed
+    ResourceReadFailOnce,
     /// tools/list changes after navigate and emits tools/list_changed notification
     DynamicToolset,
     /// tools/call requires the arguments field to be present as an object, even when empty
@@ -44,11 +46,12 @@ impl Scenario {
             "tool_call_timeout" => Ok(Self::ToolCallTimeout),
             "tools_list_fail_after_first" => Ok(Self::ToolsListFailAfterFirst),
             "structured_content" => Ok(Self::StructuredContent),
+            "resource_read_fail_once" => Ok(Self::ResourceReadFailOnce),
             "dynamic_toolset" => Ok(Self::DynamicToolset),
             "empty_object_required" => Ok(Self::EmptyObjectRequired),
             "sui_pubsub" => Ok(Self::SuiPubSub),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, dynamic_toolset, empty_object_required, sui_pubsub",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, resource_read_fail_once, dynamic_toolset, empty_object_required, sui_pubsub",
                 s
             ),
         }
