@@ -114,6 +114,8 @@ impl CacheConfigBuilder {
 pub struct ArgumentParser;
 
 impl ArgumentParser {
+    const MAX_ARRAY_INDEX: usize = 10_000;
+
     /// Parse arguments from key-value pairs and JSON payload
     pub fn parse_arguments(
         args: Vec<String>,
@@ -164,15 +166,27 @@ impl ArgumentParser {
         fn parse_segments(raw_key: &str) -> Result<Vec<PathSegment>> {
             let mut segments = Vec::new();
             let mut current = String::new();
-            let chars: Vec<char> = raw_key.chars().collect();
-            let mut index = 0;
+            let chars = raw_key.char_indices().collect::<Vec<_>>();
+            let mut index = 0usize;
+            let mut just_closed_bracket = false;
 
             while index < chars.len() {
-                match chars[index] {
+                match chars[index].1 {
                     '.' => {
-                        if !current.is_empty() {
-                            segments.push(PathSegment::Key(std::mem::take(&mut current)));
+                        if current.is_empty() {
+                            if just_closed_bracket {
+                                just_closed_bracket = false;
+                                index += 1;
+                                continue;
+                            }
+                            return Err(UxcError::InvalidArguments(format!(
+                                "Invalid argument path '{}': empty path segment",
+                                raw_key
+                            ))
+                            .into());
                         }
+                        segments.push(PathSegment::Key(std::mem::take(&mut current)));
+                        just_closed_bracket = false;
                         index += 1;
                     }
                     '[' => {
@@ -181,7 +195,7 @@ impl ArgumentParser {
                         }
                         index += 1;
                         let start = index;
-                        while index < chars.len() && chars[index] != ']' {
+                        while index < chars.len() && chars[index].1 != ']' {
                             index += 1;
                         }
                         if index >= chars.len() {
@@ -191,24 +205,49 @@ impl ArgumentParser {
                             ))
                             .into());
                         }
-                        let index_value: usize = raw_key[start..index].parse().map_err(|_| {
+                        let index_text = chars[start..index]
+                            .iter()
+                            .map(|(_, ch)| *ch)
+                            .collect::<String>();
+                        let index_value: usize = index_text.parse().map_err(|_| {
                             UxcError::InvalidArguments(format!(
                                 "Invalid argument path '{}': array index must be an integer",
                                 raw_key
                             ))
                         })?;
+                        if index_value > ArgumentParser::MAX_ARRAY_INDEX {
+                            return Err(UxcError::InvalidArguments(format!(
+                                "Invalid argument path '{}': array index [{}] exceeds max supported index {}",
+                                raw_key,
+                                index_value,
+                                ArgumentParser::MAX_ARRAY_INDEX
+                            ))
+                            .into());
+                        }
                         segments.push(PathSegment::Index(index_value));
+                        just_closed_bracket = true;
                         index += 1;
                     }
                     char => {
                         current.push(char);
+                        just_closed_bracket = false;
                         index += 1;
                     }
                 }
             }
 
+            if just_closed_bracket {
+                return Ok(segments);
+            }
+
             if !current.is_empty() {
                 segments.push(PathSegment::Key(current));
+            } else if raw_key.ends_with('.') {
+                return Err(UxcError::InvalidArguments(format!(
+                    "Invalid argument path '{}': empty path segment",
+                    raw_key
+                ))
+                .into());
             }
 
             if segments.is_empty() {
@@ -501,6 +540,29 @@ mod tests {
         let args = vec!["[0].path=/tmp/a.pdf".to_string()];
         let result = ArgumentParser::parse_arguments(args, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_arguments_rejects_empty_path_segments() {
+        for raw_key in [".attachmentPaths[0]", "attachmentPaths.", "attachmentPaths..name"] {
+            let result =
+                ArgumentParser::parse_arguments(vec![format!("{raw_key}=/tmp/a.pdf")], None);
+            assert!(result.is_err(), "expected invalid path for {raw_key}");
+        }
+    }
+
+    #[test]
+    fn test_parse_arguments_rejects_large_array_index() {
+        let args = vec!["attachmentPaths[10001]=/tmp/a.pdf".to_string()];
+        let result = ArgumentParser::parse_arguments(args, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_arguments_supports_non_ascii_keys() {
+        let args = vec!["附件[0]=/tmp/a.pdf".to_string()];
+        let result = ArgumentParser::parse_arguments(args, None).unwrap();
+        assert_eq!(result["附件"][0], "/tmp/a.pdf");
     }
 
     #[test]
