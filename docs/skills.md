@@ -608,3 +608,13 @@ clawhub sync --all --bump patch
 
 - `near-jsonrpc-skill@1.0.0`
 - `nodit-openapi-skill@1.0.0`
+
+## ClawHub Publish Log (2026-03-19, second window)
+
+- `clawhub whoami`: `jolestar`
+- Newly published in the current window:
+  - `near-jsonrpc-skill@1.0.0`
+  - `nodit-openapi-skill@1.0.0`
+- Post-publish verification:
+  - `clawhub sync --dry-run` returned `Nothing to sync`
+  - all local `skills/*` packages are now synced to ClawHub again
