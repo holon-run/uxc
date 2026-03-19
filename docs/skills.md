@@ -587,3 +587,24 @@ clawhub sync --all --bump patch
 ## Current registry sync state
 
 - As of the final 2026-03-17 window, all local `skills/*` packages are synced to ClawHub.
+
+## ClawHub Publish Log (2026-03-19)
+
+- `clawhub whoami`: `jolestar`
+- Newly published in the current window:
+  - `blocknative-openapi-skill@1.0.0`
+  - `dexscreener-openapi-skill@1.0.0`
+  - `helius-openapi-skill@1.0.0`
+  - `hive-mcp-skill@1.0.0`
+  - `mempool-space-openapi-skill@1.0.0`
+- Updated in the same pass:
+  - `feishu-openapi-skill@1.0.1`
+  - `telegram-openapi-skill@1.0.1`
+- Follow-up note:
+  - continuing the same `clawhub sync` run hit:
+    - `Rate limit: max 5 new skills per hour. Please wait before publishing more.`
+
+### Remaining publish queue after the 2026-03-19 window
+
+- `near-jsonrpc-skill@1.0.0`
+- `nodit-openapi-skill@1.0.0`
