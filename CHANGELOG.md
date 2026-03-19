@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-03-19
+
+### Added
+- Added `blocknative-openapi-skill`, `dexscreener-openapi-skill`, `helius-openapi-skill`, `hive-mcp-skill`, `mempool-space-openapi-skill`, `near-jsonrpc-skill`, and `nodit-openapi-skill`.
+- Added nested file-path argument support so OpenAPI request bodies and parameter mappings can address structured file inputs more flexibly.
+- Added MCP resource snapshot support for daemon-backed subscriptions.
+
+### Changed
+- Shared MCP subscription sessions with daemon-managed transports for more consistent live subscription behavior.
+- Improved provider skill guidance across the README, skill index, and follow-up documentation for newer crypto, browser, and messaging skills.
+
+### Fixed
+- Added multipart/form-data request body support for OpenAPI execution, enabling Telegram and Feishu multipart upload workflows.
+- Tightened multipart mixed-content selection behavior and related request-shape handling.
+
 ## [0.12.2] - 2026-03-16
 
 ### Fixed
