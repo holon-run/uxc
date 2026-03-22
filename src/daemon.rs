@@ -7183,16 +7183,27 @@ mod tests {
             .await
             .unwrap();
 
-        let first_batch = runtime
-            .subscribe_events(&SubscriptionEventsRequest {
-                job_id: response.job_id.clone(),
-                after_seq: 0,
-                limit: 10,
-                wait_ms: 5_000,
-            })
-            .await
-            .unwrap();
-        let after_seq = first_batch.next_after_seq;
+        let mut after_seq = 0;
+        let mut saw_payload = false;
+        for _ in 0..10 {
+            let batch = runtime
+                .subscribe_events(&SubscriptionEventsRequest {
+                    job_id: response.job_id.clone(),
+                    after_seq,
+                    limit: 10,
+                    wait_ms: 500,
+                })
+                .await
+                .unwrap();
+            after_seq = batch.next_after_seq;
+            if batch.events.iter().any(|event| {
+                event.data.as_ref().and_then(|value| value.get("value")) == Some(&json!(9))
+            }) {
+                saw_payload = true;
+                break;
+            }
+        }
+        assert!(saw_payload, "expected streamed websocket payload before stop");
 
         runtime.subscribe_stop(&response.job_id).await.unwrap();
 
