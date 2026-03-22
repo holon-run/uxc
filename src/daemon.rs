@@ -75,6 +75,11 @@ const SUBSCRIPTION_STOP_TIMEOUT_SECS: u64 = 5;
 const SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
 const SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS: u64 = 30;
 const SUBSCRIPTION_MAX_BUFFER_BYTES: usize = 1024 * 1024;
+const SUBSCRIPTION_EVENT_HISTORY_LIMIT: usize = 1024;
+const SUBSCRIPTION_TERMINAL_TTL_SECS: u64 = 60;
+const SUBSCRIPTION_EVENTS_DEFAULT_LIMIT: usize = 100;
+const SUBSCRIPTION_EVENTS_MAX_LIMIT: usize = 500;
+const SUBSCRIPTION_EVENTS_MAX_WAIT_MS: u64 = 15_000;
 const MCP_NOTIFICATION_HISTORY_LIMIT: usize = 256;
 const SUB_STATUS_STOPPED_AFTER_RESTART: &str = "stopped_after_restart";
 const SUB_STATUS_RESUME_FAILED: &str = "resume_failed";
@@ -83,6 +88,7 @@ const ERR_OPERATION_NOT_FOUND: i32 = -32011;
 const ERR_OAUTH_REQUIRED: i32 = -32012;
 const ERR_OAUTH_REFRESH_FAILED: i32 = -32013;
 const ERR_OAUTH_SCOPE_INSUFFICIENT: i32 = -32014;
+const ERR_SUBSCRIPTION_CURSOR_EXPIRED: i32 = -32015;
 const ERR_RUNTIME_GENERIC: i32 = -32030;
 
 #[cfg(unix)]
@@ -194,6 +200,26 @@ pub struct SubscribeStopResponse {
     pub stopped: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionEventsRequest {
+    pub job_id: String,
+    #[serde(default)]
+    pub after_seq: u64,
+    #[serde(default = "default_subscription_events_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub wait_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionEventsResponse {
+    pub job_id: String,
+    pub status: String,
+    pub events: Vec<SubscriptionEventEnvelope>,
+    pub next_after_seq: u64,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscriptionTransportHint {
@@ -241,18 +267,22 @@ pub struct SubscriptionJobView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SubscriptionEventEnvelope {
-    version: String,
-    job_id: String,
-    seq: u64,
-    timestamp_unix: u64,
-    protocol: String,
-    source_kind: String,
-    event_kind: String,
+pub struct SubscriptionEventEnvelope {
+    pub version: String,
+    pub job_id: String,
+    pub seq: u64,
+    pub timestamp_unix: u64,
+    pub protocol: String,
+    pub source_kind: String,
+    pub event_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<Value>,
+    pub data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    meta: Option<Value>,
+    pub meta: Option<Value>,
+}
+
+fn default_subscription_events_limit() -> usize {
+    SUBSCRIPTION_EVENTS_DEFAULT_LIMIT
 }
 
 fn should_read_mcp_resource_snapshot(notification: &JsonRpcNotification) -> bool {
@@ -508,16 +538,37 @@ fn resolve_stdio_request_metadata(
 #[derive(Clone, Default)]
 struct SubscriptionManager {
     jobs: Arc<Mutex<HashMap<String, Arc<SubscriptionJobEntry>>>>,
+    terminal_jobs: Arc<Mutex<HashMap<String, TerminalSubscriptionEntry>>>,
     next_id: Arc<Mutex<u64>>,
     store_path: PathBuf,
 }
 
 struct SubscriptionJobEntry {
     request: SubscribeStartRequest,
+    sink_path: PathBuf,
     view: Arc<Mutex<SubscriptionJobView>>,
     /// Wrapped so resume can replace the sender for a reconstructed job.
     stop_tx: Mutex<watch::Sender<bool>>,
     task: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Clone)]
+struct TerminalSubscriptionEntry {
+    view: SubscriptionJobView,
+    sink_path: PathBuf,
+    expires_at_unix: u64,
+    memory_backed: bool,
+}
+
+enum PreparedSubscriptionSink {
+    File(PathBuf),
+    Memory,
+}
+
+struct PreparedSubscription {
+    sink: PreparedSubscriptionSink,
+    sink_spec: String,
+    protocol: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1669,6 +1720,7 @@ impl SubscriptionManager {
     fn new(store_path: PathBuf) -> Result<Self> {
         let manager = Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            terminal_jobs: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(0)),
             store_path,
         };
@@ -1727,6 +1779,7 @@ impl SubscriptionManager {
                 record.view.job_id.clone(),
                 Arc::new(SubscriptionJobEntry {
                     request: record.request,
+                    sink_path: parse_file_sink(&record.view.sink)?,
                     view: Arc::new(Mutex::new(record.view)),
                     stop_tx: Mutex::new(stop_tx),
                     task: Mutex::new(None),
@@ -1765,19 +1818,48 @@ impl SubscriptionManager {
         write_subscription_store(&self.store_path, &records)
     }
 
+    async fn cleanup_terminal_jobs(&self) {
+        let now = now_unix_secs();
+        let mut terminal = self.terminal_jobs.lock().await;
+        let mut expired = Vec::new();
+        for (job_id, entry) in terminal.iter() {
+            if entry.expires_at_unix <= now {
+                expired.push((job_id.clone(), entry.sink_path.clone(), entry.memory_backed));
+            }
+        }
+        for (job_id, _, _) in &expired {
+            terminal.remove(job_id);
+        }
+        drop(terminal);
+        for (_, path, memory_backed) in expired {
+            if memory_backed {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+        }
+    }
+
     async fn prepare_request(
         &self,
         runtime: &DaemonRuntime,
         request: &SubscribeStartRequest,
-    ) -> Result<(PathBuf, String, String)> {
-        let sink_path = parse_file_sink(&request.sink)?;
-        if is_nonstandard_subscription_sink_path(&sink_path) {
-            tracing::warn!(
-                "subscription sink path is outside HOME/temp directories: {}. This path may be unavailable after daemon restart if permissions or mounts change.",
-                sink_path.display()
-            );
-        }
-        let sink_spec = format!("file:{}", sink_path.display());
+    ) -> Result<PreparedSubscription> {
+        let prepared_sink = match request.sink.as_str() {
+            "memory:" => PreparedSubscriptionSink::Memory,
+            _ => {
+                let sink_path = parse_file_sink(&request.sink)?;
+                if is_nonstandard_subscription_sink_path(&sink_path) {
+                    tracing::warn!(
+                        "subscription sink path is outside HOME/temp directories: {}. This path may be unavailable after daemon restart if permissions or mounts change.",
+                        sink_path.display()
+                    );
+                }
+                PreparedSubscriptionSink::File(sink_path)
+            }
+        };
+        let sink_spec = match &prepared_sink {
+            PreparedSubscriptionSink::File(sink_path) => format!("file:{}", sink_path.display()),
+            PreparedSubscriptionSink::Memory => "memory:".to_string(),
+        };
         if request.resource_uri.is_some() && request.operation_id.is_some() {
             bail!("subscribe start cannot combine --resource-uri with an operation_id");
         }
@@ -1869,7 +1951,11 @@ impl SubscriptionManager {
             SubscriptionMode::Stream => resolve_stream_subscription_protocol(request)?,
             SubscriptionMode::Poll => runtime.detect_poll_subscription_protocol(request).await?,
         };
-        Ok((sink_path, sink_spec, protocol))
+        Ok(PreparedSubscription {
+            sink: prepared_sink,
+            sink_spec,
+            protocol,
+        })
     }
 
     fn spawn_job_task(
@@ -1942,6 +2028,7 @@ impl SubscriptionManager {
     }
 
     async fn resume_all(&self, runtime: &DaemonRuntime) -> Result<()> {
+        self.cleanup_terminal_jobs().await;
         let entries = {
             let jobs = self.jobs.lock().await;
             jobs.values().cloned().collect::<Vec<_>>()
@@ -1955,17 +2042,26 @@ impl SubscriptionManager {
                 continue;
             }
 
-            let (sink_path, sink_spec, protocol) =
-                match self.prepare_request(runtime, &entry.request).await {
-                    Ok(prepared) => prepared,
-                    Err(err) => {
-                        let mut view = entry.view.lock().await;
-                        view.status = SUB_STATUS_RESUME_FAILED.to_string();
-                        view.last_resume_error = Some(err.to_string());
-                        view.stopped_at_unix = Some(now_unix_secs());
-                        continue;
-                    }
-                };
+            let prepared = match self.prepare_request(runtime, &entry.request).await {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    let mut view = entry.view.lock().await;
+                    view.status = SUB_STATUS_RESUME_FAILED.to_string();
+                    view.last_resume_error = Some(err.to_string());
+                    view.stopped_at_unix = Some(now_unix_secs());
+                    continue;
+                }
+            };
+            let sink_path = match prepared.sink {
+                PreparedSubscriptionSink::File(path) => path,
+                PreparedSubscriptionSink::Memory => {
+                    let mut view = entry.view.lock().await;
+                    view.status = SUB_STATUS_STOPPED_AFTER_RESTART.to_string();
+                    view.stopped_at_unix = Some(now_unix_secs());
+                    view.last_resume_error = None;
+                    continue;
+                }
+            };
 
             let (stop_tx, stop_rx) = watch::channel(false);
             {
@@ -1975,8 +2071,8 @@ impl SubscriptionManager {
             let job_id = {
                 let mut view = entry.view.lock().await;
                 view.endpoint = entry.request.endpoint.clone();
-                view.protocol = protocol;
-                view.sink = sink_spec;
+                view.protocol = prepared.protocol;
+                view.sink = prepared.sink_spec;
                 view.resource_uri = entry.request.resource_uri.clone();
                 view.status = "resumed".to_string();
                 view.durable = true;
@@ -2010,25 +2106,30 @@ impl SubscriptionManager {
         runtime: &DaemonRuntime,
         request: &SubscribeStartRequest,
     ) -> Result<SubscribeStartResponse> {
-        let (sink_path, sink_spec, protocol) = self.prepare_request(runtime, request).await?;
+        self.cleanup_terminal_jobs().await;
+        let prepared = self.prepare_request(runtime, request).await?;
 
         let job_id = {
             let mut next = self.next_id.lock().await;
             *next += 1;
             format!("sub_{}", *next)
         };
+        let sink_path = match prepared.sink {
+            PreparedSubscriptionSink::File(path) => path,
+            PreparedSubscriptionSink::Memory => internal_memory_sink_path(&job_id),
+        };
         let now = now_unix_secs();
         let view = Arc::new(Mutex::new(SubscriptionJobView {
             job_id: job_id.clone(),
             mode: request.mode,
             endpoint: request.endpoint.clone(),
-            protocol: protocol.clone(),
-            sink: sink_spec.clone(),
+            protocol: prepared.protocol.clone(),
+            sink: prepared.sink_spec.clone(),
             resource_uri: request.resource_uri.clone(),
             status: "running".to_string(),
-            durable: !request.ephemeral,
-            auto_resume: !request.ephemeral,
-            resume_strategy: if request.ephemeral {
+            durable: !request.ephemeral && !sink_is_memory(&request.sink),
+            auto_resume: !request.ephemeral && !sink_is_memory(&request.sink),
+            resume_strategy: if request.ephemeral || sink_is_memory(&request.sink) {
                 "none".to_string()
             } else {
                 "reconnect".to_string()
@@ -2047,6 +2148,7 @@ impl SubscriptionManager {
         let (stop_tx, stop_rx) = watch::channel(false);
         let entry = Arc::new(SubscriptionJobEntry {
             request: request.clone(),
+            sink_path: sink_path.clone(),
             view: view.clone(),
             stop_tx: Mutex::new(stop_tx),
             task: Mutex::new(None),
@@ -2067,15 +2169,16 @@ impl SubscriptionManager {
         Ok(SubscribeStartResponse {
             job_id,
             mode: request.mode,
-            protocol,
+            protocol: prepared.protocol,
             endpoint: guard.endpoint.clone(),
-            sink: sink_spec,
+            sink: prepared.sink_spec,
             resource_uri: guard.resource_uri.clone(),
             status: guard.status.clone(),
         })
     }
 
     async fn list(&self) -> Vec<SubscriptionJobView> {
+        self.cleanup_terminal_jobs().await;
         let entries = {
             let jobs = self.jobs.lock().await;
             jobs.values().cloned().collect::<Vec<_>>()
@@ -2089,18 +2192,28 @@ impl SubscriptionManager {
     }
 
     async fn status(&self, job_id: &str) -> Result<SubscriptionJobView> {
+        self.cleanup_terminal_jobs().await;
         let entry = {
             let jobs = self.jobs.lock().await;
             jobs.get(job_id).cloned()
+        };
+        if let Some(entry) = entry {
+            return Ok(entry.view.lock().await.clone());
         }
-        .ok_or_else(|| {
-            UxcError::OperationNotFound(format!("subscription job not found: {}", job_id))
-        })?;
-        let view = entry.view.lock().await.clone();
-        Ok(view)
+        let terminal = {
+            let jobs = self.terminal_jobs.lock().await;
+            jobs.get(job_id).cloned()
+        };
+        terminal
+            .map(|entry| entry.view)
+            .ok_or_else(|| {
+                UxcError::OperationNotFound(format!("subscription job not found: {}", job_id))
+            })
+            .map_err(Into::into)
     }
 
     async fn stop(&self, job_id: &str) -> Result<SubscribeStopResponse> {
+        self.cleanup_terminal_jobs().await;
         let entry = {
             let jobs = self.jobs.lock().await;
             jobs.get(job_id).cloned()
@@ -2127,20 +2240,94 @@ impl SubscriptionManager {
                 let _ = handle.await;
             }
         }
-        {
+        let view = {
             let mut guard = entry.view.lock().await;
             guard.status = "stopped".to_string();
             guard.stopped_at_unix = Some(now_unix_secs());
-        }
+            guard.clone()
+        };
         {
             let mut jobs = self.jobs.lock().await;
             jobs.remove(job_id);
+        }
+        {
+            let mut terminal = self.terminal_jobs.lock().await;
+            terminal.insert(
+                job_id.to_string(),
+                TerminalSubscriptionEntry {
+                    view,
+                    sink_path: entry.sink_path.clone(),
+                    expires_at_unix: now_unix_secs().saturating_add(SUBSCRIPTION_TERMINAL_TTL_SECS),
+                    memory_backed: sink_is_memory(&entry.request.sink),
+                },
+            );
         }
         self.persist_state().await?;
         Ok(SubscribeStopResponse {
             job_id: job_id.to_string(),
             stopped: true,
         })
+    }
+
+    async fn events(
+        &self,
+        request: &SubscriptionEventsRequest,
+    ) -> Result<SubscriptionEventsResponse> {
+        self.cleanup_terminal_jobs().await;
+        let limit = request.limit.clamp(1, SUBSCRIPTION_EVENTS_MAX_LIMIT);
+        let wait_ms = request.wait_ms.min(SUBSCRIPTION_EVENTS_MAX_WAIT_MS);
+        let deadline = Instant::now() + Duration::from_millis(wait_ms);
+
+        loop {
+            let active_entry = {
+                let jobs = self.jobs.lock().await;
+                jobs.get(&request.job_id).cloned()
+            };
+            let terminal_entry = if active_entry.is_none() {
+                let jobs = self.terminal_jobs.lock().await;
+                jobs.get(&request.job_id).cloned()
+            } else {
+                None
+            };
+
+            let (status, sink_path) = if let Some(entry) = active_entry {
+                (
+                    entry.view.lock().await.status.clone(),
+                    entry.sink_path.clone(),
+                )
+            } else if let Some(entry) = terminal_entry {
+                (entry.view.status.clone(), entry.sink_path.clone())
+            } else {
+                return Err(UxcError::OperationNotFound(format!(
+                    "subscription job not found: {}",
+                    request.job_id
+                ))
+                .into());
+            };
+
+            let loaded = load_subscription_events(&sink_path, request.after_seq, limit).await?;
+            if !loaded.events.is_empty() || wait_ms == 0 || status != "running" {
+                return Ok(SubscriptionEventsResponse {
+                    job_id: request.job_id.clone(),
+                    status,
+                    events: loaded.events,
+                    next_after_seq: loaded.next_after_seq,
+                    has_more: loaded.has_more,
+                });
+            }
+
+            if Instant::now() >= deadline {
+                return Ok(SubscriptionEventsResponse {
+                    job_id: request.job_id.clone(),
+                    status,
+                    events: Vec::new(),
+                    next_after_seq: request.after_seq,
+                    has_more: false,
+                });
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
 
@@ -2580,6 +2767,13 @@ impl DaemonRuntime {
         self.subscriptions.stop(job_id).await
     }
 
+    pub async fn subscribe_events(
+        &self,
+        request: &SubscriptionEventsRequest,
+    ) -> Result<SubscriptionEventsResponse> {
+        self.subscriptions.events(request).await
+    }
+
     pub async fn resume_persisted_subscriptions(&self) -> Result<()> {
         self.subscriptions.resume_all(self).await
     }
@@ -2814,7 +3008,7 @@ enum SubscriptionRunError {
 
 fn parse_file_sink(spec: &str) -> Result<PathBuf> {
     let Some(path) = spec.strip_prefix("file:") else {
-        bail!("subscribe sink must use file:<path>");
+        bail!("subscribe sink must use file:<path> or memory:");
     };
     if path.trim().is_empty() {
         bail!("subscribe sink path cannot be empty");
@@ -2822,6 +3016,16 @@ fn parse_file_sink(spec: &str) -> Result<PathBuf> {
     let path = PathBuf::from(path);
     validate_subscription_sink_path(&path)?;
     Ok(path)
+}
+
+fn internal_memory_sink_path(job_id: &str) -> PathBuf {
+    daemon_dir()
+        .join("subscription-events")
+        .join(format!("{}.ndjson", job_id))
+}
+
+fn sink_is_memory(spec: &str) -> bool {
+    spec == "memory:"
 }
 
 fn validate_subscription_sink_path(path: &Path) -> Result<()> {
@@ -2862,6 +3066,72 @@ async fn open_subscription_sink(path: &Path) -> Result<tokio::fs::File> {
         .open(path)
         .await
         .with_context(|| format!("Failed to open sink file {}", path.display()))
+}
+
+struct LoadedSubscriptionEvents {
+    events: Vec<SubscriptionEventEnvelope>,
+    next_after_seq: u64,
+    has_more: bool,
+}
+
+async fn load_subscription_events(
+    path: &Path,
+    after_seq: u64,
+    limit: usize,
+) -> Result<LoadedSubscriptionEvents> {
+    let raw = match tokio::fs::read_to_string(path).await {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("Failed to read subscription sink {}", path.display()))
+        }
+    };
+    let mut events = Vec::new();
+    for (index, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let event =
+            serde_json::from_str::<SubscriptionEventEnvelope>(trimmed).with_context(|| {
+                format!(
+                    "Invalid subscription event in {} at line {}",
+                    path.display(),
+                    index + 1
+                )
+            })?;
+        events.push(event);
+    }
+
+    let retained_start = events
+        .len()
+        .saturating_sub(SUBSCRIPTION_EVENT_HISTORY_LIMIT);
+    let retained = &events[retained_start..];
+    if let Some(first) = retained.first() {
+        if after_seq > 0 && after_seq < first.seq.saturating_sub(1) {
+            return Err(UxcError::InvalidArguments(format!(
+                "subscription cursor expired for job {}: earliest available seq is {}",
+                first.job_id, first.seq
+            ))
+            .into());
+        }
+    }
+
+    let filtered = retained
+        .iter()
+        .filter(|event| event.seq > after_seq)
+        .cloned()
+        .collect::<Vec<_>>();
+    let has_more = filtered.len() > limit;
+    let limited = filtered.into_iter().take(limit).collect::<Vec<_>>();
+    let next_after_seq = limited.last().map(|event| event.seq).unwrap_or(after_seq);
+
+    Ok(LoadedSubscriptionEvents {
+        events: limited,
+        next_after_seq,
+        has_more,
+    })
 }
 
 async fn update_subscription_view(
@@ -4916,6 +5186,23 @@ pub async fn subscribe_stop_client(_job_id: &str) -> Result<SubscribeStopRespons
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
+pub async fn subscribe_events_client(
+    request: &SubscriptionEventsRequest,
+) -> Result<SubscriptionEventsResponse> {
+    let value = client_call("subscription.events", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub async fn subscribe_events_client(
+    _request: &SubscriptionEventsRequest,
+) -> Result<SubscriptionEventsResponse> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
 async fn start_daemon_process() -> Result<()> {
     let dir = daemon_dir();
     ensure_private_dir(&dir)?;
@@ -5314,6 +5601,54 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 return Ok(());
             };
             match runtime.subscribe_stop(job_id).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: map_runtime_error_code(&err),
+                        message: err.to_string(),
+                    }),
+                },
+            }
+        }
+        "subscription.events" => {
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let events: SubscriptionEventsRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
+            match runtime.subscribe_events(&events).await {
                 Ok(result) => JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: req.id,
@@ -6338,6 +6673,11 @@ fn map_runtime_error_code(err: &anyhow::Error) -> i32 {
             UxcError::ProtocolDetectionFailed(_) | UxcError::UnsupportedProtocol(_) => {
                 ERR_PROTOCOL_DETECTION
             }
+            UxcError::InvalidArguments(message)
+                if message.starts_with("subscription cursor expired") =>
+            {
+                ERR_SUBSCRIPTION_CURSOR_EXPIRED
+            }
             UxcError::InvalidArguments(_) => -32602,
             UxcError::OperationNotFound(_) => ERR_OPERATION_NOT_FOUND,
             UxcError::OAuthRequired(_) => ERR_OAUTH_REQUIRED,
@@ -6782,6 +7122,106 @@ mod tests {
         );
 
         runtime.subscribe_stop(&response.job_id).await.unwrap();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn memory_sink_subscription_events_stream_without_user_file() {
+        let temp = tempdir().unwrap();
+        let (endpoint, _connects, server_task) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":7}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+
+        let runtime = test_runtime_with_store(&temp);
+        let response = runtime
+            .subscribe_start(subscription_request(&endpoint, "memory:"))
+            .await
+            .unwrap();
+
+        let events = runtime
+            .subscribe_events(&SubscriptionEventsRequest {
+                job_id: response.job_id.clone(),
+                after_seq: 0,
+                limit: 10,
+                wait_ms: 5_000,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events.job_id, response.job_id);
+        assert!(!events.events.is_empty(), "expected subscription events");
+        assert!(events.events.iter().any(|event| event.event_kind == "open"));
+        assert!(
+            events.events.iter().any(|event| event
+                .data
+                .as_ref()
+                .and_then(|value| value.get("value"))
+                == Some(&json!(7))),
+            "expected streamed websocket payload"
+        );
+
+        runtime.subscribe_stop(&response.job_id).await.unwrap();
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn stopped_subscription_status_and_tail_events_remain_temporarily_available() {
+        let temp = tempdir().unwrap();
+        let (endpoint, _connects, server_task) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":9}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+
+        let runtime = test_runtime_with_store(&temp);
+        let response = runtime
+            .subscribe_start(subscription_request(&endpoint, "memory:"))
+            .await
+            .unwrap();
+
+        let first_batch = runtime
+            .subscribe_events(&SubscriptionEventsRequest {
+                job_id: response.job_id.clone(),
+                after_seq: 0,
+                limit: 10,
+                wait_ms: 5_000,
+            })
+            .await
+            .unwrap();
+        let after_seq = first_batch.next_after_seq;
+
+        runtime.subscribe_stop(&response.job_id).await.unwrap();
+
+        let status = runtime.subscribe_status(&response.job_id).await.unwrap();
+        assert_eq!(status.status, "stopped");
+
+        let mut saw_closed = false;
+        for _ in 0..10 {
+            let tail = runtime
+                .subscribe_events(&SubscriptionEventsRequest {
+                    job_id: response.job_id.clone(),
+                    after_seq,
+                    limit: 10,
+                    wait_ms: 100,
+                })
+                .await
+                .unwrap();
+            assert_eq!(tail.status, "stopped");
+            if tail.events.iter().any(|event| {
+                event.event_kind == "closed"
+                    && event.meta.as_ref().and_then(|meta| meta.get("reason"))
+                        == Some(&json!("stopped"))
+            }) {
+                saw_closed = true;
+                break;
+            }
+        }
+        assert!(saw_closed, "expected closed event after stop");
+
         server_task.abort();
     }
 }

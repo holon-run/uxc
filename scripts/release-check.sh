@@ -47,6 +47,7 @@ main() {
 
   need_cmd cargo
   need_cmd git
+  need_cmd npm
 
   if ! git diff --quiet || ! git diff --cached --quiet; then
     if [[ "${ALLOW_DIRTY}" == "true" ]]; then
@@ -64,6 +65,11 @@ main() {
   ' Cargo.toml)"
   [[ -n "${version}" ]] || fail "failed to read version from Cargo.toml"
 
+  local npm_version
+  npm_version="$(node -p "require('./packages/uxc-daemon-client/package.json').version")"
+  [[ "${npm_version}" == "${version}" ]] \
+    || fail "npm package version ${npm_version} does not match Cargo.toml version ${version}"
+
   if [[ -n "${EXPECTED_TAG}" ]]; then
     local normalized
     normalized="${EXPECTED_TAG#refs/tags/}"
@@ -75,6 +81,10 @@ main() {
 
   cargo clippy -- -D warnings -A non_camel_case_types -A unused_variables -A unused_imports -A dead_code -A clippy::upper_case_acronyms -A clippy::enum_variant_names -A clippy::vec_init_then_push -A clippy::type_complexity
   cargo test --locked -- --test-threads=1
+  cargo build --bin uxc
+  npm ci
+  npm run build:ts
+  UXC_BIN="${PWD}/target/debug/uxc" npm run test:ts
 
   printf '[release-check] OK: version=%s\n' "${version}"
 }

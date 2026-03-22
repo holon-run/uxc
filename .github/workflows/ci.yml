@@ -21,7 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      node: ${{ steps.filter.outputs.node }}
       run_rust_ci: ${{ steps.classify.outputs.run_rust_ci }}
+      run_node_ci: ${{ steps.classify.outputs.run_node_ci }}
 
     steps:
       - name: Checkout
@@ -38,6 +40,13 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
+            node:
+              - 'packages/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'tsconfig*.json'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
 
       - name: Classify CI scope
         id: classify
@@ -45,20 +54,80 @@ jobs:
         run: |
           set -euo pipefail
           run_rust_ci=false
+          run_node_ci=false
           if [[ "${{ steps.filter.outputs.rust }}" == "true" ]]; then
             run_rust_ci=true
           fi
+          if [[ "${{ steps.filter.outputs.node }}" == "true" ]]; then
+            run_node_ci=true
+          fi
           echo "run_rust_ci=${run_rust_ci}" >> "${GITHUB_OUTPUT}"
+          echo "run_node_ci=${run_node_ci}" >> "${GITHUB_OUTPUT}"
 
   fast-path:
     name: Fast Path (docs-only)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.run_rust_ci != 'true'
+    if: needs.changes.outputs.run_rust_ci != 'true' && needs.changes.outputs.run_node_ci != 'true'
 
     steps:
       - name: Skip heavy jobs
-        run: echo "No Rust changes detected; skipping heavy CI jobs."
+        run: echo "No Rust or Node changes detected; skipping heavy CI jobs."
+
+  node-quality:
+    name: Node Quality
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run_node_ci == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript package
+        run: npm run build:ts
+
+  node-test:
+    name: Node Tests
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.run_node_ci == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-node-tests
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build uxc binary
+        run: cargo build --bin uxc
+
+      - name: Run Node tests
+        run: UXC_BIN=$PWD/target/debug/uxc npm run test:ts
 
   rust-quality:
     name: Rust Quality (stable)

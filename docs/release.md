@@ -7,12 +7,13 @@ This project uses tag-based automated releases.
 - GitHub repository secrets:
   - `CARGO_REGISTRY_TOKEN` for crates.io publishing
   - `HOMEBREW_TAP_TOKEN` for pushing formula updates to `holon-run/homebrew-tap`
+  - `NPM_TOKEN` for publishing `@holon-run/uxc-daemon-client`
 - crates.io package name is available (`uxc`)
 
 ## Pre-release Checklist
 
 1. Ensure your working tree is clean.
-2. Update version in `Cargo.toml` and `Cargo.lock`.
+2. Update version in `Cargo.toml`, `Cargo.lock`, and `packages/uxc-daemon-client/package.json`.
 3. Move release notes from `CHANGELOG.md` `Unreleased` to `## [x.y.z]`.
 4. Run local verification:
 
@@ -49,7 +50,8 @@ git push origin vX.Y.Z
 3. Generate `uxc-vX.Y.Z-checksums.txt`
 4. Create GitHub Release with all assets
 5. Publish crate to crates.io
-6. Update `holon-run/homebrew-tap` Formula
+6. Publish `@holon-run/uxc-daemon-client` to npm
+7. Update `holon-run/homebrew-tap` Formula
 
 Windows users should run UXC through WSL.
 

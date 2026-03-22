@@ -1,0 +1,11 @@
+{
+  "name": "uxc-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build:ts": "npm run --workspace @holon-run/uxc-daemon-client build",
+    "test:ts": "npm run --workspace @holon-run/uxc-daemon-client test"
+  }
+}

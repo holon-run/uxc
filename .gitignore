@@ -17,5 +17,10 @@ Thumbs.db
 # Logs
 *.log
 
+# Node
+node_modules/
+packages/*/dist/
+coverage/
+
 # Local agent settings
 .claude/settings.local.json
