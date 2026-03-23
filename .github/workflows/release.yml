@@ -8,10 +8,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  NODE_VERSION: 20
+  NODE_VERSION: 22
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   verify:
@@ -172,14 +173,7 @@ jobs:
         run: npm run build:ts
 
       - name: Publish npm package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
-            echo "NPM_TOKEN is not configured"
-            exit 1
-          fi
-          npm publish --workspace @holon-run/uxc-daemon-client --access public
+        run: npm publish --workspace @holon-run/uxc-daemon-client --access public --provenance
 
   update-homebrew-tap:
     name: Update Homebrew Tap

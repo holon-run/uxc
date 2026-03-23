@@ -7,8 +7,11 @@ This project uses tag-based automated releases.
 - GitHub repository secrets:
   - `CARGO_REGISTRY_TOKEN` for crates.io publishing
   - `HOMEBREW_TAP_TOKEN` for pushing formula updates to `holon-run/homebrew-tap`
-  - `NPM_TOKEN` for publishing `@holon-run/uxc-daemon-client`
 - crates.io package name is available (`uxc`)
+- npm package `@holon-run/uxc-daemon-client` already exists on npm
+- npm Trusted Publishing is configured for:
+  - repository: `holon-run/uxc`
+  - workflow: `.github/workflows/release.yml`
 
 ## Pre-release Checklist
 
@@ -53,6 +56,9 @@ git push origin vX.Y.Z
 6. Publish `@holon-run/uxc-daemon-client` to npm
 7. Update `holon-run/homebrew-tap` Formula
 
+The npm publish step uses GitHub Actions Trusted Publishing via OIDC.
+It does not require an `NPM_TOKEN`.
+
 Windows users should run UXC through WSL.
 
 ## Rollback
@@ -79,5 +85,9 @@ If crate was already published, version cannot be reused. Publish a new version.
 - Homebrew update skipped:
   - check `HOMEBREW_TAP_TOKEN` secret exists
   - check token has push permission to `holon-run/homebrew-tap`
+- npm publish failure:
+  - verify npm Trusted Publishing is configured for `@holon-run/uxc-daemon-client`
+  - verify the workflow filename matches `.github/workflows/release.yml`
+  - verify the workflow still has `permissions: id-token: write`
 - Missing release assets:
   - inspect failed matrix build job for target-specific toolchain errors
