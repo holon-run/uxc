@@ -7170,6 +7170,8 @@ mod tests {
     #[tokio::test]
     async fn stopped_subscription_status_and_tail_events_remain_temporarily_available() {
         let temp = tempdir().unwrap();
+        let sink_path = temp.path().join("stopped-tail-events.ndjson");
+        let sink_spec = format!("file:{}", sink_path.display());
         let (endpoint, _connects, server_task) =
             start_test_websocket_server(vec![TestWsConnectionPlan {
                 frames: vec![TestWsFrame::Text(r#"{"value":9}"#)],
@@ -7179,31 +7181,25 @@ mod tests {
 
         let runtime = test_runtime_with_store(&temp);
         let response = runtime
-            .subscribe_start(subscription_request(&endpoint, "memory:"))
+            .subscribe_start(subscription_request(&endpoint, &sink_spec))
             .await
             .unwrap();
 
-        let mut after_seq = 0;
-        let mut saw_payload = false;
-        for _ in 0..10 {
-            let batch = runtime
-                .subscribe_events(&SubscriptionEventsRequest {
-                    job_id: response.job_id.clone(),
-                    after_seq,
-                    limit: 10,
-                    wait_ms: 500,
-                })
-                .await
-                .unwrap();
-            after_seq = batch.next_after_seq;
-            if batch.events.iter().any(|event| {
-                event.data.as_ref().and_then(|value| value.get("value")) == Some(&json!(9))
-            }) {
-                saw_payload = true;
-                break;
-            }
-        }
-        assert!(saw_payload, "expected streamed websocket payload before stop");
+        assert!(
+            wait_for_file_contains(&sink_path, r#""value":9"#, StdDuration::from_secs(5)).await,
+            "expected streamed websocket payload before stop"
+        );
+
+        let snapshot = runtime
+            .subscribe_events(&SubscriptionEventsRequest {
+                job_id: response.job_id.clone(),
+                after_seq: 0,
+                limit: 100,
+                wait_ms: 0,
+            })
+            .await
+            .unwrap();
+        let after_seq = snapshot.next_after_seq;
 
         runtime.subscribe_stop(&response.job_id).await.unwrap();
 
