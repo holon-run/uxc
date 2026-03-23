@@ -621,3 +621,19 @@ clawhub sync --all --bump patch
 - Post-publish verification:
   - `clawhub sync --dry-run` returned `Nothing to sync`
   - all local `skills/*` packages are now synced to ClawHub again
+
+## ClawHub Publish Log (2026-03-23)
+
+- `clawhub whoami`: `jolestar`
+- New local skill pending publish:
+  - `notion-openapi-skill@1.0.0`
+- Local validation passed:
+  - `bash skills/notion-openapi-skill/scripts/validate.sh`
+- Publish attempt with `clawhub sync --all --bump patch` failed on the ClawHub backend while preparing the new skill:
+  - `This query or mutation function ran multiple paginated queries. Convex only supports a single paginated query in each function.`
+- Post-failure verification:
+  - `clawhub sync --dry-run` still reports `notion-openapi-skill  NEW`
+  - `clawhub inspect notion-openapi-skill` returns `Skill not found`
+- Current conclusion:
+  - `notion-openapi-skill` is the only remaining unsynced local skill
+  - the blocker is a ClawHub service-side publish error rather than a local packaging or validation issue
