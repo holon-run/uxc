@@ -95,11 +95,13 @@ notion-openapi-cli get:/data_sources/{data_source_id} data_source_id=<data_sourc
 
 # Query pages in a data source
 notion-openapi-cli post:/data_sources/{data_source_id}/query \
-  '{"data_source_id":"<data_source_uuid>","page_size":25}'
+  data_source_id=<data_source_uuid> \
+  '{"page_size":25}'
 
 # Query a data source with filter + sort
 notion-openapi-cli post:/data_sources/{data_source_id}/query \
-  '{"data_source_id":"<data_source_uuid>","filter":{"property":"Status","status":{"equals":"In progress"}},"sorts":[{"property":"Updated time","direction":"descending"}],"page_size":25}'
+  data_source_id=<data_source_uuid> \
+  '{"filter":{"property":"Status","status":{"equals":"In progress"}},"sorts":[{"property":"Updated time","direction":"descending"}],"page_size":25}'
 
 # Compatibility path for older database-based workflows
 notion-openapi-cli get:/databases/{database_id} database_id=<database_uuid>

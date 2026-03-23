@@ -170,7 +170,7 @@ uxc auth binding match https://api.notion.com/v1
 
 5. Use data source or legacy database reads to discover schema before property-sensitive queries:
    - `notion-openapi-cli get:/data_sources/{data_source_id} data_source_id=<uuid>`
-   - `notion-openapi-cli post:/data_sources/{data_source_id}/query '{"data_source_id":"<uuid>","page_size":25}'`
+   - `notion-openapi-cli post:/data_sources/{data_source_id}/query data_source_id=<uuid> '{"page_size":25}'`
    - `notion-openapi-cli get:/databases/{database_id} database_id=<uuid>`
 
 6. Execute writes only after explicit user confirmation:
