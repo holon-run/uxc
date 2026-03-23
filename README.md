@@ -295,6 +295,7 @@ See [`docs/skills.md`](docs/skills.md) for publish history, validation notes, an
 <summary>Workspace and Messaging</summary>
 
 - [`notion-mcp-skill`](skills/notion-mcp-skill/SKILL.md): operate Notion MCP workflows with OAuth-aware guidance
+- [`notion-openapi-skill`](skills/notion-openapi-skill/SKILL.md): traverse Notion pages, blocks, data sources, and legacy databases through the Notion Public API
 - [`linear-graphql-skill`](skills/linear-graphql-skill/SKILL.md): operate Linear issues, projects, and teams through GraphQL
 - [`slack-openapi-skill`](skills/slack-openapi-skill/SKILL.md): operate Slack Web API and receive inbound Socket Mode events through `uxc subscribe`
 - [`discord-openapi-skill`](skills/discord-openapi-skill/SKILL.md): operate Discord REST API and receive Gateway events through `uxc subscribe`

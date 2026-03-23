@@ -23,6 +23,8 @@ This repository ships one canonical skill for UXC (Universal X-Protocol CLI) and
   - Unified wrapper for Etherscan MCP workflows (address portfolio, token holders, contract lookup).
 - `skills/notion-mcp-skill`
   - Wrapper for Notion MCP workflows with OAuth two-step login guidance and guarded-write guidance.
+- `skills/notion-openapi-skill`
+  - Wrapper for Notion Public API traversal workflows via UXC + curated OpenAPI schema, including page/block recursion primitives and data source/database inspection.
 - `skills/discord-openapi-skill`
   - Wrapper for Discord REST workflows via UXC + link-persisted OpenAPI schema mapping (`uxc link --schema-url`).
 - `skills/slack-openapi-skill`
@@ -97,7 +99,7 @@ python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github
   --path skills/deepwiki-mcp-skill
 ```
 
-Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/coingecko-openapi-skill`, `skills/defillama-openapi-skill`, `skills/blockscout-openapi-skill`, `skills/chainbase-openapi-skill`, `skills/moralis-openapi-skill`, `skills/alchemy-openapi-skill`, `skills/coinapi-openapi-skill`, `skills/dexscreener-openapi-skill`, `skills/helius-openapi-skill`, `skills/blocknative-openapi-skill`, `skills/near-jsonrpc-skill`, `skills/hive-mcp-skill`, `skills/nodit-openapi-skill`, `skills/mempool-space-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
+Replace `skills/deepwiki-mcp-skill` with `skills/context7-mcp-skill`, `skills/okx-mcp-skill`, `skills/dune-mcp-skill`, `skills/thegraph-mcp-skill`, `skills/thegraph-token-mcp-skill`, `skills/etherscan-mcp-skill`, `skills/notion-mcp-skill`, `skills/notion-openapi-skill`, `skills/discord-openapi-skill`, `skills/slack-openapi-skill`, `skills/matrix-openapi-skill`, `skills/line-openapi-skill`, `skills/feishu-openapi-skill`, `skills/whatsapp-openapi-skill`, `skills/dingtalk-openapi-skill`, `skills/coingecko-openapi-skill`, `skills/defillama-openapi-skill`, `skills/blockscout-openapi-skill`, `skills/chainbase-openapi-skill`, `skills/moralis-openapi-skill`, `skills/alchemy-openapi-skill`, `skills/coinapi-openapi-skill`, `skills/dexscreener-openapi-skill`, `skills/helius-openapi-skill`, `skills/blocknative-openapi-skill`, `skills/near-jsonrpc-skill`, `skills/hive-mcp-skill`, `skills/nodit-openapi-skill`, `skills/mempool-space-openapi-skill`, `skills/binance-web3-openapi-skill`, or `skills/binance-spot-openapi-skill` as needed.
 
 After installation, restart Codex to load new skills.
 
@@ -124,6 +126,7 @@ bash skills/uxc-skill-creator/scripts/validate.sh
 
 ```bash
 bash skills/notion-mcp-skill/scripts/validate.sh
+bash skills/notion-openapi-skill/scripts/validate.sh
 ```
 
 - Validate Etherscan wrapper docs when touched:

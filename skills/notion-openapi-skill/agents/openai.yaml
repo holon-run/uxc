@@ -1,0 +1,4 @@
+agent:
+  display_name: "Notion Public API"
+  short_description: "Traverse Notion pages, blocks, and data sources via UXC + OpenAPI"
+  default_prompt: "Use $notion-openapi-skill to search, traverse, and inspect Notion workspace content through the Notion Public API with UXC, following version-header and read-first guardrails."

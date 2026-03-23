@@ -1,0 +1,829 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Notion Public API (Curated Traversal Surface)",
+    "version": "1.0.0",
+    "description": "Curated Notion Public API schema for search, block traversal, page reads, and data source inspection in UXC."
+  },
+  "servers": [
+    {
+      "url": "https://api.notion.com/v1"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/users/me": {
+      "get": {
+        "operationId": "get:/users/me",
+        "summary": "Retrieve the bot user for the active token",
+        "responses": {
+          "200": {
+            "description": "Current bot user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "users"
+        ]
+      }
+    },
+    "/search": {
+      "post": {
+        "operationId": "post:/search",
+        "summary": "Search pages, data sources, and databases by title or object filter",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedObjectList"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/pages/{page_id}": {
+      "get": {
+        "operationId": "get:/pages/{page_id}",
+        "summary": "Retrieve a page by ID",
+        "parameters": [
+          {
+            "name": "page_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter_properties[]",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "pages"
+        ]
+      },
+      "patch": {
+        "operationId": "patch:/pages/{page_id}",
+        "summary": "Update page properties, icon, cover, lock state, or trash state",
+        "parameters": [
+          {
+            "name": "page_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PageUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated page object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "pages"
+        ]
+      }
+    },
+    "/pages": {
+      "post": {
+        "operationId": "post:/pages",
+        "summary": "Create a page under a page, block, data source, or workspace parent",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PageCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created page object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "pages"
+        ]
+      }
+    },
+    "/pages/{page_id}/properties/{property_id}": {
+      "get": {
+        "operationId": "get:/pages/{page_id}/properties/{property_id}",
+        "summary": "Retrieve one page property item",
+        "parameters": [
+          {
+            "name": "page_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "property_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start_cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page property item response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "pages"
+        ]
+      }
+    },
+    "/blocks/{block_id}": {
+      "get": {
+        "operationId": "get:/blocks/{block_id}",
+        "summary": "Retrieve a block by ID",
+        "parameters": [
+          {
+            "name": "block_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Block object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "blocks"
+        ]
+      },
+      "patch": {
+        "operationId": "patch:/blocks/{block_id}",
+        "summary": "Update the content or trash state of a block",
+        "parameters": [
+          {
+            "name": "block_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BlockUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated block object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "blocks"
+        ]
+      },
+      "delete": {
+        "operationId": "delete:/blocks/{block_id}",
+        "summary": "Move a block to trash",
+        "parameters": [
+          {
+            "name": "block_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted or trashed block object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "blocks"
+        ]
+      }
+    },
+    "/blocks/{block_id}/children": {
+      "get": {
+        "operationId": "get:/blocks/{block_id}/children",
+        "summary": "Retrieve one level of child blocks for traversal",
+        "parameters": [
+          {
+            "name": "block_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start_cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated child block list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedObjectList"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "blocks"
+        ]
+      },
+      "patch": {
+        "operationId": "patch:/blocks/{block_id}/children",
+        "summary": "Append child blocks to a parent block, page, or database block",
+        "parameters": [
+          {
+            "name": "block_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppendBlockChildrenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Paginated list of appended first-level blocks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedObjectList"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "blocks"
+        ]
+      }
+    },
+    "/data_sources/{data_source_id}": {
+      "get": {
+        "operationId": "get:/data_sources/{data_source_id}",
+        "summary": "Retrieve a data source by ID",
+        "parameters": [
+          {
+            "name": "data_source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Data source object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "data_sources"
+        ]
+      }
+    },
+    "/data_sources/{data_source_id}/query": {
+      "post": {
+        "operationId": "post:/data_sources/{data_source_id}/query",
+        "summary": "Query pages contained in a data source",
+        "parameters": [
+          {
+            "name": "data_source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter_properties[]",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DataSourceQueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Paginated data source results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedObjectList"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "data_sources"
+        ]
+      }
+    },
+    "/databases/{database_id}": {
+      "get": {
+        "operationId": "get:/databases/{database_id}",
+        "summary": "Retrieve a legacy database by ID",
+        "parameters": [
+          {
+            "name": "database_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Database object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "databases"
+        ]
+      }
+    },
+    "/databases/{database_id}/query": {
+      "post": {
+        "operationId": "post:/databases/{database_id}/query",
+        "summary": "Query pages contained in a legacy database",
+        "parameters": [
+          {
+            "name": "database_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter_properties[]",
+            "in": "query",
+            "required": false,
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatabaseQueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Paginated database results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedObjectList"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "databases"
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "GenericObject": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "PaginatedObjectList": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GenericObject"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "SearchRequest": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "sort": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "filter": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "start_cursor": {
+            "type": "string"
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "additionalProperties": true
+      },
+      "DataSourceQueryRequest": {
+        "type": "object",
+        "properties": {
+          "filter": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "sorts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GenericObject"
+            }
+          },
+          "start_cursor": {
+            "type": "string"
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "in_trash": {
+            "type": "boolean"
+          },
+          "result_type": {
+            "type": "string",
+            "enum": [
+              "page",
+              "data_source"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "DatabaseQueryRequest": {
+        "type": "object",
+        "properties": {
+          "filter": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "sorts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GenericObject"
+            }
+          },
+          "start_cursor": {
+            "type": "string"
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "in_trash": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "PositionObject": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "end",
+              "start",
+              "after_block"
+            ]
+          },
+          "after_block": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "PageCreateRequest": {
+        "type": "object",
+        "properties": {
+          "parent": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "properties": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GenericObject"
+            },
+            "maxItems": 100
+          },
+          "icon": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "cover": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "template": {
+            "$ref": "#/components/schemas/GenericObject"
+          }
+        },
+        "required": [
+          "parent",
+          "properties"
+        ],
+        "additionalProperties": true
+      },
+      "PageUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "properties": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "icon": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "cover": {
+            "$ref": "#/components/schemas/GenericObject"
+          },
+          "is_locked": {
+            "type": "boolean"
+          },
+          "in_trash": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "AppendBlockChildrenRequest": {
+        "type": "object",
+        "properties": {
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GenericObject"
+            },
+            "maxItems": 100
+          },
+          "position": {
+            "$ref": "#/components/schemas/PositionObject"
+          }
+        },
+        "required": [
+          "children"
+        ],
+        "additionalProperties": true
+      },
+      "BlockUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "in_trash": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

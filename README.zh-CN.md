@@ -282,6 +282,7 @@ UXC 提供一个标准 skill（`uxc`）和若干官方场景化 wrapper skill。
 <summary>协作与消息系统</summary>
 
 - [`notion-mcp-skill`](skills/notion-mcp-skill/SKILL.md)：提供带 OAuth 说明的 Notion MCP 流程指引
+- [`notion-openapi-skill`](skills/notion-openapi-skill/SKILL.md)：通过 Notion Public API 遍历页面、Block、Data Source 与兼容旧 Database 工作流
 - [`linear-graphql-skill`](skills/linear-graphql-skill/SKILL.md)：通过 GraphQL 操作 Linear 的 issue、project 和 team
 - [`slack-openapi-skill`](skills/slack-openapi-skill/SKILL.md)：通过 UXC 操作 Slack Web API，并通过 `uxc subscribe` 接收 Socket Mode 事件
 - [`discord-openapi-skill`](skills/discord-openapi-skill/SKILL.md)：通过 UXC + OpenAPI schema mapping 操作 Discord REST API，并通过 `uxc subscribe` 接收 Gateway 事件
