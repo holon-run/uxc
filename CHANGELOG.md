@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-03-23
+
+### Added
+- Added `notion-public-openapi-skill` for direct Notion Public API access through UXC.
+- Added the `@holon-run/uxc-daemon-client` Node.js SDK for daemon-backed UXC workflows.
+
+### Changed
+- Switched npm release publishing to GitHub Actions Trusted Publishing with provenance.
+
+### Fixed
+- Upgraded `rustls` and `reqwest` to the newer compatible stack used by the current release workflow and daemon SDK work.
+
 ## [0.12.3] - 2026-03-19
 
 ### Added
