@@ -54,14 +54,21 @@ Example: `feature/openapi-parser`
    cargo fmt
    ```
 
-4. Run linter:
+4. Build TypeScript package when touching `packages/**`:
+   ```bash
+   npm ci
+   npm run build:ts
+   ```
+
+5. Run linter:
    ```bash
    cargo clippy -- -D warnings
    ```
 
-5. Run tests:
+6. Run tests:
    ```bash
    cargo test
+   UXC_BIN=$PWD/target/debug/uxc npm run test:ts
    ```
 
 6. Debug with logging:
@@ -215,7 +222,8 @@ Releases are tag-driven and automated by `.github/workflows/release.yml`.
 
 1. Update `Cargo.toml` version
 2. Update `CHANGELOG.md` for that version
-3. Run:
+3. Keep `packages/uxc-daemon-client/package.json` version in sync with `Cargo.toml`
+4. Run:
 
 ```bash
 ./scripts/release-check.sh vX.Y.Z

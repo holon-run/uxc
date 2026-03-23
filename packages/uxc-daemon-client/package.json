@@ -1,0 +1,40 @@
+{
+  "name": "@holon-run/uxc-daemon-client",
+  "version": "0.12.3",
+  "description": "Thin Node.js client for UXC daemon-backed operations",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/holon-run/uxc.git",
+    "directory": "packages/uxc-daemon-client"
+  },
+  "homepage": "https://github.com/holon-run/uxc",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "ws": "^8.18.3"
+  }
+}

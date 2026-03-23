@@ -8,6 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  NODE_VERSION: 20
 
 permissions:
   contents: write
@@ -149,6 +150,36 @@ jobs:
             exit 1
           fi
           cargo publish --locked --token "${CARGO_REGISTRY_TOKEN}"
+
+  publish-npm:
+    name: Publish npm Package
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript package
+        run: npm run build:ts
+
+      - name: Publish npm package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "NPM_TOKEN is not configured"
+            exit 1
+          fi
+          npm publish --workspace @holon-run/uxc-daemon-client --access public
 
   update-homebrew-tap:
     name: Update Homebrew Tap

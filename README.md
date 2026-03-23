@@ -466,6 +466,18 @@ Ensure daemon has usable 1Password auth context (for example `OP_SERVICE_ACCOUNT
 OAuth for MCP HTTP is supported (device code, client credentials, authorization code + PKCE).
 See [`docs/oauth-mcp-http.md`](docs/oauth-mcp-http.md) for full workflows.
 
+## TypeScript Daemon Client
+
+`uxc` now includes an official Node/TypeScript package for daemon-backed local integrations:
+
+```bash
+npm install @holon-run/uxc-daemon-client
+```
+
+It talks directly to the local daemon socket and returns structured objects instead of CLI stdout envelopes.
+Use it when embedding UXC into apps that need runtime calls, daemon status, or subscription lifecycle/event streaming.
+See [`docs/daemon-api.md`](docs/daemon-api.md) for the daemon contract and SDK shape.
+
 ## Docs Map
 
 - Extended quickstart and protocol walkthroughs: [`docs/quickstart.md`](docs/quickstart.md)
@@ -473,6 +485,7 @@ See [`docs/oauth-mcp-http.md`](docs/oauth-mcp-http.md) for full workflows.
 - Logging and troubleshooting with `RUST_LOG`: [`docs/logging.md`](docs/logging.md)
 - Auth credential secret sources (`literal/env/op`): [`docs/auth-secret-sources.md`](docs/auth-secret-sources.md)
 - Run daemon with service managers (`systemd`/`launchd`): [`docs/daemon-service.md`](docs/daemon-service.md)
+- Stable daemon JSON-RPC contract and TypeScript client: [`docs/daemon-api.md`](docs/daemon-api.md)
 - OpenAPI schema mapping and `--schema-url`: [`docs/schema-mapping.md`](docs/schema-mapping.md)
 - Skills overview and install/maintenance guidance: [`docs/skills.md`](docs/skills.md)
 - Release process: [`docs/release.md`](docs/release.md)
