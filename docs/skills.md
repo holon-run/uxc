@@ -637,3 +637,16 @@ clawhub sync --all --bump patch
 - Current conclusion:
   - `notion-openapi-skill` is the only remaining unsynced local skill
   - the blocker is a ClawHub service-side publish error rather than a local packaging or validation issue
+
+## ClawHub Publish Log (2026-03-24)
+
+- Retried publish for the remaining new skill:
+  - `notion-openapi-skill@1.0.0`
+- Result:
+  - publish succeeded via `clawhub sync --all --bump patch`
+  - published id: `k976vm3gwkxctw86kcwrbgad5583hkxe`
+- Post-publish verification:
+  - `clawhub inspect notion-openapi-skill` now returns `Latest: 1.0.0`
+  - `clawhub sync --dry-run` now returns `Nothing to sync`
+- Current registry sync state:
+  - all local `skills/*` packages are synced to ClawHub again
