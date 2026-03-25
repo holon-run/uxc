@@ -4,8 +4,8 @@
 
 use super::types::*;
 use crate::auth::{self, oauth, AuthType, Profile, Profiles};
-use crate::error::structured_error_from_jsonrpc_error;
 use crate::error::UxcError;
+use crate::error::{structured_error_from_jsonrpc_error, StructuredError, StructuredErrorPayload};
 use crate::http_client::build_resilient_http_client;
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
@@ -22,8 +22,25 @@ const MAX_BUFFERED_NOTIFICATIONS: usize = 64;
 const LEGACY_SSE_STREAM_TIMEOUT_SECS: u64 = 60 * 60 * 24;
 const LEGACY_SSE_RESPONSE_TIMEOUT_SECS: u64 = 30;
 
-type PendingResponse = tokio::sync::oneshot::Sender<Result<JsonValue, String>>;
+type PendingResponse = tokio::sync::oneshot::Sender<Result<JsonValue, PendingResponseError>>;
 type PendingResponses = Arc<Mutex<HashMap<RequestId, PendingResponse>>>;
+
+#[derive(Debug, Clone)]
+enum PendingResponseError {
+    Message(String),
+    Structured(StructuredErrorPayload),
+}
+
+impl PendingResponseError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Message(message) => anyhow::Error::msg(message),
+            Self::Structured(payload) => {
+                StructuredError::new(payload.code, payload.message, payload.details).into()
+            }
+        }
+    }
+}
 
 /// MCP HTTP transport mode selected during endpoint probing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,7 +278,7 @@ impl McpHttpTransport {
                 error.code,
                 &error.message,
                 error.data.as_ref(),
-                "MCP_TOOL_ERROR",
+                "EXECUTION_FAILED",
             )
             .into());
         }
@@ -1406,7 +1423,7 @@ impl LegacySseTransport {
             {
                 Ok(result) => result
                     .context("Legacy SSE reader closed before delivering a response")?
-                    .map_err(anyhow::Error::msg)?,
+                    .map_err(PendingResponseError::into_anyhow)?,
                 Err(_) => {
                     pending.lock().await.remove(&request.id);
                     bail!(
@@ -1595,18 +1612,22 @@ impl LegacySseTransport {
                                 match serde_json::from_value::<JsonRpcResponse>(value) {
                                     Ok(message) => {
                                         let payload = if let Some(error) = message.error {
-                                            Err(structured_error_from_jsonrpc_error(
-                                                error.code,
-                                                &error.message,
-                                                error.data.as_ref(),
-                                                "MCP_TOOL_ERROR",
-                                            )
-                                            .to_string())
+                                            Err(PendingResponseError::Structured(
+                                                structured_error_from_jsonrpc_error(
+                                                    error.code,
+                                                    &error.message,
+                                                    error.data.as_ref(),
+                                                    "EXECUTION_FAILED",
+                                                )
+                                                .payload(),
+                                            ))
                                         } else {
                                             message
                                                 .result
                                                 .context("MCP server response missing result field")
-                                                .map_err(|err| err.to_string())
+                                                .map_err(|err| {
+                                                    PendingResponseError::Message(err.to_string())
+                                                })
                                         };
 
                                         if let Some(sender) =
@@ -1682,7 +1703,7 @@ impl LegacySseTransport {
         };
 
         for (_, sender) in senders {
-            let _ = sender.send(Err(message.clone()));
+            let _ = sender.send(Err(PendingResponseError::Message(message.clone())));
         }
     }
 
@@ -2416,7 +2437,7 @@ data: invalid json
         let structured = err
             .downcast_ref::<StructuredError>()
             .expect("expected structured error");
-        assert_eq!(structured.code, "MCP_TOOL_ERROR");
+        assert_eq!(structured.code, "EXECUTION_FAILED");
         assert_eq!(structured.message, "Method not found");
         assert_eq!(
             structured
@@ -3208,6 +3229,32 @@ data: invalid json
             ToolContent::Text { text } => assert_eq!(text, "legacy-ok"),
             other => panic!("expected text tool content, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_sse_transport_preserves_jsonrpc_error_details() {
+        let server = spawn_legacy_sse_test_server().await;
+        let transport =
+            LegacySseTransport::with_auth(format!("{}/sse", server.base_url), None).unwrap();
+
+        transport.initialize().await.unwrap();
+
+        let err = transport
+            .send_request("unknown_method", None)
+            .await
+            .unwrap_err();
+        let structured = err
+            .downcast_ref::<StructuredError>()
+            .expect("expected structured error");
+        assert_eq!(structured.code, "EXECUTION_FAILED");
+        assert_eq!(structured.message, "unknown method: unknown_method");
+        assert_eq!(
+            structured
+                .details
+                .as_ref()
+                .and_then(|v| v.get("jsonrpc_code")),
+            Some(&json!(-32601))
+        );
     }
 
     // ===== Authentication Tests =====

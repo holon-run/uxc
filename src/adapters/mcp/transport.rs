@@ -581,7 +581,7 @@ impl McpStdioTransport {
                 error.code,
                 &error.message,
                 error.data.as_ref(),
-                "MCP_TOOL_ERROR",
+                "EXECUTION_FAILED",
             )
             .into());
         }
