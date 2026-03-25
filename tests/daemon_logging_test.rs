@@ -230,6 +230,76 @@ fn daemon_log_contains_stdio_session_lifecycle_events() {
     let _ = fs::remove_file(&log_file);
 }
 
+#[test]
+#[serial]
+fn daemon_log_contains_reap_deferred_event_when_can_reap_is_false() {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::thread;
+    use std::time::Duration;
+
+    let _ = uxc_command().arg("daemon").arg("stop").output();
+
+    let log_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        PathBuf::from(dir).join("uxc")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".uxc").join("daemon")
+    } else {
+        return;
+    };
+
+    let log_file = log_dir.join("daemon.log");
+    if log_file.exists() {
+        let _ = fs::remove_file(&log_file);
+    }
+
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} can_reap_keep_alive", bin.display());
+    let first = uxc_command()
+        .arg("--daemon-idle-ttl")
+        .arg("1")
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"seed"}"#)
+        .output()
+        .expect("first call should run");
+    assert!(first.status.success());
+
+    thread::sleep(Duration::from_millis(1500));
+
+    let second = uxc_command()
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"trigger"}"#)
+        .output()
+        .expect("second call should run");
+    assert!(second.status.success());
+
+    thread::sleep(Duration::from_millis(200));
+
+    let content = fs::read_to_string(&log_file).expect("should be able to read daemon log");
+    assert!(
+        content.contains("daemon_session_reap_deferred"),
+        "log should contain daemon_session_reap_deferred event"
+    );
+    assert!(
+        content.contains("interactive_session"),
+        "log should include the can_reap defer reason"
+    );
+
+    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let _ = fs::remove_file(&log_file);
+}
+
 #[allow(deprecated)]
 fn uxc_command() -> assert_cmd::Command {
     assert_cmd::Command::cargo_bin(env!("CARGO_PKG_NAME")).unwrap()

@@ -5,10 +5,32 @@ use super::transport::{
 };
 use super::types::*;
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CanReapState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owns_external_resource: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_for_human: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CanReapProbeResult {
+    pub can_reap: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<CanReapState>,
+}
 
 /// MCP stdio client
 pub struct McpStdioClient {
@@ -139,6 +161,26 @@ impl McpStdioClient {
 
     pub async fn drain_notifications(&mut self) -> Vec<JsonRpcNotification> {
         self.transport.drain_notifications().await
+    }
+
+    pub async fn probe_can_reap(
+        &mut self,
+        idle_for_secs: u64,
+        idle_ttl_secs: u64,
+        timeout: Duration,
+    ) -> Result<CanReapProbeResult> {
+        let params = json!({
+            "idle_for_secs": idle_for_secs,
+            "idle_ttl_secs": idle_ttl_secs,
+        });
+        let result = self
+            .transport
+            .send_request_with_timeout("uxc/can_reap", Some(params), timeout)
+            .await
+            .context("Failed to probe uxc/can_reap")?;
+        let probe: CanReapProbeResult =
+            serde_json::from_value(result).context("Failed to parse can_reap probe result")?;
+        Ok(probe)
     }
 
     /// List available tools
@@ -334,6 +376,7 @@ impl McpStdioClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::structured_error_from_anyhow;
 
     #[tokio::test]
     async fn client_requires_tools_capability() {
@@ -663,5 +706,61 @@ mod tests {
         assert!(init.serverInfo.is_some());
         assert!(init.instructions.is_some());
         assert_eq!(init.instructions.unwrap(), "Use this server");
+    }
+
+    #[tokio::test]
+    async fn probe_can_reap_parses_successful_response() {
+        let script = r#"
+            read line
+            echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read line
+            echo '{"jsonrpc":"2.0","id":2,"result":{"can_reap":false,"reason":"interactive_session","retry_after_secs":30,"state":{"interactive":true,"owns_external_resource":true}}}'
+        "#;
+
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
+
+        let result = client
+            .probe_can_reap(123, 600, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert!(!result.can_reap);
+        assert_eq!(result.reason.as_deref(), Some("interactive_session"));
+        assert_eq!(result.retry_after_secs, Some(30));
+        assert_eq!(
+            result.state,
+            Some(CanReapState {
+                interactive: Some(true),
+                owns_external_resource: Some(true),
+                waiting_for_human: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_can_reap_surfaces_method_not_found_code() {
+        let script = r#"
+            read line
+            echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read line
+            echo '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}'
+        "#;
+
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
+
+        let err = client
+            .probe_can_reap(123, 600, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        let structured = structured_error_from_anyhow(&err).expect("structured error");
+        let jsonrpc_code = structured
+            .details
+            .as_ref()
+            .and_then(|details| details.get("jsonrpc_code"))
+            .and_then(|value| value.as_i64());
+        assert_eq!(jsonrpc_code, Some(-32601));
     }
 }

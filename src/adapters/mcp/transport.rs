@@ -480,6 +480,17 @@ impl McpStdioTransport {
         method: &str,
         params: Option<JsonValue>,
     ) -> Result<JsonValue> {
+        self.send_request_with_timeout(method, params, stdio_request_timeout())
+            .await
+    }
+
+    /// Send a request and wait for the response using a caller-specified timeout.
+    pub async fn send_request_with_timeout(
+        &mut self,
+        method: &str,
+        params: Option<JsonValue>,
+        timeout: Duration,
+    ) -> Result<JsonValue> {
         // Get the next ID
         let id = {
             let mut id_guard = self.next_id.lock().await;
@@ -528,7 +539,6 @@ impl McpStdioTransport {
 
         // Wait for the response with timeout so a stuck MCP server/tool call
         // does not block the caller indefinitely.
-        let timeout = stdio_request_timeout();
         let mut response_rx = response_rx;
         let response = match tokio::select! {
             biased;
@@ -1356,6 +1366,26 @@ mod tests {
 
         // Either timeout or error is acceptable
         assert!(result.is_err() || result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn send_request_with_timeout_uses_caller_timeout() {
+        let script = "read line; sleep 10";
+        let mut transport =
+            McpStdioTransport::connect("sh", &["-c".to_string(), script.to_string()])
+                .await
+                .unwrap();
+
+        let start = tokio::time::Instant::now();
+        let err = transport
+            .send_request_with_timeout("timeout_test", None, Duration::from_millis(25))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(start.elapsed() < Duration::from_millis(250));
+        assert!(err.contains("timed out"));
+        assert!(err.contains("timeout_test"));
     }
 
     #[tokio::test]
