@@ -2,7 +2,7 @@
   "siteTitle": "UXC Docs",
   "siteDescription": "One CLI for tools across protocols.",
   "siteUrl": "https://uxc.holon.run",
-  "theme": "paper",
+  "theme": "atlas",
   "template": "document",
   "topNav": [
     { "label": "Docs", "href": "/" },
