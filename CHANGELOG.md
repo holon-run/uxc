@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-03-25
+
+### Fixed
+- Preserve structured MCP tool errors end-to-end instead of collapsing them into a generic `EXECUTION_FAILED`, including daemon-backed execution and final CLI JSON output.
+- Preserve structured MCP error details for Legacy SSE transport sessions and keep unstructured MCP JSON-RPC failures on the existing `EXECUTION_FAILED` fallback code.
+
 ## [0.12.4] - 2026-03-23
 
 ### Added
