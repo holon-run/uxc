@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-03-25
+
+### Fixed
+- Enforced the npm trusted publishing authentication path in the release workflow to avoid fallback token-based npm auth during package publish.
+
 ## [0.12.5] - 2026-03-25
 
 ### Fixed
