@@ -4,7 +4,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-[Documentation](https://uxc.holon.run) | [Skills Directory](skills/README.md)
+[Documentation](https://uxc.holon.run) | [Skills Directory](https://uxc.holon.run/skills/)
 
 [![CI](https://github.com/holon-run/uxc/workflows/CI/badge.svg)](https://github.com/holon-run/uxc/actions)
 [![Coverage](https://github.com/holon-run/uxc/workflows/Coverage/badge.svg)](https://github.com/holon-run/uxc/actions/workflows/coverage.yml)
@@ -155,7 +155,7 @@ Representative categories include:
 Use the base `uxc` skill as the shared execution layer, then add wrapper skills
 when a service-specific workflow is worth packaging.
 
-See [`skills/README.md`](skills/README.md) for the full skill catalog and
+See [the Skills Directory](https://uxc.holon.run/skills/) for the full skill catalog and
 [`docs/skills.md`](docs/skills.md) for publish and maintenance logs.
 
 ## Where It Fits
@@ -280,19 +280,19 @@ instead of CLI stdout envelopes.
 Use it when embedding UXC into applications that need runtime calls, daemon
 status, or subscription lifecycle and event streaming.
 
-See [`docs/daemon-api.md`](docs/daemon-api.md) for the daemon contract.
+See [the daemon API docs](https://uxc.holon.run/daemon/api/) for the daemon contract.
 
 ## Docs Map
 
-- quickstart: [`docs/quickstart.md`](docs/quickstart.md)
-- public no-key endpoints: [`docs/public-endpoints.md`](docs/public-endpoints.md)
-- auth secret sources: [`docs/auth-secret-sources.md`](docs/auth-secret-sources.md)
-- MCP HTTP OAuth: [`docs/oauth-mcp-http.md`](docs/oauth-mcp-http.md)
-- daemon service setup: [`docs/daemon-service.md`](docs/daemon-service.md)
-- daemon API and TypeScript client: [`docs/daemon-api.md`](docs/daemon-api.md)
-- logging and troubleshooting: [`docs/logging.md`](docs/logging.md)
-- schema mapping and `--schema-url`: [`docs/schema-mapping.md`](docs/schema-mapping.md)
-- skills catalog: [`skills/README.md`](skills/README.md)
+- getting started: [https://uxc.holon.run/getting-started/](https://uxc.holon.run/getting-started/)
+- public no-key endpoints: [https://uxc.holon.run/reference/public-endpoints/](https://uxc.holon.run/reference/public-endpoints/)
+- auth secret sources: [https://uxc.holon.run/auth/secret-sources/](https://uxc.holon.run/auth/secret-sources/)
+- MCP HTTP OAuth: [https://uxc.holon.run/auth/oauth-mcp-http/](https://uxc.holon.run/auth/oauth-mcp-http/)
+- daemon service setup: [https://uxc.holon.run/daemon/service/](https://uxc.holon.run/daemon/service/)
+- daemon API and TypeScript client: [https://uxc.holon.run/daemon/api/](https://uxc.holon.run/daemon/api/)
+- logging and troubleshooting: [https://uxc.holon.run/daemon/logging/](https://uxc.holon.run/daemon/logging/)
+- schema mapping and `--schema-url`: [https://uxc.holon.run/reference/schema-mapping/](https://uxc.holon.run/reference/schema-mapping/)
+- skills catalog: [https://uxc.holon.run/skills/](https://uxc.holon.run/skills/)
 - skills publish and maintenance log: [`docs/skills.md`](docs/skills.md)
 - release process: [`docs/release.md`](docs/release.md)
 

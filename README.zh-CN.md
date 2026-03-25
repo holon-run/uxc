@@ -4,7 +4,7 @@
 
 [English](README.md) | 简体中文
 
-[文档站点](https://uxc.holon.run) | [Skills 目录](skills/README.md)
+[文档站点](https://uxc.holon.run) | [Skills 目录](https://uxc.holon.run/skills/)
 
 [![CI](https://github.com/holon-run/uxc/workflows/CI/badge.svg)](https://github.com/holon-run/uxc/actions)
 [![Coverage](https://github.com/holon-run/uxc/workflows/Coverage/badge.svg)](https://github.com/holon-run/uxc/actions/workflows/coverage.yml)
@@ -150,7 +150,7 @@ UXC 不只是一个 CLI 入口，这个仓库也在共享执行层之上提供�
 
 建议把基础的 `uxc` skill 当作共享执行层，再按具体服务场景叠加 wrapper skill。
 
-完整 skill 目录见 [`skills/README.md`](skills/README.md)，
+完整 skill 目录见 [文档站点中的 Skills 目录](https://uxc.holon.run/skills/)，
 发布记录与维护日志见 [`docs/skills.md`](docs/skills.md)。
 
 ## 适用场景
@@ -274,19 +274,19 @@ npm install @holon-run/uxc-daemon-client
 当需要在应用里嵌入运行时调用、daemon 状态查询，或订阅生命周期与事件流管理时，
 可以优先使用它。
 
-daemon 合约见 [`docs/daemon-api.md`](docs/daemon-api.md)。
+daemon 合约见 [站点中的 daemon API 文档](https://uxc.holon.run/daemon/api/)。
 
 ## 文档导航
 
-- quickstart：[`docs/quickstart.md`](docs/quickstart.md)
-- 免 API key 的公开 endpoint：[`docs/public-endpoints.md`](docs/public-endpoints.md)
-- auth secret 来源：[`docs/auth-secret-sources.md`](docs/auth-secret-sources.md)
-- MCP HTTP OAuth：[`docs/oauth-mcp-http.md`](docs/oauth-mcp-http.md)
-- daemon service 部署：[`docs/daemon-service.md`](docs/daemon-service.md)
-- daemon API 与 TypeScript client：[`docs/daemon-api.md`](docs/daemon-api.md)
-- 日志与排障：[`docs/logging.md`](docs/logging.md)
-- schema mapping 与 `--schema-url`：[`docs/schema-mapping.md`](docs/schema-mapping.md)
-- skills 目录：[`skills/README.md`](skills/README.md)
+- 入门： [https://uxc.holon.run/getting-started/](https://uxc.holon.run/getting-started/)
+- 免 API key 的公开 endpoint： [https://uxc.holon.run/reference/public-endpoints/](https://uxc.holon.run/reference/public-endpoints/)
+- auth secret 来源： [https://uxc.holon.run/auth/secret-sources/](https://uxc.holon.run/auth/secret-sources/)
+- MCP HTTP OAuth： [https://uxc.holon.run/auth/oauth-mcp-http/](https://uxc.holon.run/auth/oauth-mcp-http/)
+- daemon service 部署： [https://uxc.holon.run/daemon/service/](https://uxc.holon.run/daemon/service/)
+- daemon API 与 TypeScript client： [https://uxc.holon.run/daemon/api/](https://uxc.holon.run/daemon/api/)
+- 日志与排障： [https://uxc.holon.run/daemon/logging/](https://uxc.holon.run/daemon/logging/)
+- schema mapping 与 `--schema-url`： [https://uxc.holon.run/reference/schema-mapping/](https://uxc.holon.run/reference/schema-mapping/)
+- skills 目录： [https://uxc.holon.run/skills/](https://uxc.holon.run/skills/)
 - skills 发布记录与维护日志：[`docs/skills.md`](docs/skills.md)
 - 发布流程：[`docs/release.md`](docs/release.md)
 
