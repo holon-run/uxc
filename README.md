@@ -4,6 +4,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
+[Documentation](https://uxc.holon.run) | [Skills Directory](skills/README.md)
+
 [![CI](https://github.com/holon-run/uxc/workflows/CI/badge.svg)](https://github.com/holon-run/uxc/actions)
 [![Coverage](https://github.com/holon-run/uxc/workflows/Coverage/badge.svg)](https://github.com/holon-run/uxc/actions/workflows/coverage.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
