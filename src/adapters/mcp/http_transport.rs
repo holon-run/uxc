@@ -4,6 +4,7 @@
 
 use super::types::*;
 use crate::auth::{self, oauth, AuthType, Profile, Profiles};
+use crate::error::structured_error_from_jsonrpc_error;
 use crate::error::UxcError;
 use crate::http_client::build_resilient_http_client;
 use anyhow::{bail, Context, Result};
@@ -256,11 +257,13 @@ impl McpHttpTransport {
 
         // Check for JSON-RPC error
         if let Some(error) = json_response.error {
-            bail!(
-                "MCP server returned error: {} - {}",
+            return Err(structured_error_from_jsonrpc_error(
                 error.code,
-                error.message
-            );
+                &error.message,
+                error.data.as_ref(),
+                "MCP_TOOL_ERROR",
+            )
+            .into());
         }
 
         // Return result
@@ -1592,10 +1595,13 @@ impl LegacySseTransport {
                                 match serde_json::from_value::<JsonRpcResponse>(value) {
                                     Ok(message) => {
                                         let payload = if let Some(error) = message.error {
-                                            Err(format!(
-                                                "MCP server returned error: {} - {}",
-                                                error.code, error.message
-                                            ))
+                                            Err(structured_error_from_jsonrpc_error(
+                                                error.code,
+                                                &error.message,
+                                                error.data.as_ref(),
+                                                "MCP_TOOL_ERROR",
+                                            )
+                                            .to_string())
                                         } else {
                                             message
                                                 .result

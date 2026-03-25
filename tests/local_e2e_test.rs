@@ -7,6 +7,7 @@ mod common;
 
 use common::{
     fresh_test_home_dir, run_uxc, run_uxc_in_home, start_test_server, test_server_binary,
+    uxc_binary,
 };
 use std::fs;
 use std::process::Command;
@@ -54,6 +55,29 @@ fn wait_for_file_match_count(
         thread::sleep(Duration::from_millis(100));
     }
     false
+}
+
+fn run_uxc_failure_json(args: &[&str]) -> serde_json::Value {
+    let test_home = fresh_test_home_dir();
+    let runtime_dir = test_home.join("runtime");
+    fs::create_dir_all(&runtime_dir).expect("Failed to create test runtime dir");
+
+    let output = Command::new(uxc_binary())
+        .args(args)
+        .env("HOME", &test_home)
+        .env("USERPROFILE", &test_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .output()
+        .expect("Failed to run uxc");
+
+    assert!(
+        !output.status.success(),
+        "Expected uxc to fail, stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    serde_json::from_slice(&output.stdout).expect("Expected JSON error output on stdout")
 }
 
 #[test]
@@ -684,6 +708,36 @@ fn test_mcp_http_call_tool_includes_structured_content() {
 
 #[test]
 #[serial_test::serial]
+fn test_mcp_http_tool_structured_error_surfaces_details() {
+    let _server = start_test_server("mcp-http", "tool_structured_error");
+    let endpoint = mcp_http_endpoint(&_server.addr);
+
+    let json = run_uxc_failure_json(&[
+        &endpoint,
+        "echo",
+        "--input-json",
+        r#"{"message":"download"}"#,
+    ]);
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "IMAGE_DOWNLOAD_CAPTURE_FAILED");
+    assert_eq!(
+        json["error"]["message"],
+        "Images are visible but download capture failed"
+    );
+    assert_eq!(
+        json["error"]["details"]["details"]["visible_image_urls"][0],
+        "https://example.com/img-1.png"
+    );
+    assert_eq!(
+        json["error"]["details"]["details"]["failure_cause"],
+        "download_button_click_did_not_trigger_network"
+    );
+    assert_eq!(json["error"]["details"]["jsonrpc_code"], -32010);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_mcp_http_auth_required() {
     let _server = start_test_server("mcp-http", "auth_required");
     let endpoint = mcp_http_endpoint(&_server.addr);
@@ -929,6 +983,40 @@ fn test_mcp_stdio_auth_required() {
     let result = run_uxc(&[&endpoint, "echo", "--input-json", r#"{"message":"x"}"#]);
 
     assert!(result.is_err(), "Expected MCP stdio auth error");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_mcp_stdio_tool_structured_error_surfaces_details() {
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} tool_structured_error", bin.display());
+
+    let json = run_uxc_failure_json(&[
+        &endpoint,
+        "echo",
+        "--input-json",
+        r#"{"message":"download"}"#,
+    ]);
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "IMAGE_DOWNLOAD_CAPTURE_FAILED");
+    assert_eq!(
+        json["error"]["message"],
+        "Images are visible but download capture failed"
+    );
+    assert_eq!(
+        json["error"]["details"]["details"]["conversation_url"],
+        "https://gemini.google.com/app/mock-conversation"
+    );
+    assert_eq!(
+        json["error"]["details"]["details"]["visible_image_count"],
+        2
+    );
+    assert_eq!(
+        json["error"]["details"]["details"]["download_buttons_present"],
+        true
+    );
+    assert_eq!(json["error"]["details"]["jsonrpc_code"], -32010);
 }
 
 #[test]

@@ -30,6 +30,7 @@ impl addsvc::add_server::Add for AddService {
             | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
+            | Scenario::ToolStructuredError
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource

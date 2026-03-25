@@ -36,7 +36,7 @@ use adapters::OperationDetail;
 use auth::injected_env::{parse_inject_env_specs, InjectEnvSpec};
 use auth::{AuthBindingRule, AuthBindings, AuthHeader, AuthType, OAuthFlow, Profile, Profiles};
 use cache::CacheConfig;
-use error::UxcError;
+use error::{structured_error_from_anyhow, UxcError};
 use http_client::build_resilient_http_client;
 use output::OutputEnvelope;
 
@@ -946,8 +946,19 @@ fn render_error(err: &anyhow::Error, output_mode: OutputMode) {
         return;
     }
 
-    let code = error_code(err);
-    let envelope = OutputEnvelope::error(code, &err.to_string());
+    let structured = structured_error_from_anyhow(err);
+    let code = structured
+        .as_ref()
+        .map(|payload| payload.code.as_str())
+        .unwrap_or_else(|| error_code(err));
+    let message = structured
+        .as_ref()
+        .map(|payload| payload.message.clone())
+        .unwrap_or_else(|| err.to_string());
+    let details = structured
+        .as_ref()
+        .and_then(|payload| payload.details.clone());
+    let envelope = OutputEnvelope::error_with_details(code, &message, details);
     match envelope.to_json() {
         Ok(json) => println!("{}", json),
         Err(ser_err) => {

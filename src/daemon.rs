@@ -8,7 +8,10 @@ use crate::auth::{self, Profile};
 use crate::cache::{self, Cache, CacheConfig};
 use crate::daemon_log::{redact_endpoint, redact_sensitive};
 use crate::daemon_log::{DaemonEventType, DaemonLogEntry, DaemonLogger};
-use crate::error::UxcError;
+use crate::error::{
+    structured_error_from_anyhow, structured_error_from_jsonrpc_error, StructuredError,
+    StructuredErrorPayload, UxcError,
+};
 use crate::subscription_discord::{
     derive_gateway_bot_endpoint, parse_gateway_bot_response, prepare_gateway_websocket_url,
     DiscordGatewayBotResponse, DiscordGatewayHandler, DiscordGatewayRuntimeConfig,
@@ -412,6 +415,8 @@ struct JsonRpcResponse {
 struct JsonRpcError {
     code: i32,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -5451,6 +5456,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     error: Some(JsonRpcError {
                         code: -32602,
                         message: "Missing params".to_string(),
+                        data: None,
                     }),
                 };
                 write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
@@ -5466,6 +5472,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                         error: Some(JsonRpcError {
                             code: -32602,
                             message: format!("Invalid params: {err}"),
+                            data: None,
                         }),
                     };
                     write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
@@ -5483,10 +5490,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: req.id,
                     result: None,
-                    error: Some(JsonRpcError {
-                        code: map_runtime_error_code(&err),
-                        message: err.to_string(),
-                    }),
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
                 },
             }
         }
@@ -5499,6 +5503,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     error: Some(JsonRpcError {
                         code: -32602,
                         message: "Missing params".to_string(),
+                        data: None,
                     }),
                 };
                 write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
@@ -5514,6 +5519,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                         error: Some(JsonRpcError {
                             code: -32602,
                             message: format!("Invalid params: {err}"),
+                            data: None,
                         }),
                     };
                     write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
@@ -5531,10 +5537,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: req.id,
                     result: None,
-                    error: Some(JsonRpcError {
-                        code: map_runtime_error_code(&err),
-                        message: err.to_string(),
-                    }),
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
                 },
             }
         }
@@ -5558,6 +5561,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     error: Some(JsonRpcError {
                         code: -32602,
                         message: "Missing job_id".to_string(),
+                        data: None,
                     }),
                 };
                 write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
@@ -5574,10 +5578,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: req.id,
                     result: None,
-                    error: Some(JsonRpcError {
-                        code: map_runtime_error_code(&err),
-                        message: err.to_string(),
-                    }),
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
                 },
             }
         }
@@ -5595,6 +5596,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     error: Some(JsonRpcError {
                         code: -32602,
                         message: "Missing job_id".to_string(),
+                        data: None,
                     }),
                 };
                 write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
@@ -5611,10 +5613,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: req.id,
                     result: None,
-                    error: Some(JsonRpcError {
-                        code: map_runtime_error_code(&err),
-                        message: err.to_string(),
-                    }),
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
                 },
             }
         }
@@ -5627,6 +5626,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     error: Some(JsonRpcError {
                         code: -32602,
                         message: "Missing params".to_string(),
+                        data: None,
                     }),
                 };
                 write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
@@ -5642,6 +5642,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                         error: Some(JsonRpcError {
                             code: -32602,
                             message: format!("Invalid params: {err}"),
+                            data: None,
                         }),
                     };
                     write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
@@ -5659,10 +5660,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: req.id,
                     result: None,
-                    error: Some(JsonRpcError {
-                        code: map_runtime_error_code(&err),
-                        message: err.to_string(),
-                    }),
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
                 },
             }
         }
@@ -5673,6 +5671,7 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
             error: Some(JsonRpcError {
                 code: -32601,
                 message: format!("Method not found: {}", req.method),
+                data: None,
             }),
         },
     };
@@ -5733,6 +5732,20 @@ async fn client_call(method: &str, params: Option<Value>) -> Result<Value> {
     let resp_val = read_frame(&mut stream).await?;
     let resp: JsonRpcResponse = serde_json::from_value(resp_val)?;
     if let Some(err) = resp.error {
+        if let Some(data) = err.data.as_ref() {
+            if let Ok(payload) = serde_json::from_value::<StructuredErrorPayload>(data.clone()) {
+                return Err(
+                    StructuredError::new(payload.code, payload.message, payload.details).into(),
+                );
+            }
+            return Err(structured_error_from_jsonrpc_error(
+                i64::from(err.code),
+                &err.message,
+                Some(data),
+                "EXECUTION_FAILED",
+            )
+            .into());
+        }
         if err.code == -32602 {
             return Err(UxcError::InvalidArguments(err.message).into());
         }
@@ -6689,6 +6702,15 @@ fn map_runtime_error_code(err: &anyhow::Error) -> i32 {
     ERR_RUNTIME_GENERIC
 }
 
+fn jsonrpc_error_from_anyhow(err: &anyhow::Error) -> JsonRpcError {
+    JsonRpcError {
+        code: map_runtime_error_code(err),
+        message: err.to_string(),
+        data: structured_error_from_anyhow(err)
+            .and_then(|payload: StructuredErrorPayload| serde_json::to_value(payload).ok()),
+    }
+}
+
 impl Default for DaemonRuntime {
     fn default() -> Self {
         Self::new()
@@ -7244,7 +7266,11 @@ async fn write_jsonrpc_error(
         jsonrpc: JSONRPC_VERSION.to_string(),
         id,
         result: None,
-        error: Some(JsonRpcError { code, message }),
+        error: Some(JsonRpcError {
+            code,
+            message,
+            data: None,
+        }),
     };
     write_frame(stream, &serde_json::to_value(resp)?).await
 }

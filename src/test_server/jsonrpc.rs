@@ -320,6 +320,7 @@ async fn execute_method(
         | Scenario::SuiPubSub
         | Scenario::ToolsListFailAfterFirst
         | Scenario::ToolCallTimeout
+        | Scenario::ToolStructuredError
         | Scenario::StructuredContent
         | Scenario::ResourceReadFailOnce
         | Scenario::SessionScopedResource

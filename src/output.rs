@@ -44,6 +44,10 @@ pub struct ErrorInfo {
 
     /// Human-readable error message
     pub message: String,
+
+    /// Structured error details when available
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,7 +131,13 @@ impl OutputEnvelope {
     }
 
     /// Create an error response
+    #[allow(dead_code)]
     pub fn error(code: &str, message: &str) -> Self {
+        Self::error_with_details(code, message, None)
+    }
+
+    /// Create an error response with structured details.
+    pub fn error_with_details(code: &str, message: &str, details: Option<Value>) -> Self {
         Self {
             ok: false,
             kind: None,
@@ -138,6 +148,7 @@ impl OutputEnvelope {
             error: Some(ErrorInfo {
                 code: code.to_string(),
                 message: message.to_string(),
+                details,
             }),
             meta: Metadata {
                 version: "v1".to_string(),
@@ -222,6 +233,11 @@ mod tests {
             envelope.error.as_ref().map(|e| e.code.clone()),
             Some("INVALID_ARGUMENT".to_string())
         );
+        assert!(envelope
+            .error
+            .as_ref()
+            .and_then(|e| e.details.as_ref())
+            .is_none());
         assert_eq!(envelope.meta.version, "v1");
     }
 }

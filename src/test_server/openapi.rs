@@ -243,6 +243,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
+            | Scenario::ToolStructuredError
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
@@ -271,6 +272,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
+            | Scenario::ToolStructuredError
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
@@ -305,6 +307,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
+            | Scenario::ToolStructuredError
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
@@ -347,6 +350,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
+            | Scenario::ToolStructuredError
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
@@ -385,6 +389,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
+            | Scenario::ToolStructuredError
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
@@ -433,6 +438,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
+            | Scenario::ToolStructuredError
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
@@ -481,6 +487,7 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::SuiPubSub
             | Scenario::ToolsListFailAfterFirst
             | Scenario::ToolCallTimeout
+            | Scenario::ToolStructuredError
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource

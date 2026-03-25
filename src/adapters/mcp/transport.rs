@@ -1,7 +1,10 @@
 //! MCP stdio transport for communicating with MCP server processes
 
 use super::types::*;
-use anyhow::{anyhow, bail, Context, Result};
+use crate::error::structured_error_from_jsonrpc_error;
+#[cfg(test)]
+use anyhow::bail;
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::VecDeque;
@@ -574,7 +577,13 @@ impl McpStdioTransport {
         };
 
         if let Some(error) = response.error {
-            bail!("JSON-RPC error: {} - {}", error.code, error.message);
+            return Err(structured_error_from_jsonrpc_error(
+                error.code,
+                &error.message,
+                error.data.as_ref(),
+                "MCP_TOOL_ERROR",
+            )
+            .into());
         }
 
         response.result.context("No result in response")

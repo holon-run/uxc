@@ -1,5 +1,7 @@
 //! UXC error types
 
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use thiserror::Error;
 
 #[allow(dead_code)]
@@ -64,4 +66,96 @@ pub enum UxcError {
 
     #[error("Generic error: {0}")]
     GenericError(#[from] anyhow::Error),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructuredErrorPayload {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+#[error("{message}")]
+pub struct StructuredError {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+impl StructuredError {
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Option<Value>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details,
+        }
+    }
+
+    pub fn payload(&self) -> StructuredErrorPayload {
+        StructuredErrorPayload {
+            code: self.code.clone(),
+            message: self.message.clone(),
+            details: self.details.clone(),
+        }
+    }
+}
+
+pub fn structured_error_from_anyhow(err: &anyhow::Error) -> Option<StructuredErrorPayload> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<StructuredError>())
+        .map(StructuredError::payload)
+}
+
+pub fn structured_error_from_jsonrpc_error(
+    code: i64,
+    message: &str,
+    data: Option<&Value>,
+    fallback_code: &str,
+) -> StructuredError {
+    match data.cloned() {
+        Some(Value::Object(mut obj)) => {
+            let structured_code = obj
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or(fallback_code)
+                .to_string();
+            let structured_message = obj
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or(message)
+                .to_string();
+            obj.entry("jsonrpc_code".to_string()).or_insert(json!(code));
+            obj.entry("jsonrpc_message".to_string())
+                .or_insert(json!(message));
+            StructuredError::new(
+                structured_code,
+                structured_message,
+                Some(Value::Object(obj)),
+            )
+        }
+        Some(other) => StructuredError::new(
+            fallback_code,
+            message,
+            Some(json!({
+                "jsonrpc_code": code,
+                "jsonrpc_message": message,
+                "data": other,
+            })),
+        ),
+        None => StructuredError::new(
+            fallback_code,
+            message,
+            Some(json!({
+                "jsonrpc_code": code,
+                "jsonrpc_message": message,
+            })),
+        ),
+    }
 }

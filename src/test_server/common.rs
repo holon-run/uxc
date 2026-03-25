@@ -23,6 +23,8 @@ pub enum Scenario {
     ToolsListFailAfterFirst,
     /// tools/call returns content + structuredContent payload
     StructuredContent,
+    /// tools/call returns a JSON-RPC error with structured data
+    ToolStructuredError,
     /// First resources/read fails, later reads succeed
     ResourceReadFailOnce,
     /// tools/list changes after navigate and emits tools/list_changed notification
@@ -48,13 +50,14 @@ impl Scenario {
             "tool_call_timeout" => Ok(Self::ToolCallTimeout),
             "tools_list_fail_after_first" => Ok(Self::ToolsListFailAfterFirst),
             "structured_content" => Ok(Self::StructuredContent),
+            "tool_structured_error" => Ok(Self::ToolStructuredError),
             "resource_read_fail_once" => Ok(Self::ResourceReadFailOnce),
             "dynamic_toolset" => Ok(Self::DynamicToolset),
             "empty_object_required" => Ok(Self::EmptyObjectRequired),
             "sui_pubsub" => Ok(Self::SuiPubSub),
             "session_scoped_resource" => Ok(Self::SessionScopedResource),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, resource_read_fail_once, dynamic_toolset, empty_object_required, sui_pubsub, session_scoped_resource",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, tool_structured_error, resource_read_fail_once, dynamic_toolset, empty_object_required, sui_pubsub, session_scoped_resource",
                 s
             ),
         }

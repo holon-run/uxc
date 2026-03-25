@@ -162,6 +162,32 @@ async fn mcp_handler(
                 .and_then(|v| v.get("message"))
                 .and_then(Value::as_str)
                 .unwrap_or("hello");
+            if matches!(state.scenario, Scenario::ToolStructuredError) {
+                return Ok(Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "error": {
+                        "code": -32010,
+                        "message": "Failed to call tool 'gemini.image.download'",
+                        "data": {
+                            "code": "IMAGE_DOWNLOAD_CAPTURE_FAILED",
+                            "message": "Images are visible but download capture failed",
+                            "details": {
+                                "conversation_url": "https://gemini.google.com/app/mock-conversation",
+                                "visible_image_count": 2,
+                                "visible_image_urls": [
+                                    "https://example.com/img-1.png",
+                                    "https://example.com/img-2.png"
+                                ],
+                                "current_mode": "images",
+                                "download_buttons_present": true,
+                                "failure_cause": "download_button_click_did_not_trigger_network"
+                            }
+                        }
+                    }
+                }))
+                .into_response());
+            }
             if matches!(state.scenario, Scenario::SessionScopedResource) {
                 if name != "set_resource" {
                     return Ok(Json(json!({

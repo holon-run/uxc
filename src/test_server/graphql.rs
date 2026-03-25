@@ -333,6 +333,7 @@ async fn execute_query(
         | Scenario::AuthRequired
         | Scenario::ToolsListFailAfterFirst
         | Scenario::ToolCallTimeout
+        | Scenario::ToolStructuredError
         | Scenario::StructuredContent
         | Scenario::ResourceReadFailOnce
         | Scenario::SessionScopedResource
