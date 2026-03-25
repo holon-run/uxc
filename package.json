@@ -6,6 +6,13 @@
   ],
   "scripts": {
     "build:ts": "npm run --workspace @holon-run/uxc-daemon-client build",
-    "test:ts": "npm run --workspace @holon-run/uxc-daemon-client test"
+    "test:ts": "npm run --workspace @holon-run/uxc-daemon-client test",
+    "docs:dev": "mdorigin dev --root docs/site",
+    "docs:index": "mdorigin build index --root docs/site",
+    "docs:build": "mdorigin build cloudflare --root docs/site",
+    "docs:deploy": "npm run docs:index && npm run docs:build && npx wrangler@4 deploy --config wrangler.jsonc"
+  },
+  "devDependencies": {
+    "mdorigin": "^0.1.2"
   }
 }

@@ -19,6 +19,7 @@ Thumbs.db
 
 # Node
 node_modules/
+dist/
 packages/*/dist/
 coverage/
 
