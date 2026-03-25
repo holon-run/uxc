@@ -1848,8 +1848,10 @@ enum ProbeAttemptResult {
 mod tests {
     use super::*;
     use crate::auth::{AuthType, OAuthFlow, OAuthProfile, Profile, Profiles};
+    use crate::error::StructuredError;
     use hyper::service::{make_service_fn, service_fn};
     use hyper::{Body, Method, Request, Response, Server, StatusCode};
+    use serde_json::json;
     use std::convert::Infallible;
     use std::net::TcpListener;
     use std::sync::{Mutex as StdMutex, MutexGuard, OnceLock};
@@ -2410,9 +2412,19 @@ data: invalid json
 
         let result = transport.send_request("unknown_method", None).await;
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Method not found"));
-        assert!(err_msg.contains("-32601"));
+        let err = result.unwrap_err();
+        let structured = err
+            .downcast_ref::<StructuredError>()
+            .expect("expected structured error");
+        assert_eq!(structured.code, "MCP_TOOL_ERROR");
+        assert_eq!(structured.message, "Method not found");
+        assert_eq!(
+            structured
+                .details
+                .as_ref()
+                .and_then(|v| v.get("jsonrpc_code")),
+            Some(&json!(-32601))
+        );
     }
 
     #[tokio::test]
