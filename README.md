@@ -1,8 +1,6 @@
 # UXC
 
-**Universal X-Protocol CLI**
-
-A stable execution surface for agents.
+**One CLI for tools across protocols**
 
 English | [简体中文](README.zh-CN.md)
 
@@ -11,92 +9,168 @@ English | [简体中文](README.zh-CN.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.83%2B-orange.svg)](https://www.rust-lang.org)
 
-UXC gives agents one stable way to discover, authenticate, and call remote tools across
-OpenAPI, gRPC, GraphQL, MCP, and JSON-RPC.
+UXC helps agents and automation discover and invoke APIs and tools across
+OpenAPI, MCP, GraphQL, gRPC, and JSON-RPC through one consistent workflow.
 
-Instead of writing separate glue for each protocol, SDK, or local MCP setup, UXC turns
-remote interfaces into one predictable command contract with help-first discovery,
-structured execution, and deterministic JSON output.
+From discovery to structured invocation, UXC aims to keep calling patterns
+consistent across protocols while handling auth, output formatting, and
+protocol-specific differences behind the scenes.
 
-## Why UXC Exists
+## Start Here
 
-Agent tool use usually breaks down in the same places:
+Most flows follow the same path:
 
-- auth scattered across prompts, scripts, and local setup
-- different invocation models for each protocol
-- local MCP server names and config that are not portable across machines
-- large tool manifests or schemas pushed into prompt context
-- one-off wrappers that drift from upstream interfaces
+```bash
+uxc <host> -h
+uxc <host> <operation_id> -h
+uxc <host> <operation_id> key=value
+```
 
-UXC exists to make remote capabilities feel like one stable execution surface for agents
-and automation.
+Example:
 
-## What UXC Does
+```bash
+uxc petstore3.swagger.io/api/v3 -h
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} -h
+uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
+```
 
-- Discover operations from an endpoint on demand
-- Inspect input and output shape before execution
-- Execute operations with structured arguments
-- Return deterministic JSON envelopes by default
-- Reuse auth bindings, signer profiles, and linked shortcuts
+## Why UXC
 
-If a target can describe itself, UXC can usually call it.
+Remote capabilities are easy to access in isolation, but hard to reuse
+consistently across systems.
 
-## Why It Works Well With Agents and Skills
+Common friction points:
 
-- Progressive discovery keeps context small: `<host> -h`, `<host> <operation_id> -h`, then execute
-- URL-first usage avoids dependency on machine-specific MCP aliases or local wrapper names
-- Auth bindings externalize credential matching instead of burying it in prompts
-- Linked shortcuts (`uxc link`) turn remote endpoints into stable local commands
-- The same command contract can be reused across many skills and workflows
+- each protocol has its own discovery and invocation style
+- auth setup is scattered across shell scripts, prompts, SDKs, and local config
+- tool and schema details are hard to inspect before execution
+- automation breaks when output shape and error handling differ by provider
+- local agent workflows do not want one-off wrappers for every service
 
-## Core Capabilities
+UXC exists to turn schema-described remote capabilities into one reusable CLI
+entrypoint for agents, skills, scripts, and local applications.
 
-- URL-first usage: call endpoints directly, no server alias required
-- Multi-protocol detection and adapter routing
-- Schema-driven operation discovery (`<host> -h`, `<host> <operation_id> -h`)
-- Structured invocation (positional JSON, key-value args)
-- Deterministic JSON envelopes for automation and agents
-- Auth model with reusable credentials, bindings, and signer profiles
-- App-credential bootstrap for short-lived bearer tokens (for example, Feishu/Lark and DingTalk)
-- Host shortcut commands via `uxc link`
-- Link-level default OpenAPI schema persistence via `uxc link --schema-url`
-- Daemon-backed background subscriptions via `uxc subscribe`
-- Provider-aware event transports for Slack Socket Mode, Discord Gateway, and Feishu long connection
-- Stdio child-process auth injection via `--inject-env NAME={{secret}}`
+## How It Works
 
-Supported protocols:
+UXC keeps the top-level interaction model simple:
+
+1. Discover what a host exposes.
+2. Inspect the shape of a specific operation.
+3. Invoke with structured arguments.
+4. Reuse the same calling pattern across protocols.
+
+This makes remote interfaces feel more like a stable command surface than a
+collection of protocol-specific request styles.
+
+## Why Not curl, SDKs, or MCP-Only Tooling
+
+### `curl`
+
+`curl` is request-first. It is excellent when the caller already knows the URL,
+method, headers, and payload shape.
+
+UXC is discovery-first. It helps callers inspect what is available, understand
+expected input shape, and invoke with a more stable command contract.
+
+### Provider SDKs or protocol-specific CLIs
+
+Provider SDKs can be deep and powerful, but each one introduces its own usage
+model, auth conventions, and output shape.
+
+UXC trades provider-specific ergonomics for a shared interface across many
+providers and protocol families.
+
+### MCP-only tool calling
+
+MCP is an important part of the ecosystem, but many useful systems are exposed
+through OpenAPI, GraphQL, gRPC, or JSON-RPC instead.
+
+UXC is designed to unify MCP with those adjacent protocol surfaces rather than
+stopping at MCP-only workflows.
+
+## What You Get
+
+- help-first discovery with `<host> -h` and `<host> <operation_id> -h`
+- structured invocation with key/value args or positional JSON payloads
+- deterministic JSON output by default, with opt-in text mode
+- reusable auth credentials and endpoint bindings
+- shortcut links for frequently used hosts
+- daemon-backed session reuse and background subscriptions
+- a TypeScript daemon client for local integrations
+
+## Protocol Coverage
+
+UXC currently supports these protocol families behind one CLI contract:
 
 - OpenAPI / Swagger
-- gRPC (server reflection)
-- GraphQL (introspection)
-- MCP (HTTP and stdio)
-- JSON-RPC (OpenRPC-based discovery)
+- MCP over HTTP and stdio
+- GraphQL introspection and execution
+- gRPC reflection-based discovery and unary invocation
+- JSON-RPC with OpenRPC-style discovery
 
-## Architecture Snapshot
+Related runtime support also includes:
 
-UXC keeps protocol diversity behind one execution contract:
+- daemon-backed subscription lifecycle
+- WebSocket-based subscription flows
+- polling-based subscriptions
+- provider-aware event intake for Slack, Discord, Feishu, and similar systems
 
-![UXC architecture snapshot](docs/images/uxc-architecture-full.png)
+## Auth Coverage
 
-This design keeps discovery, auth, and execution stable while allowing protocol-specific
-internals.
+UXC is intended for more than public demo endpoints. It includes reusable auth
+and binding primitives for real provider integrations.
 
-## Target Use Cases
+Supported auth patterns include:
 
-- AI agents and skills that need deterministic remote tool execution
-- CI/CD and automation jobs that need schema-driven calls without SDK setup
-- Cross-protocol integration testing with one command contract
-- Controlled runtime environments where JSON envelopes and predictable errors matter
+- bearer tokens
+- API keys with configurable header or query placement
+- multi-field credentials for signed APIs
+- signer-backed request generation
+- OAuth for supported MCP HTTP flows
+- secret sources from literal values, environment variables, or external secret
+  providers
 
-## Non-Goals
+The main auth model is:
+
+- credentials store auth material
+- bindings match endpoints and select which credential applies
+
+That keeps auth setup reusable instead of embedding secrets and rules into every
+individual command.
+
+## Skills and Integrations
+
+UXC is not only a CLI entrypoint. This repository also ships a growing set of
+official skills built on top of the shared execution layer.
+
+Representative categories include:
+
+- browser and local tooling: `playwright-mcp-skill`, `chrome-devtools-mcp-skill`
+- documentation and research: `context7-mcp-skill`, `deepwiki-mcp-skill`
+- workspace and messaging: `notion-*`, `slack-*`, `discord-*`, `telegram-*`
+- crypto and market data: `dune-*`, `etherscan-*`, `thegraph-*`, `coinmarketcap-*`
+
+Use the base `uxc` skill as the shared execution layer, then add wrapper skills
+when a service-specific workflow is worth packaging.
+
+See [`skills/README.md`](skills/README.md) for the full skill catalog and
+[`docs/skills.md`](docs/skills.md) for publish and maintenance logs.
+
+## Where It Fits
+
+UXC is a good fit for:
+
+- agent and skill authors who need one stable way to call many remote systems
+- automation and scripts that need structured output and predictable failure modes
+- local applications that want daemon-backed reuse instead of parsing CLI stdout
+- multi-provider workflows where auth and invocation patterns would otherwise drift
 
 UXC is not:
 
-- a code generator
-- an SDK framework
-- an API gateway or reverse proxy
-
-UXC is a stable execution surface for remote capabilities that can describe themselves.
+- a hosted platform
+- an API gateway
+- a replacement for every provider SDK
+- a full bot framework or workflow orchestration system
 
 ## Install
 
@@ -143,51 +217,7 @@ cd uxc
 cargo install --path .
 ```
 
-## Quickstart (3 Minutes)
-
-Most HTTP examples omit the scheme for brevity.
-For public hosts, UXC infers `https://` when omitted.
-
-1. Discover operations:
-
-```bash
-uxc petstore3.swagger.io/api/v3 -h
-```
-
-2. Inspect operation schema:
-
-```bash
-uxc petstore3.swagger.io/api/v3 get:/pet/{petId} -h
-```
-
-3. Execute with structured input:
-
-```bash
-uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
-```
-
-Use only these endpoint forms:
-- `uxc <host> -h`
-- `uxc <host> <operation_id> -h`
-- `uxc <host> <operation_id> key=value` or `uxc <host> <operation_id> '{...}'`
-
-For nested object or array inputs, key-value mode also supports dotted and indexed paths:
-
-```bash
-uxc <host> <operation_id> \
-  prompt="summarize this file" \
-  attachmentPaths[0]=/tmp/spec.pdf
-```
-
-## Protocol Examples (One Each)
-
-Operation ID conventions:
-
-- OpenAPI: `method:/path` (example: `get:/users/{id}`)
-- gRPC: `Service/Method`
-- GraphQL: `query/viewer`, `mutation/createUser`
-- MCP: tool name (example: `ask_question`)
-- JSON-RPC: method name (example: `eth_getBalance`)
+## Quick Examples
 
 ### OpenAPI
 
@@ -196,61 +226,18 @@ uxc petstore3.swagger.io/api/v3 -h
 uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
 ```
 
-For schema-separated services, you can override schema source:
-
-```bash
-uxc api.github.com -h \
-  --schema-url https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json
-```
-
-### gRPC
-
-```bash
-uxc grpcb.in:9000 -h
-uxc grpcb.in:9000 addsvc.Add/Sum a=1 b=2
-```
-
-Note: gRPC unary runtime invocation requires `grpcurl` on `PATH`.
-
 ### GraphQL
 
 ```bash
 uxc countries.trevorblades.com -h
 uxc countries.trevorblades.com query/country code=US
-# Prefer positional JSON for non-string object arguments
-uxc api.linear.app/graphql mutation/issueCreate '{"input":{"teamId":"TEAM_ID","title":"Test"}}'
-# Optional: control GraphQL return fields via reserved _select argument
-uxc api.linear.app/graphql query/issues '{"first":5,"_select":"nodes { identifier title url state { name } }"}'
 ```
 
 ### MCP
 
 ```bash
 uxc mcp.deepwiki.com/mcp -h
-uxc mcp.deepwiki.com/mcp ask_question repoName=holon-run/uxc question='What does this project do?'
-```
-
-### MCP (stdio)
-
-UXC can also invoke MCP servers started as local processes over stdio.
-For stdio endpoints, the "URL" is a quoted command line.
-
-Playwright MCP (stdio) example:
-
-```bash
-# One-off discovery
-uxc "npx -y @playwright/mcp@latest --headless --isolated" -h
-
-# Create a stable command name for repeated use (recommended)
-uxc link playwright-mcp-cli "npx -y @playwright/mcp@latest --headless --isolated"
-playwright-mcp-cli -h
-
-# Inspect an operation before calling it
-playwright-mcp-cli browser_navigate -h
-
-# Call operations with key=value args
-playwright-mcp-cli browser_navigate url=https://example.com
-playwright-mcp-cli browser_snapshot
+uxc mcp.deepwiki.com/mcp ask_question '{"repoName":"holon-run/uxc","question":"What does this project do?"}'
 ```
 
 ### JSON-RPC
@@ -260,244 +247,60 @@ uxc fullnode.mainnet.sui.io -h
 uxc fullnode.mainnet.sui.io sui_getLatestCheckpointSequenceNumber
 ```
 
-## Skills
-
-UXC provides one canonical skill plus scenario-specific official wrappers.
-Use `uxc` skill as the shared execution layer, and add wrappers when they fit your workflow.
-
-### Start Here
-
-- [`uxc`](skills/uxc/SKILL.md): canonical schema discovery and multi-protocol execution layer
-- [`playwright-mcp-skill`](skills/playwright-mcp-skill/SKILL.md): browser automation over MCP stdio through `uxc`
-- [`context7-mcp-skill`](skills/context7-mcp-skill/SKILL.md): current library documentation and examples over MCP
-
-See [`docs/skills.md`](docs/skills.md) for publish history, validation notes, and ClawHub maintenance details.
-
-<details>
-<summary>Core and Skill Authoring</summary>
-
-- [`uxc`](skills/uxc/SKILL.md): canonical schema discovery and multi-protocol execution layer
-- [`uxc-skill-creator`](skills/uxc-skill-creator/SKILL.md): templates and workflow guidance for building new UXC-based skills
-
-</details>
-
-<details>
-<summary>Browser Automation and Documentation</summary>
-
-- [`playwright-mcp-skill`](skills/playwright-mcp-skill/SKILL.md): run `@playwright/mcp` over MCP stdio through `uxc`
-- [`chrome-devtools-mcp-skill`](skills/chrome-devtools-mcp-skill/SKILL.md): drive Chrome DevTools MCP through `uxc`
-- [`context7-mcp-skill`](skills/context7-mcp-skill/SKILL.md): query up-to-date library documentation and examples
-- [`deepwiki-mcp-skill`](skills/deepwiki-mcp-skill/SKILL.md): query repository documentation and ask codebase questions
-
-</details>
-
-<details>
-<summary>Workspace and Messaging</summary>
-
-- [`notion-mcp-skill`](skills/notion-mcp-skill/SKILL.md): operate Notion MCP workflows with OAuth-aware guidance
-- [`notion-openapi-skill`](skills/notion-openapi-skill/SKILL.md): traverse Notion pages, blocks, data sources, and legacy databases through the Notion Public API
-- [`linear-graphql-skill`](skills/linear-graphql-skill/SKILL.md): operate Linear issues, projects, and teams through GraphQL
-- [`slack-openapi-skill`](skills/slack-openapi-skill/SKILL.md): operate Slack Web API and receive inbound Socket Mode events through `uxc subscribe`
-- [`discord-openapi-skill`](skills/discord-openapi-skill/SKILL.md): operate Discord REST API and receive Gateway events through `uxc subscribe`
-- [`feishu-openapi-skill`](skills/feishu-openapi-skill/SKILL.md): operate Feishu/Lark IM APIs with bootstrap-managed auth and long-connection event intake
-- [`telegram-openapi-skill`](skills/telegram-openapi-skill/SKILL.md): operate Telegram Bot API and receive updates through polling-based `uxc subscribe`
-- [`matrix-openapi-skill`](skills/matrix-openapi-skill/SKILL.md): operate Matrix Client-Server API and follow room timelines through `/sync` polling
-- [`dingtalk-openapi-skill`](skills/dingtalk-openapi-skill/SKILL.md): operate DingTalk OpenAPI workflows with app bootstrap auth guidance
-- [`line-openapi-skill`](skills/line-openapi-skill/SKILL.md): operate LINE Messaging API request/response workflows
-- [`whatsapp-openapi-skill`](skills/whatsapp-openapi-skill/SKILL.md): operate WhatsApp Cloud API request/response workflows
-
-</details>
-
-<details>
-<summary>Crypto and Web3</summary>
-
-- [`alchemy-openapi-skill`](skills/alchemy-openapi-skill/SKILL.md): query Alchemy prices and market endpoints through OpenAPI
-- [`binance-spot-openapi-skill`](skills/binance-spot-openapi-skill/SKILL.md): operate Binance Spot public market data and signed account/order flows through OpenAPI
-- [`binance-spot-websocket-skill`](skills/binance-spot-websocket-skill/SKILL.md): subscribe to Binance Spot public trade, ticker, depth, and book-ticker streams via raw WebSocket
-- [`binance-web3-openapi-skill`](skills/binance-web3-openapi-skill/SKILL.md): query Binance Web3 token discovery, rankings, smart money, audits, and address positions through OpenAPI
-- [`birdeye-mcp-skill`](skills/birdeye-mcp-skill/SKILL.md): use Birdeye MCP for token discovery and market reads
-- [`bitget-openapi-skill`](skills/bitget-openapi-skill/SKILL.md): operate Bitget exchange APIs through OpenAPI
-- [`bitquery-graphql-skill`](skills/bitquery-graphql-skill/SKILL.md): query Bitquery GraphQL for trades, transfers, holders, balances, and realtime subscription flows
-- [`blockscout-openapi-skill`](skills/blockscout-openapi-skill/SKILL.md): read Blockscout explorer data through OpenAPI
-- [`bybit-openapi-skill`](skills/bybit-openapi-skill/SKILL.md): operate Bybit exchange APIs through OpenAPI
-- [`chainbase-openapi-skill`](skills/chainbase-openapi-skill/SKILL.md): query Chainbase Web3 data APIs through OpenAPI
-- [`coinapi-openapi-skill`](skills/coinapi-openapi-skill/SKILL.md): read CoinAPI market data through OpenAPI
-- [`coinbase-openapi-skill`](skills/coinbase-openapi-skill/SKILL.md): operate Coinbase Advanced Trade APIs through OpenAPI
-- [`coingecko-openapi-skill`](skills/coingecko-openapi-skill/SKILL.md): read CoinGecko public market data through OpenAPI
-- [`coinmarketcap-mcp-skill`](skills/coinmarketcap-mcp-skill/SKILL.md): use CoinMarketCap MCP for quotes, market overview, and narratives
-- [`crypto-com-mcp-skill`](skills/crypto-com-mcp-skill/SKILL.md): use Crypto.com MCP for exchange market data
-- [`defillama-openapi-skill`](skills/defillama-openapi-skill/SKILL.md): use DefiLlama public APIs through OpenAPI
-- [`defillama-prices-openapi-skill`](skills/defillama-prices-openapi-skill/SKILL.md): query DefiLlama prices APIs through OpenAPI
-- [`defillama-pro-openapi-skill`](skills/defillama-pro-openapi-skill/SKILL.md): use DefiLlama Pro APIs through OpenAPI
-- [`defillama-yields-openapi-skill`](skills/defillama-yields-openapi-skill/SKILL.md): query DefiLlama yields APIs through OpenAPI
-- [`dune-mcp-skill`](skills/dune-mcp-skill/SKILL.md): discover blockchain tables, run SQL, fetch results, and build charts via Dune MCP
-- [`ethereum-jsonrpc-skill`](skills/ethereum-jsonrpc-skill/SKILL.md): use Ethereum JSON-RPC via curated OpenRPC metadata
-- [`etherscan-mcp-skill`](skills/etherscan-mcp-skill/SKILL.md): investigate addresses, token holders, and contracts via Etherscan MCP
-- [`gate-mcp-skill`](skills/gate-mcp-skill/SKILL.md): use Gate MCP for exchange market data and discovery workflows
-- [`goldrush-mcp-skill`](skills/goldrush-mcp-skill/SKILL.md): use GoldRush MCP for wallet, market, and token workflows
-- [`kraken-openapi-skill`](skills/kraken-openapi-skill/SKILL.md): operate Kraken exchange APIs through OpenAPI
-- [`kucoin-openapi-skill`](skills/kucoin-openapi-skill/SKILL.md): operate KuCoin exchange APIs through OpenAPI
-- [`lifi-mcp-skill`](skills/lifi-mcp-skill/SKILL.md): use LI.FI MCP for cross-chain route discovery and execution planning
-- [`mexc-openapi-skill`](skills/mexc-openapi-skill/SKILL.md): operate MEXC exchange APIs through OpenAPI
-- [`moralis-openapi-skill`](skills/moralis-openapi-skill/SKILL.md): query Moralis Web3 Data APIs through OpenAPI
-- [`okx-exchange-websocket-skill`](skills/okx-exchange-websocket-skill/SKILL.md): subscribe to OKX public exchange ticker, trade, book, and candle channels via raw WebSocket
-- [`okx-mcp-skill`](skills/okx-mcp-skill/SKILL.md): query OKX MCP for token, market, wallet, and swap workflows
-- [`sui-jsonrpc-skill`](skills/sui-jsonrpc-skill/SKILL.md): use Sui JSON-RPC via curated OpenRPC metadata
-- [`thegraph-mcp-skill`](skills/thegraph-mcp-skill/SKILL.md): discover subgraphs, inspect schemas, and execute GraphQL via The Graph Subgraph MCP bridge
-- [`thegraph-token-mcp-skill`](skills/thegraph-token-mcp-skill/SKILL.md): query token, wallet, transfer, holder, and market data via The Graph Token API MCP
-- [`upbit-openapi-skill`](skills/upbit-openapi-skill/SKILL.md): operate Upbit exchange APIs through OpenAPI
-
-</details>
-
-### Install Skills
-
-Use the skill folder name as the skill id for both `npx skills` and ClawHub.
-
-Install from this repository using `npx skills`:
-
-```bash
-# Install the shared execution layer only
-npx -y skills@latest add holon-run/uxc --skill uxc --agent codex -y
-
-# Install any selected bundle of skills from this repo
-npx -y skills@latest add holon-run/uxc \
-  --skill uxc \
-  --skill slack-openapi-skill \
-  --skill discord-openapi-skill \
-  --skill bitquery-graphql-skill \
-  --agent codex -y
-```
-
-Install published skills from ClawHub:
-
-```bash
-# Install the shared execution layer only
-clawhub --workdir ~/.openclaw --dir skills install uxc
-
-# Install any selected published skill by its folder/slug name
-clawhub --workdir ~/.openclaw --dir skills install slack-openapi-skill
-clawhub --workdir ~/.openclaw --dir skills install chrome-devtools-mcp-skill
-clawhub --workdir ~/.openclaw --dir skills install defillama-openapi-skill
-```
-
-See [`docs/skills.md`](docs/skills.md) for the complete publish log and maintenance rules.
-
 ## Output and Help Conventions
 
 UXC is JSON-first by default.
-Use `--text` (or `--format text`) when you want human-readable CLI output.
+Use `--text` or `--format text` for human-readable CLI output.
 
-Examples:
+Success responses return a stable JSON envelope with fields such as:
 
-```bash
-uxc
-uxc help
-uxc <host> -h
-uxc <host> <operation_id> -h
-uxc --text help
-```
+- `ok`
+- `kind`
+- `protocol`
+- `endpoint`
+- `operation`
+- `data`
+- `meta`
 
-Note: In endpoint routing, `help` is treated as a literal operation name, not a help alias.
-
-Success envelope shape:
-
-```json
-{
-  "ok": true,
-  "kind": "call_result",
-  "protocol": "openapi",
-  "endpoint": "https://petstore3.swagger.io/api/v3",
-  "operation": "get:/pet/{petId}",
-  "data": {},
-  "meta": {
-    "version": "v1",
-    "duration_ms": 128
-  }
-}
-```
-
-For MCP `tools/call`, `data` may include `content`, optional `structuredContent`, and optional `isError`.
-
-Failure envelope shape:
-
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "INVALID_ARGUMENT",
-    "message": "Field 'id' must be an integer"
-  },
-  "meta": {
-    "version": "v1"
-  }
-}
-```
-
-## Auth (Credentials + Bindings)
-
-UXC authentication has two resources:
-
-- Credentials: secret material and auth type
-- Bindings: endpoint matching rules that select a credential
-
-For non-OAuth credentials, use two auth tracks:
-
-- simple auth: keep using `--secret`, `--secret-env`, or `--secret-op`
-- complex auth: use repeatable `--field <name>=<source>` plus optional binding-level `--signer-json`
-
-Example:
-
-```bash
-uxc auth credential set deepwiki --auth-type bearer --secret-env DEEPWIKI_TOKEN
-uxc auth credential set deepwiki --secret-op op://Engineering/deepwiki/token
-uxc auth binding add --id deepwiki-mcp --host mcp.deepwiki.com --path-prefix /mcp --scheme https --credential deepwiki --priority 100
-
-# api_key supports configurable header names and templates
-uxc auth credential set okx --auth-type api_key --secret-env OKX_ACCESS_KEY --api-key-header OK-ACCESS-KEY
-uxc auth credential set okx-advanced --auth-type api_key --header "OK-ACCESS-KEY={{secret}}" --header "OK-ACCESS-PASSPHRASE={{env:OKX_PASSPHRASE}}"
-
-# multi-field auth for signed APIs
-uxc auth credential set binance --auth-type api_key --field api_key=env:BINANCE_API_KEY --field secret_key=env:BINANCE_SECRET_KEY
-uxc auth binding add --id binance-account --host api.binance.com --path-prefix /api/v3 --scheme https --credential binance --signer-json '{"kind":"hmac_query_v1","algorithm":"hmac_sha256","signing_field":"secret_key","key_field":"api_key","key_placement":"header","key_name":"X-MBX-APIKEY","signature_param":"signature","signature_encoding":"hex","timestamp_param":"timestamp","timestamp_unit":"milliseconds","canonicalization":{"mode":"preserve_order"}}' --priority 100
-```
-
-For `--secret-op`, secret resolution happens at request runtime through daemon execution.
-Ensure daemon has usable 1Password auth context (for example `OP_SERVICE_ACCOUNT_TOKEN`), and restart daemon after env changes.
-
-OAuth for MCP HTTP is supported (device code, client credentials, authorization code + PKCE).
-See [`docs/oauth-mcp-http.md`](docs/oauth-mcp-http.md) for full workflows.
+This makes UXC easier to consume from agents, scripts, and local applications.
 
 ## TypeScript Daemon Client
 
-`uxc` now includes an official Node/TypeScript package for daemon-backed local integrations:
+For local app integration, UXC also ships an official Node/TypeScript client:
 
 ```bash
 npm install @holon-run/uxc-daemon-client
 ```
 
-It talks directly to the local daemon socket and returns structured objects instead of CLI stdout envelopes.
-Use it when embedding UXC into apps that need runtime calls, daemon status, or subscription lifecycle/event streaming.
-See [`docs/daemon-api.md`](docs/daemon-api.md) for the daemon contract and SDK shape.
+It connects directly to the local daemon socket and returns structured objects
+instead of CLI stdout envelopes.
+
+Use it when embedding UXC into applications that need runtime calls, daemon
+status, or subscription lifecycle and event streaming.
+
+See [`docs/daemon-api.md`](docs/daemon-api.md) for the daemon contract.
 
 ## Docs Map
 
-- Extended quickstart and protocol walkthroughs: [`docs/quickstart.md`](docs/quickstart.md)
-- Public no-key endpoints for protocol checks: [`docs/public-endpoints.md`](docs/public-endpoints.md)
-- Logging and troubleshooting with `RUST_LOG`: [`docs/logging.md`](docs/logging.md)
-- Auth credential secret sources (`literal/env/op`): [`docs/auth-secret-sources.md`](docs/auth-secret-sources.md)
-- Run daemon with service managers (`systemd`/`launchd`): [`docs/daemon-service.md`](docs/daemon-service.md)
-- Stable daemon JSON-RPC contract and TypeScript client: [`docs/daemon-api.md`](docs/daemon-api.md)
-- OpenAPI schema mapping and `--schema-url`: [`docs/schema-mapping.md`](docs/schema-mapping.md)
-- Skills overview and install/maintenance guidance: [`docs/skills.md`](docs/skills.md)
-- Release process: [`docs/release.md`](docs/release.md)
+- quickstart: [`docs/quickstart.md`](docs/quickstart.md)
+- public no-key endpoints: [`docs/public-endpoints.md`](docs/public-endpoints.md)
+- auth secret sources: [`docs/auth-secret-sources.md`](docs/auth-secret-sources.md)
+- MCP HTTP OAuth: [`docs/oauth-mcp-http.md`](docs/oauth-mcp-http.md)
+- daemon service setup: [`docs/daemon-service.md`](docs/daemon-service.md)
+- daemon API and TypeScript client: [`docs/daemon-api.md`](docs/daemon-api.md)
+- logging and troubleshooting: [`docs/logging.md`](docs/logging.md)
+- schema mapping and `--schema-url`: [`docs/schema-mapping.md`](docs/schema-mapping.md)
+- skills catalog: [`skills/README.md`](skills/README.md)
+- skills publish and maintenance log: [`docs/skills.md`](docs/skills.md)
+- release process: [`docs/release.md`](docs/release.md)
 
 ## Contributing
 
 Contributions are welcome.
 
-- Development workflow and quality bar: [`CONTRIBUTING.md`](CONTRIBUTING.md)
-- CI and release flows: [GitHub Actions](https://github.com/holon-run/uxc/actions)
+- development workflow: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- CI and releases: [GitHub Actions](https://github.com/holon-run/uxc/actions)
 
 ## License
 
-MIT License - see [`LICENSE`](LICENSE).
+MIT License. See [`LICENSE`](LICENSE).
