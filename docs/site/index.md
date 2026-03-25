@@ -1,3 +1,8 @@
+---
+title: Docs
+summary: One CLI for tools across protocols.
+---
+
 # UXC Docs
 
 One CLI for tools across protocols.

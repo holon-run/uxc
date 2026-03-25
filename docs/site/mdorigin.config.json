@@ -1,0 +1,29 @@
+{
+  "siteTitle": "UXC Docs",
+  "siteDescription": "One CLI for tools across protocols.",
+  "siteUrl": "https://uxc.holon.run",
+  "theme": "paper",
+  "template": "document",
+  "topNav": [
+    { "label": "Docs", "href": "/" },
+    { "label": "Getting Started", "href": "/getting-started/" },
+    { "label": "Protocols", "href": "/protocols/" },
+    { "label": "Auth", "href": "/auth/" },
+    { "label": "Daemon", "href": "/daemon/" },
+    { "label": "Skills", "href": "/skills/" },
+    { "label": "GitHub", "href": "https://github.com/holon-run/uxc" }
+  ],
+  "footerNav": [
+    { "label": "README", "href": "https://github.com/holon-run/uxc#readme" },
+    { "label": "Skills", "href": "/skills/" },
+    { "label": "GitHub", "href": "https://github.com/holon-run/uxc" }
+  ],
+  "footerText": "UXC documentation site.",
+  "socialLinks": [
+    { "icon": "github", "label": "GitHub", "href": "https://github.com/holon-run/uxc" },
+    { "icon": "home", "label": "Homepage", "href": "https://uxc.holon.run" }
+  ],
+  "editLink": {
+    "baseUrl": "https://github.com/holon-run/uxc/edit/main/docs/site/"
+  }
+}
