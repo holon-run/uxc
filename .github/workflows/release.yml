@@ -165,6 +165,8 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: https://registry.npmjs.org
+          # Trusted publishing should use OIDC, not token-based npm auth.
+          token: ''
 
       - name: Install dependencies
         run: npm ci
@@ -173,6 +175,9 @@ jobs:
         run: npm run build:ts
 
       - name: Publish npm package
+        env:
+          # Ensure npm does not try registry token auth; rely on OIDC trusted publishing.
+          NODE_AUTH_TOKEN: ''
         run: npm publish --workspace @holon-run/uxc-daemon-client --access public --provenance
 
   update-homebrew-tap:
