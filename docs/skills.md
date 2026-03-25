@@ -4,7 +4,7 @@ This document is the publish, validation, and maintenance log for the skills in
 this repository.
 
 For the browsable skill catalog and category-based entrypoint, see
-[`skills/README.md`](../skills/README.md).
+https://uxc.holon.run/skills/.
 
 ## Scope
 
@@ -15,7 +15,7 @@ Use this document for:
 - ClawHub registry sync notes
 - historical publish logs and release windows
 
-Use [`skills/README.md`](../skills/README.md) for:
+Use https://uxc.holon.run/skills/ for:
 
 - the browsable skill catalog
 - category-based navigation
