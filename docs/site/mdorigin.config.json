@@ -5,7 +5,6 @@
   "theme": "atlas",
   "template": "document",
   "topNav": [
-    { "label": "Docs", "href": "/" },
     { "label": "Getting Started", "href": "/getting-started/" },
     { "label": "Protocols", "href": "/protocols/" },
     { "label": "Auth", "href": "/auth/" },
