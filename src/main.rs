@@ -1781,7 +1781,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             usage: "uxc daemon sessions".to_string(),
             commands: vec![],
             notes: vec![
-                "Shows live stdio daemon session metadata including command summary, reuse eligibility, recent stderr, and per-session idle TTL where 0 disables idle reaping."
+                "Shows live stdio daemon session metadata including command summary, reuse eligibility, recent stderr, per-session idle TTL where 0 disables idle reaping, and the latest uxc/can_reap contract state."
                     .to_string(),
             ],
             examples: vec!["uxc daemon sessions".to_string()],

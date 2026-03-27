@@ -247,7 +247,10 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
-            | Scenario::DynamicToolset => Ok(Json(json!({"status": "ok"})).into_response()),
+            | Scenario::DynamicToolset
+            | Scenario::CanReapKeepAlive
+            | Scenario::CanReapAllowReap
+            | Scenario::CanReapTimeout => Ok(Json(json!({"status": "ok"})).into_response()),
             Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
             Scenario::Malformed => {
                 // Return invalid JSON
@@ -276,7 +279,10 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
-            | Scenario::DynamicToolset => {
+            | Scenario::DynamicToolset
+            | Scenario::CanReapKeepAlive
+            | Scenario::CanReapAllowReap
+            | Scenario::CanReapTimeout => {
                 let users = vec![
                     json!({"id": 1, "name": "Alice", "email": "alice@example.com"}),
                     json!({"id": 2, "name": "Bob", "email": "bob@example.com"}),
@@ -311,7 +317,10 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
-            | Scenario::DynamicToolset => {
+            | Scenario::DynamicToolset
+            | Scenario::CanReapKeepAlive
+            | Scenario::CanReapAllowReap
+            | Scenario::CanReapTimeout => {
                 let name = payload
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -354,7 +363,10 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
-            | Scenario::DynamicToolset => {
+            | Scenario::DynamicToolset
+            | Scenario::CanReapKeepAlive
+            | Scenario::CanReapAllowReap
+            | Scenario::CanReapTimeout => {
                 if id == 1 {
                     Ok(
                         Json(json!({"id": 1, "name": "Alice", "email": "alice@example.com"}))
@@ -393,7 +405,10 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
-            | Scenario::DynamicToolset => {
+            | Scenario::DynamicToolset
+            | Scenario::CanReapKeepAlive
+            | Scenario::CanReapAllowReap
+            | Scenario::CanReapTimeout => {
                 let body = Body::from_stream(stream::iter(vec![
                     Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
                         br#"{"type":"tick","value":1}
@@ -442,7 +457,10 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
-            | Scenario::DynamicToolset => {
+            | Scenario::DynamicToolset
+            | Scenario::CanReapKeepAlive
+            | Scenario::CanReapAllowReap
+            | Scenario::CanReapTimeout => {
                 let response = match query.cursor.as_deref() {
                     None => json!({
                         "items": [
@@ -491,7 +509,10 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::StructuredContent
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
-            | Scenario::DynamicToolset => {
+            | Scenario::DynamicToolset
+            | Scenario::CanReapKeepAlive
+            | Scenario::CanReapAllowReap
+            | Scenario::CanReapTimeout => {
                 let response = match query.offset {
                     None | Some(0) => json!({
                         "ok": true,

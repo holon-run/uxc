@@ -67,6 +67,8 @@ const STOP_POLL_INTERVAL_MS: u64 = 100;
 const START_LOCK_STALE_SECS: u64 = 30;
 const STDIO_INIT_LOCK_STALE_SECS: u64 = 30;
 const MCP_IDLE_TTL_SECS: u64 = 600;
+const MCP_CAN_REAP_PROBE_TIMEOUT_MS: u64 = 1_000;
+const MCP_CAN_REAP_RETRY_AFTER_SECS: u64 = 30;
 // Five seconds is long enough for cooperative stdio servers to notice stdin EOF
 // and release external resources, while still bounding daemon-side eviction stalls.
 const MCP_STDIO_EXIT_TIMEOUT_SECS: u64 = 5;
@@ -387,10 +389,38 @@ pub struct DaemonSessionView {
     /// Current liveness state for the live daemon cache entry.
     pub state: String,
     pub reuse_eligible: bool,
+    pub can_reap_contract: CanReapContractView,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error_summary: Option<String>,
     #[serde(default)]
     pub recent_stderr: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanReapContractSupport {
+    #[default]
+    Unknown,
+    Supported,
+    Unsupported,
+    Error,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CanReapContractView {
+    pub support: CanReapContractSupport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at_unix: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_reap: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<adapters::mcp::CanReapState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error_summary: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -476,6 +506,8 @@ struct McpStdioSession {
     link_name: Option<String>,
     endpoint: String,
     daemon_exclusive: Vec<String>,
+    can_reap_contract: CanReapContractView,
+    next_can_reap_probe_after: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -490,6 +522,7 @@ struct McpStdioSessionSnapshot {
     daemon_exclusive: Vec<String>,
     in_flight_requests: u64,
     reuse_eligible: bool,
+    can_reap_contract: CanReapContractView,
     last_error_summary: Option<String>,
     recent_stderr: Vec<String>,
 }
@@ -858,6 +891,7 @@ impl McpStdioSessionSnapshot {
                 "ready".to_string()
             },
             reuse_eligible: self.reuse_eligible,
+            can_reap_contract: self.can_reap_contract.clone(),
             last_error_summary: self.last_error_summary.clone(),
             recent_stderr: self.recent_stderr.clone(),
         }
@@ -904,6 +938,17 @@ fn redact_recent_stderr(lines: Vec<String>) -> Vec<String> {
         .into_iter()
         .map(|line| truncate_for_session_summary(&redact_sensitive(&line)))
         .collect()
+}
+
+fn can_reap_error_summary(err: &anyhow::Error) -> String {
+    truncate_for_session_summary(&redact_sensitive(&err.to_string()))
+}
+
+fn can_reap_method_not_found(err: &anyhow::Error) -> bool {
+    structured_error_from_anyhow(err)
+        .and_then(|payload| payload.details)
+        .and_then(|details| details.get("jsonrpc_code").and_then(Value::as_i64))
+        == Some(-32601)
 }
 
 impl McpSessionManager {
@@ -957,6 +1002,43 @@ impl McpSessionManager {
         let _ = logger.log(&entry).await;
     }
 
+    async fn log_stdio_reap_deferred(
+        &self,
+        session_key: &str,
+        snapshot: &McpStdioSessionSnapshot,
+        contract: &CanReapContractView,
+    ) {
+        let Some(logger) = self.logger.as_ref() else {
+            return;
+        };
+        let mut meta = json!({
+            "session_key": display_session_key(session_key),
+            "link_name": snapshot.link_name.clone(),
+            "command_summary": snapshot.command_summary.clone(),
+            "daemon_exclusive": snapshot.daemon_exclusive.clone(),
+            "child_pid": snapshot.child_pid,
+            "idle_ttl_secs": snapshot.idle_ttl_secs,
+            "idle_for_secs": now_unix_secs().saturating_sub(snapshot.last_used_at_unix),
+            "reason": contract.reason.clone(),
+            "retry_after_secs": contract.retry_after_secs,
+            "state": contract.state.clone(),
+        });
+        if let Some(can_reap) = contract.can_reap {
+            meta["can_reap"] = json!(can_reap);
+        }
+        if let Some(checked_at_unix) = contract.checked_at_unix {
+            meta["checked_at_unix"] = json!(checked_at_unix);
+        }
+        let mut entry = DaemonLogEntry::new(DaemonEventType::DaemonSessionReapDeferred)
+            .with_endpoint(snapshot.endpoint.clone())
+            .with_protocol("mcp_stdio".to_string())
+            .with_meta(meta);
+        if let Some(error) = &contract.last_error_summary {
+            entry = entry.with_error(error.clone());
+        }
+        let _ = logger.log(&entry).await;
+    }
+
     async fn upsert_stdio_snapshot<F>(&self, session_key: &str, update: F)
     where
         F: FnOnce(&mut McpStdioSessionSnapshot),
@@ -1003,8 +1085,80 @@ impl McpSessionManager {
                 if guard.idle_ttl_secs == 0 {
                     continue;
                 }
-                let cutoff = Instant::now() - Duration::from_secs(guard.idle_ttl_secs);
+                let now = Instant::now();
+                let cutoff = now - Duration::from_secs(guard.idle_ttl_secs);
                 if guard.last_used < cutoff {
+                    if guard
+                        .next_can_reap_probe_after
+                        .is_some_and(|next_probe_after| next_probe_after > now)
+                    {
+                        continue;
+                    }
+                    let checked_at_unix = now_unix_secs();
+                    let idle_for_secs = checked_at_unix.saturating_sub(guard.last_used_at_unix);
+                    let idle_ttl_secs = guard.idle_ttl_secs;
+                    match guard
+                        .client
+                        .probe_can_reap(
+                            idle_for_secs,
+                            idle_ttl_secs,
+                            Duration::from_millis(MCP_CAN_REAP_PROBE_TIMEOUT_MS),
+                        )
+                        .await
+                    {
+                        Ok(result) => {
+                            guard.can_reap_contract = CanReapContractView {
+                                support: CanReapContractSupport::Supported,
+                                checked_at_unix: Some(checked_at_unix),
+                                can_reap: Some(result.can_reap),
+                                reason: result.reason.clone(),
+                                retry_after_secs: result.retry_after_secs,
+                                state: result.state.clone(),
+                                last_error_summary: None,
+                            };
+                            if result.can_reap {
+                                guard.next_can_reap_probe_after = None;
+                            } else {
+                                let retry_after_secs = result
+                                    .retry_after_secs
+                                    .unwrap_or(MCP_CAN_REAP_RETRY_AFTER_SECS);
+                                guard.next_can_reap_probe_after =
+                                    Some(now + Duration::from_secs(retry_after_secs));
+                                let contract = guard.can_reap_contract.clone();
+                                drop(guard);
+                                self.upsert_stdio_snapshot(key, |snapshot| {
+                                    snapshot.can_reap_contract = contract.clone();
+                                })
+                                .await;
+                                if let Some(snapshot) = {
+                                    let snapshots = self.stdio_snapshots.lock().await;
+                                    snapshots.get(key).cloned()
+                                } {
+                                    self.log_stdio_reap_deferred(key, &snapshot, &contract)
+                                        .await;
+                                }
+                                continue;
+                            }
+                        }
+                        Err(err) => {
+                            guard.next_can_reap_probe_after = None;
+                            guard.can_reap_contract = CanReapContractView {
+                                support: if can_reap_method_not_found(&err) {
+                                    CanReapContractSupport::Unsupported
+                                } else {
+                                    CanReapContractSupport::Error
+                                },
+                                checked_at_unix: Some(checked_at_unix),
+                                can_reap: None,
+                                reason: None,
+                                retry_after_secs: None,
+                                state: None,
+                                last_error_summary: (!can_reap_method_not_found(&err))
+                                    .then(|| can_reap_error_summary(&err)),
+                            };
+                        }
+                    }
+                    let contract = guard.can_reap_contract.clone();
                     // Idle cleanup is best-effort: even if shutdown waiting fails, we still drop
                     // the cached session so cleanup can make forward progress on the next cycle.
                     if let Err(err) = guard
@@ -1018,6 +1172,11 @@ impl McpSessionManager {
                             "Failed waiting for idle MCP stdio session to exit after kill"
                         );
                     }
+                    drop(guard);
+                    self.upsert_stdio_snapshot(key, |snapshot| {
+                        snapshot.can_reap_contract = contract;
+                    })
+                    .await;
                     stdio_remove.push(key.clone());
                 }
             }
@@ -1172,6 +1331,8 @@ impl McpSessionManager {
             link_name: metadata.link_name.map(str::to_string),
             endpoint: metadata.endpoint.to_string(),
             daemon_exclusive: exclusive_keys.clone(),
+            can_reap_contract: CanReapContractView::default(),
+            next_can_reap_probe_after: None,
         }));
 
         {
@@ -1191,6 +1352,7 @@ impl McpSessionManager {
                 daemon_exclusive: exclusive_keys.clone(),
                 in_flight_requests: 0,
                 reuse_eligible: true,
+                can_reap_contract: CanReapContractView::default(),
                 last_error_summary: None,
                 recent_stderr: Vec::new(),
             },
@@ -1263,6 +1425,7 @@ impl McpSessionManager {
         let idle_ttl_secs = guard.idle_ttl_secs;
         let last_used_at_unix = guard.last_used_at_unix;
         let daemon_exclusive = guard.daemon_exclusive.clone();
+        let can_reap_contract = guard.can_reap_contract.clone();
         drop(guard);
         self.upsert_stdio_snapshot(session_key, |snapshot| {
             snapshot.endpoint = endpoint;
@@ -1271,6 +1434,7 @@ impl McpSessionManager {
             snapshot.idle_ttl_secs = idle_ttl_secs;
             snapshot.last_used_at_unix = last_used_at_unix;
             snapshot.daemon_exclusive = daemon_exclusive;
+            snapshot.can_reap_contract = can_reap_contract;
             snapshot.recent_stderr = recent_stderr;
         })
         .await;
@@ -1628,6 +1792,7 @@ impl McpSessionManager {
                     snapshot.last_used_at_unix = guard.last_used_at_unix;
                     snapshot.idle_ttl_secs = guard.idle_ttl_secs;
                     snapshot.daemon_exclusive = guard.daemon_exclusive.clone();
+                    snapshot.can_reap_contract = guard.can_reap_contract.clone();
                     snapshot.recent_stderr = recent_stderr;
                     if child_exited {
                         snapshot.reuse_eligible = false;

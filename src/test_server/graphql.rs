@@ -337,7 +337,10 @@ async fn execute_query(
         | Scenario::StructuredContent
         | Scenario::ResourceReadFailOnce
         | Scenario::SessionScopedResource
-        | Scenario::DynamicToolset => {
+        | Scenario::DynamicToolset
+        | Scenario::CanReapKeepAlive
+        | Scenario::CanReapAllowReap
+        | Scenario::CanReapTimeout => {
             // Introspection query
             if query.contains("__schema") || query.contains("__type(") {
                 return Ok(GraphQLResponse {

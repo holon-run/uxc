@@ -35,6 +35,12 @@ pub enum Scenario {
     SuiPubSub,
     /// Resource state is scoped to a single MCP session/instance
     SessionScopedResource,
+    /// uxc/can_reap returns can_reap=false with structured state
+    CanReapKeepAlive,
+    /// uxc/can_reap returns can_reap=true
+    CanReapAllowReap,
+    /// uxc/can_reap times out
+    CanReapTimeout,
 }
 
 impl Scenario {
@@ -56,8 +62,11 @@ impl Scenario {
             "empty_object_required" => Ok(Self::EmptyObjectRequired),
             "sui_pubsub" => Ok(Self::SuiPubSub),
             "session_scoped_resource" => Ok(Self::SessionScopedResource),
+            "can_reap_keep_alive" => Ok(Self::CanReapKeepAlive),
+            "can_reap_allow_reap" => Ok(Self::CanReapAllowReap),
+            "can_reap_timeout" => Ok(Self::CanReapTimeout),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, tool_structured_error, resource_read_fail_once, dynamic_toolset, empty_object_required, sui_pubsub, session_scoped_resource",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, tool_structured_error, resource_read_fail_once, dynamic_toolset, empty_object_required, sui_pubsub, session_scoped_resource, can_reap_keep_alive, can_reap_allow_reap, can_reap_timeout",
                 s
             ),
         }

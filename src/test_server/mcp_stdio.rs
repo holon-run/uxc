@@ -94,6 +94,53 @@ pub fn run(scenario: Scenario) -> Result<()> {
                     }),
                 )?;
             }
+            "uxc/can_reap" => {
+                if matches!(scenario, Scenario::CanReapTimeout) {
+                    std::thread::sleep(super::common::timeout_duration());
+                }
+                if matches!(scenario, Scenario::CanReapKeepAlive) {
+                    respond(
+                        &mut out,
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "can_reap": false,
+                                "reason": "interactive_session",
+                                "retry_after_secs": 30,
+                                "state": {
+                                    "interactive": true,
+                                    "owns_external_resource": true,
+                                    "waiting_for_human": false
+                                }
+                            }
+                        }),
+                    )?;
+                    continue;
+                }
+                if matches!(scenario, Scenario::CanReapAllowReap) {
+                    respond(
+                        &mut out,
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "can_reap": true,
+                                "reason": "idle_session"
+                            }
+                        }),
+                    )?;
+                    continue;
+                }
+                respond(
+                    &mut out,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {"code": -32601, "message": "Method not found"}
+                    }),
+                )?;
+            }
             "tools/list" => {
                 tools_list_calls = tools_list_calls.saturating_add(1);
                 if matches!(scenario, Scenario::ToolsListFailAfterFirst) && tools_list_calls > 1 {

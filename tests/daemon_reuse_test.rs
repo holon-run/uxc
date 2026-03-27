@@ -221,6 +221,148 @@ fn daemon_sessions_lists_live_stdio_session_diagnostics() {
 
 #[test]
 #[serial]
+fn daemon_sessions_expose_supported_can_reap_contract_when_idle_reap_is_deferred() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} can_reap_keep_alive", bin.display());
+
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let first = uxc_command()
+        .arg("--daemon-idle-ttl")
+        .arg("1")
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"seed"}"#)
+        .output()
+        .expect("first call should run");
+    assert!(first.status.success());
+
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let second = uxc_command()
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"reuse"}"#)
+        .output()
+        .expect("second call should run");
+    assert!(second.status.success());
+
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second stdout should be valid JSON");
+    assert_eq!(second_json["meta"]["daemon_session_reused"], true);
+
+    let sessions = uxc_command()
+        .arg("daemon")
+        .arg("sessions")
+        .output()
+        .expect("daemon sessions should run");
+    assert!(sessions.status.success());
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&sessions.stdout).expect("valid daemon sessions json");
+    let sessions = json["data"]
+        .as_array()
+        .expect("session list should be an array");
+    assert_eq!(sessions.len(), 1, "expected one stdio session");
+    let contract = &sessions[0]["can_reap_contract"];
+    assert_eq!(contract["support"], "supported");
+    assert_eq!(contract["can_reap"], false);
+    assert_eq!(contract["reason"], "interactive_session");
+    assert_eq!(contract["retry_after_secs"], 30);
+    assert_eq!(contract["state"]["interactive"], true);
+    assert_eq!(contract["state"]["owns_external_resource"], true);
+    assert_eq!(contract["state"]["waiting_for_human"], false);
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
+fn can_reap_true_allows_idle_session_to_be_reaped_before_reuse() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} can_reap_allow_reap", bin.display());
+
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let first = uxc_command()
+        .arg("--daemon-idle-ttl")
+        .arg("1")
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"seed"}"#)
+        .output()
+        .expect("first call should run");
+    assert!(first.status.success());
+
+    let first_sessions = uxc_command()
+        .arg("daemon")
+        .arg("sessions")
+        .output()
+        .expect("daemon sessions should run");
+    assert!(first_sessions.status.success());
+    let first_json: serde_json::Value =
+        serde_json::from_slice(&first_sessions.stdout).expect("valid daemon sessions json");
+    let first_pid = first_json["data"][0]["child_pid"]
+        .as_u64()
+        .expect("child pid should be present");
+
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let second = uxc_command()
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"seed-again"}"#)
+        .output()
+        .expect("second call should run");
+    assert!(second.status.success());
+
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second stdout should be valid JSON");
+    assert!(
+        second_json["meta"]["daemon_session_reused"] != true,
+        "expected second call to use a fresh session after can_reap=true"
+    );
+
+    let second_sessions = uxc_command()
+        .arg("daemon")
+        .arg("sessions")
+        .output()
+        .expect("daemon sessions should run");
+    assert!(second_sessions.status.success());
+    let second_sessions_json: serde_json::Value =
+        serde_json::from_slice(&second_sessions.stdout).expect("valid daemon sessions json");
+    let second_pid = second_sessions_json["data"][0]["child_pid"]
+        .as_u64()
+        .expect("child pid should be present");
+    assert_ne!(first_pid, second_pid, "expected a new MCP child process");
+    assert_eq!(
+        second_sessions_json["data"][0]["can_reap_contract"]["support"],
+        "unknown"
+    );
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
 fn daemon_sessions_reports_active_state_for_busy_stdio_session() {
     daemon_stop_best_effort();
 
