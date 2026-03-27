@@ -4,7 +4,7 @@ This directory contains the canonical `uxc` skill plus official wrapper skills
 built on top of it.
 
 Use this directory as the main entrypoint for browsing available skills.
-Use [`../docs/skills.md`](../docs/skills.md) for publish history, validation
+Use [`../docs/operations/skills.md`](../docs/operations/skills.md) for publish history, validation
 notes, and maintenance logs.
 
 ## Recommended Starting Points

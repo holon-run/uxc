@@ -18,7 +18,7 @@ This section collects lookup-oriented documentation and stable reference points.
 
 These remain repository docs rather than public site pages:
 
-- [Release Process](https://github.com/holon-run/uxc/blob/main/docs/release.md)
+- [Release Process](https://github.com/holon-run/uxc/blob/main/docs/operations/release.md)
 
 <!-- INDEX:START -->
 

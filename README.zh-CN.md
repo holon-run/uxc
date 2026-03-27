@@ -151,7 +151,7 @@ UXC 不只是一个 CLI 入口，这个仓库也在共享执行层之上提供�
 建议把基础的 `uxc` skill 当作共享执行层，再按具体服务场景叠加 wrapper skill。
 
 完整 skill 目录见 [文档站点中的 Skills 目录](https://uxc.holon.run/skills/)，
-发布记录与维护日志见 [`docs/skills.md`](docs/skills.md)。
+发布记录与维护日志见 [`docs/operations/skills.md`](docs/operations/skills.md)。
 
 ## 适用场景
 
@@ -287,8 +287,8 @@ daemon 合约见 [站点中的 daemon API 文档](https://uxc.holon.run/daemon/a
 - 日志与排障： [https://uxc.holon.run/daemon/logging/](https://uxc.holon.run/daemon/logging/)
 - schema mapping 与 `--schema-url`： [https://uxc.holon.run/reference/schema-mapping/](https://uxc.holon.run/reference/schema-mapping/)
 - skills 目录： [https://uxc.holon.run/skills/](https://uxc.holon.run/skills/)
-- skills 发布记录与维护日志：[`docs/skills.md`](docs/skills.md)
-- 发布流程：[`docs/release.md`](docs/release.md)
+- skills 发布记录与维护日志：[`docs/operations/skills.md`](docs/operations/skills.md)
+- 发布流程：[`docs/operations/release.md`](docs/operations/release.md)
 
 ## 贡献
 

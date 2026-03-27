@@ -236,9 +236,9 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-See `docs/release.md` for full details, rollback, and troubleshooting.
+See `docs/operations/release.md` for full details, rollback, and troubleshooting.
 
-See `docs/skills.md` for skill install and maintenance details.
+See `docs/operations/skills.md` for skill install and maintenance details.
 
 ## Testing & Coverage
 

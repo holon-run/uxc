@@ -28,7 +28,7 @@ npm install @holon-run/uxc-daemon-client
 
 Some ecosystem details still live in the repository:
 
-- [Skills Publish and Maintenance Log](https://github.com/holon-run/uxc/blob/main/docs/skills.md)
+- [Skills Publish and Maintenance Log](https://github.com/holon-run/uxc/blob/main/docs/operations/skills.md)
 
 <!-- INDEX:START -->
 

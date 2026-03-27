@@ -156,7 +156,7 @@ Use the base `uxc` skill as the shared execution layer, then add wrapper skills
 when a service-specific workflow is worth packaging.
 
 See [the Skills Directory](https://uxc.holon.run/skills/) for the full skill catalog and
-[`docs/skills.md`](docs/skills.md) for publish and maintenance logs.
+[`docs/operations/skills.md`](docs/operations/skills.md) for publish and maintenance logs.
 
 ## Where It Fits
 
@@ -293,8 +293,8 @@ See [the daemon API docs](https://uxc.holon.run/daemon/api/) for the daemon cont
 - logging and troubleshooting: [https://uxc.holon.run/daemon/logging/](https://uxc.holon.run/daemon/logging/)
 - schema mapping and `--schema-url`: [https://uxc.holon.run/reference/schema-mapping/](https://uxc.holon.run/reference/schema-mapping/)
 - skills catalog: [https://uxc.holon.run/skills/](https://uxc.holon.run/skills/)
-- skills publish and maintenance log: [`docs/skills.md`](docs/skills.md)
-- release process: [`docs/release.md`](docs/release.md)
+- skills publish and maintenance log: [`docs/operations/skills.md`](docs/operations/skills.md)
+- release process: [`docs/operations/release.md`](docs/operations/release.md)
 
 ## Contributing
 
