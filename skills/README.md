@@ -31,6 +31,7 @@ notes, and maintenance logs.
 - [`chrome-devtools-mcp-skill`](chrome-devtools-mcp-skill/SKILL.md)
 - [`context7-mcp-skill`](context7-mcp-skill/SKILL.md)
 - [`deepwiki-mcp-skill`](deepwiki-mcp-skill/SKILL.md)
+- [`qmd-mcp-skill`](qmd-mcp-skill/SKILL.md)
 
 ### Workspace and Messaging
 
@@ -242,6 +243,9 @@ notes, and maintenance logs.
 
 - [playwright-mcp-skill](./playwright-mcp-skill/)
   Run browser automation through @playwright/mcp over UXC stdio MCP, with daemon-friendly session reuse and safe action guardrails. Use when tasks need deterministic page navigation, DOM snapshots, and scripted browser interaction from CLI.
+
+- [qmd-mcp-skill](./qmd-mcp-skill/)
+  Use a local QMD knowledge base through UXC over MCP stdio, with daemon-backed session reuse and typed retrieval flows that avoid repeated model warmup and unnecessary query-expansion latency.
 
 - [slack-openapi-skill](./slack-openapi-skill/)
   Operate Slack Web API through UXC with a curated OpenAPI schema, bearer-token auth, and messaging-core guardrails.

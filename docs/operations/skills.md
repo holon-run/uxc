@@ -58,6 +58,7 @@ bash skills/playwright-mcp-skill/scripts/validate.sh
 bash skills/chrome-devtools-mcp-skill/scripts/validate.sh
 bash skills/context7-mcp-skill/scripts/validate.sh
 bash skills/deepwiki-mcp-skill/scripts/validate.sh
+bash skills/qmd-mcp-skill/scripts/validate.sh
 bash skills/dune-mcp-skill/scripts/validate.sh
 bash skills/thegraph-mcp-skill/scripts/validate.sh
 bash skills/thegraph-token-mcp-skill/scripts/validate.sh
