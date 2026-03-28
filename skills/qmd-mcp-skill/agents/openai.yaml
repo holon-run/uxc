@@ -1,0 +1,4 @@
+interface:
+  display_name: "QMD MCP"
+  short_description: "Query local QMD indexes via UXC MCP stdio"
+  default_prompt: "Use $qmd-mcp-skill to query a local QMD knowledge base through UXC MCP stdio with daemon-backed session reuse."
