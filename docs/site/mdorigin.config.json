@@ -2,8 +2,6 @@
   "siteTitle": "UXC",
   "siteDescription": "One CLI for tools across protocols.",
   "siteUrl": "https://uxc.holon.run",
-  "theme": "atlas",
-  "template": "document",
   "topNav": [
     { "label": "Getting Started", "href": "/getting-started/" },
     { "label": "Protocols", "href": "/protocols/" },
