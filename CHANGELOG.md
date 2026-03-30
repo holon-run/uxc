@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.7] - 2026-03-30
+
+### Added
+- Added daemon `can_reap` contract support for stdio session lifecycle handling.
+- Added request-level timeout option to improve execution control on slow upstream calls.
+
 ## [0.12.6] - 2026-03-25
 
 ### Fixed
