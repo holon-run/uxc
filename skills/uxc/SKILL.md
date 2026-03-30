@@ -17,6 +17,14 @@ Use this skill when a task requires calling a remote interface and the endpoint 
 
 Do not use this skill for pure local file operations with no remote interface.
 
+## Docs Search & Support
+
+- UXC docs support full-text search at `https://uxc.holon.run/api/search?q=<query>`.
+- Prefer searching docs first when operation names, auth flags, or protocol behavior are unclear.
+- If docs are unclear or behavior looks wrong, open an issue in `holon-run/uxc`:
+  - `https://github.com/holon-run/uxc/issues/new/choose`
+  - include command, endpoint, and the JSON envelope (`ok`, `error`, `meta`) for faster triage.
+
 ## Prerequisites
 
 - `uxc` is installed and available in `PATH`.
