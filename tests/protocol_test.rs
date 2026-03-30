@@ -398,6 +398,7 @@ fn test_protocol_router_get_adapter_with_schema_url_override() {
             schema_url: Some(schema_url),
             auth_profile: None,
             stdio_spawn_options: None,
+            request_timeout: None,
         };
         router
             .get_adapter_for_url_with_options(&base_url, &options)
@@ -447,6 +448,7 @@ fn test_protocol_router_gets_jsonrpc_adapter_with_openrpc_schema_url_override() 
             schema_url: Some(schema_url),
             auth_profile: None,
             stdio_spawn_options: None,
+            request_timeout: None,
         };
         router
             .get_adapter_for_url_with_options(&base_url, &options)
@@ -774,6 +776,7 @@ fn test_detection_options_schema_url_none() {
             schema_url: None,
             auth_profile: None,
             stdio_spawn_options: None,
+            request_timeout: None,
         };
         detector.detect_adapter_with_options(&url, &options).await
     });
@@ -824,6 +827,7 @@ fn test_detection_options_schema_url_some() {
             schema_url: Some(schema_url),
             auth_profile: None,
             stdio_spawn_options: None,
+            request_timeout: None,
         };
         detector
             .detect_adapter_with_options(&base_url, &options)

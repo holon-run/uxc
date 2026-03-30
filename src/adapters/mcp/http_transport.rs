@@ -118,6 +118,7 @@ pub struct LegacySseTransport {
     session: Arc<Mutex<Option<LegacySseSession>>>,
     notifications: Arc<Mutex<VecDeque<JsonRpcNotification>>>,
     event_stream_error: Arc<Mutex<Option<String>>>,
+    response_timeout: Duration,
 }
 
 #[derive(Debug)]
@@ -162,11 +163,19 @@ async fn persist_profile_update(profile: &Profile) -> Result<()> {
 impl McpHttpTransport {
     /// Create a new HTTP transport connected to the given URL
     pub fn new(url: String) -> Result<Self> {
-        Self::with_auth(url, None)
+        Self::with_auth_and_timeout(url, None, std::time::Duration::from_secs(30))
     }
 
     /// Create a new HTTP transport with authentication
     pub fn with_auth(url: String, auth_profile: Option<Profile>) -> Result<Self> {
+        Self::with_auth_and_timeout(url, auth_profile, std::time::Duration::from_secs(30))
+    }
+
+    pub fn with_auth_and_timeout(
+        url: String,
+        auth_profile: Option<Profile>,
+        request_timeout: Duration,
+    ) -> Result<Self> {
         // Validate URL
         let parsed = url::Url::parse(&url).context("Invalid MCP server URL")?;
 
@@ -178,8 +187,7 @@ impl McpHttpTransport {
             );
         }
 
-        let client =
-            build_resilient_http_client(std::time::Duration::from_secs(30), "MCP HTTP transport")?;
+        let client = build_resilient_http_client(request_timeout, "MCP HTTP transport")?;
         let event_stream_client = build_resilient_http_client(
             std::time::Duration::from_secs(LEGACY_SSE_STREAM_TIMEOUT_SECS),
             "MCP HTTP event stream",
@@ -1201,6 +1209,18 @@ impl Drop for McpHttpTransport {
 
 impl LegacySseTransport {
     pub fn with_auth(url: String, auth_profile: Option<Profile>) -> Result<Self> {
+        Self::with_auth_and_timeout(
+            url,
+            auth_profile,
+            Duration::from_secs(LEGACY_SSE_RESPONSE_TIMEOUT_SECS),
+        )
+    }
+
+    pub fn with_auth_and_timeout(
+        url: String,
+        auth_profile: Option<Profile>,
+        response_timeout: Duration,
+    ) -> Result<Self> {
         let parsed = url::Url::parse(&url).context("Invalid MCP server URL")?;
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
             bail!(
@@ -1224,6 +1244,7 @@ impl LegacySseTransport {
             session: Arc::new(Mutex::new(None)),
             notifications: Arc::new(Mutex::new(VecDeque::new())),
             event_stream_error: Arc::new(Mutex::new(None)),
+            response_timeout,
         })
     }
 
@@ -1417,21 +1438,18 @@ impl LegacySseTransport {
             return McpHttpTransport::map_http_error(status, &body, www_authenticate.as_deref());
         }
 
-        let result =
-            match tokio::time::timeout(Duration::from_secs(LEGACY_SSE_RESPONSE_TIMEOUT_SECS), rx)
-                .await
-            {
-                Ok(result) => result
-                    .context("Legacy SSE reader closed before delivering a response")?
-                    .map_err(PendingResponseError::into_anyhow)?,
-                Err(_) => {
-                    pending.lock().await.remove(&request.id);
-                    bail!(
-                        "Timed out waiting for legacy SSE response after {}s",
-                        LEGACY_SSE_RESPONSE_TIMEOUT_SECS
-                    );
-                }
-            };
+        let result = match tokio::time::timeout(self.response_timeout, rx).await {
+            Ok(result) => result
+                .context("Legacy SSE reader closed before delivering a response")?
+                .map_err(PendingResponseError::into_anyhow)?,
+            Err(_) => {
+                pending.lock().await.remove(&request.id);
+                bail!(
+                    "Timed out waiting for legacy SSE response after {}s",
+                    self.response_timeout.as_secs()
+                );
+            }
+        };
 
         Ok(result)
     }
@@ -1771,14 +1789,26 @@ impl McpRemoteTransport {
         resolved: ResolvedMcpHttpTransport,
         auth_profile: Option<Profile>,
     ) -> Result<Self> {
+        Self::with_auth_and_timeout(resolved, auth_profile, std::time::Duration::from_secs(30))
+    }
+
+    pub fn with_auth_and_timeout(
+        resolved: ResolvedMcpHttpTransport,
+        auth_profile: Option<Profile>,
+        request_timeout: Duration,
+    ) -> Result<Self> {
         match resolved.mode {
-            McpHttpMode::StreamableHttp => Ok(Self::Streamable(McpHttpTransport::with_auth(
+            McpHttpMode::StreamableHttp => {
+                Ok(Self::Streamable(McpHttpTransport::with_auth_and_timeout(
+                    resolved.connect_url,
+                    auth_profile,
+                    request_timeout,
+                )?))
+            }
+            McpHttpMode::LegacySse => Ok(Self::Legacy(LegacySseTransport::with_auth_and_timeout(
                 resolved.connect_url,
                 auth_profile,
-            )?)),
-            McpHttpMode::LegacySse => Ok(Self::Legacy(LegacySseTransport::with_auth(
-                resolved.connect_url,
-                auth_profile,
+                request_timeout,
             )?)),
         }
     }

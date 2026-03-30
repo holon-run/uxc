@@ -16,6 +16,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
 
@@ -35,6 +36,7 @@ pub struct JsonRpcAdapter {
     schema_url_override: Option<String>,
     discovered: Arc<RwLock<HashMap<String, ResolvedOpenRpc>>>,
     next_id: Arc<Mutex<i64>>,
+    request_timeout: Option<Duration>,
 }
 
 impl JsonRpcAdapter {
@@ -52,6 +54,7 @@ impl JsonRpcAdapter {
             schema_url_override: None,
             discovered: Arc::new(RwLock::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
+            request_timeout: None,
         }
     }
 
@@ -73,6 +76,15 @@ impl JsonRpcAdapter {
     pub fn with_schema_url_override(mut self, schema_url: Option<String>) -> Self {
         self.schema_url_override = schema_url;
         self
+    }
+
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    fn request_timeout_or(&self, default: Duration) -> Duration {
+        self.request_timeout.unwrap_or(default)
     }
 
     async fn effective_auth_profile(&self) -> Option<Profile> {
@@ -225,7 +237,7 @@ impl JsonRpcAdapter {
                 let req = self
                     .client
                     .get(&resolved.url)
-                    .timeout(std::time::Duration::from_secs(5))
+                    .timeout(self.request_timeout_or(Duration::from_secs(5)))
                     .header("Accept", "application/json");
                 Ok(Self::apply_resolved_request_auth(req, &resolved))
             })
@@ -570,7 +582,7 @@ impl JsonRpcAdapter {
                 let req = self
                     .client
                     .post(&resolved.url)
-                    .timeout(std::time::Duration::from_secs(3))
+                    .timeout(self.request_timeout_or(Duration::from_secs(3)))
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .json(&request);
@@ -617,7 +629,7 @@ impl JsonRpcAdapter {
                     let req = self
                         .client
                         .get(&resolved.url)
-                        .timeout(std::time::Duration::from_secs(3))
+                        .timeout(self.request_timeout_or(Duration::from_secs(3)))
                         .header("Accept", "application/json");
                     Ok(Self::apply_resolved_request_auth(req, &resolved))
                 })
@@ -736,6 +748,7 @@ impl JsonRpcAdapter {
                 let req = self
                     .client
                     .post(&resolved.url)
+                    .timeout(self.request_timeout_or(Duration::from_secs(30)))
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .json(&request);

@@ -52,11 +52,27 @@ impl McpStdioClient {
         args: &[String],
         options: StdioSpawnOptions,
     ) -> Result<Self> {
+        Self::connect_with_options_and_timeout(
+            command,
+            args,
+            options,
+            McpStdioTransport::default_request_timeout(),
+        )
+        .await
+    }
+
+    pub async fn connect_with_options_and_timeout(
+        command: &str,
+        args: &[String],
+        options: StdioSpawnOptions,
+        timeout: Duration,
+    ) -> Result<Self> {
         Self::connect_with_executor(
             command,
             args,
             options,
             Arc::new(DefaultStdioProcessExecutor),
+            timeout,
         )
         .await
     }
@@ -67,6 +83,7 @@ impl McpStdioClient {
         args: &[String],
         options: StdioSpawnOptions,
         executor: Arc<dyn StdioProcessExecutor>,
+        timeout: Duration,
     ) -> Result<Self> {
         let mut transport =
             McpStdioTransport::connect_with_executor(command, args, options, executor).await?;
@@ -77,7 +94,9 @@ impl McpStdioClient {
             version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
-        let init_result = transport.initialize(client_info).await?;
+        let init_result = transport
+            .initialize_with_timeout(client_info, timeout)
+            .await?;
         tracing::info!(
             "Connected to MCP server: {} v{}",
             init_result
@@ -185,13 +204,18 @@ impl McpStdioClient {
 
     /// List available tools
     pub async fn list_tools(&mut self) -> Result<Vec<Tool>> {
+        self.list_tools_with_timeout(McpStdioTransport::default_request_timeout())
+            .await
+    }
+
+    pub async fn list_tools_with_timeout(&mut self, timeout: Duration) -> Result<Vec<Tool>> {
         if !self.supports_tools() {
             bail!("Server does not support tools");
         }
 
         let result = self
             .transport
-            .send_request("tools/list", None)
+            .send_request_with_timeout("tools/list", None, timeout)
             .await
             .context("Failed to list tools")?;
 
@@ -213,10 +237,25 @@ impl McpStdioClient {
     }
 
     /// Call a tool
+    #[allow(dead_code)]
     pub async fn call_tool(
         &mut self,
         name: &str,
         arguments: Option<JsonValue>,
+    ) -> Result<CallToolResult> {
+        self.call_tool_with_timeout(
+            name,
+            arguments,
+            McpStdioTransport::default_request_timeout(),
+        )
+        .await
+    }
+
+    pub async fn call_tool_with_timeout(
+        &mut self,
+        name: &str,
+        arguments: Option<JsonValue>,
+        timeout: Duration,
     ) -> Result<CallToolResult> {
         if !self.supports_tools() {
             bail!("Server does not support tools");
@@ -229,7 +268,7 @@ impl McpStdioClient {
 
         let result = self
             .transport
-            .send_request("tools/call", Some(serde_json::to_value(params)?))
+            .send_request_with_timeout("tools/call", Some(serde_json::to_value(params)?), timeout)
             .await
             .context(format!("Failed to call tool '{}'", name))?;
 

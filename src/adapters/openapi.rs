@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info};
 
@@ -25,6 +26,7 @@ pub struct OpenAPIAdapter {
     discovered_schema_urls: Arc<RwLock<HashMap<String, String>>>,
     schema_url_override: Option<String>,
     force_refresh_schema: bool,
+    request_timeout: Option<Duration>,
 }
 
 impl OpenAPIAdapter {
@@ -57,6 +59,7 @@ impl OpenAPIAdapter {
             discovered_schema_urls: Arc::new(RwLock::new(HashMap::new())),
             schema_url_override: None,
             force_refresh_schema: false,
+            request_timeout: None,
         }
     }
 
@@ -78,6 +81,15 @@ impl OpenAPIAdapter {
     pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
         self.force_refresh_schema = refresh;
         self
+    }
+
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    fn request_timeout_or(&self, default: Duration) -> Duration {
+        self.request_timeout.unwrap_or(default)
     }
 
     async fn effective_auth_profile(&self) -> Option<Profile> {
@@ -257,7 +269,7 @@ impl OpenAPIAdapter {
                 let req = self
                     .client
                     .get(&resolved.url)
-                    .timeout(std::time::Duration::from_secs(10))
+                    .timeout(self.request_timeout_or(Duration::from_secs(10)))
                     .header("Accept", "application/json");
                 Ok(Self::apply_resolved_request_auth(req, &resolved))
             })
@@ -390,7 +402,7 @@ impl OpenAPIAdapter {
                     let req = self
                         .client
                         .get(&resolved.url)
-                        .timeout(std::time::Duration::from_secs(2))
+                        .timeout(self.request_timeout_or(Duration::from_secs(2)))
                         .header("Accept", "application/json");
                     Ok(Self::apply_resolved_request_auth(req, &resolved))
                 })
@@ -1956,6 +1968,7 @@ impl Adapter for OpenAPIAdapter {
                         .into())
                     }
                 };
+                req = req.timeout(self.request_timeout_or(Duration::from_secs(30)));
                 for (name, value) in &prepared_headers {
                     req = req.header(name, value);
                 }

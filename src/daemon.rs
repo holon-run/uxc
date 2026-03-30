@@ -130,6 +130,8 @@ pub struct RuntimeInvokeOptions {
     pub inject_env: Vec<InjectEnvSpec>,
     pub no_cache: bool,
     pub cache_ttl: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
     pub refresh_schema: bool,
     pub schema_url: Option<String>,
     pub link_name: Option<String>,
@@ -635,9 +637,10 @@ impl McpStdioSession {
         &mut self,
         _endpoint: &str,
         _cache: &Arc<dyn Cache>,
+        timeout: Duration,
     ) -> Result<Vec<adapters::mcp::types::Tool>> {
         if self.tools.is_none() || self.tools_dirty {
-            let tools = self.client.list_tools().await?;
+            let tools = self.client.list_tools_with_timeout(timeout).await?;
             self.tools = Some(tools);
             self.tools_dirty = false;
         }
@@ -1245,6 +1248,7 @@ impl McpSessionManager {
         command: &str,
         args: &[String],
         spawn_options: &adapters::mcp::StdioSpawnOptions,
+        request_timeout: Option<Duration>,
         metadata: StdioSessionRequestMetadata<'_>,
     ) -> Result<(Arc<Mutex<McpStdioSession>>, bool)> {
         let exclusive_keys = normalize_exclusive_keys(metadata.exclusive_keys);
@@ -1309,10 +1313,13 @@ impl McpSessionManager {
             }
         }
 
-        let client = adapters::mcp::McpStdioClient::connect_with_options(
+        let client = adapters::mcp::McpStdioClient::connect_with_options_and_timeout(
             command,
             args,
             spawn_options.clone(),
+            request_timeout.unwrap_or_else(
+                adapters::mcp::transport::McpStdioTransport::default_request_timeout,
+            ),
         )
         .await?;
         let created_at_unix = now_unix_secs();
@@ -1731,6 +1738,7 @@ impl McpSessionManager {
         key: &str,
         resolved: &adapters::mcp::ResolvedMcpHttpTransport,
         auth_profile: Option<Profile>,
+        request_timeout: Option<Duration>,
     ) -> Result<(Arc<McpHttpSession>, bool)> {
         let existing = {
             let map = self.http.lock().await;
@@ -1746,8 +1754,11 @@ impl McpSessionManager {
             return Ok((session, true));
         }
 
-        let transport =
-            adapters::mcp::McpRemoteTransport::with_auth(resolved.clone(), auth_profile)?;
+        let transport = adapters::mcp::McpRemoteTransport::with_auth_and_timeout(
+            resolved.clone(),
+            auth_profile,
+            request_timeout.unwrap_or_else(|| Duration::from_secs(30)),
+        )?;
         transport.initialize().await?;
         let session = Arc::new(McpHttpSession {
             transport,
@@ -2626,6 +2637,7 @@ impl DaemonRuntime {
             schema_url: request.options.schema_url.clone(),
             auth_profile: detection_auth_profile.clone(),
             stdio_spawn_options: stdio_spawn_options.clone(),
+            request_timeout: request_timeout_duration(request.options.timeout_ms),
         };
 
         if let Some((kind, operation, data, reused)) = self
@@ -2710,6 +2722,10 @@ impl DaemonRuntime {
         )?;
         resolved.adapter =
             inject_auth_if_supported(resolved.adapter, execution_auth_profile.clone());
+        resolved.adapter = inject_timeout_if_supported(
+            resolved.adapter,
+            request_timeout_duration(request.options.timeout_ms),
+        );
         let mut meta = RuntimeMeta::default();
         if let Some(cache_meta) = resolved.cache_meta {
             meta.schema_involved = Some(true);
@@ -2812,6 +2828,10 @@ impl DaemonRuntime {
                             root_auth_profile.clone(),
                         )?;
                         adapter = inject_auth_if_supported(adapter, fallback_auth_profile.clone());
+                        adapter = inject_timeout_if_supported(
+                            adapter,
+                            request_timeout_duration(request.options.timeout_ms),
+                        );
                         adapter =
                             inject_refresh_if_supported(adapter, request.options.refresh_schema);
 
@@ -2978,6 +2998,7 @@ impl DaemonRuntime {
             schema_url: request.options.schema_url.clone(),
             auth_profile: root_auth_profile.clone(),
             stdio_spawn_options,
+            request_timeout: request_timeout_duration(request.options.timeout_ms),
         };
         let resolved = resolve_adapter_with_schema_cache(
             &request.endpoint,
@@ -3101,6 +3122,7 @@ impl DaemonRuntime {
                     &cmd,
                     &cmd_args,
                     &spawn_options,
+                    request_timeout_duration(request.options.timeout_ms),
                     StdioSessionRequestMetadata {
                         idle_ttl_secs: request.options.daemon_idle_ttl,
                         link_name: request.options.link_name.as_deref(),
@@ -3113,7 +3135,16 @@ impl DaemonRuntime {
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
             guard.last_used_at_unix = now_unix_secs();
-            let result = guard.client.call_tool(op, arguments).await;
+            let result = guard
+                .client
+                .call_tool_with_timeout(
+                    op,
+                    arguments,
+                    request_timeout_duration(request.options.timeout_ms).unwrap_or_else(
+                        adapters::mcp::transport::McpStdioTransport::default_request_timeout,
+                    ),
+                )
+                .await;
             let _ = guard
                 .mark_tools_dirty_from_notifications(endpoint, &cache)
                 .await;
@@ -3155,7 +3186,13 @@ impl DaemonRuntime {
                     auth_fingerprint(auth_profile.as_ref())
                 );
                 self.mcp
-                    .get_or_create_http(&lookup_key, &key, &resolved_transport, auth_profile)
+                    .get_or_create_http(
+                        &lookup_key,
+                        &key,
+                        &resolved_transport,
+                        auth_profile,
+                        request_timeout_duration(request.options.timeout_ms),
+                    )
                     .await?
             };
             session.mark_used().await;
@@ -4595,6 +4632,7 @@ async fn resolve_graphql_subscription_prepared_operation(
         schema_url: request.options.schema_url.clone(),
         auth_profile: root_auth_profile.clone(),
         stdio_spawn_options: None,
+        request_timeout: request_timeout_duration(request.options.timeout_ms),
     };
 
     let resolved = resolve_adapter_with_schema_cache(
@@ -4987,6 +5025,7 @@ async fn run_mcp_subscription_job(
             &cmd,
             &cmd_args,
             &spawn_options,
+            request_timeout_duration(request.options.timeout_ms),
             StdioSessionRequestMetadata {
                 idle_ttl_secs: request.options.daemon_idle_ttl,
                 link_name: request.options.link_name.as_deref(),
@@ -5144,7 +5183,13 @@ async fn run_mcp_http_subscription_job(
             );
             let (session, _) = runtime
                 .mcp
-                .get_or_create_http(&lookup_key, &session_key, &resolved_transport, auth_profile)
+                .get_or_create_http(
+                    &lookup_key,
+                    &session_key,
+                    &resolved_transport,
+                    auth_profile,
+                    request_timeout_duration(request.options.timeout_ms),
+                )
                 .await?;
             (session, Some(resolved_transport))
         };
@@ -6286,21 +6331,28 @@ fn adapter_from_protocol(protocol: ProtocolType, options: &DetectionOptions) -> 
     match protocol {
         ProtocolType::OpenAPI => AdapterEnum::OpenAPI(
             adapters::openapi::OpenAPIAdapter::new()
-                .with_schema_url_override(options.schema_url.clone()),
+                .with_schema_url_override(options.schema_url.clone())
+                .with_timeout(options.request_timeout),
         ),
-        ProtocolType::GRpc => AdapterEnum::GRpc(adapters::grpc::GrpcAdapter::new()),
+        ProtocolType::GRpc => AdapterEnum::GRpc(
+            adapters::grpc::GrpcAdapter::new().with_timeout(options.request_timeout),
+        ),
         ProtocolType::JsonRpc => AdapterEnum::JsonRpc(
             adapters::jsonrpc::JsonRpcAdapter::new()
-                .with_schema_url_override(options.schema_url.clone()),
+                .with_schema_url_override(options.schema_url.clone())
+                .with_timeout(options.request_timeout),
         ),
         ProtocolType::Mcp => {
-            let mut adapter = adapters::mcp::McpAdapter::new();
+            let mut adapter =
+                adapters::mcp::McpAdapter::new().with_timeout(options.request_timeout);
             if let Some(spawn_options) = options.stdio_spawn_options.clone() {
                 adapter = adapter.with_stdio_spawn_options(spawn_options);
             }
             AdapterEnum::Mcp(adapter)
         }
-        ProtocolType::GraphQL => AdapterEnum::GraphQL(adapters::graphql::GraphQLAdapter::new()),
+        ProtocolType::GraphQL => AdapterEnum::GraphQL(
+            adapters::graphql::GraphQLAdapter::new().with_timeout(options.request_timeout),
+        ),
     }
 }
 
@@ -6360,6 +6412,31 @@ fn inject_refresh_if_supported(
             adapters::AdapterEnum::Mcp(a.with_refresh_schema(refresh_schema))
         }
     }
+}
+
+fn inject_timeout_if_supported(
+    adapter: adapters::AdapterEnum,
+    timeout: Option<Duration>,
+) -> adapters::AdapterEnum {
+    match adapter {
+        adapters::AdapterEnum::OpenAPI(a) => {
+            adapters::AdapterEnum::OpenAPI(a.with_timeout(timeout))
+        }
+        adapters::AdapterEnum::GraphQL(a) => {
+            adapters::AdapterEnum::GraphQL(a.with_timeout(timeout))
+        }
+        adapters::AdapterEnum::GRpc(a) => adapters::AdapterEnum::GRpc(a.with_timeout(timeout)),
+        adapters::AdapterEnum::JsonRpc(a) => {
+            adapters::AdapterEnum::JsonRpc(a.with_timeout(timeout))
+        }
+        adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_timeout(timeout)),
+    }
+}
+
+fn request_timeout_duration(timeout_ms: Option<u64>) -> Option<Duration> {
+    timeout_ms
+        .and_then(|value| (value > 0).then_some(value))
+        .map(Duration::from_millis)
 }
 
 fn openapi_runtime_endpoint(request: &RuntimeInvokeRequest) -> Option<String> {
@@ -6552,7 +6629,13 @@ async fn invoke_live_stdio_mcp_help(
         .mark_tools_dirty_from_notifications(&request.endpoint, &cache)
         .await;
     let tools = guard
-        .refresh_tools_if_needed(&request.endpoint, &cache)
+        .refresh_tools_if_needed(
+            &request.endpoint,
+            &cache,
+            request_timeout_duration(request.options.timeout_ms).unwrap_or_else(
+                adapters::mcp::transport::McpStdioTransport::default_request_timeout,
+            ),
+        )
         .await;
     let recent_stderr = guard.client.recent_stderr_lines(5).await;
     let child_exited = guard.client.child_has_exited().unwrap_or(false);
@@ -6909,6 +6992,7 @@ mod tests {
                 inject_env: Vec::new(),
                 no_cache: false,
                 cache_ttl: None,
+                timeout_ms: None,
                 refresh_schema: false,
                 schema_url: Some("https://example.com/schema.json".to_string()),
                 link_name: None,
@@ -6982,6 +7066,7 @@ mod tests {
                 inject_env: Vec::new(),
                 no_cache: false,
                 cache_ttl: None,
+                timeout_ms: None,
                 refresh_schema: false,
                 schema_url: Some("https://example.com/schema.json".to_string()),
                 link_name: None,
@@ -7053,6 +7138,7 @@ mod tests {
                 inject_env: Vec::new(),
                 no_cache: false,
                 cache_ttl: None,
+                timeout_ms: None,
                 refresh_schema: false,
                 schema_url: None,
                 link_name: None,
@@ -7081,6 +7167,7 @@ mod tests {
                 inject_env: Vec::new(),
                 no_cache: false,
                 cache_ttl: None,
+                timeout_ms: None,
                 refresh_schema: false,
                 schema_url: None,
                 link_name: None,
@@ -7191,6 +7278,7 @@ mod tests {
                 inject_env: Vec::new(),
                 no_cache: false,
                 cache_ttl: None,
+                timeout_ms: None,
                 refresh_schema: false,
                 schema_url: None,
                 link_name: None,

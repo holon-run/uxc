@@ -17,6 +17,7 @@ pub use http_transport::{McpHttpTransport, McpRemoteTransport, ResolvedMcpHttpTr
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 pub use transport::StdioSpawnOptions;
@@ -28,6 +29,7 @@ pub struct McpAdapter {
     discovered_http_endpoints: Arc<RwLock<HashMap<String, ResolvedMcpHttpTransport>>>,
     stdio_spawn_options: transport::StdioSpawnOptions,
     last_probe_diagnostics: Arc<RwLock<Option<String>>>,
+    request_timeout: Option<Duration>,
 }
 
 impl McpAdapter {
@@ -43,6 +45,7 @@ impl McpAdapter {
             stdio_spawn_options: transport::StdioSpawnOptions::default(),
             discovered_http_endpoints: Arc::new(RwLock::new(HashMap::new())),
             last_probe_diagnostics: Arc::new(RwLock::new(None)),
+            request_timeout: None,
         }
     }
 
@@ -64,6 +67,16 @@ impl McpAdapter {
     pub fn with_stdio_spawn_options(mut self, options: transport::StdioSpawnOptions) -> Self {
         self.stdio_spawn_options = options;
         self
+    }
+
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    fn request_timeout_or_default(&self) -> Duration {
+        self.request_timeout
+            .unwrap_or_else(transport::McpStdioTransport::default_request_timeout)
     }
 
     /// Check if a URL/command looks like an MCP stdio command
@@ -330,9 +343,13 @@ impl McpAdapter {
         // If it's a stdio command, connect and get server info
         if Self::is_stdio_command(url) {
             let (cmd, args) = Self::parse_stdio_command(url)?;
-            let mut client =
-                McpStdioClient::connect_with_options(&cmd, &args, self.stdio_spawn_options.clone())
-                    .await?;
+            let mut client = McpStdioClient::connect_with_options_and_timeout(
+                &cmd,
+                &args,
+                self.stdio_spawn_options.clone(),
+                self.request_timeout_or_default(),
+            )
+            .await?;
             let server_info = client.server_info().cloned();
             let instructions = client.instructions().map(ToString::to_string);
             let tools = match client.list_tools().await {
@@ -378,8 +395,11 @@ impl McpAdapter {
             let resolved = self.resolve_http_transport(url).await?.ok_or_else(|| {
                 anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
             })?;
-            let transport =
-                McpRemoteTransport::with_auth(resolved.clone(), self.auth_profile.clone())?;
+            let transport = McpRemoteTransport::with_auth_and_timeout(
+                resolved.clone(),
+                self.auth_profile.clone(),
+                self.request_timeout_or_default(),
+            )?;
             let init_result = transport.initialize().await?;
             let tools = match transport.list_tools().await {
                 Ok(tools) => Some(tools),
@@ -512,16 +532,19 @@ impl Adapter for McpAdapter {
 
         if Self::is_stdio_command(url) {
             let (cmd, args_list) = Self::parse_stdio_command(url)?;
-            let mut client = McpStdioClient::connect_with_options(
+            let mut client = McpStdioClient::connect_with_options_and_timeout(
                 &cmd,
                 &args_list,
                 self.stdio_spawn_options.clone(),
+                self.request_timeout_or_default(),
             )
             .await?;
 
             let arguments = Self::build_tool_arguments(args);
 
-            let result = client.call_tool(operation, arguments).await?;
+            let result = client
+                .call_tool_with_timeout(operation, arguments, self.request_timeout_or_default())
+                .await?;
 
             let output = convert_tool_result_to_value(&result);
 
@@ -539,7 +562,11 @@ impl Adapter for McpAdapter {
             let resolved = self.resolve_http_transport(url).await?.ok_or_else(|| {
                 anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
             })?;
-            let transport = McpRemoteTransport::with_auth(resolved, self.auth_profile.clone())?;
+            let transport = McpRemoteTransport::with_auth_and_timeout(
+                resolved,
+                self.auth_profile.clone(),
+                self.request_timeout_or_default(),
+            )?;
             transport.initialize().await?;
 
             let arguments = Self::build_tool_arguments(args);

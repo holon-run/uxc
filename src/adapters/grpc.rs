@@ -113,6 +113,8 @@ pub struct GrpcAdapter {
     force_refresh_schema: bool,
     /// grpcurl executor (abstracted for testing)
     grpcurl_executor: Arc<dyn GrpcurlExecutor>,
+    /// Request timeout applied to reflection and unary calls.
+    request_timeout: Option<Duration>,
 }
 
 /// Cached reflection data for a server
@@ -152,6 +154,7 @@ impl GrpcAdapter {
             oauth_refresh_lock: Arc::new(Mutex::new(())),
             force_refresh_schema: false,
             grpcurl_executor: Arc::new(DefaultGrpcurlExecutor),
+            request_timeout: None,
         }
     }
 
@@ -175,6 +178,15 @@ impl GrpcAdapter {
     pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
         self.force_refresh_schema = refresh;
         self
+    }
+
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    fn request_timeout_or(&self, default: Duration) -> Duration {
+        self.request_timeout.unwrap_or(default)
     }
 
     async fn effective_auth_profile(&self) -> Option<Profile> {
@@ -491,7 +503,7 @@ impl GrpcAdapter {
     fn create_endpoint(&self, url: &str) -> Result<Endpoint> {
         let addr = Self::parse_url(url)?;
         let endpoint = Endpoint::from_shared(format!("http://{}", addr))?
-            .timeout(Duration::from_secs(30))
+            .timeout(self.request_timeout_or(Duration::from_secs(30)))
             .connect_timeout(Duration::from_secs(10))
             .tcp_keepalive(Some(Duration::from_secs(60)))
             .http2_keep_alive_interval(Duration::from_secs(30))
@@ -928,16 +940,18 @@ impl GrpcAdapter {
         };
 
         for plaintext in attempts {
-            let result = self
-                .grpcurl_executor
-                .execute(
+            let result = tokio::time::timeout(
+                self.request_timeout_or(Duration::from_secs(30)),
+                self.grpcurl_executor.execute(
                     plaintext,
                     headers.clone(),
                     &request_json,
                     target,
                     full_method,
-                )
-                .await?;
+                ),
+            )
+            .await
+            .context("grpcurl request timed out")??;
 
             if result.success {
                 if result.stdout.is_empty() {

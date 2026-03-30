@@ -257,6 +257,10 @@ struct OutboundMessage {
 }
 
 impl McpStdioTransport {
+    pub fn default_request_timeout() -> Duration {
+        Duration::from_millis(DEFAULT_STDIO_REQUEST_TIMEOUT_MS)
+    }
+
     /// Spawn a new MCP server process and create a transport
     #[allow(dead_code)]
     pub async fn connect(command: &str, args: &[String]) -> Result<Self> {
@@ -480,7 +484,7 @@ impl McpStdioTransport {
         method: &str,
         params: Option<JsonValue>,
     ) -> Result<JsonValue> {
-        self.send_request_with_timeout(method, params, stdio_request_timeout())
+        self.send_request_with_timeout(method, params, Self::default_request_timeout())
             .await
     }
 
@@ -627,7 +631,18 @@ impl McpStdioTransport {
     }
 
     /// Initialize the MCP session
+    #[allow(dead_code)]
     pub async fn initialize(&mut self, client_info: ClientInfo) -> Result<InitializeResult> {
+        self.initialize_with_timeout(client_info, Self::default_request_timeout())
+            .await
+    }
+
+    /// Initialize the MCP session using a caller-specified timeout.
+    pub async fn initialize_with_timeout(
+        &mut self,
+        client_info: ClientInfo,
+        timeout: Duration,
+    ) -> Result<InitializeResult> {
         let params = InitializeParams {
             protocolVersion: MCP_PROTOCOL_VERSION.to_string(),
             capabilities: ClientCapabilities::default(),
@@ -635,7 +650,7 @@ impl McpStdioTransport {
         };
 
         let result = self
-            .send_request("initialize", Some(serde_json::to_value(params)?))
+            .send_request_with_timeout("initialize", Some(serde_json::to_value(params)?), timeout)
             .await?;
 
         let init_result: InitializeResult = serde_json::from_value(result)?;
@@ -720,15 +735,6 @@ impl Drop for McpStdioTransport {
     fn drop(&mut self) {
         self.start_kill();
     }
-}
-
-fn stdio_request_timeout() -> Duration {
-    let ms = std::env::var("UXC_MCP_STDIO_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(DEFAULT_STDIO_REQUEST_TIMEOUT_MS);
-    Duration::from_millis(ms)
 }
 
 enum StdioRequestOutcome {
@@ -1411,8 +1417,7 @@ mod tests {
             echo "TARGET_UNREACHABLE: failed to connect" >&2
             exit 7
         "#;
-        let timeout_ms = 10_000u64;
-        std::env::set_var("UXC_MCP_STDIO_TIMEOUT_MS", timeout_ms.to_string());
+        let timeout = Duration::from_secs(10);
         let mut transport =
             McpStdioTransport::connect("sh", &["-c".to_string(), script.to_string()])
                 .await
@@ -1425,16 +1430,15 @@ mod tests {
 
         let start = tokio::time::Instant::now();
         let err = transport
-            .initialize(client_info)
+            .initialize_with_timeout(client_info, timeout)
             .await
             .unwrap_err()
             .to_string();
-        std::env::remove_var("UXC_MCP_STDIO_TIMEOUT_MS");
 
         assert!(
-            start.elapsed() < Duration::from_millis(timeout_ms / 4),
-            "initialize should fail well before timeout {}, got {:?}",
-            timeout_ms,
+            start.elapsed() < timeout / 4,
+            "initialize should fail well before timeout {:?}, got {:?}",
+            timeout,
             start.elapsed()
         );
         assert!(err.contains("child exited before response to initialize"));

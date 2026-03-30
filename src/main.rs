@@ -104,6 +104,10 @@ struct Cli {
     #[arg(long, global = true)]
     cache_ttl: Option<u64>,
 
+    /// Per-request timeout in milliseconds
+    #[arg(long = "timeout-ms", global = true, value_name = "MILLISECONDS")]
+    timeout_ms: Option<u64>,
+
     /// Force online schema discovery and refresh cache.
     #[arg(long, global = true, conflicts_with = "no_cache")]
     refresh_schema: bool,
@@ -1605,6 +1609,7 @@ async fn execute_endpoint_via_daemon(
             inject_env: collect_inject_env_specs(cli)?,
             no_cache: cli.no_cache,
             cache_ttl: cli.cache_ttl,
+            timeout_ms: cli.timeout_ms,
             refresh_schema: cli.refresh_schema,
             schema_url: cli.schema_url.as_deref().map(normalize_endpoint_url),
             link_name: std::env::var("UXC_LINK_NAME").ok(),
@@ -4147,6 +4152,7 @@ async fn handle_subscribe_command(
                     inject_env: collect_inject_env_specs(cli)?,
                     no_cache: cli.no_cache,
                     cache_ttl: cli.cache_ttl,
+                    timeout_ms: None,
                     refresh_schema: cli.refresh_schema,
                     schema_url: None,
                     link_name: std::env::var("UXC_LINK_NAME").ok(),
@@ -5530,6 +5536,18 @@ mod tests {
         unsafe {
             std::env::remove_var("UXC_DAEMON_IDLE_TTL");
         }
+    }
+
+    #[test]
+    fn cli_parses_timeout_ms_as_request_option() {
+        let cli = Cli::parse_from([
+            "uxc",
+            "--timeout-ms",
+            "45000",
+            "https://api.example.com",
+            "get:/health",
+        ]);
+        assert_eq!(cli.timeout_ms, Some(45_000));
     }
 
     #[test]
