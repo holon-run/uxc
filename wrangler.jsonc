@@ -3,6 +3,7 @@
   "name": "uxc",
   "main": "dist/cloudflare/worker.mjs",
   "assets": {
+    "binding": "ASSETS",
     "directory": "dist/cloudflare/assets"
   },
   "compatibility_date": "2026-03-25",
