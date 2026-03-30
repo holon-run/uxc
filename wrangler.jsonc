@@ -2,6 +2,9 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "uxc",
   "main": "dist/cloudflare/worker.mjs",
+  "assets": {
+    "directory": "dist/cloudflare/assets"
+  },
   "compatibility_date": "2026-03-25",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true
