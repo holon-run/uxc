@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// Enum of all available adapters
 #[allow(non_camel_case_types)]
@@ -203,6 +204,7 @@ pub struct DetectionOptions {
     pub schema_url: Option<String>,
     pub auth_profile: Option<crate::auth::Profile>,
     pub stdio_spawn_options: Option<mcp::StdioSpawnOptions>,
+    pub request_timeout: Option<Duration>,
 }
 
 impl ProtocolDetector {
@@ -355,6 +357,7 @@ mod tests {
             schema_url: None,
             auth_profile: Some(Profile::new("test-token".to_string(), AuthType::Bearer)),
             stdio_spawn_options: None,
+            request_timeout: None,
         };
 
         let adapter = detector
@@ -401,6 +404,7 @@ mod tests {
             schema_url: None,
             auth_profile: None,
             stdio_spawn_options: None,
+            request_timeout: None,
         };
 
         let result = detector
@@ -448,6 +452,7 @@ mod tests {
             schema_url: None,
             auth_profile: Some(profile),
             stdio_spawn_options: None,
+            request_timeout: None,
         };
 
         let result = detector
@@ -500,6 +505,7 @@ mod tests {
             schema_url: None,
             auth_profile: Some(Profile::new("graph-token".to_string(), AuthType::Bearer)),
             stdio_spawn_options: None,
+            request_timeout: None,
         };
 
         let adapter = detector
@@ -552,6 +558,7 @@ mod tests {
             schema_url: None,
             auth_profile: Some(Profile::new("openapi-token".to_string(), AuthType::Bearer)),
             stdio_spawn_options: None,
+            request_timeout: None,
         };
 
         let adapter = detector
@@ -618,6 +625,7 @@ mod tests {
             schema_url: None,
             auth_profile: Some(Profile::new("jsonrpc-token".to_string(), AuthType::Bearer)),
             stdio_spawn_options: None,
+            request_timeout: None,
         };
 
         let adapter = detector

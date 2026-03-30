@@ -35,6 +35,7 @@ pub struct GraphQLAdapter {
     runtime_auth_profile: Arc<Mutex<Option<Profile>>>,
     oauth_refresh_lock: Arc<Mutex<()>>,
     force_refresh_schema: bool,
+    request_timeout: Option<Duration>,
 }
 
 impl GraphQLAdapter {
@@ -50,6 +51,7 @@ impl GraphQLAdapter {
             runtime_auth_profile: Arc::new(Mutex::new(None)),
             oauth_refresh_lock: Arc::new(Mutex::new(())),
             force_refresh_schema: false,
+            request_timeout: None,
         }
     }
 
@@ -66,6 +68,15 @@ impl GraphQLAdapter {
     pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
         self.force_refresh_schema = refresh;
         self
+    }
+
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    fn request_timeout_or(&self, default: Duration) -> Duration {
+        self.request_timeout.unwrap_or(default)
     }
 
     async fn effective_auth_profile(&self) -> Option<Profile> {
@@ -180,7 +191,13 @@ impl GraphQLAdapter {
             payload["operationName"] = serde_json::json!(op_name);
         }
 
-        let resp = self.send_graphql_request(url, &payload, None).await?;
+        let resp = self
+            .send_graphql_request(
+                url,
+                &payload,
+                Some(self.request_timeout_or(Duration::from_secs(30))),
+            )
+            .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -1127,7 +1144,11 @@ impl Adapter for GraphQLAdapter {
 
         let payload = serde_json::json!({ "query": query });
         let resp = match self
-            .send_graphql_request(url, &payload, Some(std::time::Duration::from_secs(2)))
+            .send_graphql_request(
+                url,
+                &payload,
+                Some(self.request_timeout_or(Duration::from_secs(2))),
+            )
             .await
         {
             Ok(r) => r,
@@ -1176,7 +1197,13 @@ impl Adapter for GraphQLAdapter {
         let introspection_query = Self::get_introspection_query();
 
         let payload = serde_json::json!({ "query": introspection_query });
-        let resp = self.send_graphql_request(url, &payload, None).await?;
+        let resp = self
+            .send_graphql_request(
+                url,
+                &payload,
+                Some(self.request_timeout_or(Duration::from_secs(30))),
+            )
+            .await?;
 
         if !resp.status().is_success() {
             bail!("Failed to fetch GraphQL schema: HTTP {}", resp.status());

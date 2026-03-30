@@ -40,6 +40,7 @@ trait GrpcurlExecutor: Send + Sync {
         request_json: &str,
         target: &str,
         method: &str,
+        timeout: Duration,
     ) -> Result<GrpcurlResult>;
 }
 
@@ -63,6 +64,7 @@ impl GrpcurlExecutor for DefaultGrpcurlExecutor {
         request_json: &str,
         target: &str,
         method: &str,
+        timeout: Duration,
     ) -> Result<GrpcurlResult> {
         let mut cmd = tokio::process::Command::new("grpcurl");
         cmd.arg("-format").arg("json");
@@ -76,22 +78,29 @@ impl GrpcurlExecutor for DefaultGrpcurlExecutor {
         }
 
         cmd.arg("-d").arg(request_json).arg(target).arg(method);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
 
-        let output = cmd.output().await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!(
-                    "grpcurl is required for gRPC unary calls. Install grpcurl and retry."
-                )
-            } else {
-                anyhow::anyhow!("Failed to execute grpcurl: {}", e)
-            }
-        })?;
+        let child = cmd.spawn().map_err(map_grpcurl_spawn_error)?;
+        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(result) => result.context("Failed to execute grpcurl")?,
+            Err(_) => bail!("grpcurl request timed out"),
+        };
 
         Ok(GrpcurlResult {
             success: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         })
+    }
+}
+
+fn map_grpcurl_spawn_error(e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!("grpcurl is required for gRPC unary calls. Install grpcurl and retry.")
+    } else {
+        anyhow::anyhow!("Failed to execute grpcurl: {}", e)
     }
 }
 
@@ -113,6 +122,8 @@ pub struct GrpcAdapter {
     force_refresh_schema: bool,
     /// grpcurl executor (abstracted for testing)
     grpcurl_executor: Arc<dyn GrpcurlExecutor>,
+    /// Request timeout applied to reflection and unary calls.
+    request_timeout: Option<Duration>,
 }
 
 /// Cached reflection data for a server
@@ -152,6 +163,7 @@ impl GrpcAdapter {
             oauth_refresh_lock: Arc::new(Mutex::new(())),
             force_refresh_schema: false,
             grpcurl_executor: Arc::new(DefaultGrpcurlExecutor),
+            request_timeout: None,
         }
     }
 
@@ -175,6 +187,15 @@ impl GrpcAdapter {
     pub fn with_refresh_schema(mut self, refresh: bool) -> Self {
         self.force_refresh_schema = refresh;
         self
+    }
+
+    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    fn request_timeout_or(&self, default: Duration) -> Duration {
+        self.request_timeout.unwrap_or(default)
     }
 
     async fn effective_auth_profile(&self) -> Option<Profile> {
@@ -491,7 +512,7 @@ impl GrpcAdapter {
     fn create_endpoint(&self, url: &str) -> Result<Endpoint> {
         let addr = Self::parse_url(url)?;
         let endpoint = Endpoint::from_shared(format!("http://{}", addr))?
-            .timeout(Duration::from_secs(30))
+            .timeout(self.request_timeout_or(Duration::from_secs(30)))
             .connect_timeout(Duration::from_secs(10))
             .tcp_keepalive(Some(Duration::from_secs(60)))
             .http2_keep_alive_interval(Duration::from_secs(30))
@@ -936,6 +957,7 @@ impl GrpcAdapter {
                     &request_json,
                     target,
                     full_method,
+                    self.request_timeout_or(Duration::from_secs(30)),
                 )
                 .await?;
 
@@ -1251,6 +1273,7 @@ mod tests {
             _request_json: &str,
             _target: &str,
             _method: &str,
+            _timeout: Duration,
         ) -> Result<GrpcurlResult> {
             self.response
                 .clone()
@@ -1272,6 +1295,7 @@ mod tests {
             _request_json: &str,
             _target: &str,
             _method: &str,
+            _timeout: Duration,
         ) -> Result<GrpcurlResult> {
             self.headers.lock().unwrap().push(headers);
             Ok(self.response.clone())
