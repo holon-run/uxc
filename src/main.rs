@@ -4152,7 +4152,7 @@ async fn handle_subscribe_command(
                     inject_env: collect_inject_env_specs(cli)?,
                     no_cache: cli.no_cache,
                     cache_ttl: cli.cache_ttl,
-                    timeout_ms: None,
+                    timeout_ms: cli.timeout_ms,
                     refresh_schema: cli.refresh_schema,
                     schema_url: None,
                     link_name: std::env::var("UXC_LINK_NAME").ok(),

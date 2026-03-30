@@ -203,6 +203,7 @@ impl McpStdioClient {
     }
 
     /// List available tools
+    #[allow(dead_code)]
     pub async fn list_tools(&mut self) -> Result<Vec<Tool>> {
         self.list_tools_with_timeout(McpStdioTransport::default_request_timeout())
             .await

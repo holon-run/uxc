@@ -1445,8 +1445,8 @@ impl LegacySseTransport {
             Err(_) => {
                 pending.lock().await.remove(&request.id);
                 bail!(
-                    "Timed out waiting for legacy SSE response after {}s",
-                    self.response_timeout.as_secs()
+                    "Timed out waiting for legacy SSE response after {:?}",
+                    self.response_timeout
                 );
             }
         };

@@ -40,6 +40,7 @@ trait GrpcurlExecutor: Send + Sync {
         request_json: &str,
         target: &str,
         method: &str,
+        timeout: Duration,
     ) -> Result<GrpcurlResult>;
 }
 
@@ -63,6 +64,7 @@ impl GrpcurlExecutor for DefaultGrpcurlExecutor {
         request_json: &str,
         target: &str,
         method: &str,
+        timeout: Duration,
     ) -> Result<GrpcurlResult> {
         let mut cmd = tokio::process::Command::new("grpcurl");
         cmd.arg("-format").arg("json");
@@ -76,22 +78,29 @@ impl GrpcurlExecutor for DefaultGrpcurlExecutor {
         }
 
         cmd.arg("-d").arg(request_json).arg(target).arg(method);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
 
-        let output = cmd.output().await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!(
-                    "grpcurl is required for gRPC unary calls. Install grpcurl and retry."
-                )
-            } else {
-                anyhow::anyhow!("Failed to execute grpcurl: {}", e)
-            }
-        })?;
+        let child = cmd.spawn().map_err(map_grpcurl_spawn_error)?;
+        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(result) => result.context("Failed to execute grpcurl")?,
+            Err(_) => bail!("grpcurl request timed out"),
+        };
 
         Ok(GrpcurlResult {
             success: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         })
+    }
+}
+
+fn map_grpcurl_spawn_error(e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!("grpcurl is required for gRPC unary calls. Install grpcurl and retry.")
+    } else {
+        anyhow::anyhow!("Failed to execute grpcurl: {}", e)
     }
 }
 
@@ -940,18 +949,17 @@ impl GrpcAdapter {
         };
 
         for plaintext in attempts {
-            let result = tokio::time::timeout(
-                self.request_timeout_or(Duration::from_secs(30)),
-                self.grpcurl_executor.execute(
+            let result = self
+                .grpcurl_executor
+                .execute(
                     plaintext,
                     headers.clone(),
                     &request_json,
                     target,
                     full_method,
-                ),
-            )
-            .await
-            .context("grpcurl request timed out")??;
+                    self.request_timeout_or(Duration::from_secs(30)),
+                )
+                .await?;
 
             if result.success {
                 if result.stdout.is_empty() {
@@ -1265,6 +1273,7 @@ mod tests {
             _request_json: &str,
             _target: &str,
             _method: &str,
+            _timeout: Duration,
         ) -> Result<GrpcurlResult> {
             self.response
                 .clone()
@@ -1286,6 +1295,7 @@ mod tests {
             _request_json: &str,
             _target: &str,
             _method: &str,
+            _timeout: Duration,
         ) -> Result<GrpcurlResult> {
             self.headers.lock().unwrap().push(headers);
             Ok(self.response.clone())

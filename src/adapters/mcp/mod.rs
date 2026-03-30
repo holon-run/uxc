@@ -352,7 +352,10 @@ impl McpAdapter {
             .await?;
             let server_info = client.server_info().cloned();
             let instructions = client.instructions().map(ToString::to_string);
-            let tools = match client.list_tools().await {
+            let tools = match client
+                .list_tools_with_timeout(self.request_timeout_or_default())
+                .await
+            {
                 Ok(tools) => Some(tools),
                 Err(err) => {
                     debug!("MCP stdio list_tools failed while building schema: {}", err);
