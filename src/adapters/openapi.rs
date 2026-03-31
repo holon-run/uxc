@@ -1392,6 +1392,7 @@ impl OpenAPIAdapter {
                             key
                         )
                     })?;
+                    let path = path.strip_prefix('@').unwrap_or(path);
                     parts.push(PreparedMultipartPart::File {
                         name: key.clone(),
                         path: PathBuf::from(path),
@@ -3248,6 +3249,55 @@ mod tests {
                 .contains("must be provided as a local file path string"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    #[test]
+    fn prepare_request_oas3_multipart_accepts_at_prefixed_file_path() {
+        let root = json!({});
+        let path_item = json!({});
+        let operation = json!({
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["file"],
+                            "properties": {
+                                "file": { "type": "string", "format": "binary" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let mut args = HashMap::new();
+        args.insert(
+            "file".to_string(),
+            Value::String("@/tmp/upload.bin".to_string()),
+        );
+
+        let prepared = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://example.com",
+            "/upload",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.multipart_body,
+            Some(PreparedMultipartBody {
+                parts: vec![PreparedMultipartPart::File {
+                    name: "file".to_string(),
+                    path: PathBuf::from("/tmp/upload.bin"),
+                }],
+            })
         );
     }
 }

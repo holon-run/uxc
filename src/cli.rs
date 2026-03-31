@@ -138,18 +138,31 @@ impl ArgumentParser {
             }
         } else {
             for arg in args {
-                let parts: Vec<&str> = arg.splitn(2, '=').collect();
-                if parts.len() == 2 {
-                    Self::insert_argument_path(
-                        &mut args_map,
-                        parts[0],
-                        serde_json::json!(parts[1]),
-                    )?;
+                if let Some((key, value)) = Self::parse_assignment(&arg)? {
+                    Self::insert_argument_path(&mut args_map, &key, value)?;
                 }
             }
         }
 
         Ok(args_map.into_iter().collect())
+    }
+
+    fn parse_assignment(raw: &str) -> Result<Option<(String, Value)>> {
+        if let Some((key, rhs)) = raw.split_once(":=") {
+            let parsed = serde_json::from_str::<Value>(rhs).map_err(|err| {
+                UxcError::InvalidArguments(format!(
+                    "Invalid JSON value for '{}:=' assignment: {}",
+                    key, err
+                ))
+            })?;
+            return Ok(Some((key.to_string(), parsed)));
+        }
+
+        if let Some((key, rhs)) = raw.split_once('=') {
+            return Ok(Some((key.to_string(), serde_json::json!(rhs))));
+        }
+
+        Ok(None)
     }
 
     fn insert_argument_path(
@@ -567,6 +580,28 @@ mod tests {
         let args = vec!["附件[0]=/tmp/a.pdf".to_string()];
         let result = ArgumentParser::parse_arguments(args, None).unwrap();
         assert_eq!(result["附件"][0], "/tmp/a.pdf");
+    }
+
+    #[test]
+    fn test_parse_arguments_supports_json_field_assignment() {
+        let args = vec![
+            r#"filter:={"status":"active","limit":10}"#.to_string(),
+            r#"tags:=["rust","cli"]"#.to_string(),
+        ];
+        let result = ArgumentParser::parse_arguments(args, None).unwrap();
+        assert_eq!(result["filter"]["status"], "active");
+        assert_eq!(result["filter"]["limit"], 10);
+        assert_eq!(result["tags"][0], "rust");
+        assert_eq!(result["tags"][1], "cli");
+    }
+
+    #[test]
+    fn test_parse_arguments_rejects_invalid_json_field_assignment() {
+        let args = vec![r#"filter:={invalid}"#.to_string()];
+        let err = ArgumentParser::parse_arguments(args, None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Invalid JSON value for 'filter:=' assignment"));
     }
 
     #[test]

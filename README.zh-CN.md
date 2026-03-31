@@ -27,6 +27,19 @@ uxc <host> <operation_id> -h
 uxc <host> <operation_id> key=value
 ```
 
+参数传递方式：
+
+```bash
+# 嵌套字段
+uxc <host> <operation_id> filter.status=active items[0].id=1
+
+# 单个字段按 JSON 解析
+uxc <host> <operation_id> filter:='{"status":"active"}' tags:='["rust","cli"]'
+
+# 整体 JSON payload
+uxc <host> <operation_id> '{"filter":{"status":"active"}}'
+```
+
 示例：
 
 ```bash
@@ -91,7 +104,7 @@ MCP-only workflow。
 ## 你能得到什么
 
 - 通过 `<host> -h` 和 `<host> <operation_id> -h` 实现 help-first discovery
-- 用 key/value 参数或位置 JSON 做结构化调用
+- 用 key/value、路径式嵌套参数、`:=` 单字段 JSON 或位置 JSON 做结构化调用
 - 默认返回稳定的 JSON 输出，文本输出为可选模式
 - 可复用的认证凭证和 endpoint binding
 - 面向常用 host 的快捷 link

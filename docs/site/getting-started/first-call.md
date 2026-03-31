@@ -22,6 +22,9 @@ uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
 
 ## Tips
 
-- Use key/value arguments for simple calls.
-- Use positional JSON for nested objects.
+- Use `key=value` for scalar fields.
+- Use path-style keys for nested fields: `filter.status=active`, `items[0].id=1`.
+- Use `:=` for one complex field: `filter:='{"status":"active"}'`.
+- For multipart file fields, both `file=/abs/path/a.pdf` and `file=@/abs/path/a.pdf` are accepted.
+- Use positional JSON when most fields are complex.
 - Keep `--text` for human-readable output; JSON is the default contract.
