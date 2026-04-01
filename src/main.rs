@@ -2940,7 +2940,7 @@ fn build_operation_invocation_examples(
     if let Some(file_field) = input_schema.and_then(first_file_field_name) {
         push_unique(
             &mut snippets,
-            format!("{}=@/abs/path/{}.bin", file_field, file_field),
+            format!("{}=/abs/path/{}.bin", file_field, file_field),
         );
     }
 
@@ -5942,6 +5942,6 @@ mod tests {
         assert!(flattened.contains("meta.status=value"));
         assert!(flattened.contains("tags[0]=value"));
         assert!(flattened.contains("meta:='"));
-        assert!(flattened.contains("file=@/abs/path/file.bin"));
+        assert!(flattened.contains("file=/abs/path/file.bin"));
     }
 }

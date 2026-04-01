@@ -905,7 +905,7 @@ fn operation_help_marks_openapi_multipart_file_fields() {
         .is_some_and(|examples| examples
             .iter()
             .filter_map(|v| v.as_str())
-            .any(|line| line.contains("file=@/abs/path/file.bin"))));
+            .any(|line| line.contains("file=/abs/path/file.bin"))));
 }
 
 #[test]
