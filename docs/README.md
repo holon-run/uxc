@@ -17,6 +17,7 @@ For public product docs, use the docs site:
 - [`operations/release.md`](./operations/release.md): release workflow and publishing checklist
 - [`operations/skills.md`](./operations/skills.md): skills publish and maintenance log
 - [`decisions/matrix-auth.md`](./decisions/matrix-auth.md): issue-specific Matrix auth decision note for #274
+- [`decisions/daemon-session-lifecycle.md`](./decisions/daemon-session-lifecycle.md): daemon session lifecycle contract note for #337
 
 ## Public Docs Now Live on the Site
 
