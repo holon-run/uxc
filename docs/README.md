@@ -19,6 +19,7 @@ For public product docs, use the docs site:
 - [`decisions/matrix-auth.md`](./decisions/matrix-auth.md): issue-specific Matrix auth decision note for #274
 - [`decisions/daemon-session-lifecycle.md`](./decisions/daemon-session-lifecycle.md): daemon session lifecycle contract note for #337
 - [`decisions/artifact-contract.md`](./decisions/artifact-contract.md): artifact contract note for #338
+- [`decisions/generated-runtime-clients.md`](./decisions/generated-runtime-clients.md): generated client design note for #334
 
 ## Public Docs Now Live on the Site
 
