@@ -18,6 +18,7 @@ For public product docs, use the docs site:
 - [`operations/skills.md`](./operations/skills.md): skills publish and maintenance log
 - [`decisions/matrix-auth.md`](./decisions/matrix-auth.md): issue-specific Matrix auth decision note for #274
 - [`decisions/daemon-session-lifecycle.md`](./decisions/daemon-session-lifecycle.md): daemon session lifecycle contract note for #337
+- [`decisions/artifact-contract.md`](./decisions/artifact-contract.md): artifact contract note for #338
 
 ## Public Docs Now Live on the Site
 
