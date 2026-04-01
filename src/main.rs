@@ -18,6 +18,7 @@ mod arg_coercion;
 mod auth;
 mod cache;
 pub mod cli;
+mod codegen;
 mod daemon;
 mod daemon_log;
 mod error;
@@ -115,6 +116,10 @@ struct Cli {
     /// Explicit OpenAPI schema URL (for schema-discovery separated services)
     #[arg(long, global = true)]
     schema_url: Option<String>,
+
+    /// Export host-scoped runtime codegen schema input (no emitter output)
+    #[arg(long, global = true)]
+    codegen_schema: bool,
 
     /// Output format (default: json)
     #[arg(long, value_enum, global = true)]
@@ -687,6 +692,7 @@ enum AuthBootstrapCommands {
 
 enum EndpointCommand {
     HostHelp,
+    CodegenSchema,
     Describe {
         operation_id: String,
     },
@@ -1575,6 +1581,7 @@ async fn execute_endpoint_via_daemon(
         .map(|outcome| outcome.restarted_for_version_mismatch);
     let (action, operation_id, args_map) = match endpoint_command {
         EndpointCommand::HostHelp => (daemon::RuntimeAction::HostHelp, None, None),
+        EndpointCommand::CodegenSchema => (daemon::RuntimeAction::CodegenSchema, None, None),
         EndpointCommand::Describe { operation_id } => (
             daemon::RuntimeAction::OperationHelp,
             Some(operation_id.clone()),
@@ -1712,11 +1719,13 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             notes: vec![
                 "Default output is JSON. Use --text for human-readable output.".to_string(),
                 "For endpoints, use: uxc <host> -h, uxc <host> <operation_id> -h, and uxc <host> <operation_id> ...".to_string(),
+                "Use --codegen-schema to export host-scoped runtime codegen input (without emitter output).".to_string(),
                 "--inject-env NAME={{secret}} is available for stdio endpoints when a credential is supplied.".to_string(),
             ],
             examples: vec![
                 "uxc -h".to_string(),
                 "uxc <host> -h".to_string(),
+                "uxc <host> --codegen-schema".to_string(),
                 "uxc <host> <operation_id> -h".to_string(),
                 "uxc <host> <operation_id> key=value".to_string(),
                 "uxc --auth thegraph --inject-env THEGRAPH_API_KEY={{secret}} \"npx -y mcp-remote --header \\\"Authorization: Bearer ${THEGRAPH_API_KEY}\\\" https://subgraphs.mcp.thegraph.com/sse\" -h".to_string(),
@@ -2724,6 +2733,24 @@ fn decode_envelope_data<T: DeserializeOwned>(envelope: &OutputEnvelope) -> Resul
 }
 
 fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
+    if cli.codegen_schema {
+        return match &cli.command {
+            None => Ok(EndpointCommand::CodegenSchema),
+            Some(Commands::External(_)) => Err(UxcError::InvalidArguments(
+                "--codegen-schema cannot be combined with operation arguments".to_string(),
+            )
+            .into()),
+            Some(Commands::Cache { .. })
+            | Some(Commands::Auth { .. })
+            | Some(Commands::Link { .. })
+            | Some(Commands::Daemon { .. })
+            | Some(Commands::Subscribe { .. }) => Err(UxcError::InvalidArguments(
+                "--codegen-schema is only supported for endpoint invocations".to_string(),
+            )
+            .into()),
+        };
+    }
+
     match &cli.command {
         None => Ok(EndpointCommand::HostHelp),
         Some(Commands::External(tokens)) => parse_external_command(tokens, cli.help),

@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { UxcDaemonClient } from "../src/index.js";
+import { generateTypeScriptClient, UxcDaemonClient, type CodegenHostSchemaV1 } from "../src/index.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import ts from "typescript";
 
 const execFileAsync = promisify(execFile);
 
@@ -60,6 +61,82 @@ describe("UxcDaemonClient", () => {
     } finally {
       await server.stop();
     }
+  });
+
+  test("codegenSchema exports host-scoped runtime codegen input", async () => {
+    const server = createOpenApiServer();
+    await server.start();
+    try {
+      const schema = await client.codegenSchema({
+        endpoint: server.baseUrl,
+        options: { no_cache: true },
+      });
+      expect(schema.version).toBe("v1");
+      expect(schema.host.endpoint).toBe(server.baseUrl);
+      expect(schema.host.protocol).toBe("openapi");
+      expect(schema.runtime).toHaveProperty("invoke_options_schema");
+      expect(schema.runtime).toHaveProperty("lifecycle_contract");
+      expect(schema.runtime).toHaveProperty("artifact_contract");
+      expect(schema.operations.length).toBeGreaterThan(0);
+      expect(schema.operations[0]?.id).toBe("get:/health");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("generateTypeScriptClient emits compilable host client source", async () => {
+    const schema: CodegenHostSchemaV1 = {
+      version: "v1",
+      generated_at_unix: Date.now(),
+      host: {
+        id: "petstore",
+        endpoint: "https://example.test/api",
+        protocol: "openapi",
+      },
+      runtime: {
+        invoke_options_schema: {},
+        result_meta_schema: {},
+        artifact_meta_schema: {},
+        lifecycle_contract: {},
+        artifact_contract: {},
+      },
+      operations: [
+        {
+          id: "get:/health",
+          display_name: "GET /health",
+          kind: "execute",
+          input_schema: {
+            type: "object",
+            properties: {
+              verbose: { type: "boolean" },
+            },
+            required: [],
+          },
+          output_schema: null,
+          result_kind: "call_result",
+          execute: true,
+          help_only: false,
+          subscribable: false,
+        },
+      ],
+    };
+
+    const source = generateTypeScriptClient(schema, {
+      className: "PetstoreClient",
+    });
+    expect(source).toContain("export class PetstoreClient");
+    expect(source).toContain("async getHealth(");
+
+    const transpiled = ts.transpileModule(source, {
+      reportDiagnostics: true,
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.ESNext,
+      },
+    });
+    const diagnostics = transpiled.diagnostics ?? [];
+    const errors = diagnostics.filter((diag) => diag.category === ts.DiagnosticCategory.Error);
+    expect(errors).toHaveLength(0);
   });
 
   test("subscribeStart + subscribeEvents streams memory sink events", async () => {

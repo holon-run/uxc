@@ -6,6 +6,7 @@ use crate::arg_coercion::prepare_execute_args;
 use crate::auth::injected_env::{fingerprint_injected_env, render_injected_env, InjectEnvSpec};
 use crate::auth::{self, Profile};
 use crate::cache::{self, Cache, CacheConfig};
+use crate::codegen::build_codegen_host_schema;
 use crate::daemon_log::{redact_endpoint, redact_sensitive};
 use crate::daemon_log::{DaemonEventType, DaemonLogEntry, DaemonLogger};
 use crate::error::{
@@ -109,6 +110,7 @@ pub fn daemon_supported() -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeAction {
     HostHelp,
+    CodegenSchema,
     OperationHelp,
     Execute,
 }
@@ -6568,6 +6570,29 @@ async fn invoke_with_adapter(
             }
             Ok(("host_help".to_string(), None, payload))
         }
+        RuntimeAction::CodegenSchema => {
+            let operations = adapter.list_operations(&request.endpoint).await?;
+            let mut details = HashMap::new();
+            for op in &operations {
+                let detail = adapter
+                    .describe_operation(&request.endpoint, &op.operation_id)
+                    .await?;
+                details.insert(op.operation_id.clone(), detail);
+            }
+            let schema = build_codegen_host_schema(
+                &request.endpoint,
+                adapter.protocol_type().as_str(),
+                request.options.link_name.as_deref(),
+                &operations,
+                &details,
+                now_unix_secs(),
+            );
+            Ok((
+                "codegen_host_schema".to_string(),
+                None,
+                serde_json::to_value(schema)?,
+            ))
+        }
         RuntimeAction::OperationHelp => {
             let op = request
                 .operation_id
@@ -6600,7 +6625,7 @@ async fn invoke_live_stdio_mcp_help(
 ) -> Result<Option<(String, Option<String>, Value)>> {
     if !matches!(
         request.action,
-        RuntimeAction::HostHelp | RuntimeAction::OperationHelp
+        RuntimeAction::HostHelp | RuntimeAction::CodegenSchema | RuntimeAction::OperationHelp
     ) {
         return Ok(None);
     }
@@ -6661,6 +6686,29 @@ async fn invoke_live_stdio_mcp_help(
                     payload["service"] = serde_json::to_value(service)?;
                 }
                 Ok(Some(("host_help".to_string(), None, payload)))
+            }
+            RuntimeAction::CodegenSchema => {
+                let operations = tools
+                    .iter()
+                    .map(operation_from_mcp_tool)
+                    .collect::<Vec<_>>();
+                let details = tools
+                    .iter()
+                    .map(|tool| (tool.name.clone(), operation_detail_from_mcp_tool(tool)))
+                    .collect::<HashMap<_, _>>();
+                let schema = build_codegen_host_schema(
+                    &request.endpoint,
+                    "mcp",
+                    request.options.link_name.as_deref(),
+                    &operations,
+                    &details,
+                    now_unix_secs(),
+                );
+                Ok(Some((
+                    "codegen_host_schema".to_string(),
+                    None,
+                    serde_json::to_value(schema)?,
+                )))
             }
             RuntimeAction::OperationHelp => {
                 let op = request

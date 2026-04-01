@@ -31,6 +31,46 @@ export interface RuntimeInvokeResponse {
   meta: Record<string, unknown>;
 }
 
+export interface CodegenHostSchemaV1 {
+  version: "v1" | string;
+  generated_at_unix: number;
+  host: {
+    id: string;
+    endpoint: string;
+    protocol: string;
+    link_name?: string | null;
+  };
+  runtime: {
+    invoke_options_schema: unknown;
+    result_meta_schema: unknown;
+    artifact_meta_schema: unknown;
+    lifecycle_contract: unknown;
+    artifact_contract: unknown;
+  };
+  operations: CodegenOperationV1[];
+}
+
+export interface CodegenOperationV1 {
+  id: string;
+  display_name: string;
+  description?: string | null;
+  kind: string;
+  input_schema?: unknown;
+  output_schema?: unknown;
+  result_kind: string;
+  execute: boolean;
+  help_only: boolean;
+  subscribable: boolean;
+}
+
+export type RuntimeResult<TData = unknown, TMeta = Record<string, unknown>> = Omit<
+  RuntimeInvokeResponse,
+  "data" | "meta"
+> & {
+  data: TData;
+  meta: TMeta;
+};
+
 export interface SubscriptionEventEnvelope {
   version: string;
   job_id: string;
@@ -111,6 +151,12 @@ export interface UxcDaemonClientOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+export interface GenerateTypeScriptClientOptions {
+  className?: string;
+  packageImport?: string;
+  includeSchemaJson?: boolean;
+}
+
 export interface SubscribeStartArgs {
   endpoint: string;
   resourceUri?: string;
@@ -168,7 +214,7 @@ export class UxcDaemonClient {
   async call(args: {
     endpoint: string;
     operation: string;
-    payload?: Record<string, unknown>;
+    payload?: Record<string, unknown> | undefined;
     options?: RuntimeInvokeOptions;
   }): Promise<RuntimeInvokeResponse> {
     return this.request("runtime.invoke", {
@@ -179,6 +225,38 @@ export class UxcDaemonClient {
       args: args.payload ?? null,
       options: normalizeOptions(args.options),
     });
+  }
+
+  async codegenSchema(args: {
+    endpoint: string;
+    options?: RuntimeInvokeOptions;
+  }): Promise<CodegenHostSchemaV1> {
+    const response = await this.request<RuntimeInvokeResponse>("runtime.invoke", {
+      request_id: requestId("codegen"),
+      endpoint: args.endpoint,
+      action: "codegen_schema",
+      operation_id: null,
+      args: null,
+      options: normalizeOptions(args.options),
+    });
+    if (response.kind !== "codegen_host_schema") {
+      throw new Error(
+        `Unexpected codegen response kind '${response.kind}' (expected codegen_host_schema)`,
+      );
+    }
+    return response.data as CodegenHostSchemaV1;
+  }
+
+  async generateTypeScriptClient(args: {
+    endpoint: string;
+    options?: RuntimeInvokeOptions;
+    emitter?: GenerateTypeScriptClientOptions;
+  }): Promise<string> {
+    const schema = await this.codegenSchema({
+      endpoint: args.endpoint,
+      options: args.options,
+    });
+    return generateTypeScriptClient(schema, args.emitter);
   }
 
   async subscribeStart(args: SubscribeStartArgs): Promise<SubscribeStartResponse> {
@@ -351,6 +429,302 @@ export class UxcDaemonClient {
     });
     return response;
   }
+}
+
+export function generateTypeScriptClient(
+  schema: CodegenHostSchemaV1,
+  options: GenerateTypeScriptClientOptions = {},
+): string {
+  const packageImport = options.packageImport ?? "@holon-run/uxc-daemon-client";
+  const className = sanitizeTypeName(options.className ?? defaultClassName(schema.host.id));
+  const methodNames = new Set<string>();
+  const typeNames = new Set<string>();
+  const operationBlocks: string[] = [];
+  const typeBlocks: string[] = [];
+
+  for (const operation of schema.operations) {
+    if (!operation.execute || operation.help_only) {
+      continue;
+    }
+    const methodName = uniqueName(
+      sanitizeMethodName(defaultMethodName(operation.id)),
+      methodNames,
+    );
+    const typeName = uniqueName(
+      sanitizeTypeName(`${upperFirst(methodName)}Input`),
+      typeNames,
+    );
+    const selectedInputSchema = selectOperationInputSchema(operation.input_schema);
+    const inputType = selectedInputSchema
+      ? renderTsTypeFromSchema(selectedInputSchema, 0)
+      : "Record<string, unknown>";
+    const inputRequired = selectedInputSchema ? hasRequiredInput(selectedInputSchema) : false;
+    typeBlocks.push(`export type ${typeName} = ${inputType};`);
+    operationBlocks.push(
+      [
+        `  async ${methodName}(`,
+        inputRequired ? `    input: ${typeName},` : `    input?: ${typeName},`,
+        `    options: RuntimeInvokeOptions = {},`,
+        `  ): Promise<RuntimeResult<unknown>> {`,
+        `    return this.client.call({`,
+        `      endpoint: this.endpoint,`,
+        `      operation: ${JSON.stringify(operation.id)},`,
+        `      payload: input as Record<string, unknown> | undefined,`,
+        `      options: { ...this.defaultOptions, ...options },`,
+        `    }) as Promise<RuntimeResult<unknown>>;`,
+        `  }`,
+      ].join("\n"),
+    );
+  }
+
+  const lines: string[] = [
+    `import { UxcDaemonClient, type RuntimeInvokeOptions, type RuntimeResult } from ${JSON.stringify(packageImport)};`,
+    "",
+    ...typeBlocks,
+    "",
+    `export interface ${className}Options {`,
+    "  client?: UxcDaemonClient;",
+    "  endpoint?: string;",
+    "  defaultOptions?: RuntimeInvokeOptions;",
+    "}",
+    "",
+    `export class ${className} {`,
+    "  readonly client: UxcDaemonClient;",
+    "  readonly endpoint: string;",
+    "  readonly defaultOptions: RuntimeInvokeOptions;",
+    "",
+    `  constructor(options: ${className}Options = {}) {`,
+    "    this.client = options.client ?? new UxcDaemonClient();",
+    `    this.endpoint = options.endpoint ?? ${JSON.stringify(schema.host.endpoint)};`,
+    "    this.defaultOptions = options.defaultOptions ?? {};",
+    "  }",
+    "",
+    ...operationBlocks,
+    "}",
+  ];
+
+  if (options.includeSchemaJson) {
+    lines.push(
+      "",
+      `export const GENERATED_SCHEMA = ${JSON.stringify(schema, null, 2)} as const;`,
+    );
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+function defaultClassName(hostId: string): string {
+  return `${sanitizeTypeName(hostId)}Client`;
+}
+
+function defaultMethodName(operationId: string): string {
+  const openApiMatch = operationId.match(/^([a-z]+):\/(.*)$/i);
+  if (openApiMatch) {
+    const verb = openApiMatch[1].toLowerCase();
+    const path = openApiMatch[2]
+      .replace(/\{([^}]+)\}/g, " by $1 ")
+      .replace(/[/:_-]+/g, " ");
+    return `${verb} ${path}`;
+  }
+  return operationId.replace(/[/:._-]+/g, " ");
+}
+
+function sanitizeMethodName(raw: string): string {
+  const tokens = raw
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length === 0) {
+    return "invoke";
+  }
+  const [first, ...rest] = tokens;
+  const normalized = [first.toLowerCase(), ...rest.map((token) => upperFirst(token.toLowerCase()))].join(
+    "",
+  );
+  return /^[a-zA-Z_$]/.test(normalized) ? normalized : `op${upperFirst(normalized)}`;
+}
+
+function sanitizeTypeName(raw: string): string {
+  if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(raw)) {
+    return raw;
+  }
+  const tokens = raw
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => upperFirst(token));
+  const candidate = tokens.join("") || "Generated";
+  return /^[A-Za-z_$]/.test(candidate) ? candidate : `T${candidate}`;
+}
+
+function upperFirst(input: string): string {
+  if (input.length === 0) {
+    return input;
+  }
+  return `${input[0].toUpperCase()}${input.slice(1)}`;
+}
+
+function uniqueName(name: string, used: Set<string>): string {
+  let candidate = name;
+  let idx = 2;
+  while (used.has(candidate)) {
+    candidate = `${name}${idx}`;
+    idx += 1;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+function hasRequiredInput(schema: unknown): boolean {
+  if (!schema || typeof schema !== "object") {
+    return false;
+  }
+  const required = (schema as Record<string, unknown>).required;
+  return Array.isArray(required) && required.length > 0;
+}
+
+function selectOperationInputSchema(inputSchema: unknown): unknown {
+  if (!inputSchema || typeof inputSchema !== "object") {
+    return undefined;
+  }
+  const obj = inputSchema as Record<string, unknown>;
+  if (obj.kind === "grpc_message" && typeof obj.schema === "object") {
+    return obj.schema;
+  }
+  if (obj.kind === "openrpc_method" && Array.isArray(obj.params)) {
+    const properties: Record<string, unknown> = {};
+    const required: string[] = [];
+    for (const raw of obj.params) {
+      if (!raw || typeof raw !== "object") {
+        continue;
+      }
+      const param = raw as Record<string, unknown>;
+      const name = typeof param.name === "string" ? param.name : undefined;
+      if (!name) {
+        continue;
+      }
+      const schema = typeof param.schema === "object" ? param.schema : {};
+      properties[name] = schema;
+      if (param.required === true) {
+        required.push(name);
+      }
+    }
+    return { type: "object", properties, required };
+  }
+  if (obj.kind === "openapi_request_body" && obj.content && typeof obj.content === "object") {
+    const content = obj.content as Record<string, unknown>;
+    const prioritized = [
+      "application/json",
+      "application/x-www-form-urlencoded",
+      "multipart/form-data",
+    ];
+    for (const mime of prioritized) {
+      const entry = content[mime];
+      if (entry && typeof entry === "object" && (entry as Record<string, unknown>).schema) {
+        return (entry as Record<string, unknown>).schema;
+      }
+    }
+    for (const entry of Object.values(content)) {
+      if (entry && typeof entry === "object" && (entry as Record<string, unknown>).schema) {
+        return (entry as Record<string, unknown>).schema;
+      }
+    }
+  }
+  if (typeof obj.schema === "object" && obj.type == null) {
+    return obj.schema;
+  }
+  return inputSchema;
+}
+
+function renderTsTypeFromSchema(schema: unknown, depth: number): string {
+  if (!schema || typeof schema !== "object") {
+    return "Record<string, unknown>";
+  }
+  const obj = schema as Record<string, unknown>;
+
+  const enumValues = asPrimitiveArray(obj.enum);
+  if (enumValues && enumValues.length > 0) {
+    return enumValues.map((value) => JSON.stringify(value)).join(" | ");
+  }
+  if (Array.isArray(obj.oneOf) && obj.oneOf.length > 0) {
+    return obj.oneOf.map((item) => renderTsTypeFromSchema(item, depth + 1)).join(" | ");
+  }
+  if (Array.isArray(obj.anyOf) && obj.anyOf.length > 0) {
+    return obj.anyOf.map((item) => renderTsTypeFromSchema(item, depth + 1)).join(" | ");
+  }
+  const schemaType = normalizeType(obj.type);
+  switch (schemaType) {
+    case "string":
+      return "string";
+    case "integer":
+    case "number":
+      return "number";
+    case "boolean":
+      return "boolean";
+    case "array": {
+      const itemType = renderTsTypeFromSchema(obj.items, depth + 1);
+      return `Array<${itemType}>`;
+    }
+    case "object": {
+      const properties = obj.properties;
+      if (!properties || typeof properties !== "object") {
+        return "Record<string, unknown>";
+      }
+      if (depth > 4) {
+        return "Record<string, unknown>";
+      }
+      const required = new Set(
+        Array.isArray(obj.required)
+          ? obj.required.filter((item): item is string => typeof item === "string")
+          : [],
+      );
+      const fields = Object.entries(properties as Record<string, unknown>).map(([name, value]) => {
+        const optional = required.has(name) ? "" : "?";
+        const key = safePropertyName(name);
+        const valueType = renderTsTypeFromSchema(value, depth + 1);
+        return `${key}${optional}: ${valueType}`;
+      });
+      if (fields.length === 0) {
+        return "Record<string, unknown>";
+      }
+      return `{ ${fields.join("; ")} }`;
+    }
+    default:
+      return "unknown";
+  }
+}
+
+function normalizeType(typeValue: unknown): string | undefined {
+  if (typeof typeValue === "string") {
+    return typeValue;
+  }
+  if (Array.isArray(typeValue)) {
+    const nonNull = typeValue.find(
+      (entry): entry is string => typeof entry === "string" && entry !== "null",
+    );
+    return nonNull;
+  }
+  return undefined;
+}
+
+function asPrimitiveArray(value: unknown): Array<string | number | boolean | null> | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const allPrimitive = value.every(
+    (item) =>
+      item == null ||
+      typeof item === "string" ||
+      typeof item === "number" ||
+      typeof item === "boolean",
+  );
+  return allPrimitive ? (value as Array<string | number | boolean | null>) : undefined;
+}
+
+function safePropertyName(name: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name);
 }
 
 function normalizeOptions(options: RuntimeInvokeOptions | undefined): RuntimeInvokeOptions {

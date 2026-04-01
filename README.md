@@ -293,6 +293,24 @@ instead of CLI stdout envelopes.
 Use it when embedding UXC into applications that need runtime calls, daemon
 status, or subscription lifecycle and event streaming.
 
+For generated runtime clients (#334), you can export host-scoped codegen input
+from CLI and generate a typed TypeScript client through the daemon client:
+
+```bash
+uxc <host> --codegen-schema
+```
+
+```ts
+import { UxcDaemonClient } from "@holon-run/uxc-daemon-client";
+
+const runtime = new UxcDaemonClient();
+const source = await runtime.generateTypeScriptClient({
+  endpoint: "https://petstore3.swagger.io/api/v3",
+  options: { no_cache: true },
+  emitter: { className: "PetstoreClient" },
+});
+```
+
 See [the daemon API docs](https://uxc.holon.run/daemon/api/) for the daemon contract.
 
 ## Docs Map

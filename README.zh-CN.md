@@ -287,6 +287,24 @@ npm install @holon-run/uxc-daemon-client
 当需要在应用里嵌入运行时调用、daemon 状态查询，或订阅生命周期与事件流管理时，
 可以优先使用它。
 
+针对 #334 的生成式 runtime client，你可以先用 CLI 导出 host 级 codegen 输入，
+再通过 daemon client 生成 TypeScript typed client：
+
+```bash
+uxc <host> --codegen-schema
+```
+
+```ts
+import { UxcDaemonClient } from "@holon-run/uxc-daemon-client";
+
+const runtime = new UxcDaemonClient();
+const source = await runtime.generateTypeScriptClient({
+  endpoint: "https://petstore3.swagger.io/api/v3",
+  options: { no_cache: true },
+  emitter: { className: "PetstoreClient" },
+});
+```
+
 daemon 合约见 [站点中的 daemon API 文档](https://uxc.holon.run/daemon/api/)。
 
 ## 文档导航
