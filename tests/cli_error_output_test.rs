@@ -136,9 +136,9 @@ fn unknown_double_dash_arg_returns_invalid_argument_with_helpful_hint() {
     assert!(message.contains("--unknown-param"));
     assert!(message.contains("test-operation"));
     // Verify the helpful hint is included
-    assert!(message.contains("key=value format (recommended)"));
+    assert!(message.contains("Use key=value for scalar fields"));
     assert!(message.contains("uxc <host> test-operation key1=value1"));
-    assert!(message.contains("JSON object as a positional argument"));
+    assert!(message.contains("Or pass one full JSON object"));
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn invalid_positional_arg_returns_invalid_argument_with_helpful_hint() {
     let message = json["error"]["message"].as_str().unwrap_or_default();
     assert!(message.contains("Unknown argument"));
     // Verify the helpful hint includes JSON example
-    assert!(message.contains("JSON object as a positional argument"));
+    assert!(message.contains("Or pass one full JSON object"));
     assert!(message.contains(r#"key1":"value1"#));
     assert!(message.contains(r#"key2":"value2"#));
 }

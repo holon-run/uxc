@@ -900,6 +900,12 @@ fn operation_help_marks_openapi_multipart_file_fields() {
         json["data"]["input_schema"]["content"]["multipart/form-data"]["x-uxc-file-input"],
         "local_path_string"
     );
+    assert!(json["data"]["invocation_examples"]
+        .as_array()
+        .is_some_and(|examples| examples
+            .iter()
+            .filter_map(|v| v.as_str())
+            .any(|line| line.contains("file=/abs/path/file.bin"))));
 }
 
 #[test]

@@ -49,7 +49,7 @@ entrypoint for agents, skills, scripts, and local applications.
 ## What You Get
 
 - help-first discovery with `<host> -h` and `<host> <operation_id> -h`
-- structured invocation with key/value args or positional JSON payloads
+- structured invocation with key/value args, path-style nested args, `:=` per-field JSON, or positional JSON payloads
 - deterministic JSON output by default, with opt-in text mode
 - reusable auth credentials and endpoint bindings
 - daemon-backed session reuse and background subscriptions

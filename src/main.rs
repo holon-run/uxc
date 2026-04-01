@@ -1620,12 +1620,25 @@ async fn execute_endpoint_via_daemon(
     };
 
     let response = daemon::runtime_invoke_client(&request).await?;
+    let command_head = request
+        .options
+        .link_name
+        .as_deref()
+        .unwrap_or("uxc <host>")
+        .to_string();
+    let mut response_data = response.data;
+    if response.kind == "operation_detail" {
+        if let Some(operation_id) = response.operation.as_deref() {
+            response_data =
+                enrich_operation_detail_payload(response_data, &command_head, operation_id);
+        }
+    }
     let mut envelope = OutputEnvelope::success(
         &response.kind,
         &response.protocol,
         &response.endpoint,
         response.operation.as_deref(),
-        response.data,
+        response_data,
         response.duration_ms,
     )
     .with_daemon_meta(
@@ -2264,7 +2277,20 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             let endpoint = envelope.endpoint.as_deref().unwrap_or("unknown");
             let protocol = envelope.protocol.as_deref().unwrap_or("unknown");
             let detail: OperationDetail = decode_envelope_data(envelope)?;
-            print_detail_text(protocol, endpoint, &detail);
+            let invocation_examples = envelope
+                .data
+                .as_ref()
+                .and_then(|value| value.get("invocation_examples"))
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            print_detail_text(protocol, endpoint, &detail, &invocation_examples);
             Ok(())
         }
         Some("inspect_result") => {
@@ -2715,8 +2741,8 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
 /// Build a helpful error message for invalid operation arguments
 fn build_invalid_arg_error(arg: &str, operation_id: &str) -> String {
     format!(
-        "Unknown argument '{}' for operation '{}'.\n\nHint: Use key=value format (recommended):\n  uxc <host> {} key1=value1 key2=value2\n\nOr pass a JSON object as a positional argument:\n  uxc <host> {} '{{\"key1\":\"value1\",\"key2\":\"value2\"}}'",
-        arg, operation_id, operation_id, operation_id
+        "Unknown argument '{}' for operation '{}'.\n\nHint: Use key=value for scalar fields:\n  uxc <host> {} key1=value1 key2=value2\n\nUse path-style keys for nested fields:\n  uxc <host> {} filter.status=active items[0].id=1\n\nUse := for per-field JSON values:\n  uxc <host> {} filter:='{{\"status\":\"active\"}}' tags:='[\"rust\",\"cli\"]'\n\nOr pass one full JSON object:\n  uxc <host> {} '{{\"key1\":\"value1\",\"key2\":\"value2\"}}'",
+        arg, operation_id, operation_id, operation_id, operation_id, operation_id
     )
 }
 
@@ -2828,7 +2854,8 @@ fn normalize_operation_inputs(
 
     if explicit_input_json.is_some() && bare_json_payload.is_some() {
         return Err(UxcError::InvalidArguments(
-            "Cannot provide both --input-json and positional JSON payload".to_string(),
+            "Cannot provide both --input-json and positional JSON payload. Choose one input style: keep --input-json <json> and remove the positional JSON, or remove --input-json and keep exactly one positional JSON object."
+                .to_string(),
         )
         .into());
     }
@@ -2860,30 +2887,304 @@ fn parse_arguments(
     args: Vec<String>,
     input_json: Option<String>,
 ) -> Result<HashMap<String, Value>> {
-    let mut args_map = HashMap::new();
+    crate::cli::ArgumentParser::parse_arguments(args, input_json)
+}
 
-    if let Some(json_str) = input_json {
-        let value: Value = serde_json::from_str(&json_str)
-            .map_err(|e| UxcError::InvalidArguments(format!("Invalid JSON payload: {}", e)))?;
-        if let Some(obj) = value.as_object() {
-            for (k, v) in obj {
-                args_map.insert(k.clone(), v.clone());
-            }
-        } else {
-            return Err(
-                UxcError::InvalidArguments("JSON payload must be an object".to_string()).into(),
-            );
+fn enrich_operation_detail_payload(data: Value, command_head: &str, operation_id: &str) -> Value {
+    let mut data = data;
+    let Some(object) = data.as_object_mut() else {
+        return data;
+    };
+    if object.contains_key("invocation_examples") {
+        return data;
+    }
+
+    let examples = build_operation_invocation_examples(
+        &Value::Object(object.clone()),
+        command_head,
+        operation_id,
+    );
+    if !examples.is_empty() {
+        object.insert(
+            "invocation_examples".to_string(),
+            Value::Array(examples.into_iter().map(Value::String).collect()),
+        );
+    }
+    data
+}
+
+fn build_operation_invocation_examples(
+    detail_data: &Value,
+    command_head: &str,
+    operation_id: &str,
+) -> Vec<String> {
+    let mut snippets = Vec::new();
+    let input_schema = detail_data.get("input_schema");
+
+    if let Some(schema) = input_schema.and_then(select_operation_input_schema_for_examples) {
+        if let Some((key, value)) = first_scalar_path_example(&schema) {
+            push_unique(&mut snippets, format!("{}={}", key, value));
         }
-    } else {
-        for arg in args {
-            let parts: Vec<&str> = arg.splitn(2, '=').collect();
-            if parts.len() == 2 {
-                args_map.insert(parts[0].to_string(), json!(parts[1]));
+        if let Some((key, value)) = first_nested_path_example(&schema) {
+            push_unique(&mut snippets, format!("{}={}", key, value));
+        }
+        if let Some((key, value)) = first_array_path_example(&schema) {
+            push_unique(&mut snippets, format!("{}={}", key, value));
+        }
+        if let Some((key, json_value)) = first_json_assignment_example(&schema) {
+            let encoded = serde_json::to_string(&json_value).unwrap_or_else(|_| "{}".to_string());
+            push_unique(&mut snippets, format!("{}:='{}'", key, encoded));
+        }
+    }
+
+    if let Some(file_field) = input_schema.and_then(first_file_field_name) {
+        push_unique(
+            &mut snippets,
+            format!("{}=/abs/path/{}.bin", file_field, file_field),
+        );
+    }
+
+    if snippets.is_empty() {
+        if let Some(first_param) = detail_data
+            .get("parameters")
+            .and_then(Value::as_array)
+            .and_then(|params| params.first())
+            .and_then(|param| param.get("name"))
+            .and_then(Value::as_str)
+        {
+            snippets.push(format!("{}=value", first_param));
+        }
+    }
+
+    snippets
+        .into_iter()
+        .map(|snippet| format!("{command_head} {operation_id} {snippet}"))
+        .collect()
+}
+
+fn select_operation_input_schema_for_examples(input_schema: &Value) -> Option<Value> {
+    if input_schema.get("kind").and_then(Value::as_str) == Some("grpc_message") {
+        return input_schema.get("schema").cloned();
+    }
+
+    if input_schema.get("kind").and_then(Value::as_str) == Some("openrpc_method") {
+        let params = input_schema.get("params").and_then(Value::as_array)?;
+        let mut properties = serde_json::Map::new();
+        for param in params {
+            let name = param.get("name").and_then(Value::as_str)?;
+            let schema = param
+                .get("schema")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+            properties.insert(name.to_string(), schema);
+        }
+        return Some(json!({
+            "type": "object",
+            "properties": properties
+        }));
+    }
+
+    if let Some(content) = input_schema.get("content").and_then(Value::as_object) {
+        for media_type in [
+            "application/json",
+            "application/x-www-form-urlencoded",
+            "multipart/form-data",
+        ] {
+            if let Some(schema) = content
+                .get(media_type)
+                .and_then(|entry| entry.get("schema"))
+            {
+                return Some(schema.clone());
             }
         }
     }
 
-    Ok(args_map)
+    if input_schema.get("type").is_some() {
+        return Some(input_schema.clone());
+    }
+
+    input_schema.get("schema").cloned()
+}
+
+fn first_scalar_path_example(schema: &Value) -> Option<(String, String)> {
+    let properties = schema.get("properties").and_then(Value::as_object)?;
+    for (name, property_schema) in properties {
+        if let Some(sample) = scalar_sample_value(property_schema) {
+            return Some((name.clone(), sample));
+        }
+    }
+    None
+}
+
+fn first_nested_path_example(schema: &Value) -> Option<(String, String)> {
+    let properties = schema.get("properties").and_then(Value::as_object)?;
+    for (name, property_schema) in properties {
+        if schema_type(property_schema) != Some("object") {
+            continue;
+        }
+        let nested_properties = property_schema
+            .get("properties")
+            .and_then(Value::as_object)?;
+        for (child_name, child_schema) in nested_properties {
+            if let Some(sample) = scalar_sample_value(child_schema) {
+                return Some((format!("{name}.{child_name}"), sample));
+            }
+        }
+    }
+    None
+}
+
+fn first_array_path_example(schema: &Value) -> Option<(String, String)> {
+    let properties = schema.get("properties").and_then(Value::as_object)?;
+    for (name, property_schema) in properties {
+        if schema_type(property_schema) != Some("array") {
+            continue;
+        }
+        let item_schema = property_schema.get("items")?;
+        if let Some(sample) = scalar_sample_value(item_schema) {
+            return Some((format!("{name}[0]"), sample));
+        }
+        if schema_type(item_schema) == Some("object") {
+            let nested_properties = item_schema.get("properties").and_then(Value::as_object)?;
+            for (child_name, child_schema) in nested_properties {
+                if let Some(sample) = scalar_sample_value(child_schema) {
+                    return Some((format!("{name}[0].{child_name}"), sample));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn first_json_assignment_example(schema: &Value) -> Option<(String, Value)> {
+    let properties = schema.get("properties").and_then(Value::as_object)?;
+    for (name, property_schema) in properties {
+        if !matches!(schema_type(property_schema), Some("object" | "array")) {
+            continue;
+        }
+        if let Some(value) = sample_json_value(property_schema, 2) {
+            return Some((name.clone(), value));
+        }
+    }
+    None
+}
+
+fn first_file_field_name(input_schema: &Value) -> Option<String> {
+    if let Some(name) = input_schema
+        .get("content")
+        .and_then(|content| content.get("multipart/form-data"))
+        .and_then(|multipart| multipart.get("x-uxc-file-fields"))
+        .and_then(Value::as_array)
+        .and_then(|fields| fields.first())
+        .and_then(Value::as_str)
+    {
+        return Some(name.to_string());
+    }
+
+    let schema = select_operation_input_schema_for_examples(input_schema)?;
+    let properties = schema.get("properties").and_then(Value::as_object)?;
+    for (name, property_schema) in properties {
+        if schema_type(property_schema) == Some("string")
+            && property_schema.get("format").and_then(Value::as_str) == Some("binary")
+        {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
+fn sample_json_value(schema: &Value, depth: usize) -> Option<Value> {
+    if depth == 0 {
+        return None;
+    }
+    match schema_type(schema) {
+        Some("object") => {
+            let properties = schema.get("properties").and_then(Value::as_object)?;
+            let mut object = serde_json::Map::new();
+            for (name, property_schema) in properties.iter().take(2) {
+                if let Some(value) = sample_json_value(property_schema, depth.saturating_sub(1)) {
+                    object.insert(name.clone(), value);
+                }
+            }
+            if object.is_empty() {
+                Some(Value::Object(serde_json::Map::new()))
+            } else {
+                Some(Value::Object(object))
+            }
+        }
+        Some("array") => {
+            let item_schema = schema.get("items");
+            let item = item_schema
+                .and_then(|inner| sample_json_value(inner, depth.saturating_sub(1)))
+                .unwrap_or_else(|| Value::String("value".to_string()));
+            Some(Value::Array(vec![item]))
+        }
+        _ => scalar_json_sample(schema),
+    }
+}
+
+fn scalar_sample_value(schema: &Value) -> Option<String> {
+    if let Some(sample) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+    {
+        return value_to_cli_scalar(sample);
+    }
+    if let Some(sample) = schema.get("const") {
+        return value_to_cli_scalar(sample);
+    }
+    match schema_type(schema) {
+        Some("integer") => Some("1".to_string()),
+        Some("number") => Some("1.5".to_string()),
+        Some("boolean") => Some("true".to_string()),
+        Some("string") => Some("value".to_string()),
+        _ => None,
+    }
+}
+
+fn value_to_cli_scalar(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(v) => Some(v.to_string()),
+        Value::Null => Some("null".to_string()),
+        _ => None,
+    }
+}
+
+fn schema_type(schema: &Value) -> Option<&str> {
+    match schema.get("type") {
+        Some(Value::String(v)) => Some(v.as_str()),
+        Some(Value::Array(items)) => items.iter().find_map(Value::as_str),
+        _ => None,
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, candidate: String) {
+    if !values.iter().any(|item| item == &candidate) {
+        values.push(candidate);
+    }
+}
+
+fn scalar_json_sample(schema: &Value) -> Option<Value> {
+    if let Some(sample) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+    {
+        return Some(sample.clone());
+    }
+    if let Some(sample) = schema.get("const") {
+        return Some(sample.clone());
+    }
+    match schema_type(schema) {
+        Some("integer") => Some(Value::Number(serde_json::Number::from(1))),
+        Some("number") => serde_json::Number::from_f64(1.5).map(Value::Number),
+        Some("boolean") => Some(Value::Bool(true)),
+        Some("string") => Some(Value::String("value".to_string())),
+        _ => None,
+    }
 }
 
 fn print_json(envelope: &OutputEnvelope) -> Result<()> {
@@ -2960,7 +3261,12 @@ fn print_help_text(data: &HelpData) {
     }
 }
 
-fn print_detail_text(protocol: &str, endpoint: &str, detail: &OperationDetail) {
+fn print_detail_text(
+    protocol: &str,
+    endpoint: &str,
+    detail: &OperationDetail,
+    invocation_examples: &[String],
+) {
     println!("Protocol: {}", protocol);
     println!("Endpoint: {}", endpoint);
     println!("Operation ID: {}", detail.operation_id);
@@ -2994,6 +3300,13 @@ fn print_detail_text(protocol: &str, endpoint: &str, detail: &OperationDetail) {
             "\nInput Schema:\n{}",
             serde_json::to_string_pretty(input_schema).unwrap_or_else(|_| "{}".to_string())
         );
+    }
+
+    if !invocation_examples.is_empty() {
+        println!("\nInvocation Examples:");
+        for line in invocation_examples {
+            println!("  {}", line);
+        }
     }
 }
 
@@ -5378,11 +5691,12 @@ fn parse_oauth_flow(value: &str) -> Result<OAuthFlow> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_link_launcher, collect_daemon_idle_ttl, infer_scheme_for_endpoint, link_target_path,
-        normalize_endpoint_url, resolve_home_dir, resolve_link_dir, shell_single_quote,
-        validate_link_name, Cli,
+        build_link_launcher, collect_daemon_idle_ttl, enrich_operation_detail_payload,
+        infer_scheme_for_endpoint, link_target_path, normalize_endpoint_url, parse_arguments,
+        resolve_home_dir, resolve_link_dir, shell_single_quote, validate_link_name, Cli,
     };
     use clap::Parser;
+    use serde_json::json;
     use std::path::Path;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
@@ -5566,5 +5880,68 @@ mod tests {
         std::env::set_current_dir(cwd).expect("should restore cwd");
         assert!(normalized.contains(bin_path.to_string_lossy().as_ref()));
         assert!(normalized.ends_with(" ok"));
+    }
+
+    #[test]
+    fn parse_arguments_supports_path_and_json_field_assignment() {
+        let args = vec![
+            "filter.status=active".to_string(),
+            r#"tags:=["rust","cli"]"#.to_string(),
+        ];
+        let parsed = parse_arguments(args, None).expect("arguments should parse");
+        assert_eq!(parsed["filter"]["status"], "active");
+        assert_eq!(parsed["tags"][0], "rust");
+        assert_eq!(parsed["tags"][1], "cli");
+    }
+
+    #[test]
+    fn enrich_operation_detail_payload_adds_schema_aware_examples() {
+        let detail = json!({
+            "operation_id": "post:/upload",
+            "display_name": "POST /upload",
+            "parameters": [],
+            "input_schema": {
+                "kind": "openapi_request_body",
+                "content": {
+                    "multipart/form-data": {
+                        "x-uxc-file-fields": ["file"],
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "caption": { "type": "string" },
+                                "meta": {
+                                    "type": "object",
+                                    "properties": {
+                                        "status": { "type": "string" }
+                                    }
+                                },
+                                "tags": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "file": { "type": "string", "format": "binary" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let enriched = enrich_operation_detail_payload(detail, "uxc <host>", "post:/upload");
+        let examples = enriched
+            .get("invocation_examples")
+            .and_then(|v| v.as_array())
+            .expect("invocation_examples should exist");
+        let flattened = examples
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(flattened.contains("caption=value"));
+        assert!(flattened.contains("meta.status=value"));
+        assert!(flattened.contains("tags[0]=value"));
+        assert!(flattened.contains("meta:='"));
+        assert!(flattened.contains("file=/abs/path/file.bin"));
     }
 }

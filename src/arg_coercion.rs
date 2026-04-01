@@ -259,7 +259,7 @@ fn coerce_object(
         Value::Object(map) => Value::Object(map.clone()),
         Value::String(raw) => serde_json::from_str::<Value>(raw).map_err(|_| {
             UxcError::InvalidArguments(format!(
-                "Invalid value at {}: expected object, got string {}. Use a JSON positional argument for complex values.",
+                "Invalid value at {}: expected object, got string {}. Use nested path keys (for example a.b=c) or per-field JSON assignment (a:='{{\"k\":\"v\"}}').",
                 path,
                 render_value(value)
             ))
@@ -347,7 +347,7 @@ fn coerce_array(
         Value::Array(items) => Value::Array(items.clone()),
         Value::String(raw) => serde_json::from_str::<Value>(raw).map_err(|_| {
             UxcError::InvalidArguments(format!(
-                "Invalid value at {}: expected array, got string {}. Use a JSON positional argument for complex values.",
+                "Invalid value at {}: expected array, got string {}. Use indexed path keys (for example items[0]=x) or per-field JSON assignment (items:='[\"x\"]').",
                 path,
                 render_value(value)
             ))

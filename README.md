@@ -28,6 +28,19 @@ uxc <host> <operation_id> -h
 uxc <host> <operation_id> key=value
 ```
 
+Argument styles:
+
+```bash
+# nested fields
+uxc <host> <operation_id> filter.status=active items[0].id=1
+
+# one field as JSON
+uxc <host> <operation_id> filter:='{"status":"active"}' tags:='["rust","cli"]'
+
+# full payload
+uxc <host> <operation_id> '{"filter":{"status":"active"}}'
+```
+
 Example:
 
 ```bash
@@ -93,7 +106,7 @@ stopping at MCP-only workflows.
 ## What You Get
 
 - help-first discovery with `<host> -h` and `<host> <operation_id> -h`
-- structured invocation with key/value args or positional JSON payloads
+- structured invocation with key/value args, path-style nested args, `:=` per-field JSON, or positional JSON payloads
 - deterministic JSON output by default, with opt-in text mode
 - reusable auth credentials and endpoint bindings
 - shortcut links for frequently used hosts
