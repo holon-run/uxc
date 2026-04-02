@@ -10,6 +10,7 @@ pub mod auth;
 pub mod cache;
 pub mod cli;
 pub mod codegen;
+pub mod config_import;
 pub mod daemon;
 pub mod daemon_client;
 pub mod daemon_log;

@@ -19,6 +19,7 @@ mod auth;
 mod cache;
 pub mod cli;
 mod codegen;
+mod config_import;
 mod daemon;
 mod daemon_log;
 mod error;
@@ -37,6 +38,10 @@ use adapters::OperationDetail;
 use auth::injected_env::{parse_inject_env_specs, InjectEnvSpec};
 use auth::{AuthBindingRule, AuthBindings, AuthHeader, AuthType, OAuthFlow, Profile, Profiles};
 use cache::CacheConfig;
+use config_import::{
+    build_mcp_import_plan, resolve_source, CredentialCandidate, CredentialKind,
+    CredentialSecretSource, McpImportPlan,
+};
 use error::{structured_error_from_anyhow, UxcError};
 use http_client::build_resilient_http_client;
 use output::OutputEnvelope;
@@ -140,6 +145,12 @@ struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
+    /// Import and normalize external runtime configs
+    Config {
+        #[command(subcommand)]
+        config_command: ConfigCommands,
+    },
+
     /// Manage schema cache
     Cache {
         #[command(subcommand)]
@@ -194,6 +205,49 @@ enum Commands {
     /// Dynamic operation execution: `uxc <url> <operation_id> [key=value ...] ['{...}']`
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Import external configs
+    Import {
+        #[command(subcommand)]
+        import_command: ConfigImportCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigImportCommands {
+    /// Import MCP client/editor config into UXC link/auth/binding plan
+    Mcp {
+        /// Source path or preset: cursor | claude-desktop | vscode | codex
+        #[arg(long = "from", value_name = "SOURCE")]
+        from: String,
+
+        /// Import only one server by name
+        #[arg(long = "server", value_name = "NAME")]
+        server: Option<String>,
+
+        /// Preview import plan only
+        #[arg(long = "dry-run", conflicts_with = "create_links")]
+        dry_run: bool,
+
+        /// Create links (and auto-create credential/binding when derivable)
+        #[arg(long = "create-links", conflicts_with = "dry_run")]
+        create_links: bool,
+
+        /// Link output directory when --create-links is enabled
+        #[arg(long = "link-dir", value_name = "DIR")]
+        link_dir: Option<String>,
+
+        /// Prefix for generated link names
+        #[arg(long = "prefix", value_name = "TEXT")]
+        prefix: Option<String>,
+
+        /// Overwrite existing UXC-managed link files
+        #[arg(long = "force")]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -906,6 +960,50 @@ struct LinkCreateData {
     daemon_idle_ttl: Option<u64>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct ConfigImportMcpActionData {
+    planned: bool,
+    created: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ConfigImportMcpServerData {
+    original_name: String,
+    recommended_link_name: String,
+    transport: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+    env_keys: Vec<String>,
+    warnings: Vec<String>,
+    link: ConfigImportMcpActionData,
+    credential: ConfigImportMcpActionData,
+    binding: ConfigImportMcpActionData,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ConfigImportMcpResultData {
+    source_type: String,
+    source_input: String,
+    source_path: String,
+    discovered_count: usize,
+    processed_count: usize,
+    dry_run: bool,
+    create_links: bool,
+    created_links: usize,
+    created_credentials: usize,
+    created_bindings: usize,
+    failed_count: usize,
+    servers: Vec<ConfigImportMcpServerData>,
+}
+
 struct LinkCommandOptions<'a> {
     dir: Option<&'a str>,
     schema_url: Option<&'a str>,
@@ -1162,7 +1260,7 @@ fn raw_has_help_token(raw_args: &[String]) -> bool {
 fn is_top_level_command_token(token: &str) -> bool {
     matches!(
         token,
-        "help" | "cache" | "auth" | "link" | "daemon" | "subscribe"
+        "help" | "config" | "cache" | "auth" | "link" | "daemon" | "subscribe"
     )
 }
 
@@ -1191,6 +1289,18 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
     idx += 1;
 
     match path[0].as_str() {
+        "config" => {
+            if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
+                if level1 == "import" {
+                    path.push("import".to_string());
+                    if let Some(level2) = tokens.get(idx + 1).map(|s| s.as_str()) {
+                        if level2 == "mcp" {
+                            path.push("mcp".to_string());
+                        }
+                    }
+                }
+            }
+        }
         "cache" => {
             if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
                 if matches!(level1, "clear" | "stats") {
@@ -1295,6 +1405,11 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
     }
 
     match &cli.command {
+        Some(Commands::Config { config_command }) => match config_command {
+            ConfigCommands::Import { import_command } => match import_command {
+                ConfigImportCommands::Mcp { .. } => Some(vec!["config", "import", "mcp"]),
+            },
+        },
         Some(Commands::Cache { cache_command }) => match cache_command {
             CacheCommands::List => Some(vec!["cache", "list"]),
             CacheCommands::Clear { .. } => Some(vec!["cache", "clear"]),
@@ -1514,6 +1629,10 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
         return handle_cache_command(cache_command, cache_config).await;
     }
 
+    if let Some(Commands::Config { config_command }) = &cli.command {
+        return handle_config_command(config_command).await;
+    }
+
     if let Some(Commands::Auth { auth_command }) = &cli.command {
         return handle_auth_command(auth_command).await;
     }
@@ -1716,6 +1835,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             usage: "uxc [OPTIONS] [URL] [COMMAND]".to_string(),
             commands: commands(&[
                 ("help", "Show global help"),
+                ("config", "Import and normalize external runtime configs"),
                 ("cache", "Manage schema cache"),
                 ("auth", "Manage credentials, bindings, and OAuth"),
                 ("link", "Create a host-bound shortcut command"),
@@ -1760,6 +1880,44 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc link thegraph-mcp-cli \"/bin/zsh -lc 'npx -y mcp-remote --header \\\"Authorization: Bearer ${THEGRAPH_API_KEY}\\\" https://subgraphs.mcp.thegraph.com/sse'\" --credential thegraph --inject-env THEGRAPH_API_KEY={{secret}}".to_string(),
                 "uxc link --daemon-exclusive ~/.uxc/playwright-profile --daemon-idle-ttl 0 playwright-mcp-ui \"npx -y @playwright/mcp@latest --user-data-dir ~/.uxc/playwright-profile\"".to_string(),
                 "petcli -h".to_string(),
+            ],
+        },
+        ["config"] => HelpData {
+            path: "uxc config".to_string(),
+            about: "Import and normalize external runtime configs".to_string(),
+            usage: "uxc config <import> ...".to_string(),
+            commands: commands(&[("import", "Import external configs")]),
+            notes: vec![
+                "MCP-first import is available via `uxc config import mcp`.".to_string(),
+                "Use --dry-run to inspect mapping before writing links/auth/bindings.".to_string(),
+            ],
+            examples: vec![
+                "uxc config import mcp --from cursor --dry-run".to_string(),
+                "uxc config import mcp --from ~/.cursor/mcp.json --create-links".to_string(),
+            ],
+        },
+        ["config", "import"] => HelpData {
+            path: "uxc config import".to_string(),
+            about: "Import external configs".to_string(),
+            usage: "uxc config import <mcp> ...".to_string(),
+            commands: commands(&[("mcp", "Import MCP client/editor config")]),
+            notes: vec![],
+            examples: vec!["uxc config import mcp --from cursor --dry-run".to_string()],
+        },
+        ["config", "import", "mcp"] => HelpData {
+            path: "uxc config import mcp".to_string(),
+            about: "Import MCP config into UXC plan or links".to_string(),
+            usage: "uxc config import mcp --from <path|cursor|claude-desktop|vscode|codex> [--server <name>] [--dry-run] [--create-links] [--link-dir <dir>] [--prefix <text>] [--force]".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Default mode is preview-only unless --create-links is provided.".to_string(),
+                "When --create-links is enabled, UXC also auto-creates credential/binding when auth mapping is derivable."
+                    .to_string(),
+            ],
+            examples: vec![
+                "uxc config import mcp --from cursor --dry-run".to_string(),
+                "uxc config import mcp --from ~/.cursor/mcp.json --create-links --link-dir ~/.local/bin".to_string(),
+                "uxc config import mcp --from codex --server deepwiki --create-links".to_string(),
             ],
         },
         ["daemon"] => HelpData {
@@ -2721,6 +2879,57 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             }
             Ok(())
         }
+        Some("config_import_mcp_result") => {
+            let data: ConfigImportMcpResultData = decode_envelope_data(envelope)?;
+            println!(
+                "MCP import from {} ({})",
+                data.source_input, data.source_path
+            );
+            println!(
+                "Discovered: {}, Processed: {}, Failed: {}",
+                data.discovered_count, data.processed_count, data.failed_count
+            );
+            println!(
+                "Created links/credentials/bindings: {}/{}/{}",
+                data.created_links, data.created_credentials, data.created_bindings
+            );
+            for server in data.servers {
+                let mut state = "ok";
+                if server.error.is_some()
+                    || server.link.error.is_some()
+                    || server.credential.error.is_some()
+                    || server.binding.error.is_some()
+                {
+                    state = "failed";
+                }
+                println!(
+                    "- {} [{}] -> {}",
+                    server.original_name, state, server.recommended_link_name
+                );
+                if let Some(path) = server.link.path {
+                    println!("  link: {}", path);
+                }
+                if let Some(id) = server.credential.id {
+                    println!("  credential: {}", id);
+                }
+                if let Some(id) = server.binding.id {
+                    println!("  binding: {}", id);
+                }
+                if let Some(err) = server.error {
+                    println!("  error: {}", err);
+                }
+                if let Some(err) = server.link.error {
+                    println!("  link error: {}", err);
+                }
+                if let Some(err) = server.credential.error {
+                    println!("  credential error: {}", err);
+                }
+                if let Some(err) = server.binding.error {
+                    println!("  binding error: {}", err);
+                }
+            }
+            Ok(())
+        }
         _ => {
             if let Some(data) = &envelope.data {
                 println!("{}", serde_json::to_string_pretty(data)?);
@@ -2747,6 +2956,7 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
             )
             .into()),
             Some(Commands::Cache { .. })
+            | Some(Commands::Config { .. })
             | Some(Commands::Auth { .. })
             | Some(Commands::Link { .. })
             | Some(Commands::Daemon { .. })
@@ -2761,6 +2971,7 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
         None => Ok(EndpointCommand::HostHelp),
         Some(Commands::External(tokens)) => parse_external_command(tokens, cli.help),
         Some(Commands::Cache { .. })
+        | Some(Commands::Config { .. })
         | Some(Commands::Auth { .. })
         | Some(Commands::Link { .. })
         | Some(Commands::Daemon { .. })
@@ -4036,6 +4247,396 @@ async fn handle_cache_command(
             }
         }
     }
+}
+
+async fn handle_config_command(command: &ConfigCommands) -> Result<OutputEnvelope> {
+    match command {
+        ConfigCommands::Import { import_command } => match import_command {
+            ConfigImportCommands::Mcp {
+                from,
+                server,
+                dry_run,
+                create_links,
+                link_dir,
+                prefix,
+                force,
+            } => {
+                let effective_create_links = *create_links;
+                let effective_dry_run = if *dry_run {
+                    true
+                } else {
+                    !effective_create_links
+                };
+                let source = resolve_source(from)?;
+                let plan = build_mcp_import_plan(&source, server.as_deref(), prefix.as_deref())?;
+                let data = if effective_create_links {
+                    execute_mcp_import_create_links(&plan, link_dir.as_deref(), *force).await?
+                } else {
+                    summarize_mcp_import_plan(&plan)
+                };
+                let mut data = data;
+                data.dry_run = effective_dry_run;
+                data.create_links = effective_create_links;
+                Ok(OutputEnvelope::success(
+                    "config_import_mcp_result",
+                    "cli",
+                    "uxc",
+                    None,
+                    serde_json::to_value(data)?,
+                    None,
+                ))
+            }
+        },
+    }
+}
+
+fn summarize_mcp_import_plan(plan: &McpImportPlan) -> ConfigImportMcpResultData {
+    let mut servers = Vec::new();
+    let mut failed_count = 0usize;
+    for server in &plan.servers {
+        let link_planned = server.host.is_some() && server.error.is_none();
+        let credential_planned = server.credential.is_some() && server.error.is_none();
+        let binding_planned =
+            credential_planned && server.binding.is_some() && server.error.is_none();
+        if server.error.is_some() {
+            failed_count += 1;
+        }
+        servers.push(ConfigImportMcpServerData {
+            original_name: server.original_name.clone(),
+            recommended_link_name: server.recommended_link_name.clone(),
+            transport: server.transport.clone(),
+            host: server.host.clone(),
+            env_keys: server.env_keys.clone(),
+            warnings: server.warnings.clone(),
+            link: ConfigImportMcpActionData {
+                planned: link_planned,
+                created: false,
+                id: None,
+                path: None,
+                error: None,
+            },
+            credential: ConfigImportMcpActionData {
+                planned: credential_planned,
+                created: false,
+                id: None,
+                path: None,
+                error: None,
+            },
+            binding: ConfigImportMcpActionData {
+                planned: binding_planned,
+                created: false,
+                id: None,
+                path: None,
+                error: None,
+            },
+            error: server.error.clone(),
+        });
+    }
+
+    ConfigImportMcpResultData {
+        source_type: plan.source.kind.as_str().to_string(),
+        source_input: plan.source.input.clone(),
+        source_path: plan.source.resolved_path.display().to_string(),
+        discovered_count: plan.discovered_count,
+        processed_count: plan.servers.len(),
+        dry_run: true,
+        create_links: false,
+        created_links: 0,
+        created_credentials: 0,
+        created_bindings: 0,
+        failed_count,
+        servers,
+    }
+}
+
+async fn execute_mcp_import_create_links(
+    plan: &McpImportPlan,
+    link_dir: Option<&str>,
+    force: bool,
+) -> Result<ConfigImportMcpResultData> {
+    let resolved_link_dir = resolve_link_dir(link_dir)?;
+    let mut profiles = Profiles::load_profiles()?;
+    let mut bindings = AuthBindings::load_bindings()?;
+    let mut profile_names = profiles
+        .profile_names()
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut binding_names = bindings
+        .bindings
+        .iter()
+        .map(|rule| rule.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut servers = Vec::new();
+    let mut created_links = 0usize;
+    let mut created_credentials = 0usize;
+    let mut created_bindings = 0usize;
+    let mut failed_count = 0usize;
+    let mut profile_dirty = false;
+    let mut binding_dirty = false;
+
+    for server in &plan.servers {
+        let mut server_error = server.error.clone();
+        let mut link = ConfigImportMcpActionData {
+            planned: server.host.is_some() && server.error.is_none(),
+            created: false,
+            id: None,
+            path: None,
+            error: None,
+        };
+        let mut credential = ConfigImportMcpActionData {
+            planned: server.credential.is_some() && server.error.is_none(),
+            created: false,
+            id: None,
+            path: None,
+            error: None,
+        };
+        let mut binding = ConfigImportMcpActionData {
+            planned: server.credential.is_some()
+                && server.binding.is_some()
+                && server.error.is_none(),
+            created: false,
+            id: None,
+            path: None,
+            error: None,
+        };
+
+        let mut created_credential_id: Option<String> = None;
+
+        if server_error.is_none() && server.host.is_some() {
+            let target_path = link_target_path(&resolved_link_dir, &server.recommended_link_name);
+            if target_path.exists() && !force {
+                let message = format!(
+                    "Shortcut '{}' already exists at {}. Use --force to overwrite.",
+                    server.recommended_link_name,
+                    target_path.display()
+                );
+                link.error = Some(message.clone());
+                server_error = Some(message);
+            }
+        }
+
+        if server_error.is_none() {
+            if let Some(candidate) = &server.credential {
+                let credential_id = unique_identifier(
+                    &format!(
+                        "mcpimp-{}",
+                        sanitize_identifier(&server.original_name, true)
+                    ),
+                    &mut profile_names,
+                );
+                match build_profile_from_candidate(candidate) {
+                    Ok(mut profile) => {
+                        profile.description = Some(format!(
+                            "Imported from {} ({})",
+                            plan.source.input, server.original_name
+                        ));
+                        if let Err(err) = profiles.set_profile(credential_id.clone(), profile) {
+                            let message = err.to_string();
+                            credential.error = Some(message.clone());
+                            server_error.get_or_insert(message);
+                        } else {
+                            credential.created = true;
+                            credential.id = Some(credential_id.clone());
+                            created_credential_id = Some(credential_id);
+                            created_credentials += 1;
+                            profile_dirty = true;
+                        }
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        credential.error = Some(message.clone());
+                        server_error.get_or_insert(message);
+                    }
+                }
+            }
+        }
+
+        if server_error.is_none() {
+            if let (Some(binding_candidate), Some(credential_id)) =
+                (server.binding.as_ref(), created_credential_id.as_ref())
+            {
+                let binding_id = unique_identifier(
+                    &format!(
+                        "mcpimp-{}",
+                        sanitize_identifier(&server.original_name, true)
+                    ),
+                    &mut binding_names,
+                );
+                let add_result = bindings.add_binding(AuthBindingRule {
+                    id: binding_id.clone(),
+                    host: binding_candidate.host.clone(),
+                    path_prefix: binding_candidate.path_prefix.clone(),
+                    scheme: binding_candidate.scheme.clone(),
+                    credential: credential_id.clone(),
+                    signer: None,
+                    priority: 100,
+                    enabled: true,
+                });
+                match add_result {
+                    Ok(()) => {
+                        binding.created = true;
+                        binding.id = Some(binding_id);
+                        created_bindings += 1;
+                        binding_dirty = true;
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        binding.error = Some(message.clone());
+                        server_error.get_or_insert(message);
+                    }
+                }
+            }
+        }
+
+        if server_error.is_none() {
+            if let Some(host) = server.host.as_deref() {
+                let stdio_host = adapters::mcp::McpAdapter::is_stdio_command(host);
+                let persisted_credential = if stdio_host {
+                    created_credential_id.as_deref()
+                } else {
+                    None
+                };
+                let inject_env = if stdio_host {
+                    server.inject_env.as_slice()
+                } else {
+                    &[]
+                };
+                let options = LinkCommandOptions {
+                    dir: link_dir,
+                    schema_url: None,
+                    credential: persisted_credential,
+                    explicit_auth: None,
+                    inject_env,
+                    force,
+                    daemon_exclusive: &[],
+                    daemon_idle_ttl: None,
+                };
+                match handle_link_command(&server.recommended_link_name, host, options).await {
+                    Ok(envelope) => {
+                        let data: LinkCreateData = decode_envelope_data(&envelope)?;
+                        link.created = true;
+                        link.path = Some(data.path);
+                        created_links += 1;
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        link.error = Some(message.clone());
+                        server_error.get_or_insert(message);
+                    }
+                }
+            }
+        }
+
+        let action_failed =
+            link.error.is_some() || credential.error.is_some() || binding.error.is_some();
+        if server_error.is_some() || action_failed {
+            failed_count += 1;
+        }
+
+        servers.push(ConfigImportMcpServerData {
+            original_name: server.original_name.clone(),
+            recommended_link_name: server.recommended_link_name.clone(),
+            transport: server.transport.clone(),
+            host: server.host.clone(),
+            env_keys: server.env_keys.clone(),
+            warnings: server.warnings.clone(),
+            link,
+            credential,
+            binding,
+            error: server_error,
+        });
+    }
+
+    if profile_dirty {
+        profiles.save_profiles()?;
+    }
+    if binding_dirty {
+        bindings.save_bindings()?;
+    }
+
+    Ok(ConfigImportMcpResultData {
+        source_type: plan.source.kind.as_str().to_string(),
+        source_input: plan.source.input.clone(),
+        source_path: plan.source.resolved_path.display().to_string(),
+        discovered_count: plan.discovered_count,
+        processed_count: plan.servers.len(),
+        dry_run: false,
+        create_links: true,
+        created_links,
+        created_credentials,
+        created_bindings,
+        failed_count,
+        servers,
+    })
+}
+
+fn build_profile_from_candidate(candidate: &CredentialCandidate) -> Result<Profile> {
+    let auth_type = match candidate.kind {
+        CredentialKind::Bearer => AuthType::Bearer,
+        CredentialKind::ApiKeyHeader { .. } => AuthType::ApiKey,
+    };
+    let mut profile = Profile::new(String::new(), auth_type.clone());
+    match &candidate.secret {
+        CredentialSecretSource::Env { key } => {
+            profile.secret_source = Some(auth::SecretSource::Env { key: key.clone() });
+            profile.api_key.clear();
+        }
+        CredentialSecretSource::Literal { value } => {
+            profile.secret_source = Some(auth::SecretSource::Literal {
+                value: value.clone(),
+            });
+            profile.api_key = value.clone();
+        }
+    }
+
+    if let CredentialKind::ApiKeyHeader { header_name } = &candidate.kind {
+        let header = AuthHeader::new(header_name, "{{secret}}")
+            .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+        profile.auth_headers = Some(vec![header]);
+    }
+    if auth_type != AuthType::ApiKey {
+        profile.auth_headers = None;
+        profile.auth_query_params = None;
+        profile.auth_path_prefix = None;
+    }
+    Ok(profile)
+}
+
+fn sanitize_identifier(raw: &str, allow_leading_digit: bool) -> String {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        out = "item".to_string();
+    }
+    if !allow_leading_digit
+        && out
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+    {
+        out = format!("id-{}", out);
+    }
+    out
+}
+
+fn unique_identifier(base: &str, existing: &mut std::collections::BTreeSet<String>) -> String {
+    let mut candidate = base.to_string();
+    let mut idx = 2usize;
+    while existing.contains(&candidate) {
+        candidate = format!("{}-{}", base, idx);
+        idx += 1;
+    }
+    existing.insert(candidate.clone());
+    candidate
 }
 
 async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelope> {

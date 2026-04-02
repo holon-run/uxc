@@ -110,6 +110,7 @@ stopping at MCP-only workflows.
 - deterministic JSON output by default, with opt-in text mode
 - reusable auth credentials and endpoint bindings
 - shortcut links for frequently used hosts
+- MCP-first config import from common client/editor configs
 - daemon-backed session reuse and background subscriptions
 - a TypeScript daemon client for local integrations
 
