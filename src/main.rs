@@ -1634,7 +1634,7 @@ async fn execute_endpoint_via_daemon(
         .unwrap_or("uxc <host>")
         .to_string();
     let mut response_data = response.data;
-    if response.kind == "operation_detail" {
+    if response.kind == "operation_detail" && response.meta.artifact_truncated != Some(true) {
         if let Some(operation_id) = response.operation.as_deref() {
             response_data =
                 enrich_operation_detail_payload(response_data, &command_head, operation_id);

@@ -182,3 +182,76 @@ fn host_help_large_payload_compacts_but_codegen_schema_stays_inline() {
 
     daemon_stop_best_effort(&home);
 }
+
+#[test]
+#[serial]
+fn compacted_operation_detail_is_not_post_enriched_in_cli() {
+    let home = TempDir::new().expect("temp home");
+    daemon_stop_best_effort(&home);
+
+    let mut properties = serde_json::Map::new();
+    for i in 0..3000 {
+        properties.insert(
+            format!("field{i}"),
+            serde_json::json!({
+                "type": "string",
+                "description": format!("Field {i}")
+            }),
+        );
+    }
+    let schema = serde_json::json!({
+        "openapi": "3.0.0",
+        "info": { "title": "detail", "version": "1.0.0" },
+        "paths": {
+            "/bulk": {
+                "post": {
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": properties
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": { "description": "ok" }
+                    }
+                }
+            }
+        }
+    });
+
+    let mut server = mockito::Server::new();
+    let _schema = server
+        .mock("GET", "/openapi.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(schema.to_string())
+        .create();
+
+    let runtime_dir = home.path().join("runtime");
+    let _ = fs::create_dir_all(&runtime_dir);
+    let detail = uxc_command()
+        .arg(server.url())
+        .arg("--no-cache")
+        .arg("post:/bulk")
+        .arg("-h")
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .output()
+        .expect("operation detail should run");
+    assert!(detail.status.success(), "operation detail should succeed");
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail.stdout).expect("json");
+    assert_eq!(detail_json["kind"], "operation_detail");
+    assert_eq!(detail_json["meta"]["artifact_truncated"], true);
+    assert!(
+        detail_json["data"]["invocation_examples"].is_null(),
+        "compacted operation_detail preview should not be post-enriched in CLI"
+    );
+
+    daemon_stop_best_effort(&home);
+}

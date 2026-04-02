@@ -291,7 +291,7 @@ fn artifact_contract() -> Value {
         "output_model": {
             "artifact_reference_may_appear_in_data": true,
             "local_path_supported": true,
-            "daemon_ref_supported": true
+            "daemon_ref_supported": false
         },
         "compaction_model": {
             "automatic_above_bytes": 65536,
