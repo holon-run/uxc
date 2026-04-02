@@ -423,7 +423,12 @@ fn detect_http_credential_candidate(
 fn detect_stdio_secret_env_mapping(env_map: &BTreeMap<String, String>) -> Option<(String, String)> {
     let mut candidates = env_map
         .iter()
-        .filter_map(|(name, value)| parse_env_placeholder(value).map(|key| (name.clone(), key)))
+        .filter_map(|(name, value)| {
+            if !looks_secret_like_name(name) {
+                return None;
+            }
+            parse_env_placeholder(value).map(|key| (name.clone(), key))
+        })
         .collect::<Vec<_>>();
     candidates.sort();
     candidates.into_iter().next()
@@ -438,8 +443,7 @@ fn detect_stdio_secret_literal_mapping(
             if value.trim().is_empty() {
                 return None;
             }
-            let upper = name.to_ascii_uppercase();
-            if upper.contains("TOKEN") || upper.contains("SECRET") || upper.contains("API_KEY") {
+            if looks_secret_like_name(name) {
                 return Some((name.clone(), value.clone()));
             }
             None
@@ -528,6 +532,17 @@ fn parse_env_placeholder(value: &str) -> Option<String> {
         return validate_env_key(key).then(|| key.to_string());
     }
     None
+}
+
+fn looks_secret_like_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.contains("TOKEN")
+        || upper.contains("SECRET")
+        || upper.contains("API_KEY")
+        || upper.contains("APIKEY")
+        || upper.contains("ACCESS_KEY")
+        || upper.contains("AUTH")
+        || upper.contains("BEARER")
 }
 
 fn validate_env_key(value: &str) -> bool {
@@ -730,5 +745,16 @@ mod tests {
     fn sanitize_link_name_keeps_allowed_chars() {
         assert_eq!(sanitize_link_name("My MCP/Server"), "my-mcp-server");
         assert_eq!(sanitize_link_name("a_b.c-1"), "a_b.c-1");
+    }
+
+    #[test]
+    fn stdio_env_derivation_ignores_non_secret_like_env_keys() {
+        let mut env_map = BTreeMap::new();
+        env_map.insert("NODE_OPTIONS".to_string(), "${NODE_OPTIONS}".to_string());
+        env_map.insert("MY_API_KEY".to_string(), "${MY_API_KEY}".to_string());
+        assert_eq!(
+            detect_stdio_secret_env_mapping(&env_map),
+            Some(("MY_API_KEY".to_string(), "MY_API_KEY".to_string()))
+        );
     }
 }
