@@ -4358,7 +4358,16 @@ async fn execute_mcp_import_apply(
     force: bool,
     create_links_enabled: bool,
 ) -> Result<ConfigImportMcpResultData> {
-    let resolved_link_dir = resolve_link_dir(link_dir)?;
+    let resolved_link_dir = if create_links_enabled {
+        Some(resolve_link_dir(link_dir)?)
+    } else {
+        None
+    };
+    let existing_link_entries = if let Some(dir) = resolved_link_dir.as_deref() {
+        build_existing_link_entries(dir)?
+    } else {
+        Vec::new()
+    };
     let mut profiles = Profiles::load_profiles()?;
     let mut bindings = AuthBindings::load_bindings()?;
     let mut profile_names = profiles
@@ -4529,11 +4538,17 @@ async fn execute_mcp_import_apply(
 
         if server_error.is_none() && create_links_enabled {
             if let Some(host) = server.host.as_deref() {
-                if let Some(existing_path) = find_existing_link_by_host(&resolved_link_dir, host)? {
+                if let Some(existing_path) =
+                    find_existing_link_by_host_in_entries(&existing_link_entries, host)
+                {
                     link.path = Some(existing_path.display().to_string());
                 } else {
-                    let target_path =
-                        link_target_path(&resolved_link_dir, &server.recommended_link_name);
+                    let target_path = link_target_path(
+                        resolved_link_dir
+                            .as_deref()
+                            .expect("resolved link dir present when create-links is enabled"),
+                        &server.recommended_link_name,
+                    );
                     if target_path.exists() && !force {
                         let message = format!(
                             "Shortcut '{}' already exists at {}. Use --force to overwrite.",
@@ -4750,13 +4765,17 @@ fn normalize_binding_path_prefix(prefix: &str) -> String {
     }
 }
 
-fn find_existing_link_by_host(link_dir: &Path, host: &str) -> Result<Option<PathBuf>> {
-    if !link_dir.exists() {
-        return Ok(None);
-    }
-    let marker_unix = format!("exec uxc {}", shell_single_quote(host));
-    let marker_windows = format!("uxc \"{}\"", host);
+struct ExistingLinkEntry {
+    path: PathBuf,
+    text: String,
+}
 
+fn build_existing_link_entries(link_dir: &Path) -> Result<Vec<ExistingLinkEntry>> {
+    if !link_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries_out = Vec::new();
     let entries = fs::read_dir(link_dir)?;
     for entry in entries {
         let entry = entry?;
@@ -4768,12 +4787,27 @@ fn find_existing_link_by_host(link_dir: &Path, host: &str) -> Result<Option<Path
         if !looks_like_uxc_link_launcher(&bytes) {
             continue;
         }
-        let text = String::from_utf8_lossy(&bytes);
-        if text.contains(&marker_unix) || text.contains(&marker_windows) {
-            return Ok(Some(path));
-        }
+        entries_out.push(ExistingLinkEntry {
+            path,
+            text: String::from_utf8_lossy(&bytes).to_string(),
+        });
     }
-    Ok(None)
+    Ok(entries_out)
+}
+
+fn find_existing_link_by_host_in_entries(
+    entries: &[ExistingLinkEntry],
+    host: &str,
+) -> Option<PathBuf> {
+    let marker_unix = format!("exec uxc {}", shell_single_quote(host));
+    let marker_windows = format!("uxc \"{}\"", host);
+    entries.iter().find_map(|entry| {
+        if entry.text.contains(&marker_unix) || entry.text.contains(&marker_windows) {
+            Some(entry.path.clone())
+        } else {
+            None
+        }
+    })
 }
 
 fn sanitize_identifier(raw: &str, allow_leading_digit: bool) -> String {
