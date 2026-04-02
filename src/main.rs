@@ -1634,7 +1634,7 @@ async fn execute_endpoint_via_daemon(
         .unwrap_or("uxc <host>")
         .to_string();
     let mut response_data = response.data;
-    if response.kind == "operation_detail" {
+    if response.kind == "operation_detail" && response.meta.artifact_truncated != Some(true) {
         if let Some(operation_id) = response.operation.as_deref() {
             response_data =
                 enrich_operation_detail_payload(response_data, &command_head, operation_id);
@@ -1664,6 +1664,12 @@ async fn execute_endpoint_via_daemon(
             response.meta.cache_fallback,
         );
     }
+    envelope.meta.artifact_truncated = response.meta.artifact_truncated;
+    envelope.meta.artifact_kind = response.meta.artifact_kind;
+    envelope.meta.artifact_bytes = response.meta.artifact_bytes;
+    envelope.meta.artifact_path = response.meta.artifact_path;
+    envelope.meta.artifact_ref = response.meta.artifact_ref;
+    envelope.meta.artifact_sha256 = response.meta.artifact_sha256;
     Ok(envelope)
 }
 
