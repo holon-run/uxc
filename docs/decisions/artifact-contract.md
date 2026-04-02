@@ -229,6 +229,22 @@ The preview should be:
 The exact preview policy can vary by output kind, but the contract should always make truncation
 explicit through metadata.
 
+### Current v1 defaults
+
+The current v1 implementation uses:
+
+- automatic compaction above `65536` bytes
+- envelope-level metadata fields:
+  - `artifact_truncated`
+  - `artifact_kind`
+  - `artifact_bytes`
+  - `artifact_path`
+  - `artifact_sha256`
+- local path-backed externalization under daemon-managed local artifact directory
+- inline preview data for compacted payloads
+
+`codegen_host_schema` is intentionally excluded from compaction in v1.
+
 ## Local Path vs Daemon Ref
 
 The current design space has two legitimate output reference forms:

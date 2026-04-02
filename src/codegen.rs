@@ -294,8 +294,17 @@ fn artifact_contract() -> Value {
             "daemon_ref_supported": true
         },
         "compaction_model": {
+            "automatic_above_bytes": 65536,
             "preview_inline": true,
             "full_payload_externalized": true,
+            "applies_to_result_kinds": [
+                "host_help",
+                "operation_detail",
+                "call_result"
+            ],
+            "excluded_result_kinds": [
+                "codegen_host_schema"
+            ],
             "meta_fields": [
                 "artifact_truncated",
                 "artifact_kind",

@@ -1664,6 +1664,12 @@ async fn execute_endpoint_via_daemon(
             response.meta.cache_fallback,
         );
     }
+    envelope.meta.artifact_truncated = response.meta.artifact_truncated;
+    envelope.meta.artifact_kind = response.meta.artifact_kind;
+    envelope.meta.artifact_bytes = response.meta.artifact_bytes;
+    envelope.meta.artifact_path = response.meta.artifact_path;
+    envelope.meta.artifact_ref = response.meta.artifact_ref;
+    envelope.meta.artifact_sha256 = response.meta.artifact_sha256;
     Ok(envelope)
 }
 

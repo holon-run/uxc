@@ -94,6 +94,30 @@ pub struct Metadata {
     /// Whether daemon session was reused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_session_reused: Option<bool>,
+
+    /// Whether response data is preview-only and full payload was externalized.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_truncated: Option<bool>,
+
+    /// Artifact kind used for externalized payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_kind: Option<String>,
+
+    /// Full artifact byte length before preview compaction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_bytes: Option<u64>,
+
+    /// Local artifact path for externalized payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+
+    /// Reserved daemon-managed artifact reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_ref: Option<String>,
+
+    /// SHA-256 hash of full externalized payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
 }
 
 impl OutputEnvelope {
@@ -126,6 +150,12 @@ impl OutputEnvelope {
                 daemon_autostarted: None,
                 daemon_restarted_for_version_mismatch: None,
                 daemon_session_reused: None,
+                artifact_truncated: None,
+                artifact_kind: None,
+                artifact_bytes: None,
+                artifact_path: None,
+                artifact_ref: None,
+                artifact_sha256: None,
             },
         }
     }
@@ -162,6 +192,12 @@ impl OutputEnvelope {
                 daemon_autostarted: None,
                 daemon_restarted_for_version_mismatch: None,
                 daemon_session_reused: None,
+                artifact_truncated: None,
+                artifact_kind: None,
+                artifact_bytes: None,
+                artifact_path: None,
+                artifact_ref: None,
+                artifact_sha256: None,
             },
         }
     }

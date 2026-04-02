@@ -87,6 +87,11 @@ const SUBSCRIPTION_EVENTS_DEFAULT_LIMIT: usize = 100;
 const SUBSCRIPTION_EVENTS_MAX_LIMIT: usize = 500;
 const SUBSCRIPTION_EVENTS_MAX_WAIT_MS: u64 = 15_000;
 const MCP_NOTIFICATION_HISTORY_LIMIT: usize = 256;
+const ARTIFACT_COMPACTION_THRESHOLD_BYTES: usize = 64 * 1024;
+const ARTIFACT_PREVIEW_MAX_OBJECT_KEYS: usize = 20;
+const ARTIFACT_PREVIEW_MAX_ARRAY_ITEMS: usize = 20;
+const ARTIFACT_PREVIEW_MAX_STRING_CHARS: usize = 512;
+const ARTIFACT_PREVIEW_MAX_DEPTH: usize = 3;
 const SUB_STATUS_STOPPED_AFTER_RESTART: &str = "stopped_after_restart";
 const SUB_STATUS_RESUME_FAILED: &str = "resume_failed";
 const ERR_PROTOCOL_DETECTION: i32 = -32010;
@@ -163,6 +168,12 @@ pub struct RuntimeMeta {
     pub cache_stale: Option<bool>,
     pub cache_fallback: Option<bool>,
     pub daemon_session_reused: Option<bool>,
+    pub artifact_truncated: Option<bool>,
+    pub artifact_kind: Option<String>,
+    pub artifact_bytes: Option<u64>,
+    pub artifact_path: Option<String>,
+    pub artifact_ref: Option<String>,
+    pub artifact_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2669,18 +2680,21 @@ impl DaemonRuntime {
                     .with_duration_ms(duration_ms),
             )
             .await;
+            let mut response_meta = RuntimeMeta {
+                schema_involved: Some(true),
+                daemon_session_reused: Some(reused),
+                ..Default::default()
+            };
+            let mut response_data = data;
+            apply_runtime_artifact_compaction(&kind, &mut response_data, &mut response_meta)?;
             return Ok(RuntimeInvokeResponse {
                 protocol: "mcp".to_string(),
                 endpoint: request.endpoint,
                 kind,
                 operation,
-                data,
+                data: response_data,
                 duration_ms: Some(duration_ms),
-                meta: RuntimeMeta {
-                    schema_involved: Some(true),
-                    daemon_session_reused: Some(reused),
-                    ..Default::default()
-                },
+                meta: response_meta,
             });
         }
 
@@ -2879,8 +2893,9 @@ impl DaemonRuntime {
         }
 
         match result {
-            Ok((kind, operation, data)) => {
+            Ok((kind, operation, mut data)) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
+                apply_runtime_artifact_compaction(&kind, &mut data, &mut meta)?;
                 self.log(
                     DaemonLogEntry::new(DaemonEventType::RuntimeInvokeSuccess)
                         .with_request_id(request.request_id.clone())
@@ -6292,6 +6307,122 @@ fn cache_age_ms(fetched_at: u64) -> u64 {
     now_unix_secs()
         .saturating_sub(fetched_at)
         .saturating_mul(1000)
+}
+
+fn apply_runtime_artifact_compaction(
+    kind: &str,
+    data: &mut Value,
+    meta: &mut RuntimeMeta,
+) -> Result<()> {
+    if !matches!(kind, "host_help" | "operation_detail" | "call_result") {
+        return Ok(());
+    }
+
+    let full_payload = serde_json::to_vec(data)?;
+    let full_bytes = full_payload.len();
+    if full_bytes <= ARTIFACT_COMPACTION_THRESHOLD_BYTES {
+        return Ok(());
+    }
+
+    match write_runtime_artifact(kind, &full_payload) {
+        Ok((artifact_path, sha256_hex)) => {
+            *data = build_preview_value(data, 0);
+            meta.artifact_truncated = Some(true);
+            meta.artifact_kind = Some(kind.to_string());
+            meta.artifact_bytes = Some(full_bytes as u64);
+            meta.artifact_path = Some(artifact_path.display().to_string());
+            meta.artifact_sha256 = Some(sha256_hex);
+        }
+        Err(err) => {
+            tracing::warn!(
+                "artifact compaction write failed for kind {}: {} (falling back to inline payload)",
+                kind,
+                err
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn write_runtime_artifact(kind: &str, payload: &[u8]) -> Result<(PathBuf, String)> {
+    let artifacts_dir = daemon_dir().join("artifacts");
+    ensure_private_dir(&artifacts_dir)?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(payload);
+    let digest = hasher.finalize();
+    let sha256_hex = format!("{:x}", digest);
+    let short_hash = &sha256_hex[..16];
+    let artifact_name = format!("{}-{}-{}.json", kind, now_unix_secs(), short_hash);
+    let artifact_path = artifacts_dir.join(artifact_name);
+    fs::write(&artifact_path, payload).with_context(|| {
+        format!(
+            "failed to write compacted artifact payload to {}",
+            artifact_path.display()
+        )
+    })?;
+
+    Ok((artifact_path, sha256_hex))
+}
+
+fn build_preview_value(value: &Value, depth: usize) -> Value {
+    if depth >= ARTIFACT_PREVIEW_MAX_DEPTH {
+        return match value {
+            Value::Object(_) => json!({"_uxc_preview_truncated": true, "_uxc_type": "object"}),
+            Value::Array(_) => json!({"_uxc_preview_truncated": true, "_uxc_type": "array"}),
+            Value::String(s) => Value::String(truncate_preview_string(s)),
+            _ => value.clone(),
+        };
+    }
+
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (idx, (key, val)) in map.iter().enumerate() {
+                if idx >= ARTIFACT_PREVIEW_MAX_OBJECT_KEYS {
+                    break;
+                }
+                out.insert(key.clone(), build_preview_value(val, depth + 1));
+            }
+            if map.len() > ARTIFACT_PREVIEW_MAX_OBJECT_KEYS {
+                out.insert("_uxc_preview_truncated".to_string(), Value::Bool(true));
+                out.insert(
+                    "_uxc_preview_remaining_keys".to_string(),
+                    Value::Number(((map.len() - ARTIFACT_PREVIEW_MAX_OBJECT_KEYS) as u64).into()),
+                );
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => {
+            let mut out = Vec::new();
+            for item in items.iter().take(ARTIFACT_PREVIEW_MAX_ARRAY_ITEMS) {
+                out.push(build_preview_value(item, depth + 1));
+            }
+            if items.len() > ARTIFACT_PREVIEW_MAX_ARRAY_ITEMS {
+                out.push(json!({
+                    "_uxc_preview_truncated": true,
+                    "_uxc_preview_remaining_items": items.len() - ARTIFACT_PREVIEW_MAX_ARRAY_ITEMS
+                }));
+            }
+            Value::Array(out)
+        }
+        Value::String(s) => Value::String(truncate_preview_string(s)),
+        _ => value.clone(),
+    }
+}
+
+fn truncate_preview_string(input: &str) -> String {
+    let mut chars = input.chars();
+    let truncated: String = chars
+        .by_ref()
+        .take(ARTIFACT_PREVIEW_MAX_STRING_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 fn protocol_from_cached_schema(schema: &Value) -> Option<ProtocolType> {

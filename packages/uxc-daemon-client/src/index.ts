@@ -28,7 +28,23 @@ export interface RuntimeInvokeResponse {
   operation?: string | null;
   data: unknown;
   duration_ms?: number | null;
-  meta: Record<string, unknown>;
+  meta: RuntimeMeta;
+}
+
+export interface RuntimeMeta {
+  schema_involved?: boolean | null;
+  cache_source?: string | null;
+  cache_age_ms?: number | null;
+  cache_stale?: boolean | null;
+  cache_fallback?: boolean | null;
+  daemon_session_reused?: boolean | null;
+  artifact_truncated?: boolean | null;
+  artifact_kind?: string | null;
+  artifact_bytes?: number | null;
+  artifact_path?: string | null;
+  artifact_ref?: string | null;
+  artifact_sha256?: string | null;
+  [key: string]: unknown;
 }
 
 export interface CodegenHostSchemaV1 {
