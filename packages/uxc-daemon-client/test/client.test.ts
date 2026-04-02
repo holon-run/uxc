@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { UxcDaemonClient } from "../src/index.js";
+import { generateTypeScriptClient, UxcDaemonClient, type CodegenHostSchemaV1 } from "../src/index.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import ts from "typescript";
 
 const execFileAsync = promisify(execFile);
 
@@ -60,6 +61,192 @@ describe("UxcDaemonClient", () => {
     } finally {
       await server.stop();
     }
+  });
+
+  test("codegenSchema exports host-scoped runtime codegen input", async () => {
+    const server = createOpenApiServer();
+    await server.start();
+    try {
+      const schema = await client.codegenSchema({
+        endpoint: server.baseUrl,
+        options: { no_cache: true },
+      });
+      expect(schema.version).toBe("v1");
+      expect(schema.host.endpoint).toBe(server.baseUrl);
+      expect(schema.host.protocol).toBe("openapi");
+      expect(schema.runtime).toHaveProperty("invoke_options_schema");
+      expect(schema.runtime).toHaveProperty("lifecycle_contract");
+      expect(schema.runtime).toHaveProperty("artifact_contract");
+      expect(schema.operations.length).toBeGreaterThan(0);
+      expect(schema.operations[0]?.id).toBe("get:/health");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  test("generateTypeScriptClient emits compilable host client source", async () => {
+    const schema: CodegenHostSchemaV1 = {
+      version: "v1",
+      generated_at_unix: Math.floor(Date.now() / 1000),
+      host: {
+        id: "petstore",
+        endpoint: "https://example.test/api",
+        protocol: "openapi",
+      },
+      runtime: {
+        invoke_options_schema: {},
+        result_meta_schema: {},
+        artifact_meta_schema: {},
+        lifecycle_contract: {},
+        artifact_contract: {},
+      },
+      operations: [
+        {
+          id: "get:/health",
+          display_name: "GET /health",
+          kind: "execute",
+          input_schema: {
+            type: "object",
+            properties: {
+              verbose: { type: "boolean" },
+            },
+            required: [],
+          },
+          output_schema: null,
+          result_kind: "call_result",
+          execute: true,
+          help_only: false,
+          subscribable: false,
+        },
+      ],
+    };
+
+    const source = generateTypeScriptClient(schema, {
+      className: "PetstoreClient",
+    });
+    expect(source).toContain("export class PetstoreClient");
+    expect(source).toContain("async getHealth(");
+    expect(source).toContain("payload: toRuntimePayload(input)");
+
+    const transpiled = ts.transpileModule(source, {
+      reportDiagnostics: true,
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.ESNext,
+      },
+    });
+    const diagnostics = transpiled.diagnostics ?? [];
+    const errors = diagnostics.filter((diag) => diag.category === ts.DiagnosticCategory.Error);
+    expect(errors).toHaveLength(0);
+  });
+
+  test("generateTypeScriptClient skips subscribable operations in v1 emitter", () => {
+    const schema: CodegenHostSchemaV1 = {
+      version: "v1",
+      generated_at_unix: Math.floor(Date.now() / 1000),
+      host: {
+        id: "graphql-demo",
+        endpoint: "https://example.test/graphql",
+        protocol: "graphql",
+      },
+      runtime: {
+        invoke_options_schema: {},
+        result_meta_schema: {},
+        artifact_meta_schema: {},
+        lifecycle_contract: {},
+        artifact_contract: {},
+      },
+      operations: [
+        {
+          id: "subscription/newMessage",
+          display_name: "subscription newMessage",
+          kind: "subscription",
+          input_schema: { type: "object", properties: {} },
+          output_schema: null,
+          result_kind: "subscription_event",
+          execute: true,
+          help_only: false,
+          subscribable: true,
+        },
+      ],
+    };
+    const source = generateTypeScriptClient(schema, { className: "GraphqlDemoClient" });
+    expect(source).not.toContain("subscription/newMessage");
+  });
+
+  test("generateTypeScriptClient keeps nullability from union schema types", () => {
+    const schema: CodegenHostSchemaV1 = {
+      version: "v1",
+      generated_at_unix: Math.floor(Date.now() / 1000),
+      host: {
+        id: "nullable-demo",
+        endpoint: "https://example.test/rpc",
+        protocol: "jsonrpc",
+      },
+      runtime: {
+        invoke_options_schema: {},
+        result_meta_schema: {},
+        artifact_meta_schema: {},
+        lifecycle_contract: {},
+        artifact_contract: {},
+      },
+      operations: [
+        {
+          id: "get:user",
+          display_name: "get user",
+          kind: "execute",
+          input_schema: {
+            type: "object",
+            properties: {
+              nickname: { type: ["string", "null"] },
+            },
+          },
+          output_schema: null,
+          result_kind: "call_result",
+          execute: true,
+          help_only: false,
+          subscribable: false,
+        },
+      ],
+    };
+    const source = generateTypeScriptClient(schema, { className: "NullableClient" });
+    expect(source).toContain("nickname?: string | null");
+  });
+
+  test("codegenSchema rejects invalid response kind", async () => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    (stub as unknown as { request: (...args: unknown[]) => Promise<unknown> }).request = async () => ({
+      protocol: "openapi",
+      endpoint: "https://example.test",
+      kind: "call_result",
+      operation: null,
+      data: {},
+      duration_ms: 1,
+      meta: {},
+    });
+    await expect(
+      stub.codegenSchema({
+        endpoint: "https://example.test",
+      }),
+    ).rejects.toThrow(/Unexpected codegen response kind/i);
+  });
+
+  test("codegenSchema rejects malformed codegen payload", async () => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    (stub as unknown as { request: (...args: unknown[]) => Promise<unknown> }).request = async () => ({
+      protocol: "openapi",
+      endpoint: "https://example.test",
+      kind: "codegen_host_schema",
+      operation: null,
+      data: { version: "v1", host: {}, runtime: {}, operations: [] },
+      duration_ms: 1,
+      meta: {},
+    });
+    await expect(
+      stub.codegenSchema({
+        endpoint: "https://example.test",
+      }),
+    ).rejects.toThrow(/Invalid codegen/i);
   });
 
   test("subscribeStart + subscribeEvents streams memory sink events", async () => {

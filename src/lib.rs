@@ -9,6 +9,7 @@ pub mod arg_coercion;
 pub mod auth;
 pub mod cache;
 pub mod cli;
+pub mod codegen;
 pub mod daemon;
 pub mod daemon_client;
 pub mod daemon_log;
