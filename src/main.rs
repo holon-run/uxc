@@ -39,8 +39,8 @@ use auth::injected_env::{parse_inject_env_specs, InjectEnvSpec};
 use auth::{AuthBindingRule, AuthBindings, AuthHeader, AuthType, OAuthFlow, Profile, Profiles};
 use cache::CacheConfig;
 use config_import::{
-    build_mcp_import_plan, resolve_source, CredentialCandidate, CredentialKind,
-    CredentialSecretSource, McpImportPlan,
+    build_mcp_import_plan_from_input, CredentialCandidate, CredentialKind, CredentialSecretSource,
+    McpImportPlan,
 };
 use error::{structured_error_from_anyhow, UxcError};
 use http_client::build_resilient_http_client;
@@ -220,23 +220,19 @@ enum ConfigCommands {
 enum ConfigImportCommands {
     /// Import MCP client/editor config into UXC link/auth/binding plan
     Mcp {
-        /// Source path or preset: cursor | claude-desktop | vscode | codex
+        /// Source path or preset (default: auto)
         #[arg(long = "from", value_name = "SOURCE")]
-        from: String,
-
-        /// Import only one server by name
-        #[arg(long = "server", value_name = "NAME")]
-        server: Option<String>,
+        from: Option<String>,
 
         /// Preview import plan only
-        #[arg(long = "dry-run", conflicts_with = "create_links")]
+        #[arg(long = "dry-run")]
         dry_run: bool,
 
-        /// Create links (and auto-create credential/binding when derivable)
-        #[arg(long = "create-links", conflicts_with = "dry_run")]
-        create_links: bool,
+        /// Skip link creation while still importing auth assets
+        #[arg(long = "skip-create-links")]
+        skip_create_links: bool,
 
-        /// Link output directory when --create-links is enabled
+        /// Link output directory when link creation is enabled
         #[arg(long = "link-dir", value_name = "DIR")]
         link_dir: Option<String>,
 
@@ -997,6 +993,7 @@ struct ConfigImportMcpResultData {
     processed_count: usize,
     dry_run: bool,
     create_links: bool,
+    skip_create_links: bool,
     created_links: usize,
     created_credentials: usize,
     created_bindings: usize,
@@ -1889,11 +1886,11 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: commands(&[("import", "Import external configs")]),
             notes: vec![
                 "MCP-first import is available via `uxc config import mcp`.".to_string(),
-                "Use --dry-run to inspect mapping before writing links/auth/bindings.".to_string(),
+                "Default mode applies import and writes assets; use --dry-run to preview.".to_string(),
             ],
             examples: vec![
-                "uxc config import mcp --from cursor --dry-run".to_string(),
-                "uxc config import mcp --from ~/.cursor/mcp.json --create-links".to_string(),
+                "uxc config import mcp --dry-run".to_string(),
+                "uxc config import mcp --from ~/.cursor/mcp.json".to_string(),
             ],
         },
         ["config", "import"] => HelpData {
@@ -1902,22 +1899,22 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             usage: "uxc config import <mcp> ...".to_string(),
             commands: commands(&[("mcp", "Import MCP client/editor config")]),
             notes: vec![],
-            examples: vec!["uxc config import mcp --from cursor --dry-run".to_string()],
+            examples: vec!["uxc config import mcp --dry-run".to_string()],
         },
         ["config", "import", "mcp"] => HelpData {
             path: "uxc config import mcp".to_string(),
             about: "Import MCP config into UXC plan or links".to_string(),
-            usage: "uxc config import mcp --from <path|cursor|claude-desktop|vscode|codex> [--server <name>] [--dry-run] [--create-links] [--link-dir <dir>] [--prefix <text>] [--force]".to_string(),
+            usage: "uxc config import mcp [--from <path|auto|cursor|claude-code|claude-desktop|vscode|codex|windsurf|opencode>] [--dry-run] [--skip-create-links] [--link-dir <dir>] [--prefix <text>] [--force]".to_string(),
             commands: vec![],
             notes: vec![
-                "Default mode is preview-only unless --create-links is provided.".to_string(),
-                "When --create-links is enabled, UXC also auto-creates credential/binding when auth mapping is derivable."
+                "Default mode applies import and writes assets; use --dry-run for preview mode.".to_string(),
+                "Use --skip-create-links to import credential/binding only."
                     .to_string(),
             ],
             examples: vec![
-                "uxc config import mcp --from cursor --dry-run".to_string(),
-                "uxc config import mcp --from ~/.cursor/mcp.json --create-links --link-dir ~/.local/bin".to_string(),
-                "uxc config import mcp --from codex --server deepwiki --create-links".to_string(),
+                "uxc config import mcp --dry-run".to_string(),
+                "uxc config import mcp --from ~/.cursor/mcp.json --link-dir ~/.local/bin".to_string(),
+                "uxc config import mcp --from codex --skip-create-links".to_string(),
             ],
         },
         ["daemon"] => HelpData {
@@ -4254,29 +4251,31 @@ async fn handle_config_command(command: &ConfigCommands) -> Result<OutputEnvelop
         ConfigCommands::Import { import_command } => match import_command {
             ConfigImportCommands::Mcp {
                 from,
-                server,
                 dry_run,
-                create_links,
+                skip_create_links,
                 link_dir,
                 prefix,
                 force,
             } => {
-                let effective_create_links = *create_links;
-                let effective_dry_run = if *dry_run {
-                    true
+                let source_input = from.as_deref().unwrap_or("auto");
+                let effective_dry_run = *dry_run;
+                let effective_create_links = !effective_dry_run && !*skip_create_links;
+                let plan = build_mcp_import_plan_from_input(source_input, prefix.as_deref())?;
+                let data = if effective_dry_run {
+                    summarize_mcp_import_plan(&plan, effective_create_links)
                 } else {
-                    !effective_create_links
-                };
-                let source = resolve_source(from)?;
-                let plan = build_mcp_import_plan(&source, server.as_deref(), prefix.as_deref())?;
-                let data = if effective_create_links {
-                    execute_mcp_import_create_links(&plan, link_dir.as_deref(), *force).await?
-                } else {
-                    summarize_mcp_import_plan(&plan)
+                    execute_mcp_import_apply(
+                        &plan,
+                        link_dir.as_deref(),
+                        *force,
+                        effective_create_links,
+                    )
+                    .await?
                 };
                 let mut data = data;
                 data.dry_run = effective_dry_run;
                 data.create_links = effective_create_links;
+                data.skip_create_links = !effective_create_links;
                 Ok(OutputEnvelope::success(
                     "config_import_mcp_result",
                     "cli",
@@ -4290,11 +4289,14 @@ async fn handle_config_command(command: &ConfigCommands) -> Result<OutputEnvelop
     }
 }
 
-fn summarize_mcp_import_plan(plan: &McpImportPlan) -> ConfigImportMcpResultData {
+fn summarize_mcp_import_plan(
+    plan: &McpImportPlan,
+    create_links_enabled: bool,
+) -> ConfigImportMcpResultData {
     let mut servers = Vec::new();
     let mut failed_count = 0usize;
     for server in &plan.servers {
-        let link_planned = server.host.is_some() && server.error.is_none();
+        let link_planned = create_links_enabled && server.host.is_some() && server.error.is_none();
         let credential_planned = server.credential.is_some() && server.error.is_none();
         let binding_planned =
             credential_planned && server.binding.is_some() && server.error.is_none();
@@ -4340,7 +4342,8 @@ fn summarize_mcp_import_plan(plan: &McpImportPlan) -> ConfigImportMcpResultData 
         discovered_count: plan.discovered_count,
         processed_count: plan.servers.len(),
         dry_run: true,
-        create_links: false,
+        create_links: create_links_enabled,
+        skip_create_links: !create_links_enabled,
         created_links: 0,
         created_credentials: 0,
         created_bindings: 0,
@@ -4349,12 +4352,22 @@ fn summarize_mcp_import_plan(plan: &McpImportPlan) -> ConfigImportMcpResultData 
     }
 }
 
-async fn execute_mcp_import_create_links(
+async fn execute_mcp_import_apply(
     plan: &McpImportPlan,
     link_dir: Option<&str>,
     force: bool,
+    create_links_enabled: bool,
 ) -> Result<ConfigImportMcpResultData> {
-    let resolved_link_dir = resolve_link_dir(link_dir)?;
+    let resolved_link_dir = if create_links_enabled {
+        Some(resolve_link_dir(link_dir)?)
+    } else {
+        None
+    };
+    let existing_link_entries = if let Some(dir) = resolved_link_dir.as_deref() {
+        build_existing_link_entries(dir)?
+    } else {
+        Vec::new()
+    };
     let mut profiles = Profiles::load_profiles()?;
     let mut bindings = AuthBindings::load_bindings()?;
     let mut profile_names = profiles
@@ -4378,7 +4391,7 @@ async fn execute_mcp_import_create_links(
     for server in &plan.servers {
         let mut server_error = server.error.clone();
         let mut link = ConfigImportMcpActionData {
-            planned: server.host.is_some() && server.error.is_none(),
+            planned: create_links_enabled && server.host.is_some() && server.error.is_none(),
             created: false,
             id: None,
             path: None,
@@ -4401,29 +4414,13 @@ async fn execute_mcp_import_create_links(
             error: None,
         };
 
-        let mut created_credential_id: Option<String> = None;
-
-        if server_error.is_none() && server.host.is_some() {
-            let target_path = link_target_path(&resolved_link_dir, &server.recommended_link_name);
-            if target_path.exists() && !force {
-                let message = format!(
-                    "Shortcut '{}' already exists at {}. Use --force to overwrite.",
-                    server.recommended_link_name,
-                    target_path.display()
-                );
-                link.error = Some(message.clone());
-                server_error = Some(message);
-            }
-        }
+        let mut resolved_credential_id: Option<String> = None;
 
         if server_error.is_none() {
             if let Some(candidate) = &server.credential {
-                let credential_id = unique_identifier(
-                    &format!(
-                        "mcpimp-{}",
-                        sanitize_identifier(&server.original_name, true)
-                    ),
-                    &mut profile_names,
+                let preferred_id = format!(
+                    "mcpimp-{}",
+                    sanitize_identifier(&server.original_name, true)
                 );
                 match build_profile_from_candidate(candidate) {
                     Ok(mut profile) => {
@@ -4431,16 +4428,29 @@ async fn execute_mcp_import_create_links(
                             "Imported from {} ({})",
                             plan.source.input, server.original_name
                         ));
-                        if let Err(err) = profiles.set_profile(credential_id.clone(), profile) {
+                        if let Some(existing_id) = find_equivalent_profile_id(&profiles, &profile)?
+                        {
+                            credential.id = Some(existing_id.clone());
+                            resolved_credential_id = Some(existing_id);
+                        } else if profiles.has_profile(&preferred_id) && !force {
+                            let message = format!(
+                                "Credential '{}' already exists with different config. Use --force to overwrite.",
+                                preferred_id
+                            );
+                            credential.error = Some(message.clone());
+                            server_error.get_or_insert(message);
+                        } else if let Err(err) = profiles.set_profile(preferred_id.clone(), profile)
+                        {
                             let message = err.to_string();
                             credential.error = Some(message.clone());
                             server_error.get_or_insert(message);
                         } else {
                             credential.created = true;
-                            credential.id = Some(credential_id.clone());
-                            created_credential_id = Some(credential_id);
+                            credential.id = Some(preferred_id.clone());
+                            resolved_credential_id = Some(preferred_id.clone());
                             created_credentials += 1;
                             profile_dirty = true;
+                            profile_names.insert(preferred_id);
                         }
                     }
                     Err(err) => {
@@ -4454,75 +4464,136 @@ async fn execute_mcp_import_create_links(
 
         if server_error.is_none() {
             if let (Some(binding_candidate), Some(credential_id)) =
-                (server.binding.as_ref(), created_credential_id.as_ref())
+                (server.binding.as_ref(), resolved_credential_id.as_ref())
             {
-                let binding_id = unique_identifier(
-                    &format!(
-                        "mcpimp-{}",
-                        sanitize_identifier(&server.original_name, true)
-                    ),
-                    &mut binding_names,
-                );
-                let add_result = bindings.add_binding(AuthBindingRule {
-                    id: binding_id.clone(),
-                    host: binding_candidate.host.clone(),
-                    path_prefix: binding_candidate.path_prefix.clone(),
-                    scheme: binding_candidate.scheme.clone(),
-                    credential: credential_id.clone(),
-                    signer: None,
-                    priority: 100,
-                    enabled: true,
-                });
-                match add_result {
-                    Ok(()) => {
+                if let Some(existing_id) =
+                    find_equivalent_binding_id(&bindings, binding_candidate, credential_id)
+                {
+                    binding.id = Some(existing_id);
+                } else if let Some(conflict_idx) =
+                    find_binding_target_conflict_idx(&bindings, binding_candidate)
+                {
+                    if force {
+                        let existing_id = bindings.bindings[conflict_idx].id.clone();
+                        bindings.bindings[conflict_idx] = AuthBindingRule {
+                            id: existing_id.clone(),
+                            host: binding_candidate.host.clone(),
+                            path_prefix: binding_candidate.path_prefix.clone(),
+                            scheme: binding_candidate.scheme.clone(),
+                            credential: credential_id.clone(),
+                            signer: None,
+                            priority: 100,
+                            enabled: true,
+                        };
                         binding.created = true;
-                        binding.id = Some(binding_id);
+                        binding.id = Some(existing_id);
                         created_bindings += 1;
                         binding_dirty = true;
-                    }
-                    Err(err) => {
-                        let message = err.to_string();
+                    } else {
+                        let conflict_id = bindings.bindings[conflict_idx].id.clone();
+                        let message = format!(
+                            "Binding target already exists in '{}' with different credential. Use --force to overwrite.",
+                            conflict_id
+                        );
                         binding.error = Some(message.clone());
                         server_error.get_or_insert(message);
+                    }
+                } else {
+                    let preferred_id = format!(
+                        "mcpimp-{}",
+                        sanitize_identifier(&server.original_name, true)
+                    );
+                    let binding_id = if binding_names.contains(&preferred_id) {
+                        unique_identifier(&preferred_id, &mut binding_names)
+                    } else {
+                        binding_names.insert(preferred_id.clone());
+                        preferred_id
+                    };
+                    let add_result = bindings.add_binding(AuthBindingRule {
+                        id: binding_id.clone(),
+                        host: binding_candidate.host.clone(),
+                        path_prefix: binding_candidate.path_prefix.clone(),
+                        scheme: binding_candidate.scheme.clone(),
+                        credential: credential_id.clone(),
+                        signer: None,
+                        priority: 100,
+                        enabled: true,
+                    });
+                    match add_result {
+                        Ok(()) => {
+                            binding.created = true;
+                            binding.id = Some(binding_id);
+                            created_bindings += 1;
+                            binding_dirty = true;
+                        }
+                        Err(err) => {
+                            let message = err.to_string();
+                            binding.error = Some(message.clone());
+                            server_error.get_or_insert(message);
+                        }
                     }
                 }
             }
         }
 
-        if server_error.is_none() {
+        if server_error.is_none() && create_links_enabled {
             if let Some(host) = server.host.as_deref() {
-                let stdio_host = adapters::mcp::McpAdapter::is_stdio_command(host);
-                let persisted_credential = if stdio_host {
-                    created_credential_id.as_deref()
+                if let Some(existing_path) =
+                    find_existing_link_by_host_in_entries(&existing_link_entries, host)
+                {
+                    link.path = Some(existing_path.display().to_string());
                 } else {
-                    None
-                };
-                let inject_env = if stdio_host {
-                    server.inject_env.as_slice()
-                } else {
-                    &[]
-                };
-                let options = LinkCommandOptions {
-                    dir: link_dir,
-                    schema_url: None,
-                    credential: persisted_credential,
-                    explicit_auth: None,
-                    inject_env,
-                    force,
-                    daemon_exclusive: &[],
-                    daemon_idle_ttl: None,
-                };
-                match handle_link_command(&server.recommended_link_name, host, options).await {
-                    Ok(envelope) => {
-                        let data: LinkCreateData = decode_envelope_data(&envelope)?;
-                        link.created = true;
-                        link.path = Some(data.path);
-                        created_links += 1;
-                    }
-                    Err(err) => {
-                        let message = err.to_string();
+                    let target_path = link_target_path(
+                        resolved_link_dir
+                            .as_deref()
+                            .expect("resolved link dir present when create-links is enabled"),
+                        &server.recommended_link_name,
+                    );
+                    if target_path.exists() && !force {
+                        let message = format!(
+                            "Shortcut '{}' already exists at {}. Use --force to overwrite.",
+                            server.recommended_link_name,
+                            target_path.display()
+                        );
                         link.error = Some(message.clone());
                         server_error.get_or_insert(message);
+                    } else {
+                        let stdio_host = adapters::mcp::McpAdapter::is_stdio_command(host);
+                        let persisted_credential = if stdio_host {
+                            resolved_credential_id.as_deref()
+                        } else {
+                            None
+                        };
+                        let inject_env = if stdio_host {
+                            server.inject_env.as_slice()
+                        } else {
+                            &[]
+                        };
+                        let options = LinkCommandOptions {
+                            dir: link_dir,
+                            schema_url: None,
+                            credential: persisted_credential,
+                            explicit_auth: None,
+                            inject_env,
+                            force,
+                            daemon_exclusive: &[],
+                            daemon_idle_ttl: None,
+                        };
+                        match handle_link_command(&server.recommended_link_name, host, options)
+                            .await
+                        {
+                            Ok(envelope) => {
+                                let data: LinkCreateData = decode_envelope_data(&envelope)?;
+                                link.created = true;
+                                link.path = Some(data.path);
+                                created_links += 1;
+                            }
+                            Err(err) => {
+                                let message = err.to_string();
+                                link.error = Some(message.clone());
+                                server_error.get_or_insert(message);
+                            }
+                        }
                     }
                 }
             }
@@ -4562,7 +4633,8 @@ async fn execute_mcp_import_create_links(
         discovered_count: plan.discovered_count,
         processed_count: plan.servers.len(),
         dry_run: false,
-        create_links: true,
+        create_links: create_links_enabled,
+        skip_create_links: !create_links_enabled,
         created_links,
         created_credentials,
         created_bindings,
@@ -4601,6 +4673,141 @@ fn build_profile_from_candidate(candidate: &CredentialCandidate) -> Result<Profi
         profile.auth_path_prefix = None;
     }
     Ok(profile)
+}
+
+fn find_equivalent_profile_id(profiles: &Profiles, target: &Profile) -> Result<Option<String>> {
+    for name in profiles.profile_names() {
+        let existing = profiles.get_profile(&name)?;
+        if profiles_are_equivalent(existing, target) {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+fn profiles_are_equivalent(existing: &Profile, target: &Profile) -> bool {
+    existing.auth_type == target.auth_type
+        && existing.secret_source == target.secret_source
+        && existing.auth_headers == target.auth_headers
+        && existing.auth_query_params == target.auth_query_params
+        && existing.auth_path_prefix == target.auth_path_prefix
+}
+
+fn find_equivalent_binding_id(
+    bindings: &AuthBindings,
+    candidate: &config_import::BindingCandidate,
+    credential_id: &str,
+) -> Option<String> {
+    let host = candidate.host.to_ascii_lowercase();
+    let scheme = candidate
+        .scheme
+        .as_ref()
+        .map(|value| value.trim().to_ascii_lowercase());
+    let prefix = candidate
+        .path_prefix
+        .as_ref()
+        .map(|value| normalize_binding_path_prefix(value));
+    bindings.bindings.iter().find_map(|rule| {
+        let rule_scheme = rule
+            .scheme
+            .as_ref()
+            .map(|value| value.trim().to_ascii_lowercase());
+        let rule_prefix = rule
+            .path_prefix
+            .as_ref()
+            .map(|value| normalize_binding_path_prefix(value));
+        if rule.host.eq_ignore_ascii_case(&host)
+            && rule_scheme == scheme
+            && rule_prefix == prefix
+            && rule.credential == credential_id
+        {
+            Some(rule.id.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn find_binding_target_conflict_idx(
+    bindings: &AuthBindings,
+    candidate: &config_import::BindingCandidate,
+) -> Option<usize> {
+    let host = candidate.host.to_ascii_lowercase();
+    let scheme = candidate
+        .scheme
+        .as_ref()
+        .map(|value| value.trim().to_ascii_lowercase());
+    let prefix = candidate
+        .path_prefix
+        .as_ref()
+        .map(|value| normalize_binding_path_prefix(value));
+    bindings.bindings.iter().position(|rule| {
+        let rule_scheme = rule
+            .scheme
+            .as_ref()
+            .map(|value| value.trim().to_ascii_lowercase());
+        let rule_prefix = rule
+            .path_prefix
+            .as_ref()
+            .map(|value| normalize_binding_path_prefix(value));
+        rule.host.eq_ignore_ascii_case(&host) && rule_scheme == scheme && rule_prefix == prefix
+    })
+}
+
+fn normalize_binding_path_prefix(prefix: &str) -> String {
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed)
+    }
+}
+
+struct ExistingLinkEntry {
+    path: PathBuf,
+    text: String,
+}
+
+fn build_existing_link_entries(link_dir: &Path) -> Result<Vec<ExistingLinkEntry>> {
+    if !link_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries_out = Vec::new();
+    let entries = fs::read_dir(link_dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = read_file_prefix(&path, 8192)?;
+        if !looks_like_uxc_link_launcher(&bytes) {
+            continue;
+        }
+        entries_out.push(ExistingLinkEntry {
+            path,
+            text: String::from_utf8_lossy(&bytes).to_string(),
+        });
+    }
+    Ok(entries_out)
+}
+
+fn find_existing_link_by_host_in_entries(
+    entries: &[ExistingLinkEntry],
+    host: &str,
+) -> Option<PathBuf> {
+    let marker_unix = format!("exec uxc {}", shell_single_quote(host));
+    let marker_windows = format!("uxc \"{}\"", host);
+    entries.iter().find_map(|entry| {
+        if entry.text.contains(&marker_unix) || entry.text.contains(&marker_windows) {
+            Some(entry.path.clone())
+        } else {
+            None
+        }
+    })
 }
 
 fn sanitize_identifier(raw: &str, allow_leading_digit: bool) -> String {

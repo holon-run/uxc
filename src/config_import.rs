@@ -7,21 +7,29 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpImportSourceKind {
+    Auto,
     Path,
     Cursor,
+    ClaudeCode,
     ClaudeDesktop,
     Vscode,
     Codex,
+    Windsurf,
+    OpenCode,
 }
 
 impl McpImportSourceKind {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Path => "path",
             Self::Cursor => "cursor",
+            Self::ClaudeCode => "claude-code",
             Self::ClaudeDesktop => "claude-desktop",
             Self::Vscode => "vscode",
             Self::Codex => "codex",
+            Self::Windsurf => "windsurf",
+            Self::OpenCode => "opencode",
         }
     }
 }
@@ -79,28 +87,88 @@ pub struct McpImportPlan {
     pub servers: Vec<McpServerImportPlan>,
 }
 
-pub fn resolve_source(input: &str) -> Result<McpImportSourceResolution> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err(UxcError::InvalidArguments("--from cannot be empty".to_string()).into());
+pub fn build_mcp_import_plan_from_input(
+    input: &str,
+    prefix: Option<&str>,
+) -> Result<McpImportPlan> {
+    let sources = resolve_sources(input)?;
+    let normalized_prefix = prefix
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    let mut discovered_count = 0usize;
+    let mut merged = Vec::new();
+    let mut dedupe_hosts = BTreeSet::new();
+
+    for source in &sources {
+        let root = parse_source_root(source)?;
+        let discovered = collect_mcp_server_entries(&root, source);
+        discovered_count += discovered.len();
+        for (name, value) in discovered {
+            let plan = build_server_plan(&name, value, normalized_prefix.as_deref());
+            if let Some(host) = plan.host.as_ref().map(|h| h.trim().to_string()) {
+                if !host.is_empty() && plan.error.is_none() && !dedupe_hosts.insert(host) {
+                    continue;
+                }
+            }
+            merged.push(plan);
+        }
     }
 
-    let lower = trimmed.to_ascii_lowercase();
-    let preset = match lower.as_str() {
-        "cursor" => Some((McpImportSourceKind::Cursor, preset_paths_cursor())),
-        "claude-desktop" => Some((McpImportSourceKind::ClaudeDesktop, preset_paths_claude())),
-        "vscode" => Some((McpImportSourceKind::Vscode, preset_paths_vscode())),
-        "codex" => Some((McpImportSourceKind::Codex, preset_paths_codex())),
-        _ => None,
-    };
+    merged.sort_by(|a, b| a.original_name.cmp(&b.original_name));
+    let source = source_for_plan(input, &sources);
+    Ok(McpImportPlan {
+        source,
+        discovered_count,
+        servers: merged,
+    })
+}
 
-    if let Some((kind, candidates)) = preset {
+fn source_for_plan(
+    input: &str,
+    sources: &[McpImportSourceResolution],
+) -> McpImportSourceResolution {
+    if input.trim().eq_ignore_ascii_case("auto") {
+        return McpImportSourceResolution {
+            kind: McpImportSourceKind::Auto,
+            input: "auto".to_string(),
+            resolved_path: PathBuf::from("multiple"),
+        };
+    }
+    sources
+        .first()
+        .cloned()
+        .unwrap_or(McpImportSourceResolution {
+            kind: McpImportSourceKind::Auto,
+            input: "auto".to_string(),
+            resolved_path: PathBuf::from("multiple"),
+        })
+}
+
+fn resolve_sources(input: &str) -> Result<Vec<McpImportSourceResolution>> {
+    let trimmed = input.trim();
+    let normalized = if trimmed.is_empty() { "auto" } else { trimmed };
+    let lower = normalized.to_ascii_lowercase();
+    if lower == "auto" {
+        let discovered = discover_auto_sources();
+        if discovered.is_empty() {
+            return Err(UxcError::InvalidArguments(
+                "Could not discover any known MCP config source for auto mode".to_string(),
+            )
+            .into());
+        }
+        return Ok(discovered);
+    }
+
+    if let Some(kind) = source_kind_from_name(&lower) {
+        let candidates = paths_for_source(kind.clone());
         if let Some(path) = candidates.iter().find(|path| path.exists()).cloned() {
-            return Ok(McpImportSourceResolution {
+            return Ok(vec![McpImportSourceResolution {
                 kind,
-                input: trimmed.to_string(),
+                input: normalized.to_string(),
                 resolved_path: path,
-            });
+            }]);
         }
         let display = candidates
             .iter()
@@ -109,78 +177,79 @@ pub fn resolve_source(input: &str) -> Result<McpImportSourceResolution> {
             .join(", ");
         return Err(UxcError::InvalidArguments(format!(
             "Could not resolve preset source '{}'. Tried: {}",
-            trimmed, display
+            normalized, display
         ))
         .into());
     }
 
-    let path = expand_user_path(trimmed);
+    let path = expand_user_path(normalized);
     if !path.exists() {
         return Err(UxcError::InvalidArguments(format!(
             "Import source '{}' not found at {}",
-            trimmed,
+            normalized,
             path.display()
         ))
         .into());
     }
-    Ok(McpImportSourceResolution {
+    Ok(vec![McpImportSourceResolution {
         kind: McpImportSourceKind::Path,
-        input: trimmed.to_string(),
+        input: normalized.to_string(),
         resolved_path: path,
-    })
+    }])
 }
 
-pub fn build_mcp_import_plan(
-    source: &McpImportSourceResolution,
-    server_filter: Option<&str>,
-    prefix: Option<&str>,
-) -> Result<McpImportPlan> {
-    let raw = std::fs::read_to_string(&source.resolved_path)?;
-    let extension = source
-        .resolved_path
-        .extension()
-        .and_then(|v| v.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let root = parse_config_text(&raw, &extension, &source.resolved_path)?;
+fn source_kind_from_name(value: &str) -> Option<McpImportSourceKind> {
+    match value {
+        "cursor" => Some(McpImportSourceKind::Cursor),
+        "claude-code" => Some(McpImportSourceKind::ClaudeCode),
+        "claude-desktop" => Some(McpImportSourceKind::ClaudeDesktop),
+        "vscode" => Some(McpImportSourceKind::Vscode),
+        "codex" => Some(McpImportSourceKind::Codex),
+        "windsurf" => Some(McpImportSourceKind::Windsurf),
+        "opencode" => Some(McpImportSourceKind::OpenCode),
+        _ => None,
+    }
+}
 
-    let discovered = collect_mcp_server_entries(&root);
-    let discovered_count = discovered.len();
-    let normalized_prefix = prefix
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-
-    let mut plans = Vec::new();
-    for (name, value) in discovered {
-        if let Some(filter) = server_filter {
-            if name != filter {
-                continue;
+fn discover_auto_sources() -> Vec<McpImportSourceResolution> {
+    let ordered = [
+        McpImportSourceKind::ClaudeCode,
+        McpImportSourceKind::Cursor,
+        McpImportSourceKind::Codex,
+        McpImportSourceKind::Windsurf,
+        McpImportSourceKind::OpenCode,
+        McpImportSourceKind::ClaudeDesktop,
+        McpImportSourceKind::Vscode,
+    ];
+    let mut out = Vec::new();
+    for kind in ordered {
+        for path in paths_for_source(kind.clone()) {
+            if path.exists() {
+                out.push(McpImportSourceResolution {
+                    kind: kind.clone(),
+                    input: kind.as_str().to_string(),
+                    resolved_path: path,
+                });
+                break;
             }
         }
-        plans.push(build_server_plan(
-            &name,
-            value,
-            normalized_prefix.as_deref(),
-        ));
     }
+    out
+}
 
-    if let Some(filter) = server_filter {
-        if plans.is_empty() {
-            return Err(UxcError::InvalidArguments(format!(
-                "Server '{}' not found in import source",
-                filter
-            ))
-            .into());
-        }
-    }
-
-    plans.sort_by(|a, b| a.original_name.cmp(&b.original_name));
-    Ok(McpImportPlan {
-        source: source.clone(),
-        discovered_count,
-        servers: plans,
-    })
+fn parse_source_root(source: &McpImportSourceResolution) -> Result<Value> {
+    let raw = std::fs::read_to_string(&source.resolved_path)?;
+    parse_config_text(
+        &raw,
+        source
+            .resolved_path
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        &source.resolved_path,
+    )
 }
 
 fn parse_config_text(raw: &str, extension: &str, path: &Path) -> Result<Value> {
@@ -205,31 +274,129 @@ fn parse_config_text(raw: &str, extension: &str, path: &Path) -> Result<Value> {
             })?;
             Ok(value)
         }
-        _ => {
-            let value: Value = serde_json::from_str(raw).map_err(|err| {
-                UxcError::InvalidArguments(format!(
-                    "Failed to parse JSON source {}: {}",
-                    path.display(),
-                    err
-                ))
-            })?;
-            Ok(value)
-        }
+        _ => match serde_json::from_str::<Value>(raw) {
+            Ok(value) => Ok(value),
+            Err(json_err) => {
+                let json5_value: Value = json5::from_str(raw).map_err(|json5_err| {
+                    UxcError::InvalidArguments(format!(
+                        "Failed to parse JSON/JSONC source {}: {}; {}",
+                        path.display(),
+                        json_err,
+                        json5_err
+                    ))
+                })?;
+                Ok(json5_value)
+            }
+        },
     }
 }
 
-fn collect_mcp_server_entries(root: &Value) -> BTreeMap<String, Value> {
+fn collect_mcp_server_entries(
+    root: &Value,
+    source: &McpImportSourceResolution,
+) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::new();
-    if let Some(obj) = root.as_object() {
-        for key in ["mcpServers", "servers", "mcp_servers"] {
-            if let Some(servers) = obj.get(key).and_then(Value::as_object) {
-                for (name, value) in servers {
-                    out.insert(name.to_string(), value.clone());
-                }
+    let Some(obj) = root.as_object() else {
+        return out;
+    };
+    let descriptor = source_container_descriptor(source);
+    let mut found_container = false;
+
+    if descriptor.allow_mcp_servers {
+        if let Some(container) = obj.get("mcpServers").and_then(Value::as_object) {
+            found_container = true;
+            for (name, value) in container {
+                out.insert(name.to_string(), value.clone());
+            }
+        }
+    }
+    if descriptor.allow_servers {
+        if let Some(container) = obj.get("servers").and_then(Value::as_object) {
+            found_container = true;
+            for (name, value) in container {
+                out.entry(name.to_string()).or_insert_with(|| value.clone());
+            }
+        }
+    }
+    if descriptor.allow_mcp {
+        if let Some(container) = obj.get("mcp").and_then(Value::as_object) {
+            found_container = true;
+            for (name, value) in container {
+                out.entry(name.to_string()).or_insert_with(|| value.clone());
+            }
+        }
+    }
+    if descriptor.allow_mcp_servers {
+        if let Some(container) = obj.get("mcp_servers").and_then(Value::as_object) {
+            found_container = true;
+            for (name, value) in container {
+                out.entry(name.to_string()).or_insert_with(|| value.clone());
+            }
+        }
+    }
+    if descriptor.allow_root_fallback && !found_container {
+        for (name, value) in obj {
+            if value.as_object().is_some_and(looks_like_server_entry) {
+                out.entry(name.to_string()).or_insert_with(|| value.clone());
             }
         }
     }
     out
+}
+
+struct SourceContainerDescriptor {
+    allow_mcp_servers: bool,
+    allow_servers: bool,
+    allow_mcp: bool,
+    allow_root_fallback: bool,
+}
+
+fn source_container_descriptor(source: &McpImportSourceResolution) -> SourceContainerDescriptor {
+    match source.kind {
+        McpImportSourceKind::OpenCode => SourceContainerDescriptor {
+            allow_mcp_servers: false,
+            allow_servers: false,
+            allow_mcp: true,
+            allow_root_fallback: false,
+        },
+        McpImportSourceKind::ClaudeCode => {
+            let path_text = source.resolved_path.to_string_lossy().replace('\\', "/");
+            let allow_root_fallback =
+                path_text.ends_with(".claude.json") || path_text.ends_with(".claude/mcp.json");
+            SourceContainerDescriptor {
+                allow_mcp_servers: true,
+                allow_servers: true,
+                allow_mcp: true,
+                allow_root_fallback,
+            }
+        }
+        _ => SourceContainerDescriptor {
+            allow_mcp_servers: true,
+            allow_servers: true,
+            allow_mcp: true,
+            allow_root_fallback: true,
+        },
+    }
+}
+
+fn looks_like_server_entry(value: &serde_json::Map<String, Value>) -> bool {
+    value
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .is_some()
+        || value
+            .get("url")
+            .or_else(|| value.get("endpoint"))
+            .or_else(|| value.get("baseUrl"))
+            .or_else(|| value.get("base_url"))
+            .or_else(|| value.get("serverUrl"))
+            .or_else(|| value.get("server_url"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some()
 }
 
 fn build_server_plan(name: &str, raw: Value, prefix: Option<&str>) -> McpServerImportPlan {
@@ -253,12 +420,30 @@ fn build_server_plan(name: &str, raw: Value, prefix: Option<&str>) -> McpServerI
     let mut inject_env = Vec::new();
     let mut binding = None;
 
-    let host = if let Some(command) = raw
+    let command = raw
         .get("command")
+        .or_else(|| raw.get("executable"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
+        .map(ToOwned::to_owned);
+    let command_from_array = raw
+        .get("command")
+        .and_then(Value::as_array)
+        .and_then(|parts| {
+            let text = parts
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        });
+
+    let host = if let Some(command) = command.or(command_from_array) {
         let args = raw
             .get("args")
             .and_then(Value::as_array)
@@ -270,8 +455,9 @@ fn build_server_plan(name: &str, raw: Value, prefix: Option<&str>) -> McpServerI
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let host = build_stdio_command(command, &args);
-        if let Some((var_name, env_key)) = detect_stdio_secret_env_mapping(&env_map, command, &args)
+        let host = build_stdio_command(&command, &args);
+        if let Some((var_name, env_key)) =
+            detect_stdio_secret_env_mapping(&env_map, &command, &args)
         {
             match InjectEnvSpec::new(&var_name, "{{secret}}") {
                 Ok(spec) => inject_env.push(spec),
@@ -307,15 +493,37 @@ fn build_server_plan(name: &str, raw: Value, prefix: Option<&str>) -> McpServerI
         let endpoint = raw
             .get("url")
             .or_else(|| raw.get("endpoint"))
+            .or_else(|| raw.get("baseUrl"))
+            .or_else(|| raw.get("base_url"))
+            .or_else(|| raw.get("serverUrl"))
+            .or_else(|| raw.get("server_url"))
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
 
         if let Some(endpoint) = endpoint.clone() {
-            let headers = value_string_map(raw.get("headers"));
+            let mut headers = value_string_map(raw.get("headers"));
             let env_http_headers = value_string_map(raw.get("env_http_headers"));
-            let merged_headers = merge_headers(headers, env_http_headers);
+            headers = merge_headers(headers, env_http_headers);
+            if let Some(bearer) = raw
+                .get("bearerToken")
+                .or_else(|| raw.get("bearer_token"))
+                .and_then(Value::as_str)
+            {
+                headers
+                    .entry("Authorization".to_string())
+                    .or_insert_with(|| format!("Bearer {}", bearer));
+            }
+            if let Some(bearer_env) = raw
+                .get("bearerTokenEnv")
+                .or_else(|| raw.get("bearer_token_env"))
+                .and_then(Value::as_str)
+            {
+                headers
+                    .entry("Authorization".to_string())
+                    .or_insert_with(|| format!("${{{}}}", bearer_env));
+            }
 
             if let Some(env_var) = raw
                 .get("bearer_token_env_var")
@@ -329,9 +537,9 @@ fn build_server_plan(name: &str, raw: Value, prefix: Option<&str>) -> McpServerI
                         key: env_var.to_string(),
                     },
                 });
-            } else if let Some(candidate) = detect_http_credential_candidate(&merged_headers) {
+            } else if let Some(candidate) = detect_http_credential_candidate(&headers) {
                 credential = Some(candidate);
-            } else if !merged_headers.is_empty() {
+            } else if !headers.is_empty() {
                 warnings.push(
                     "Headers detected but no supported auth mapping found for auto credential import"
                         .to_string(),
@@ -438,8 +646,6 @@ fn detect_stdio_secret_env_mapping(
                 return None;
             }
             let key = parse_env_placeholder(value)?;
-            // Keep auto-derivation conservative: the env placeholder should either
-            // map 1:1 to the config key or appear in the stdio command/args text.
             if key != *name && !env_var_is_referenced_in_text(&key, &command_text) {
                 return None;
             }
@@ -661,6 +867,115 @@ fn sanitize_link_name(value: &str) -> String {
     out
 }
 
+fn paths_for_source(kind: McpImportSourceKind) -> Vec<PathBuf> {
+    let root_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match kind {
+        McpImportSourceKind::Cursor => {
+            let mut paths = vec![
+                root_dir.join(".cursor").join("mcp.json"),
+                expand_user_path("~/.cursor/mcp.json"),
+            ];
+            if let Some(home) = home_dir() {
+                paths.push(home.join("Library/Application Support/Cursor/User/mcp.json"));
+                paths.push(home.join("AppData/Roaming/Cursor/User/mcp.json"));
+            }
+            if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+                paths.push(PathBuf::from(xdg).join("Cursor/User/mcp.json"));
+            }
+            unique_paths(paths)
+        }
+        McpImportSourceKind::ClaudeCode => unique_paths(vec![
+            root_dir.join(".claude/settings.local.json"),
+            root_dir.join(".claude/settings.json"),
+            root_dir.join(".claude/mcp.json"),
+            expand_user_path("~/.claude/settings.local.json"),
+            expand_user_path("~/.claude/settings.json"),
+            expand_user_path("~/.claude/mcp.json"),
+            expand_user_path("~/.claude.json"),
+        ]),
+        McpImportSourceKind::ClaudeDesktop => {
+            let mut paths = vec![
+                expand_user_path("~/Library/Application Support/Claude/settings.json"),
+                expand_user_path("~/.config/Claude/settings.json"),
+                expand_user_path("~/Library/Application Support/Claude/claude_desktop_config.json"),
+                expand_user_path("~/.config/Claude/claude_desktop_config.json"),
+            ];
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                paths.push(PathBuf::from(&appdata).join("Claude/settings.json"));
+                paths.push(PathBuf::from(appdata).join("Claude/claude_desktop_config.json"));
+            }
+            unique_paths(paths)
+        }
+        McpImportSourceKind::Vscode => {
+            let mut paths = vec![root_dir.join(".vscode/mcp.json")];
+            if cfg!(target_os = "macos") {
+                paths.push(expand_user_path(
+                    "~/Library/Application Support/Code/User/mcp.json",
+                ));
+                paths.push(expand_user_path(
+                    "~/Library/Application Support/Code - Insiders/User/mcp.json",
+                ));
+            } else if cfg!(windows) {
+                if let Some(appdata) = std::env::var_os("APPDATA") {
+                    let base = PathBuf::from(appdata);
+                    paths.push(base.join("Code/User/mcp.json"));
+                    paths.push(base.join("Code - Insiders/User/mcp.json"));
+                }
+            } else {
+                paths.push(expand_user_path("~/.config/Code/User/mcp.json"));
+                paths.push(expand_user_path("~/.config/Code - Insiders/User/mcp.json"));
+            }
+            unique_paths(paths)
+        }
+        McpImportSourceKind::Codex => unique_paths(vec![
+            root_dir.join(".codex/config.toml"),
+            expand_user_path("~/.codex/config.toml"),
+            expand_user_path("~/.config/codex/config.toml"),
+        ]),
+        McpImportSourceKind::Windsurf => {
+            let mut paths = vec![
+                expand_user_path("~/.codeium/windsurf/mcp_config.json"),
+                expand_user_path("~/.codeium/windsurf-next/mcp_config.json"),
+                expand_user_path("~/.windsurf/mcp_config.json"),
+                expand_user_path("~/.config/.codeium/windsurf/mcp_config.json"),
+            ];
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                paths.push(PathBuf::from(appdata).join("Codeium/windsurf/mcp_config.json"));
+            }
+            unique_paths(paths)
+        }
+        McpImportSourceKind::OpenCode => {
+            let mut paths = Vec::new();
+            if let Some(value) = std::env::var_os("OPENCODE_CONFIG") {
+                paths.push(PathBuf::from(value));
+            }
+            paths.push(root_dir.join("opencode.jsonc"));
+            paths.push(root_dir.join("opencode.json"));
+            if let Some(value) = std::env::var_os("OPENCODE_CONFIG_DIR") {
+                let dir = PathBuf::from(value);
+                paths.push(dir.join("opencode.jsonc"));
+                paths.push(dir.join("opencode.json"));
+            }
+            paths.push(root_dir.join(".openai/config.json"));
+            if let Some(value) = std::env::var_os("OPENAI_WORKDIR") {
+                paths.push(PathBuf::from(value).join(".openai/config.json"));
+            }
+            if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+                let base = PathBuf::from(xdg);
+                paths.push(base.join("openai/config.json"));
+                paths.push(base.join("opencode/opencode.jsonc"));
+                paths.push(base.join("opencode/opencode.json"));
+            } else {
+                paths.push(expand_user_path("~/.config/openai/config.json"));
+                paths.push(expand_user_path("~/.config/opencode/opencode.jsonc"));
+                paths.push(expand_user_path("~/.config/opencode/opencode.json"));
+            }
+            unique_paths(paths)
+        }
+        McpImportSourceKind::Auto | McpImportSourceKind::Path => Vec::new(),
+    }
+}
+
 fn expand_user_path(raw: &str) -> PathBuf {
     if raw == "~" {
         return home_dir().unwrap_or_else(|| PathBuf::from(raw));
@@ -677,50 +992,6 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-}
-
-fn preset_paths_cursor() -> Vec<PathBuf> {
-    vec![expand_user_path("~/.cursor/mcp.json")]
-}
-
-fn preset_paths_claude() -> Vec<PathBuf> {
-    let mut paths = vec![expand_user_path(
-        "~/Library/Application Support/Claude/claude_desktop_config.json",
-    )];
-    paths.push(expand_user_path(
-        "~/.config/Claude/claude_desktop_config.json",
-    ));
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        paths.push(
-            PathBuf::from(appdata)
-                .join("Claude")
-                .join("claude_desktop_config.json"),
-        );
-    }
-    unique_paths(paths)
-}
-
-fn preset_paths_vscode() -> Vec<PathBuf> {
-    let mut paths = vec![expand_user_path(
-        "~/Library/Application Support/Code/User/mcp.json",
-    )];
-    paths.push(expand_user_path("~/.config/Code/User/mcp.json"));
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        paths.push(
-            PathBuf::from(appdata)
-                .join("Code")
-                .join("User")
-                .join("mcp.json"),
-        );
-    }
-    unique_paths(paths)
-}
-
-fn preset_paths_codex() -> Vec<PathBuf> {
-    unique_paths(vec![
-        expand_user_path("~/.codex/config.toml"),
-        expand_user_path("~/.config/codex/config.toml"),
-    ])
 }
 
 fn unique_paths(input: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -808,5 +1079,35 @@ mod tests {
             ),
             Some(("API_KEY".to_string(), "REAL_SECRET".to_string()))
         );
+    }
+
+    #[test]
+    fn source_kind_parser_supports_new_presets() {
+        assert_eq!(
+            source_kind_from_name("claude-code"),
+            Some(McpImportSourceKind::ClaudeCode)
+        );
+        assert_eq!(
+            source_kind_from_name("windsurf"),
+            Some(McpImportSourceKind::Windsurf)
+        );
+        assert_eq!(
+            source_kind_from_name("opencode"),
+            Some(McpImportSourceKind::OpenCode)
+        );
+    }
+
+    #[test]
+    fn opencode_descriptor_only_allows_mcp_container() {
+        let source = McpImportSourceResolution {
+            kind: McpImportSourceKind::OpenCode,
+            input: "opencode".to_string(),
+            resolved_path: PathBuf::from("opencode.jsonc"),
+        };
+        let descriptor = source_container_descriptor(&source);
+        assert!(!descriptor.allow_mcp_servers);
+        assert!(!descriptor.allow_servers);
+        assert!(descriptor.allow_mcp);
+        assert!(!descriptor.allow_root_fallback);
     }
 }
