@@ -271,7 +271,8 @@ fn build_server_plan(name: &str, raw: Value, prefix: Option<&str>) -> McpServerI
             })
             .unwrap_or_default();
         let host = build_stdio_command(command, &args);
-        if let Some((var_name, env_key)) = detect_stdio_secret_env_mapping(&env_map) {
+        if let Some((var_name, env_key)) = detect_stdio_secret_env_mapping(&env_map, command, &args)
+        {
             match InjectEnvSpec::new(&var_name, "{{secret}}") {
                 Ok(spec) => inject_env.push(spec),
                 Err(err) => warnings.push(format!(
@@ -420,14 +421,29 @@ fn detect_http_credential_candidate(
     None
 }
 
-fn detect_stdio_secret_env_mapping(env_map: &BTreeMap<String, String>) -> Option<(String, String)> {
+fn detect_stdio_secret_env_mapping(
+    env_map: &BTreeMap<String, String>,
+    command: &str,
+    args: &[String],
+) -> Option<(String, String)> {
+    let mut command_refs = Vec::with_capacity(args.len() + 1);
+    command_refs.push(command.to_string());
+    command_refs.extend(args.iter().cloned());
+    let command_text = command_refs.join(" ");
+
     let mut candidates = env_map
         .iter()
         .filter_map(|(name, value)| {
             if !looks_secret_like_name(name) {
                 return None;
             }
-            parse_env_placeholder(value).map(|key| (name.clone(), key))
+            let key = parse_env_placeholder(value)?;
+            // Keep auto-derivation conservative: the env placeholder should either
+            // map 1:1 to the config key or appear in the stdio command/args text.
+            if key != *name && !env_var_is_referenced_in_text(&key, &command_text) {
+                return None;
+            }
+            Some((name.clone(), key))
         })
         .collect::<Vec<_>>();
     candidates.sort();
@@ -543,6 +559,12 @@ fn looks_secret_like_name(name: &str) -> bool {
         || upper.contains("ACCESS_KEY")
         || upper.contains("AUTH")
         || upper.contains("BEARER")
+}
+
+fn env_var_is_referenced_in_text(env_key: &str, text: &str) -> bool {
+    text.contains(&format!("${{{}}}", env_key))
+        || text.contains(&format!("${}", env_key))
+        || text.contains(&format!("{{{{env:{}}}}}", env_key))
 }
 
 fn validate_env_key(value: &str) -> bool {
@@ -753,8 +775,38 @@ mod tests {
         env_map.insert("NODE_OPTIONS".to_string(), "${NODE_OPTIONS}".to_string());
         env_map.insert("MY_API_KEY".to_string(), "${MY_API_KEY}".to_string());
         assert_eq!(
-            detect_stdio_secret_env_mapping(&env_map),
+            detect_stdio_secret_env_mapping(&env_map, "npx", &[String::from("server.js")]),
             Some(("MY_API_KEY".to_string(), "MY_API_KEY".to_string()))
+        );
+    }
+
+    #[test]
+    fn stdio_env_derivation_requires_command_reference_or_same_name() {
+        let mut env_map = BTreeMap::new();
+        env_map.insert("API_KEY".to_string(), "${REAL_SECRET}".to_string());
+        assert_eq!(
+            detect_stdio_secret_env_mapping(
+                &env_map,
+                "node",
+                &[
+                    String::from("server.js"),
+                    String::from("--mode"),
+                    String::from("prod")
+                ]
+            ),
+            None
+        );
+        assert_eq!(
+            detect_stdio_secret_env_mapping(
+                &env_map,
+                "node",
+                &[
+                    String::from("server.js"),
+                    String::from("--token"),
+                    String::from("${REAL_SECRET}")
+                ]
+            ),
+            Some(("API_KEY".to_string(), "REAL_SECRET".to_string()))
         );
     }
 }
