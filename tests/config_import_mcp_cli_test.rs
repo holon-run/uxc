@@ -78,6 +78,7 @@ fn config_import_mcp_dry_run_from_json_file() {
     assert_eq!(json["kind"], "config_import_mcp_result");
     assert_eq!(json["data"]["dry_run"], true);
     assert_eq!(json["data"]["create_links"], false);
+    assert_eq!(json["data"]["skip_create_links"], true);
     assert_eq!(json["data"]["discovered_count"], 2);
     assert_eq!(json["data"]["processed_count"], 2);
     assert_eq!(json["data"]["servers"][0]["original_name"], "deepwiki");
@@ -87,7 +88,7 @@ fn config_import_mcp_dry_run_from_json_file() {
 }
 
 #[test]
-fn config_import_mcp_create_links_and_conflicts_are_reported_per_server() {
+fn config_import_mcp_default_apply_is_idempotent() {
     let env = TestEnv::new();
     let source_path = env.temp_dir.path().join("mcp.json");
     let source = r#"{
@@ -111,7 +112,6 @@ fn config_import_mcp_create_links_and_conflicts_are_reported_per_server() {
         .arg("mcp")
         .arg("--from")
         .arg(&source_path)
-        .arg("--create-links")
         .arg("--link-dir")
         .arg(&env.link_dir)
         .output()
@@ -123,6 +123,8 @@ fn config_import_mcp_create_links_and_conflicts_are_reported_per_server() {
         String::from_utf8_lossy(&first.stderr)
     );
     let first_json = parse_stdout_json(&first);
+    assert_eq!(first_json["data"]["dry_run"], false);
+    assert_eq!(first_json["data"]["create_links"], true);
     assert_eq!(first_json["data"]["created_links"], 2);
     assert_eq!(first_json["data"]["created_credentials"], 2);
     assert_eq!(first_json["data"]["created_bindings"], 1);
@@ -148,7 +150,6 @@ fn config_import_mcp_create_links_and_conflicts_are_reported_per_server() {
         .arg("mcp")
         .arg("--from")
         .arg(&source_path)
-        .arg("--create-links")
         .arg("--link-dir")
         .arg(&env.link_dir)
         .output()
@@ -161,11 +162,56 @@ fn config_import_mcp_create_links_and_conflicts_are_reported_per_server() {
     );
     let second_json = parse_stdout_json(&second);
     assert_eq!(second_json["data"]["created_links"], 0);
-    assert_eq!(second_json["data"]["failed_count"], 2);
-    assert!(second_json["data"]["servers"][0]["link"]["error"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("already exists"));
+    assert_eq!(second_json["data"]["created_credentials"], 0);
+    assert_eq!(second_json["data"]["created_bindings"], 0);
+    assert_eq!(second_json["data"]["failed_count"], 0);
+}
+
+#[test]
+fn config_import_mcp_skip_create_links_still_imports_auth_assets() {
+    let env = TestEnv::new();
+    let source_path = env.temp_dir.path().join("mcp.json");
+    let source = r#"{
+  "mcpServers": {
+    "thegraph": {
+      "url": "https://subgraphs.mcp.thegraph.com/sse",
+      "headers": {"Authorization": "Bearer test-token"}
+    }
+  }
+}"#;
+    fs::write(&source_path, source).expect("source file should be written");
+
+    let output = uxc_command(&env)
+        .arg("config")
+        .arg("import")
+        .arg("mcp")
+        .arg("--from")
+        .arg(&source_path)
+        .arg("--skip-create-links")
+        .arg("--link-dir")
+        .arg(&env.link_dir)
+        .output()
+        .expect("config import should run");
+    assert!(output.status.success(), "command should succeed");
+    let json = parse_stdout_json(&output);
+    assert_eq!(json["data"]["create_links"], false);
+    assert_eq!(json["data"]["skip_create_links"], true);
+    assert_eq!(json["data"]["created_links"], 0);
+    assert_eq!(json["data"]["created_credentials"], 1);
+    assert_eq!(json["data"]["created_bindings"], 1);
+}
+
+#[test]
+fn config_import_mcp_rejects_removed_create_links_flag() {
+    let env = TestEnv::new();
+    let output = uxc_command(&env)
+        .arg("config")
+        .arg("import")
+        .arg("mcp")
+        .arg("--create-links")
+        .output()
+        .expect("command should run");
+    assert!(!output.status.success(), "command should fail");
 }
 
 #[test]
