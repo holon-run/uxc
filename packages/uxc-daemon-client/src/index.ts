@@ -244,7 +244,8 @@ export class UxcDaemonClient {
         `Unexpected codegen response kind '${response.kind}' (expected codegen_host_schema)`,
       );
     }
-    return response.data as CodegenHostSchemaV1;
+    assertCodegenHostSchema(response.data);
+    return response.data;
   }
 
   async generateTypeScriptClient(args: {
@@ -443,7 +444,7 @@ export function generateTypeScriptClient(
   const typeBlocks: string[] = [];
 
   for (const operation of schema.operations) {
-    if (!operation.execute || operation.help_only) {
+    if (!operation.execute || operation.help_only || operation.subscribable) {
       continue;
     }
     const methodName = uniqueName(
@@ -469,7 +470,7 @@ export function generateTypeScriptClient(
         `    return this.client.call({`,
         `      endpoint: this.endpoint,`,
         `      operation: ${JSON.stringify(operation.id)},`,
-        `      payload: input as Record<string, unknown> | undefined,`,
+        `      payload: toRuntimePayload(input),`,
         `      options: { ...this.defaultOptions, ...options },`,
         `    }) as Promise<RuntimeResult<unknown>>;`,
         `  }`,
@@ -500,6 +501,16 @@ export function generateTypeScriptClient(
     "  }",
     "",
     ...operationBlocks,
+    "}",
+    "",
+    "function toRuntimePayload(input: unknown): Record<string, unknown> | undefined {",
+    "  if (input == null) {",
+    "    return undefined;",
+    "  }",
+    "  if (typeof input === \"object\" && !Array.isArray(input)) {",
+    "    return input as Record<string, unknown>;",
+    "  }",
+    "  return { body: input };",
     "}",
   ];
 
@@ -643,37 +654,51 @@ function renderTsTypeFromSchema(schema: unknown, depth: number): string {
     return "Record<string, unknown>";
   }
   const obj = schema as Record<string, unknown>;
+  const typeInfo = resolveSchemaType(obj.type);
 
   const enumValues = asPrimitiveArray(obj.enum);
   if (enumValues && enumValues.length > 0) {
-    return enumValues.map((value) => JSON.stringify(value)).join(" | ");
+    return withNullable(
+      enumValues.map((value) => JSON.stringify(value)).join(" | "),
+      typeInfo.nullable,
+    );
   }
   if (Array.isArray(obj.oneOf) && obj.oneOf.length > 0) {
-    return obj.oneOf.map((item) => renderTsTypeFromSchema(item, depth + 1)).join(" | ");
+    return withNullable(
+      obj.oneOf.map((item) => renderTsTypeFromSchema(item, depth + 1)).join(" | "),
+      typeInfo.nullable,
+    );
   }
   if (Array.isArray(obj.anyOf) && obj.anyOf.length > 0) {
-    return obj.anyOf.map((item) => renderTsTypeFromSchema(item, depth + 1)).join(" | ");
+    return withNullable(
+      obj.anyOf.map((item) => renderTsTypeFromSchema(item, depth + 1)).join(" | "),
+      typeInfo.nullable,
+    );
   }
-  const schemaType = normalizeType(obj.type);
+  const schemaType = typeInfo.base;
+  const openApiNullable = obj.nullable === true;
   switch (schemaType) {
     case "string":
-      return "string";
+      return withNullable("string", typeInfo.nullable || openApiNullable);
     case "integer":
     case "number":
-      return "number";
+      return withNullable("number", typeInfo.nullable || openApiNullable);
     case "boolean":
-      return "boolean";
+      return withNullable("boolean", typeInfo.nullable || openApiNullable);
+    case "null":
+      return "null";
     case "array": {
       const itemType = renderTsTypeFromSchema(obj.items, depth + 1);
-      return `Array<${itemType}>`;
+      return withNullable(`Array<${itemType}>`, typeInfo.nullable || openApiNullable);
     }
     case "object": {
       const properties = obj.properties;
       if (!properties || typeof properties !== "object") {
-        return "Record<string, unknown>";
+        return withNullable("Record<string, unknown>", typeInfo.nullable || openApiNullable);
       }
+      // Bound recursive expansion to keep emitted types readable and finite.
       if (depth > 4) {
-        return "Record<string, unknown>";
+        return withNullable("Record<string, unknown>", typeInfo.nullable || openApiNullable);
       }
       const required = new Set(
         Array.isArray(obj.required)
@@ -687,26 +712,36 @@ function renderTsTypeFromSchema(schema: unknown, depth: number): string {
         return `${key}${optional}: ${valueType}`;
       });
       if (fields.length === 0) {
-        return "Record<string, unknown>";
+        return withNullable("Record<string, unknown>", typeInfo.nullable || openApiNullable);
       }
-      return `{ ${fields.join("; ")} }`;
+      return withNullable(`{ ${fields.join("; ")} }`, typeInfo.nullable || openApiNullable);
     }
     default:
-      return "unknown";
+      return withNullable("unknown", typeInfo.nullable || openApiNullable);
   }
 }
 
-function normalizeType(typeValue: unknown): string | undefined {
+function resolveSchemaType(typeValue: unknown): { base: string | undefined; nullable: boolean } {
   if (typeof typeValue === "string") {
-    return typeValue;
+    return {
+      base: typeValue,
+      nullable: typeValue === "null",
+    };
   }
   if (Array.isArray(typeValue)) {
+    const nullable = typeValue.some((entry) => entry === "null");
     const nonNull = typeValue.find(
       (entry): entry is string => typeof entry === "string" && entry !== "null",
     );
-    return nonNull;
+    return {
+      base: nonNull,
+      nullable,
+    };
   }
-  return undefined;
+  return {
+    base: undefined,
+    nullable: false,
+  };
 }
 
 function asPrimitiveArray(value: unknown): Array<string | number | boolean | null> | undefined {
@@ -725,6 +760,90 @@ function asPrimitiveArray(value: unknown): Array<string | number | boolean | nul
 
 function safePropertyName(name: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name);
+}
+
+function withNullable(type: string, nullable: boolean): string {
+  if (!nullable || type.includes("null")) {
+    return type;
+  }
+  return `${type} | null`;
+}
+
+function toRuntimePayload(input: unknown): Record<string, unknown> | undefined {
+  if (input == null) {
+    return undefined;
+  }
+  if (typeof input === "object" && !Array.isArray(input)) {
+    return input as Record<string, unknown>;
+  }
+  return { body: input };
+}
+
+function assertCodegenHostSchema(value: unknown): asserts value is CodegenHostSchemaV1 {
+  const obj = asRecord(value, "codegen schema");
+  assertString(obj.version, "codegen.version");
+  assertNumber(obj.generated_at_unix, "codegen.generated_at_unix");
+
+  const host = asRecord(obj.host, "codegen.host");
+  assertString(host.id, "codegen.host.id");
+  assertString(host.endpoint, "codegen.host.endpoint");
+  assertString(host.protocol, "codegen.host.protocol");
+
+  const runtime = asRecord(obj.runtime, "codegen.runtime");
+  if (!("invoke_options_schema" in runtime)) {
+    throw new Error("Invalid codegen schema: runtime.invoke_options_schema is required");
+  }
+  if (!("result_meta_schema" in runtime)) {
+    throw new Error("Invalid codegen schema: runtime.result_meta_schema is required");
+  }
+  if (!("artifact_meta_schema" in runtime)) {
+    throw new Error("Invalid codegen schema: runtime.artifact_meta_schema is required");
+  }
+  if (!("lifecycle_contract" in runtime)) {
+    throw new Error("Invalid codegen schema: runtime.lifecycle_contract is required");
+  }
+  if (!("artifact_contract" in runtime)) {
+    throw new Error("Invalid codegen schema: runtime.artifact_contract is required");
+  }
+
+  if (!Array.isArray(obj.operations)) {
+    throw new Error("Invalid codegen schema: operations must be an array");
+  }
+  for (const [index, operationValue] of obj.operations.entries()) {
+    const operation = asRecord(operationValue, `codegen.operations[${index}]`);
+    assertString(operation.id, `codegen.operations[${index}].id`);
+    assertString(operation.display_name, `codegen.operations[${index}].display_name`);
+    assertString(operation.kind, `codegen.operations[${index}].kind`);
+    assertString(operation.result_kind, `codegen.operations[${index}].result_kind`);
+    assertBoolean(operation.execute, `codegen.operations[${index}].execute`);
+    assertBoolean(operation.help_only, `codegen.operations[${index}].help_only`);
+    assertBoolean(operation.subscribable, `codegen.operations[${index}].subscribable`);
+  }
+}
+
+function asRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Invalid ${label}: expected object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function assertString(value: unknown, label: string): asserts value is string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Invalid ${label}: expected non-empty string`);
+  }
+}
+
+function assertNumber(value: unknown, label: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`Invalid ${label}: expected number`);
+  }
+}
+
+function assertBoolean(value: unknown, label: string): asserts value is boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`Invalid ${label}: expected boolean`);
+  }
 }
 
 function normalizeOptions(options: RuntimeInvokeOptions | undefined): RuntimeInvokeOptions {

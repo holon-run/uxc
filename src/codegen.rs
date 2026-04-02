@@ -139,7 +139,10 @@ fn operation_kind(protocol: &str, operation_id: &str) -> String {
 fn operation_subscribable(protocol: &str, operation_id: &str) -> bool {
     match protocol {
         "graphql" => operation_id.starts_with("subscription/"),
-        "jsonrpc" => operation_id.ends_with("_subscribe"),
+        "jsonrpc" => {
+            let normalized = operation_id.to_ascii_lowercase();
+            normalized.contains("subscribe") && !normalized.contains("unsubscribe")
+        }
         _ => false,
     }
 }
@@ -303,4 +306,17 @@ fn artifact_contract() -> Value {
             ]
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonrpc_subscribable_detection_matches_subscribe_family() {
+        assert!(operation_subscribable("jsonrpc", "eth_subscribe"));
+        assert!(operation_subscribable("jsonrpc", "wallet_subscribeEvents"));
+        assert!(!operation_subscribable("jsonrpc", "eth_unsubscribe"));
+        assert!(!operation_subscribable("jsonrpc", "web3_clientVersion"));
+    }
 }
