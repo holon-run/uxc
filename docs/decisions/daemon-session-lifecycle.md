@@ -263,6 +263,7 @@ V1 observable guarantees should include:
 - endpoint
 - protocol / transport family
 - `link_name` as last presentation hint
+- source link metadata such as `link_skill`, `link_skill_doc`, and `link_skill_path` when present
 - `idle_ttl_secs`
 - `expires_in_secs`
 - `daemon_exclusive`
