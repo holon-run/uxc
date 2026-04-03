@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-04-03
+
+### Added
+- Added schema-aware operation argument help, including stronger invocation examples and improved argument ergonomics.
+- Added generated runtime client support with exported codegen schema and TypeScript client generation for the daemon/runtime surface.
+- Added MCP-first config import, including `auto` source discovery, source-specific config parsing, default apply mode, and idempotent dedupe.
+- Added source skill metadata support for generated links so linked commands can surface originating skill context.
+- Added daemon session observability for in-flight request counts and link source metadata in `uxc daemon sessions`.
+
+### Changed
+- Reworked the docs and README into a docs-site-first product surface, including the new mdorigin-powered site at `uxc.holon.run`.
+- Unified runtime lifecycle, artifact handling, and generated-client design around explicit internal decision notes for the `v0.13.0` milestone.
+
+### Fixed
+- Unified artifact compaction around preview + artifact metadata and aligned large-response handling with the new artifact contract.
+- Improved daemon-backed MCP stdio lifecycle behavior and observability around reuse, idle TTL semantics, and session diagnostics.
+
 ## [0.12.8] - 2026-03-30
 
 ### Fixed
@@ -367,7 +384,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/holon-run/uxc/releases/tag/v0.13.0
 [0.12.2]: https://github.com/holon-run/uxc/releases/tag/v0.12.2
 [0.12.1]: https://github.com/holon-run/uxc/releases/tag/v0.12.1
 [0.12.0]: https://github.com/holon-run/uxc/releases/tag/v0.12.0
