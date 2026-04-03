@@ -390,6 +390,12 @@ pub struct DaemonSessionView {
     pub endpoint: String,
     /// Link name from the latest request metadata, if present.
     pub link_name: Option<String>,
+    /// Source skill name from the latest request metadata, if present.
+    pub link_skill: Option<String>,
+    /// Source skill docs URL from the latest request metadata, if present.
+    pub link_skill_doc: Option<String>,
+    /// Source skill local path from the latest request metadata, if present.
+    pub link_skill_path: Option<String>,
     /// Safe summary of the underlying stdio command.
     pub command_summary: String,
     /// Child process id for stdio-backed sessions when available.
@@ -409,6 +415,8 @@ pub struct DaemonSessionView {
     pub daemon_exclusive: Vec<String>,
     /// Current liveness state for the live daemon cache entry.
     pub state: String,
+    /// Number of daemon-tracked in-flight requests currently using this session.
+    pub in_flight_requests: u64,
     pub reuse_eligible: bool,
     pub can_reap_contract: CanReapContractView,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -525,6 +533,9 @@ struct McpStdioSession {
     idle_ttl_secs: u64,
     child_pid: Option<u32>,
     link_name: Option<String>,
+    link_skill: Option<String>,
+    link_skill_doc: Option<String>,
+    link_skill_path: Option<String>,
     endpoint: String,
     daemon_exclusive: Vec<String>,
     can_reap_contract: CanReapContractView,
@@ -535,6 +546,9 @@ struct McpStdioSession {
 struct McpStdioSessionSnapshot {
     endpoint: String,
     link_name: Option<String>,
+    link_skill: Option<String>,
+    link_skill_doc: Option<String>,
+    link_skill_path: Option<String>,
     command_summary: String,
     child_pid: Option<u32>,
     started_at_unix: u64,
@@ -573,6 +587,9 @@ struct SessionNotificationFanout {
 struct StdioSessionRequestMetadata<'a> {
     idle_ttl_secs: Option<u64>,
     link_name: Option<&'a str>,
+    link_skill: Option<&'a str>,
+    link_skill_doc: Option<&'a str>,
+    link_skill_path: Option<&'a str>,
     endpoint: &'a str,
     exclusive_keys: &'a [String],
 }
@@ -580,7 +597,15 @@ struct StdioSessionRequestMetadata<'a> {
 fn resolve_stdio_request_metadata(
     metadata: &StdioSessionRequestMetadata<'_>,
     existing_exclusive_keys: &[String],
-) -> (u64, Option<String>, String, Vec<String>) {
+) -> (
+    u64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    Vec<String>,
+) {
     let daemon_exclusive = if metadata.exclusive_keys.is_empty() {
         existing_exclusive_keys.to_vec()
     } else {
@@ -589,6 +614,9 @@ fn resolve_stdio_request_metadata(
     (
         metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
         metadata.link_name.map(str::to_string),
+        metadata.link_skill.map(str::to_string),
+        metadata.link_skill_doc.map(str::to_string),
+        metadata.link_skill_path.map(str::to_string),
         metadata.endpoint.to_string(),
         daemon_exclusive,
     )
@@ -644,10 +672,20 @@ struct PersistedSubscriptionStore {
 
 impl McpStdioSession {
     fn apply_request_metadata(&mut self, metadata: &StdioSessionRequestMetadata<'_>) {
-        let (idle_ttl_secs, link_name, endpoint, daemon_exclusive) =
-            resolve_stdio_request_metadata(metadata, &self.daemon_exclusive);
+        let (
+            idle_ttl_secs,
+            link_name,
+            link_skill,
+            link_skill_doc,
+            link_skill_path,
+            endpoint,
+            daemon_exclusive,
+        ) = resolve_stdio_request_metadata(metadata, &self.daemon_exclusive);
         self.idle_ttl_secs = idle_ttl_secs;
         self.link_name = link_name;
+        self.link_skill = link_skill;
+        self.link_skill_doc = link_skill_doc;
+        self.link_skill_path = link_skill_path;
         self.endpoint = endpoint;
         self.daemon_exclusive = daemon_exclusive;
     }
@@ -899,6 +937,9 @@ impl McpStdioSessionSnapshot {
             protocol: "mcp_stdio".to_string(),
             endpoint: redact_sensitive(&self.endpoint),
             link_name: self.link_name.clone(),
+            link_skill: self.link_skill.clone(),
+            link_skill_doc: self.link_skill_doc.clone(),
+            link_skill_path: self.link_skill_path.clone(),
             command_summary: self.command_summary.clone(),
             child_pid: self.child_pid,
             started_at_unix: self.started_at_unix,
@@ -912,6 +953,7 @@ impl McpStdioSessionSnapshot {
             } else {
                 "ready".to_string()
             },
+            in_flight_requests: self.in_flight_requests,
             reuse_eligible: self.reuse_eligible,
             can_reap_contract: self.can_reap_contract.clone(),
             last_error_summary: self.last_error_summary.clone(),
@@ -1003,11 +1045,15 @@ impl McpSessionManager {
         let mut meta = json!({
             "session_key": display_session_key(session_key),
             "link_name": snapshot.link_name.clone(),
+            "link_skill": snapshot.link_skill.clone(),
+            "link_skill_doc": snapshot.link_skill_doc.clone(),
+            "link_skill_path": snapshot.link_skill_path.clone(),
             "command_summary": snapshot.command_summary.clone(),
             "daemon_exclusive": snapshot.daemon_exclusive.clone(),
             "child_pid": snapshot.child_pid,
             "idle_ttl_secs": snapshot.idle_ttl_secs,
             "idle_for_secs": now_unix_secs().saturating_sub(snapshot.last_used_at_unix),
+            "in_flight_requests": snapshot.in_flight_requests,
             "reuse_eligible": snapshot.reuse_eligible,
             "recent_stderr": snapshot.recent_stderr.clone(),
         });
@@ -1036,11 +1082,15 @@ impl McpSessionManager {
         let mut meta = json!({
             "session_key": display_session_key(session_key),
             "link_name": snapshot.link_name.clone(),
+            "link_skill": snapshot.link_skill.clone(),
+            "link_skill_doc": snapshot.link_skill_doc.clone(),
+            "link_skill_path": snapshot.link_skill_path.clone(),
             "command_summary": snapshot.command_summary.clone(),
             "daemon_exclusive": snapshot.daemon_exclusive.clone(),
             "child_pid": snapshot.child_pid,
             "idle_ttl_secs": snapshot.idle_ttl_secs,
             "idle_for_secs": now_unix_secs().saturating_sub(snapshot.last_used_at_unix),
+            "in_flight_requests": snapshot.in_flight_requests,
             "reason": contract.reason.clone(),
             "retry_after_secs": contract.retry_after_secs,
             "state": contract.state.clone(),
@@ -1274,6 +1324,9 @@ impl McpSessionManager {
         let metadata = StdioSessionRequestMetadata {
             idle_ttl_secs: metadata.idle_ttl_secs,
             link_name: metadata.link_name,
+            link_skill: metadata.link_skill,
+            link_skill_doc: metadata.link_skill_doc,
+            link_skill_path: metadata.link_skill_path,
             endpoint: metadata.endpoint,
             exclusive_keys: &exclusive_keys,
         };
@@ -1355,6 +1408,9 @@ impl McpSessionManager {
             last_used_at_unix: created_at_unix,
             idle_ttl_secs: metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
             link_name: metadata.link_name.map(str::to_string),
+            link_skill: metadata.link_skill.map(str::to_string),
+            link_skill_doc: metadata.link_skill_doc.map(str::to_string),
+            link_skill_path: metadata.link_skill_path.map(str::to_string),
             endpoint: metadata.endpoint.to_string(),
             daemon_exclusive: exclusive_keys.clone(),
             can_reap_contract: CanReapContractView::default(),
@@ -1370,6 +1426,9 @@ impl McpSessionManager {
             McpStdioSessionSnapshot {
                 endpoint: metadata.endpoint.to_string(),
                 link_name: metadata.link_name.map(str::to_string),
+                link_skill: metadata.link_skill.map(str::to_string),
+                link_skill_doc: metadata.link_skill_doc.map(str::to_string),
+                link_skill_path: metadata.link_skill_path.map(str::to_string),
                 command_summary,
                 child_pid,
                 started_at_unix: created_at_unix,
@@ -1447,6 +1506,9 @@ impl McpSessionManager {
         let recent_stderr = redact_recent_stderr(guard.client.recent_stderr_lines(5).await);
         let endpoint = guard.endpoint.clone();
         let link_name = guard.link_name.clone();
+        let link_skill = guard.link_skill.clone();
+        let link_skill_doc = guard.link_skill_doc.clone();
+        let link_skill_path = guard.link_skill_path.clone();
         let child_pid = guard.child_pid;
         let idle_ttl_secs = guard.idle_ttl_secs;
         let last_used_at_unix = guard.last_used_at_unix;
@@ -1456,6 +1518,9 @@ impl McpSessionManager {
         self.upsert_stdio_snapshot(session_key, |snapshot| {
             snapshot.endpoint = endpoint;
             snapshot.link_name = link_name;
+            snapshot.link_skill = link_skill;
+            snapshot.link_skill_doc = link_skill_doc;
+            snapshot.link_skill_path = link_skill_path;
             snapshot.child_pid = child_pid;
             snapshot.idle_ttl_secs = idle_ttl_secs;
             snapshot.last_used_at_unix = last_used_at_unix;
@@ -1818,6 +1883,9 @@ impl McpSessionManager {
                 self.upsert_stdio_snapshot(session_key, |snapshot| {
                     snapshot.endpoint = guard.endpoint.clone();
                     snapshot.link_name = guard.link_name.clone();
+                    snapshot.link_skill = guard.link_skill.clone();
+                    snapshot.link_skill_doc = guard.link_skill_doc.clone();
+                    snapshot.link_skill_path = guard.link_skill_path.clone();
                     snapshot.child_pid = guard.child_pid;
                     snapshot.last_used_at_unix = guard.last_used_at_unix;
                     snapshot.idle_ttl_secs = guard.idle_ttl_secs;
@@ -3149,6 +3217,9 @@ impl DaemonRuntime {
                     StdioSessionRequestMetadata {
                         idle_ttl_secs: request.options.daemon_idle_ttl,
                         link_name: request.options.link_name.as_deref(),
+                        link_skill: request.options.link_skill.as_deref(),
+                        link_skill_doc: request.options.link_skill_doc.as_deref(),
+                        link_skill_path: request.options.link_skill_path.as_deref(),
                         endpoint,
                         exclusive_keys: &request.options.daemon_exclusive,
                     },
@@ -5052,6 +5123,9 @@ async fn run_mcp_subscription_job(
             StdioSessionRequestMetadata {
                 idle_ttl_secs: request.options.daemon_idle_ttl,
                 link_name: request.options.link_name.as_deref(),
+                link_skill: request.options.link_skill.as_deref(),
+                link_skill_doc: request.options.link_skill_doc.as_deref(),
+                link_skill_path: request.options.link_skill_path.as_deref(),
                 endpoint: &request.endpoint,
                 exclusive_keys: &request.options.daemon_exclusive,
             },
@@ -6794,6 +6868,9 @@ async fn invoke_live_stdio_mcp_help(
     guard.apply_request_metadata(&StdioSessionRequestMetadata {
         idle_ttl_secs: request.options.daemon_idle_ttl,
         link_name: request.options.link_name.as_deref(),
+        link_skill: request.options.link_skill.as_deref(),
+        link_skill_doc: request.options.link_skill_doc.as_deref(),
+        link_skill_path: request.options.link_skill_path.as_deref(),
         endpoint: &request.endpoint,
         exclusive_keys: &request.options.daemon_exclusive,
     });
@@ -7231,10 +7308,21 @@ mod tests {
 
     #[test]
     fn resolve_stdio_request_metadata_resets_ttl_and_link_name_from_current_request() {
-        let (idle_ttl_secs, link_name, endpoint, daemon_exclusive) = resolve_stdio_request_metadata(
+        let (
+            idle_ttl_secs,
+            link_name,
+            link_skill,
+            link_skill_doc,
+            link_skill_path,
+            endpoint,
+            daemon_exclusive,
+        ) = resolve_stdio_request_metadata(
             &StdioSessionRequestMetadata {
                 idle_ttl_secs: None,
                 link_name: None,
+                link_skill: None,
+                link_skill_doc: None,
+                link_skill_path: None,
                 endpoint: "https://new.example.com",
                 exclusive_keys: &[],
             },
@@ -7243,16 +7331,30 @@ mod tests {
 
         assert_eq!(idle_ttl_secs, MCP_IDLE_TTL_SECS);
         assert_eq!(link_name, None);
+        assert_eq!(link_skill, None);
+        assert_eq!(link_skill_doc, None);
+        assert_eq!(link_skill_path, None);
         assert_eq!(endpoint, "https://new.example.com");
         assert_eq!(daemon_exclusive, vec!["/tmp/profile".to_string()]);
     }
 
     #[test]
     fn resolve_stdio_request_metadata_accepts_zero_ttl_override() {
-        let (idle_ttl_secs, link_name, endpoint, daemon_exclusive) = resolve_stdio_request_metadata(
+        let (
+            idle_ttl_secs,
+            link_name,
+            link_skill,
+            link_skill_doc,
+            link_skill_path,
+            endpoint,
+            daemon_exclusive,
+        ) = resolve_stdio_request_metadata(
             &StdioSessionRequestMetadata {
                 idle_ttl_secs: Some(0),
                 link_name: Some("board-link"),
+                link_skill: Some("board-webmcp"),
+                link_skill_doc: Some("https://uxc.holon.run/skills/board-webmcp/"),
+                link_skill_path: Some("skills/board-webmcp/SKILL.md"),
                 endpoint: "https://new.example.com",
                 exclusive_keys: &["/tmp/new-profile".to_string()],
             },
@@ -7261,6 +7363,15 @@ mod tests {
 
         assert_eq!(idle_ttl_secs, 0);
         assert_eq!(link_name, Some("board-link".to_string()));
+        assert_eq!(link_skill, Some("board-webmcp".to_string()));
+        assert_eq!(
+            link_skill_doc,
+            Some("https://uxc.holon.run/skills/board-webmcp/".to_string())
+        );
+        assert_eq!(
+            link_skill_path,
+            Some("skills/board-webmcp/SKILL.md".to_string())
+        );
         assert_eq!(endpoint, "https://new.example.com");
         assert_eq!(daemon_exclusive, vec!["/tmp/new-profile".to_string()]);
     }
