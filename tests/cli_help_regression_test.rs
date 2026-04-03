@@ -266,6 +266,119 @@ fn host_help_uses_link_name_for_next_commands_when_env_set() {
 
 #[test]
 #[serial]
+fn host_help_surfaces_source_skill_metadata_when_env_set() {
+    daemon_stop_best_effort();
+    let mut server = mockito::Server::new();
+    let _schema = server
+        .mock("GET", "/openapi.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r##"{
+  "openapi": "3.0.0",
+  "info": { "title": "test", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "list pets",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"##,
+        )
+        .create();
+
+    let output = uxc_command()
+        .env("UXC_LINK_NAME", "qmd-mcp-cli")
+        .env("UXC_LINK_SKILL", "qmd-mcp-skill")
+        .env(
+            "UXC_LINK_SKILL_DOC",
+            "https://uxc.holon.run/skills/qmd-mcp-skill/",
+        )
+        .env("UXC_LINK_SKILL_PATH", "skills/qmd-mcp-skill/SKILL.md")
+        .arg(server.url())
+        .arg("--no-cache")
+        .arg("-h")
+        .output()
+        .expect("failed to run uxc");
+
+    assert!(
+        output.status.success(),
+        "command should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "host_help");
+    assert_eq!(json["data"]["linked_command"], "qmd-mcp-cli");
+    assert_eq!(json["data"]["source_skill"], "qmd-mcp-skill");
+    assert_eq!(
+        json["data"]["source_docs"],
+        "https://uxc.holon.run/skills/qmd-mcp-skill/"
+    );
+    assert_eq!(json["data"]["source_path"], "skills/qmd-mcp-skill/SKILL.md");
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
+fn host_help_text_surfaces_source_skill_metadata_when_env_set() {
+    daemon_stop_best_effort();
+    let mut server = mockito::Server::new();
+    let _schema = server
+        .mock("GET", "/openapi.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r##"{
+  "openapi": "3.0.0",
+  "info": { "title": "test", "version": "1.0.0" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "summary": "list pets",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}"##,
+        )
+        .create();
+
+    let output = uxc_command()
+        .env("UXC_LINK_NAME", "qmd-mcp-cli")
+        .env("UXC_LINK_SKILL", "qmd-mcp-skill")
+        .env(
+            "UXC_LINK_SKILL_DOC",
+            "https://uxc.holon.run/skills/qmd-mcp-skill/",
+        )
+        .env("UXC_LINK_SKILL_PATH", "skills/qmd-mcp-skill/SKILL.md")
+        .arg("--text")
+        .arg(server.url())
+        .arg("--no-cache")
+        .arg("-h")
+        .output()
+        .expect("failed to run uxc");
+
+    assert!(
+        output.status.success(),
+        "command should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Linked command: qmd-mcp-cli"));
+    assert!(stdout.contains("Source skill: qmd-mcp-skill"));
+    assert!(stdout.contains("Source docs: https://uxc.holon.run/skills/qmd-mcp-skill/"));
+    assert!(stdout.contains("Source path: skills/qmd-mcp-skill/SKILL.md"));
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
 fn host_help_uses_stale_cache_fallback_with_meta() {
     daemon_stop_best_effort();
     let temp_home = tempfile::tempdir().expect("temp home should be created");
@@ -674,6 +787,10 @@ fn link_help_flag_outputs_subcommand_help_json() {
         .as_str()
         .unwrap_or_default()
         .contains("--credential <credential_id>"));
+    assert!(link_json["data"]["usage"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("--skill <name>"));
     assert!(link_json["data"]["usage"]
         .as_str()
         .unwrap_or_default()

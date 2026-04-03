@@ -173,6 +173,53 @@ fn link_create_with_credential_and_inject_env_writes_script_and_json() {
 }
 
 #[test]
+fn link_create_with_source_metadata_persists_launcher_env_and_json() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let link_dir = temp_dir.path().join("bin");
+    let script_path = link_script_path(&link_dir, "qmd-mcp-cli");
+
+    let output = uxc_command()
+        .arg("link")
+        .arg("qmd-mcp-cli")
+        .arg("qmd mcp")
+        .arg("--dir")
+        .arg(&link_dir)
+        .arg("--skill")
+        .arg("qmd-mcp-skill")
+        .arg("--skill-doc")
+        .arg("https://uxc.holon.run/skills/qmd-mcp-skill/")
+        .arg("--skill-path")
+        .arg("skills/qmd-mcp-skill/SKILL.md")
+        .output()
+        .expect("uxc link should run");
+    assert!(output.status.success(), "command should succeed");
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["data"]["skill"], "qmd-mcp-skill");
+    assert_eq!(
+        json["data"]["skill_doc"],
+        "https://uxc.holon.run/skills/qmd-mcp-skill/"
+    );
+    assert_eq!(json["data"]["skill_path"], "skills/qmd-mcp-skill/SKILL.md");
+
+    let script = fs::read_to_string(&script_path).expect("script should be readable");
+    #[cfg(unix)]
+    {
+        assert!(script.contains("UXC_LINK_SKILL='qmd-mcp-skill'"));
+        assert!(script.contains("UXC_LINK_SKILL_DOC='https://uxc.holon.run/skills/qmd-mcp-skill/'"));
+        assert!(script.contains("UXC_LINK_SKILL_PATH='skills/qmd-mcp-skill/SKILL.md'"));
+    }
+    #[cfg(windows)]
+    {
+        assert!(script.contains("set \"UXC_LINK_SKILL=qmd-mcp-skill\""));
+        assert!(script
+            .contains("set \"UXC_LINK_SKILL_DOC=https://uxc.holon.run/skills/qmd-mcp-skill/\""));
+        assert!(script.contains("set \"UXC_LINK_SKILL_PATH=skills/qmd-mcp-skill/SKILL.md\""));
+    }
+}
+
+#[test]
 fn link_create_rejects_inject_env_for_non_stdio_host() {
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
     let link_dir = temp_dir.path().join("bin");
