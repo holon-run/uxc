@@ -6653,6 +6653,7 @@ mod tests {
         build_link_launcher, collect_daemon_idle_ttl, enrich_operation_detail_payload,
         infer_scheme_for_endpoint, link_target_path, normalize_endpoint_url, parse_arguments,
         resolve_home_dir, resolve_link_dir, shell_single_quote, validate_link_name, Cli,
+        LinkLauncherConfig,
     };
     use clap::Parser;
     use serde_json::json;
