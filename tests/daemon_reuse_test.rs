@@ -206,6 +206,7 @@ fn daemon_sessions_lists_live_stdio_session_diagnostics() {
     assert_eq!(session["transport"], "stdio");
     assert_eq!(session["protocol"], "mcp_stdio");
     assert_eq!(session["state"], "ready");
+    assert_eq!(session["in_flight_requests"], 0);
     assert_eq!(session["reuse_eligible"], true);
     assert!(session["command_summary"]
         .as_str()
@@ -215,6 +216,61 @@ fn daemon_sessions_lists_live_stdio_session_diagnostics() {
     assert!(session.get("expires_in_secs").is_some());
     assert!(session["daemon_exclusive"].as_array().is_some());
     assert!(session["recent_stderr"].as_array().is_some());
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
+fn daemon_sessions_surface_link_source_metadata() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} ok", bin.display());
+
+    let start = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let call = uxc_command()
+        .env("UXC_LINK_NAME", "qmd-mcp-cli")
+        .env("UXC_LINK_SKILL", "qmd-mcp-skill")
+        .env(
+            "UXC_LINK_SKILL_DOC",
+            "https://uxc.holon.run/skills/qmd-mcp-skill/",
+        )
+        .env("UXC_LINK_SKILL_PATH", "skills/qmd-mcp-skill/SKILL.md")
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"inspect"}"#)
+        .output()
+        .expect("call should run");
+    assert!(call.status.success());
+
+    let sessions = uxc_command()
+        .arg("daemon")
+        .arg("sessions")
+        .output()
+        .expect("daemon sessions should run");
+    assert!(sessions.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&sessions.stdout).expect("valid json");
+    let sessions = json["data"]
+        .as_array()
+        .expect("session list should be an array");
+    assert_eq!(sessions.len(), 1, "expected one stdio session");
+    let session = &sessions[0];
+    assert_eq!(session["link_name"], "qmd-mcp-cli");
+    assert_eq!(session["link_skill"], "qmd-mcp-skill");
+    assert_eq!(
+        session["link_skill_doc"],
+        "https://uxc.holon.run/skills/qmd-mcp-skill/"
+    );
+    assert_eq!(session["link_skill_path"], "skills/qmd-mcp-skill/SKILL.md");
 
     daemon_stop_best_effort();
 }
@@ -403,10 +459,10 @@ fn daemon_sessions_reports_active_state_for_busy_stdio_session() {
         let entries = json["data"]
             .as_array()
             .expect("session list should be an array");
-        if entries
-            .iter()
-            .any(|session| session["state"].as_str() == Some("active"))
-        {
+        if entries.iter().any(|session| {
+            session["state"].as_str() == Some("active")
+                && session["in_flight_requests"].as_u64().unwrap_or(0) >= 1
+        }) {
             found_active = true;
             break;
         }
