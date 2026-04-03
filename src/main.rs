@@ -185,6 +185,18 @@ enum Commands {
         #[arg(long = "credential")]
         credential: Option<String>,
 
+        /// Source skill name persisted in the generated shortcut metadata
+        #[arg(long = "skill", value_name = "SKILL")]
+        skill: Option<String>,
+
+        /// Source skill docs URL persisted in the generated shortcut metadata
+        #[arg(long = "skill-doc", value_name = "URL")]
+        skill_doc: Option<String>,
+
+        /// Source skill local path persisted in the generated shortcut metadata
+        #[arg(long = "skill-path", value_name = "PATH")]
+        skill_path: Option<String>,
+
         /// Overwrite existing shortcut file
         #[arg(long)]
         force: bool,
@@ -769,6 +781,14 @@ struct HostHelpData {
     count: usize,
     examples: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    linked_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_skill: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_docs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     service: Option<ServiceSummary>,
 }
 
@@ -952,6 +972,9 @@ struct LinkCreateData {
     dir_in_path: bool,
     schema_url: Option<String>,
     credential: Option<String>,
+    skill: Option<String>,
+    skill_doc: Option<String>,
+    skill_path: Option<String>,
     inject_env: Vec<String>,
     daemon_idle_ttl: Option<u64>,
 }
@@ -1005,9 +1028,23 @@ struct LinkCommandOptions<'a> {
     dir: Option<&'a str>,
     schema_url: Option<&'a str>,
     credential: Option<&'a str>,
+    skill: Option<&'a str>,
+    skill_doc: Option<&'a str>,
+    skill_path: Option<&'a str>,
     explicit_auth: Option<&'a str>,
     inject_env: &'a [InjectEnvSpec],
     force: bool,
+    daemon_exclusive: &'a [String],
+    daemon_idle_ttl: Option<u64>,
+}
+
+struct LinkLauncherConfig<'a> {
+    schema_url: Option<&'a str>,
+    credential: Option<&'a str>,
+    source_skill: Option<&'a str>,
+    source_skill_doc: Option<&'a str>,
+    source_skill_path: Option<&'a str>,
+    inject_env: &'a [InjectEnvSpec],
     daemon_exclusive: &'a [String],
     daemon_idle_ttl: Option<u64>,
 }
@@ -1640,6 +1677,9 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
         dir,
         schema_url,
         credential,
+        skill,
+        skill_doc,
+        skill_path,
         force,
     }) = &cli.command
     {
@@ -1649,6 +1689,9 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
             dir: dir.as_deref(),
             schema_url: schema_url.as_deref(),
             credential: credential.as_deref(),
+            skill: skill.as_deref(),
+            skill_doc: skill_doc.as_deref(),
+            skill_path: skill_path.as_deref(),
             explicit_auth: cli.auth.as_deref(),
             inject_env: &inject_env,
             force: *force,
@@ -1736,6 +1779,9 @@ async fn execute_endpoint_via_daemon(
             refresh_schema: cli.refresh_schema,
             schema_url: cli.schema_url.as_deref().map(normalize_endpoint_url),
             link_name: std::env::var("UXC_LINK_NAME").ok(),
+            link_skill: env_var_nonempty("UXC_LINK_SKILL"),
+            link_skill_doc: env_var_nonempty("UXC_LINK_SKILL_DOC"),
+            link_skill_path: env_var_nonempty("UXC_LINK_SKILL_PATH"),
             schema_mapping_file: std::env::var("UXC_SCHEMA_MAPPINGS_FILE").ok(),
             daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
             daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
@@ -1858,11 +1904,13 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             path: "uxc link".to_string(),
             about: "Create a host-bound shortcut command".to_string(),
             usage:
-                "uxc link <name> <host> [--dir <dir>] [--schema-url <url>] [--credential <credential_id>] [--inject-env NAME={{secret}} ...] [--daemon-exclusive <key> ...] [--daemon-idle-ttl <seconds>] [--force]"
+                "uxc link <name> <host> [--dir <dir>] [--schema-url <url>] [--credential <credential_id>] [--skill <name>] [--skill-doc <url>] [--skill-path <path>] [--inject-env NAME={{secret}} ...] [--daemon-exclusive <key> ...] [--daemon-idle-ttl <seconds>] [--force]"
                     .to_string(),
             commands: vec![],
             notes: vec![
                 "Use --schema-url to persist a default OpenAPI schema URL in the shortcut; callers can still override it by passing --schema-url explicitly."
+                    .to_string(),
+                "Use --skill, --skill-doc, and --skill-path to persist source skill metadata shown by linked command help."
                     .to_string(),
                 "Use --credential and --inject-env for stdio shortcuts that need child-process env auth injection."
                     .to_string(),
@@ -1874,6 +1922,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             examples: vec![
                 "uxc link petcli petstore3.swagger.io/api/v3".to_string(),
                 "uxc link discord-openapi-cli https://discord.com/api/v10 --schema-url https://raw.githubusercontent.com/discord/discord-api-spec/main/specs/openapi.json".to_string(),
+                "uxc link qmd-mcp-cli \"qmd mcp\" --skill qmd-mcp-skill --skill-doc https://uxc.holon.run/skills/qmd-mcp-skill/ --skill-path skills/qmd-mcp-skill/SKILL.md".to_string(),
                 "uxc link thegraph-mcp-cli \"/bin/zsh -lc 'npx -y mcp-remote --header \\\"Authorization: Bearer ${THEGRAPH_API_KEY}\\\" https://subgraphs.mcp.thegraph.com/sse'\" --credential thegraph --inject-env THEGRAPH_API_KEY={{secret}}".to_string(),
                 "uxc link --daemon-exclusive ~/.uxc/playwright-profile --daemon-idle-ttl 0 playwright-mcp-ui \"npx -y @playwright/mcp@latest --user-data-dir ~/.uxc/playwright-profile\"".to_string(),
                 "petcli -h".to_string(),
@@ -2434,13 +2483,7 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             let endpoint = envelope.endpoint.as_deref().unwrap_or("unknown");
             let protocol = envelope.protocol.as_deref().unwrap_or("unknown");
             let data: HostHelpData = decode_envelope_data(envelope)?;
-            print_host_help_text_from_summaries(
-                protocol,
-                endpoint,
-                &data.operations,
-                &data.examples,
-                &data.service,
-            );
+            print_host_help_text(protocol, endpoint, &data);
             Ok(())
         }
         Some("operation_detail") => {
@@ -2864,6 +2907,15 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             }
             if let Some(credential) = data.credential {
                 println!("Credential: {}", credential);
+            }
+            if let Some(skill) = data.skill {
+                println!("Source Skill: {}", skill);
+            }
+            if let Some(skill_doc) = data.skill_doc {
+                println!("Source Skill Docs: {}", skill_doc);
+            }
+            if let Some(skill_path) = data.skill_path {
+                println!("Source Skill Path: {}", skill_path);
             }
             if !data.inject_env.is_empty() {
                 println!("Injected Env: {}", data.inject_env.join(", "));
@@ -3433,16 +3485,22 @@ fn print_json(envelope: &OutputEnvelope) -> Result<()> {
     Ok(())
 }
 
-fn print_host_help_text_from_summaries(
-    protocol: &str,
-    endpoint: &str,
-    operations: &[OperationSummary],
-    examples: &[String],
-    service: &Option<ServiceSummary>,
-) {
+fn print_host_help_text(protocol: &str, endpoint: &str, data: &HostHelpData) {
     println!("Protocol: {}", protocol);
     println!("Endpoint: {}", endpoint);
-    if let Some(service) = service {
+    if let Some(linked_command) = data.linked_command.as_deref() {
+        println!("Linked command: {}", linked_command);
+    }
+    if let Some(source_skill) = data.source_skill.as_deref() {
+        println!("Source skill: {}", source_skill);
+    }
+    if let Some(source_docs) = data.source_docs.as_deref() {
+        println!("Source docs: {}", source_docs);
+    }
+    if let Some(source_path) = data.source_path.as_deref() {
+        println!("Source path: {}", source_path);
+    }
+    if let Some(service) = &data.service {
         println!();
         println!("Service:");
         if let Some(name) = &service.name {
@@ -3454,7 +3512,7 @@ fn print_host_help_text_from_summaries(
     }
     println!();
     println!("Available operations:");
-    for op in operations {
+    for op in &data.operations {
         if let Some(desc) = &op.summary {
             println!("- {} ({}) : {}", op.display_name, op.operation_id, desc);
         } else {
@@ -3462,10 +3520,10 @@ fn print_host_help_text_from_summaries(
         }
     }
 
-    if !examples.is_empty() {
+    if !data.examples.is_empty() {
         println!();
         println!("Examples:");
-        for line in examples {
+        for line in &data.examples {
             println!("  {}", line);
         }
     }
@@ -3575,6 +3633,18 @@ async fn handle_link_command(
         .credential
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let source_skill = options
+        .skill
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let source_skill_doc = options
+        .skill_doc
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let source_skill_path = options
+        .skill_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     if options.explicit_auth.is_some() && credential.is_some() {
         return Err(UxcError::InvalidArguments(
             "uxc link does not allow both global --auth and --credential; use --credential only"
@@ -3610,11 +3680,16 @@ async fn handle_link_command(
     let launcher = build_link_launcher(
         name,
         host,
-        schema_url,
-        persisted_credential,
-        options.inject_env,
-        options.daemon_exclusive,
-        options.daemon_idle_ttl,
+        LinkLauncherConfig {
+            schema_url,
+            credential: persisted_credential,
+            source_skill,
+            source_skill_doc,
+            source_skill_path,
+            inject_env: options.inject_env,
+            daemon_exclusive: options.daemon_exclusive,
+            daemon_idle_ttl: options.daemon_idle_ttl,
+        },
     );
     let target_exists_before = target_path.exists();
     write_link_file(&target_path, launcher.as_bytes(), options.force)?;
@@ -3628,6 +3703,9 @@ async fn handle_link_command(
         dir_in_path: is_dir_in_path(&target_dir),
         schema_url: schema_url.map(ToOwned::to_owned),
         credential: persisted_credential.map(ToOwned::to_owned),
+        skill: source_skill.map(ToOwned::to_owned),
+        skill_doc: source_skill_doc.map(ToOwned::to_owned),
+        skill_path: source_skill_path.map(ToOwned::to_owned),
         inject_env: options
             .inject_env
             .iter()
@@ -3662,23 +3740,18 @@ fn link_target_path(dir: &Path, name: &str) -> PathBuf {
     }
 }
 
-fn build_link_launcher(
-    name: &str,
-    host: &str,
-    schema_url: Option<&str>,
-    credential: Option<&str>,
-    inject_env: &[InjectEnvSpec],
-    daemon_exclusive: &[String],
-    daemon_idle_ttl: Option<u64>,
-) -> String {
+fn build_link_launcher(name: &str, host: &str, config: LinkLauncherConfig<'_>) -> String {
     const LINK_SENTINEL: &str = "# Generated by uxc link; do not edit by hand";
 
-    let exclusive = daemon_exclusive.join(";");
-    let idle_ttl = daemon_idle_ttl.map(|value| value.to_string());
+    let exclusive = config.daemon_exclusive.join(";");
+    let idle_ttl = config.daemon_idle_ttl.map(|value| value.to_string());
 
     #[cfg(windows)]
     {
         let escaped_name = windows_batch_escape(name);
+        let escaped_skill = config.source_skill.map(windows_batch_escape);
+        let escaped_skill_doc = config.source_skill_doc.map(windows_batch_escape);
+        let escaped_skill_path = config.source_skill_path.map(windows_batch_escape);
         let escaped = windows_batch_escape(host);
         let escaped_exclusive = windows_batch_escape(&exclusive);
         let exclusive_line = if escaped_exclusive.is_empty() {
@@ -3686,6 +3759,15 @@ fn build_link_launcher(
         } else {
             format!("set \"UXC_DAEMON_EXCLUSIVE={}\"", escaped_exclusive)
         };
+        let source_skill_line = escaped_skill
+            .map(|value| format!("set \"UXC_LINK_SKILL={}\"", value))
+            .unwrap_or_else(|| "REM UXC_LINK_SKILL is empty".to_string());
+        let source_skill_doc_line = escaped_skill_doc
+            .map(|value| format!("set \"UXC_LINK_SKILL_DOC={}\"", value))
+            .unwrap_or_else(|| "REM UXC_LINK_SKILL_DOC is empty".to_string());
+        let source_skill_path_line = escaped_skill_path
+            .map(|value| format!("set \"UXC_LINK_SKILL_PATH={}\"", value))
+            .unwrap_or_else(|| "REM UXC_LINK_SKILL_PATH is empty".to_string());
         let idle_ttl_line = if let Some(idle_ttl) = idle_ttl.as_deref() {
             format!(
                 "set \"UXC_DAEMON_IDLE_TTL={}\"",
@@ -3695,16 +3777,17 @@ fn build_link_launcher(
             "REM UXC_DAEMON_IDLE_TTL is empty".to_string()
         };
         let mut base_command = format!("uxc \"{}\"", escaped);
-        if let Some(credential) = credential {
+        if let Some(credential) = config.credential {
             base_command.push_str(&format!(" --auth \"{}\"", windows_batch_escape(credential)));
         }
-        for spec in inject_env {
+        for spec in config.inject_env {
             base_command.push_str(&format!(
                 " --inject-env \"{}\"",
                 windows_batch_escape(&spec.as_cli_arg())
             ));
         }
-        let schema_logic = schema_url
+        let schema_logic = config
+            .schema_url
             .map(|url| {
                 let escaped_url = windows_batch_escape(url);
                 format!(
@@ -3714,8 +3797,15 @@ fn build_link_launcher(
             })
             .unwrap_or_else(|| format!("{} %*\r\n", base_command));
         return format!(
-            "@echo off\r\nREM {}\r\nset \"UXC_LINK_NAME={}\"\r\n{}\r\n{}\r\n{}",
-            LINK_SENTINEL, escaped_name, exclusive_line, idle_ttl_line, schema_logic
+            "@echo off\r\nREM {}\r\nset \"UXC_LINK_NAME={}\"\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}",
+            LINK_SENTINEL,
+            escaped_name,
+            source_skill_line,
+            source_skill_doc_line,
+            source_skill_path_line,
+            exclusive_line,
+            idle_ttl_line,
+            schema_logic
         );
     }
     #[cfg(not(windows))]
@@ -3729,23 +3819,38 @@ fn build_link_launcher(
             .as_deref()
             .map(|value| format!("UXC_DAEMON_IDLE_TTL={} ", shell_single_quote(value)))
             .unwrap_or_default();
+        let source_skill_prefix = config
+            .source_skill
+            .map(|value| format!("UXC_LINK_SKILL={} ", shell_single_quote(value)))
+            .unwrap_or_default();
+        let source_skill_doc_prefix = config
+            .source_skill_doc
+            .map(|value| format!("UXC_LINK_SKILL_DOC={} ", shell_single_quote(value)))
+            .unwrap_or_default();
+        let source_skill_path_prefix = config
+            .source_skill_path
+            .map(|value| format!("UXC_LINK_SKILL_PATH={} ", shell_single_quote(value)))
+            .unwrap_or_default();
         let mut exec_prefix = format!(
-            "{}{}UXC_LINK_NAME={} exec uxc {}",
+            "{}{}{}{}{}UXC_LINK_NAME={} exec uxc {}",
             exclusive_prefix,
             idle_ttl_prefix,
+            source_skill_prefix,
+            source_skill_doc_prefix,
+            source_skill_path_prefix,
             shell_single_quote(name),
             shell_single_quote(host)
         );
-        if let Some(credential) = credential {
+        if let Some(credential) = config.credential {
             exec_prefix.push_str(&format!(" --auth {}", shell_single_quote(credential)));
         }
-        for spec in inject_env {
+        for spec in config.inject_env {
             exec_prefix.push_str(&format!(
                 " --inject-env {}",
                 shell_single_quote(&spec.as_cli_arg())
             ));
         }
-        if let Some(schema_url) = schema_url {
+        if let Some(schema_url) = config.schema_url {
             format!(
                 "#!/usr/bin/env sh\n{}\nhas_schema_url=false\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    --schema-url|--schema-url=*)\n      has_schema_url=true\n      break\n      ;;\n  esac\ndone\n\nif [ \"$has_schema_url\" = true ]; then\n  {} \"$@\"\nelse\n  {} --schema-url {} \"$@\"\nfi\n",
                 LINK_SENTINEL,
@@ -3840,6 +3945,13 @@ fn collect_daemon_idle_ttl(cli: &Cli) -> Result<Option<u64>> {
         ))
     })?;
     Ok(Some(ttl))
+}
+
+fn env_var_nonempty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn collect_inject_env_specs(cli: &Cli) -> Result<Vec<InjectEnvSpec>> {
@@ -4573,6 +4685,9 @@ async fn execute_mcp_import_apply(
                             dir: link_dir,
                             schema_url: None,
                             credential: persisted_credential,
+                            skill: None,
+                            skill_doc: None,
+                            skill_path: None,
                             explicit_auth: None,
                             inject_env,
                             force,
@@ -5310,6 +5425,9 @@ async fn handle_subscribe_command(
                     refresh_schema: cli.refresh_schema,
                     schema_url: None,
                     link_name: std::env::var("UXC_LINK_NAME").ok(),
+                    link_skill: env_var_nonempty("UXC_LINK_SKILL"),
+                    link_skill_doc: env_var_nonempty("UXC_LINK_SKILL_DOC"),
+                    link_skill_path: env_var_nonempty("UXC_LINK_SKILL_PATH"),
                     schema_mapping_file: None,
                     daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
                     daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
@@ -6653,11 +6771,16 @@ mod tests {
         let launcher = build_link_launcher(
             "board-webmcp-ui",
             "example.com",
-            None,
-            None,
-            &[],
-            &["~/.uxc/profile".to_string()],
-            Some(0),
+            LinkLauncherConfig {
+                schema_url: None,
+                credential: None,
+                source_skill: None,
+                source_skill_doc: None,
+                source_skill_path: None,
+                inject_env: &[],
+                daemon_exclusive: &["~/.uxc/profile".to_string()],
+                daemon_idle_ttl: Some(0),
+            },
         );
         assert!(launcher.contains("UXC_DAEMON_IDLE_TTL"));
         assert!(launcher.contains("0"));

@@ -16,6 +16,9 @@ export interface RuntimeInvokeOptions {
   refresh_schema?: boolean;
   schema_url?: string;
   link_name?: string;
+  link_skill?: string;
+  link_skill_doc?: string;
+  link_skill_path?: string;
   schema_mapping_file?: string;
   daemon_exclusive?: string[];
   daemon_idle_ttl?: number;

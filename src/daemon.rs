@@ -142,6 +142,12 @@ pub struct RuntimeInvokeOptions {
     pub refresh_schema: bool,
     pub schema_url: Option<String>,
     pub link_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_skill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_skill_doc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_skill_path: Option<String>,
     pub schema_mapping_file: Option<String>,
     #[serde(default)]
     pub daemon_exclusive: Vec<String>,
@@ -6696,6 +6702,18 @@ async fn invoke_with_adapter(
                 "count": summaries.len(),
                 "examples": host_help_examples(request.options.link_name.as_deref()),
             });
+            if let Some(link_name) = request.options.link_name.as_deref() {
+                payload["linked_command"] = Value::String(link_name.to_string());
+            }
+            if let Some(source_skill) = request.options.link_skill.as_deref() {
+                payload["source_skill"] = Value::String(source_skill.to_string());
+            }
+            if let Some(source_docs) = request.options.link_skill_doc.as_deref() {
+                payload["source_docs"] = Value::String(source_docs.to_string());
+            }
+            if let Some(source_path) = request.options.link_skill_path.as_deref() {
+                payload["source_path"] = Value::String(source_path.to_string());
+            }
             if let Some(service) = service {
                 payload["service"] = serde_json::to_value(service)?;
             }
@@ -6813,6 +6831,18 @@ async fn invoke_live_stdio_mcp_help(
                     "count": summaries.len(),
                     "examples": host_help_examples(request.options.link_name.as_deref()),
                 });
+                if let Some(link_name) = request.options.link_name.as_deref() {
+                    payload["linked_command"] = Value::String(link_name.to_string());
+                }
+                if let Some(source_skill) = request.options.link_skill.as_deref() {
+                    payload["source_skill"] = Value::String(source_skill.to_string());
+                }
+                if let Some(source_docs) = request.options.link_skill_doc.as_deref() {
+                    payload["source_docs"] = Value::String(source_docs.to_string());
+                }
+                if let Some(source_path) = request.options.link_skill_path.as_deref() {
+                    payload["source_path"] = Value::String(source_path.to_string());
+                }
                 if let Some(service) = service {
                     payload["service"] = serde_json::to_value(service)?;
                 }
@@ -7175,6 +7205,9 @@ mod tests {
                 refresh_schema: false,
                 schema_url: Some("https://example.com/schema.json".to_string()),
                 link_name: None,
+                link_skill: None,
+                link_skill_doc: None,
+                link_skill_path: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
@@ -7249,6 +7282,9 @@ mod tests {
                 refresh_schema: false,
                 schema_url: Some("https://example.com/schema.json".to_string()),
                 link_name: None,
+                link_skill: None,
+                link_skill_doc: None,
+                link_skill_path: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
@@ -7321,6 +7357,9 @@ mod tests {
                 refresh_schema: false,
                 schema_url: None,
                 link_name: None,
+                link_skill: None,
+                link_skill_doc: None,
+                link_skill_path: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
@@ -7350,6 +7389,9 @@ mod tests {
                 refresh_schema: false,
                 schema_url: None,
                 link_name: None,
+                link_skill: None,
+                link_skill_doc: None,
+                link_skill_path: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
@@ -7461,6 +7503,9 @@ mod tests {
                 refresh_schema: false,
                 schema_url: None,
                 link_name: None,
+                link_skill: None,
+                link_skill_doc: None,
+                link_skill_path: None,
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
