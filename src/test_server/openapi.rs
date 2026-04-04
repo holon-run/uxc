@@ -25,6 +25,7 @@ struct ServerState {
 struct PollEventsQuery {
     cursor: Option<String>,
     offset: Option<u64>,
+    since: Option<u64>,
 }
 
 /// Create the OpenAPI test router
@@ -180,6 +181,37 @@ fn create_router(state: ServerState) -> Router {
                               }
                             },
                             "next_cursor": {"type": "string"}
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "/poll/github-events": {
+              "get": {
+                "operationId": "poll_github_events",
+                "summary": "Top-level array polling endpoint",
+                "parameters": [{
+                  "name": "since",
+                  "in": "query",
+                  "required": false,
+                  "schema": {"type": "integer"}
+                }],
+                "responses": {
+                  "200": {
+                    "description": "GitHub-style top-level event list",
+                    "content": {
+                      "application/json": {
+                        "schema": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {"type": "string"},
+                              "type": {"type": "string"}
+                            }
                           }
                         }
                       }
@@ -553,11 +585,55 @@ fn create_router(state: ServerState) -> Router {
         }
     }
 
+    async fn poll_github_events(
+        State(state): State<ServerState>,
+        Query(query): Query<PollEventsQuery>,
+    ) -> Result<Response, StatusCode> {
+        match state.scenario {
+            Scenario::Ok
+            | Scenario::EmptyObjectRequired
+            | Scenario::Legacy
+            | Scenario::SuiPubSub
+            | Scenario::ToolsListFailAfterFirst
+            | Scenario::ToolCallTimeout
+            | Scenario::ToolStructuredError
+            | Scenario::StructuredContent
+            | Scenario::ResourceReadFailOnce
+            | Scenario::SessionScopedResource
+            | Scenario::DynamicToolset
+            | Scenario::CanReapKeepAlive
+            | Scenario::CanReapAllowReap
+            | Scenario::CanReapTimeout => {
+                let since = query.since.unwrap_or(0);
+                let response = if since >= 3 {
+                    json!([])
+                } else {
+                    json!([
+                        {"id": "1", "type": "PushEvent"},
+                        {"id": "2", "type": "IssuesEvent"},
+                        {"id": "3", "type": "WatchEvent"}
+                    ])
+                };
+                Ok(Json(response).into_response())
+            }
+            Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
+            Scenario::Malformed => Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body("[broken".into())
+                .unwrap()),
+            Scenario::Timeout => {
+                tokio::time::sleep(super::common::timeout_duration()).await;
+                Ok(Json(json!([])).into_response())
+            }
+        }
+    }
+
     Router::new()
         .route("/openapi.json", get(serve_schema))
         .route("/health", get(health_check))
         .route("/stream", get(stream_json))
         .route("/poll/events", get(poll_events))
+        .route("/poll/github-events", get(poll_github_events))
         .route("/poll/telegram-updates", get(poll_telegram_updates))
         .route("/users", get(list_users).post(create_user))
         .route("/users/:id", get(get_user))

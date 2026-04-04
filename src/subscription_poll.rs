@@ -114,9 +114,6 @@ impl PollSubscriptionConfig {
         if self.interval_secs == 0 {
             bail!("poll interval_secs must be greater than 0");
         }
-        if self.extract_items_pointer.is_empty() {
-            bail!("poll extract_items_pointer cannot be empty");
-        }
         if self
             .request_cursor_arg
             .as_deref()
@@ -1033,5 +1030,60 @@ mod tests {
         assert!(err
             .to_string()
             .contains("extract_items_pointer did not resolve"));
+    }
+
+    #[test]
+    fn empty_extract_items_pointer_uses_response_root_array() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: String::new(),
+            missing_extract_items_pointer_as_empty: false,
+            request_cursor_arg: None,
+            response_cursor_pointer: None,
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
+            checkpoint_strategy: PollCheckpointStrategy::ItemKey {
+                item_key_pointer: "/id".to_string(),
+                seen_window: Some(8),
+            },
+        })
+        .unwrap();
+
+        let first = runner
+            .process_response(json!([{"id": 1}, {"id": 2}]), Some(3))
+            .unwrap();
+        assert_eq!(
+            first.emitted_items,
+            vec![json!({"id": 1}), json!({"id": 2})]
+        );
+
+        let second = runner
+            .process_response(json!([{"id": 2}, {"id": 3}]), Some(2))
+            .unwrap();
+        assert_eq!(second.emitted_items, vec![json!({"id": 3})]);
+    }
+
+    #[test]
+    fn empty_extract_items_pointer_with_missing_as_empty_still_treats_non_array_as_error() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: String::new(),
+            missing_extract_items_pointer_as_empty: true,
+            request_cursor_arg: None,
+            response_cursor_pointer: None,
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
+            checkpoint_strategy: PollCheckpointStrategy::ContentHash {
+                seen_window: Some(8),
+            },
+        })
+        .unwrap();
+
+        let err = runner
+            .process_response(json!({"items":[{"id":1}]}), None)
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("extract_items_pointer must resolve to an array"));
     }
 }
