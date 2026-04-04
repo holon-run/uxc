@@ -182,6 +182,7 @@ export interface SubscribeStartArgs {
   operationId?: string;
   args?: Record<string, unknown>;
   mode?: "stream" | "poll";
+  pollConfig?: PollSubscriptionConfig;
   options?: RuntimeInvokeOptions;
   sink?: `file:${string}` | "memory:";
   ephemeral?: boolean;
@@ -191,6 +192,35 @@ export interface SubscribeStartArgs {
     | "discord_gateway"
     | "slack_socket_mode"
     | "feishu_long_connection";
+}
+
+export interface PollSubscriptionConfig {
+  interval_secs: number;
+  extract_items_pointer: string;
+  missing_extract_items_pointer_as_empty?: boolean;
+  request_cursor_arg?: string;
+  response_cursor_pointer?: string;
+  cursor_from_item_pointer?: string;
+  cursor_transform?: "increment";
+  checkpoint_strategy:
+    | {
+        type: "cursor_only";
+      }
+    | {
+        type: "item_key";
+        item_key_pointer: string;
+        seen_window?: number;
+      }
+    | {
+        type: "watermark";
+        item_watermark_pointer: string;
+        item_tiebreaker_pointer?: string;
+        seen_window?: number;
+      }
+    | {
+        type: "content_hash";
+        seen_window?: number;
+      };
 }
 
 export class DaemonRpcError extends Error {
@@ -292,7 +322,7 @@ export class UxcDaemonClient {
       subprotocols: [],
       initial_text_frames: [],
       mode: args.mode ?? "stream",
-      poll_config: null,
+      poll_config: args.pollConfig ?? null,
       ephemeral: args.ephemeral ?? (args.sink ?? "memory:") === "memory:",
       options: normalizeOptions(args.options),
     });
