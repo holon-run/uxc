@@ -310,6 +310,13 @@ export class UxcDaemonClient {
   }
 
   async subscribeStart(args: SubscribeStartArgs): Promise<SubscribeStartResponse> {
+    const mode = args.mode ?? (args.pollConfig ? "poll" : "stream");
+    if (mode === "poll" && !args.pollConfig) {
+      throw new Error("pollConfig is required when mode is 'poll'");
+    }
+    if (mode !== "poll" && args.pollConfig) {
+      throw new Error("pollConfig is only valid when mode is 'poll'");
+    }
     return this.request("subscription.start", {
       request_id: requestId("subscribe"),
       endpoint: args.endpoint,
@@ -321,7 +328,7 @@ export class UxcDaemonClient {
       transport_hint: args.transportHint ?? null,
       subprotocols: [],
       initial_text_frames: [],
-      mode: args.mode ?? "stream",
+      mode,
       poll_config: args.pollConfig ?? null,
       ephemeral: args.ephemeral ?? (args.sink ?? "memory:") === "memory:",
       options: normalizeOptions(args.options),
