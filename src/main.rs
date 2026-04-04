@@ -2086,7 +2086,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint, reuses auth/cache behavior, and automatically falls back between modern and legacy GraphQL websocket profiles.".to_string(),
                 "For JSON-RPC pubsub, pass a ws:// or wss:// endpoint plus a method ending in _subscribe; send raw JSON-RPC params through '{\"params\":...}'.".to_string(),
                 "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>; add --read-resource to append resources/read snapshots alongside update notifications.".to_string(),
-                "For poll mode, pass a normal operation ID plus --mode poll and --poll-config '{...}'; poll config controls interval, extraction, checkpoint strategy, and optional item-derived request cursors.".to_string(),
+                "For poll mode, pass a normal operation ID plus --mode poll and --poll-config '{...}'; poll config controls interval, extraction, checkpoint strategy, and optional item-derived request cursors. Use extract_items_pointer:\"\" when the response root is already an array.".to_string(),
                 "Subscriptions are durable by default. Use --ephemeral when the job should not auto-resume after daemon restart.".to_string(),
             ],
             examples: vec![
@@ -2100,6 +2100,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\",\"_select\":\"id body\"}' --sink file:/tmp/graphql.ndjson".to_string(),
                 "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"logs\",{\"address\":\"0xabc\"}]}' --sink file:/tmp/logs.ndjson".to_string(),
                 "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}' --sink file:/tmp/events.ndjson".to_string(),
+                "uxc subscribe start https://api.github.com get:/repos/{owner}/{repo}/events owner=holon-run repo=uxc --mode poll --poll-config '{\"interval_secs\":30,\"extract_items_pointer\":\"\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}' --sink file:/tmp/github-events.ndjson".to_string(),
                 "uxc subscribe start https://api.telegram.org post:/getUpdates --mode poll --poll-config '{\"interval_secs\":2,\"extract_items_pointer\":\"/result\",\"request_cursor_arg\":\"offset\",\"cursor_from_item_pointer\":\"/update_id\",\"cursor_transform\":\"increment\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/update_id\"}}' --sink file:/tmp/telegram.ndjson".to_string(),
                 "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --read-resource --sink file:/tmp/mcp-http.ndjson".to_string(),
                 "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --read-resource --sink file:/tmp/mcp.ndjson".to_string(),
