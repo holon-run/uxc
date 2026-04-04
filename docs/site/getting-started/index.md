@@ -6,6 +6,7 @@ Use this section to get from install to a first successful call.
 
 - [Install](./install.md)
 - [First Call](./first-call.md)
+- [Import Existing MCP Config](./import-mcp-config.md)
 
 ## Core Flow
 
@@ -24,8 +25,14 @@ Use this section to get from install to a first successful call.
 
 - [First Call](./first-call.md)
   Most first calls should start from discovery, not direct execution.
+  <!-- mdorigin:index kind=article -->
+
+- [Import Existing MCP Config](./import-mcp-config.md)
+  If you already have MCP servers configured in tools like Cursor, Claude Code, Claude Desktop, VS Code, Codex, Windsurf, or OpenCode, UXC can import them into its own link and auth model.
+  <!-- mdorigin:index kind=article -->
 
 - [Install](./install.md)
   ```bash brew tap holon-run/homebrew-tap brew install uxc ```
+  <!-- mdorigin:index kind=article -->
 
 <!-- INDEX:END -->

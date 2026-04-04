@@ -87,9 +87,34 @@ Wrapper skills should default to a fixed local link command instead of calling `
    - `uxc link <link_name> <host>`
    - For OpenAPI services whose schema is hosted at a separate fixed URL, create the link with `uxc link <link_name> <host> --schema-url <schema_url>`
    - For stdio hosts that need credential-driven child env auth, create the link with `uxc link <link_name> <host> --credential <credential_id> --inject-env NAME={{secret}}`
+   - If the link is being created as part of a wrapper skill, persist source metadata with `--skill <skill_name> --skill-doc <docs_url> --skill-path <local_skill_path>` so later help output preserves skill context.
 4. Validate link command:
    - `<link_name> -h`
 5. Use only the link command for the rest of the skill flow.
+
+### Import Existing MCP Config First
+
+If an MCP server is already configured in a supported editor or local agent, prefer
+importing it before hand-writing a new link:
+
+- Preview imports:
+  - `uxc config import mcp --dry-run`
+- Auto-discover common MCP config sources and import them:
+  - `uxc config import mcp --from auto`
+- Import from a specific source preset:
+  - `uxc config import mcp --from cursor`
+  - `uxc config import mcp --from codex`
+
+Supported presets in v1 include:
+
+- `auto`
+- `cursor`
+- `claude-code`
+- `claude-desktop`
+- `vscode`
+- `codex`
+- `windsurf`
+- `opencode`
 
 ### Naming Governance
 
@@ -137,6 +162,8 @@ Default output is JSON. Do not use `--text` in agent automation paths.
 
 - Workflow details and progressive invocation patterns:
   - `references/usage-patterns.md`
+- Generated runtime client flow:
+  - `https://uxc.holon.run/ecosystem/typescript-client/`
 - Protocol operation naming quick reference:
   - `references/protocol-cheatsheet.md`
 - Public endpoint examples and availability notes:

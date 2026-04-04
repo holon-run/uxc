@@ -24,6 +24,8 @@ For local app integration, UXC ships an official Node/TypeScript package:
 npm install @holon-run/uxc-daemon-client
 ```
 
+- [Generated TypeScript Clients](./typescript-client.md)
+
 ## Current Detail Docs
 
 Some ecosystem details still live in the repository:
@@ -31,5 +33,9 @@ Some ecosystem details still live in the repository:
 - [Skills Publish and Maintenance Log](https://github.com/holon-run/uxc/blob/main/docs/operations/skills.md)
 
 <!-- INDEX:START -->
+
+- [Generated TypeScript Clients](./typescript-client.md)
+  UXC ships a daemon client package for local app integration:
+  <!-- mdorigin:index kind=article -->
 
 <!-- INDEX:END -->

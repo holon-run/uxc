@@ -48,3 +48,7 @@ Typical request shape:
 ## TypeScript Client
 
 The first-party Node package is `@holon-run/uxc-daemon-client`.
+
+See also:
+
+- [Generated TypeScript Clients](../ecosystem/typescript-client.md)
