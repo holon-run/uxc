@@ -1785,6 +1785,7 @@ async fn execute_endpoint_via_daemon(
             schema_mapping_file: std::env::var("UXC_SCHEMA_MAPPINGS_FILE").ok(),
             daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
             daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
+            request_headers: HashMap::new(),
         },
     };
 
@@ -2086,7 +2087,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint, reuses auth/cache behavior, and automatically falls back between modern and legacy GraphQL websocket profiles.".to_string(),
                 "For JSON-RPC pubsub, pass a ws:// or wss:// endpoint plus a method ending in _subscribe; send raw JSON-RPC params through '{\"params\":...}'.".to_string(),
                 "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>; add --read-resource to append resources/read snapshots alongside update notifications.".to_string(),
-                "For poll mode, pass a normal operation ID plus --mode poll and --poll-config '{...}'; poll config controls interval, extraction, checkpoint strategy, and optional item-derived request cursors. Use extract_items_pointer:\"\" when the response root is already an array.".to_string(),
+                "For poll mode, pass a normal operation ID plus --mode poll and --poll-config '{...}'; poll config controls interval, extraction, checkpoint strategy, and optional item-derived request cursors. Use extract_items_pointer:\"\" when the response root is already an array. Poll runtime automatically tracks ETag/If-None-Match and honors X-Poll-Interval when provided by the endpoint.".to_string(),
                 "Subscriptions are durable by default. Use --ephemeral when the job should not auto-resume after daemon restart.".to_string(),
             ],
             examples: vec![
@@ -5432,6 +5433,7 @@ async fn handle_subscribe_command(
                     schema_mapping_file: None,
                     daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
                     daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
+                    request_headers: HashMap::new(),
                 },
             };
             let data = serde_json::to_value(daemon::subscribe_start_client(&request).await?)?;

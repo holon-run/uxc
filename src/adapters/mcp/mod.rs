@@ -556,6 +556,8 @@ impl Adapter for McpAdapter {
                 metadata: super::ExecutionMetadata {
                     duration_ms: start.elapsed().as_millis() as u64,
                     operation: operation.to_string(),
+                    response_status_code: None,
+                    response_headers: std::collections::HashMap::new(),
                 },
             });
         }
@@ -583,6 +585,8 @@ impl Adapter for McpAdapter {
                 metadata: super::ExecutionMetadata {
                     duration_ms: start.elapsed().as_millis() as u64,
                     operation: operation.to_string(),
+                    response_status_code: None,
+                    response_headers: std::collections::HashMap::new(),
                 },
             });
         }

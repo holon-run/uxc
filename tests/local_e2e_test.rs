@@ -1383,6 +1383,92 @@ fn test_poll_subscribe_supports_top_level_array_responses() {
 
 #[test]
 #[serial_test::serial]
+fn test_poll_subscribe_uses_etag_conditional_requests_and_handles_304() {
+    let server = start_test_server("openapi", "ok");
+    let test_home = fresh_test_home_dir();
+    let sink_path = test_home.join("github-poll-conditional-subscribe.ndjson");
+    let sink_spec = format!("file:{}", sink_path.display());
+    let endpoint = format!("http://{}/", server.addr);
+    let poll_config = r#"{"interval_secs":1,"extract_items_pointer":"","checkpoint_strategy":{"type":"item_key","item_key_pointer":"/id"}}"#;
+
+    let start = run_uxc_in_home(
+        &[
+            "subscribe",
+            "start",
+            &endpoint,
+            "get:/poll/github-events-conditional",
+            "--mode",
+            "poll",
+            "--poll-config",
+            poll_config,
+            "--sink",
+            &sink_spec,
+        ],
+        &test_home,
+    );
+    assert!(
+        start.is_ok(),
+        "Conditional top-level poll subscribe start failed: {:?}",
+        start
+    );
+    let start_json: serde_json::Value = serde_json::from_str(&start.unwrap()).unwrap();
+    assert_eq!(start_json["ok"], true);
+    assert_eq!(start_json["data"]["protocol"], "openapi");
+    assert_eq!(start_json["data"]["mode"], "poll");
+    let job_id = start_json["data"]["job_id"].as_str().unwrap().to_string();
+
+    assert!(
+        wait_for_file_contains(&sink_path, r#""id":"evt-2""#, Duration::from_secs(5)),
+        "Conditional poll subscribe sink did not receive first data batch"
+    );
+    assert!(
+        wait_for_file_contains(&sink_path, r#""not_modified":true"#, Duration::from_secs(5)),
+        "Conditional poll subscribe sink did not record 304 not-modified cycle"
+    );
+    assert!(
+        wait_for_file_contains(
+            &sink_path,
+            r#""poll_interval_secs":2"#,
+            Duration::from_secs(5)
+        ),
+        "Conditional poll subscribe sink did not honor x-poll-interval"
+    );
+
+    let sink_body = std::fs::read_to_string(&sink_path).expect("read sink file");
+    assert_eq!(sink_body.matches(r#""id":"evt-1""#).count(), 1);
+    assert_eq!(sink_body.matches(r#""id":"evt-2""#).count(), 1);
+    assert!(
+        sink_body.contains(r#""etag":"\"etag-v1\"""#),
+        "Conditional poll subscribe sink did not persist etag in checkpoint metadata"
+    );
+
+    let status = run_uxc_in_home(&["subscribe", "status", &job_id], &test_home);
+    assert!(
+        status.is_ok(),
+        "Conditional poll subscribe status failed: {:?}",
+        status
+    );
+    let status_json: serde_json::Value = serde_json::from_str(&status.unwrap()).unwrap();
+    assert_eq!(status_json["ok"], true);
+    assert_eq!(status_json["data"]["protocol"], "openapi");
+    assert_eq!(status_json["data"]["mode"], "poll");
+    assert_eq!(status_json["data"]["status"], "running");
+    assert_eq!(status_json["data"]["reconnect_count"], 0);
+    assert!(status_json["data"]["last_error"].is_null());
+
+    let stop = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    assert!(
+        stop.is_ok(),
+        "Conditional poll subscribe stop failed: {:?}",
+        stop
+    );
+    let stop_json: serde_json::Value = serde_json::from_str(&stop.unwrap()).unwrap();
+    assert_eq!(stop_json["ok"], true);
+    assert_eq!(stop_json["data"]["stopped"], true);
+}
+
+#[test]
+#[serial_test::serial]
 fn test_graphql_subscribe_start_status_stop_writes_file() {
     let server = start_test_server("graphql", "ok");
     let test_home = fresh_test_home_dir();

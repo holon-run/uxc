@@ -5,7 +5,7 @@ use anyhow::Result;
 use axum::{
     body::{Body, Bytes},
     extract::{Path as AxumPath, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -216,6 +216,34 @@ fn create_router(state: ServerState) -> Router {
                         }
                       }
                     }
+                  }
+                }
+              }
+            },
+            "/poll/github-events-conditional": {
+              "get": {
+                "operationId": "poll_github_events_conditional",
+                "summary": "Top-level array polling endpoint with ETag and 304 support",
+                "responses": {
+                  "200": {
+                    "description": "GitHub-style top-level event list",
+                    "content": {
+                      "application/json": {
+                        "schema": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {"type": "string"},
+                              "type": {"type": "string"}
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "304": {
+                    "description": "No new events"
                   }
                 }
               }
@@ -628,12 +656,74 @@ fn create_router(state: ServerState) -> Router {
         }
     }
 
+    async fn poll_github_events_conditional(
+        State(state): State<ServerState>,
+        headers: HeaderMap,
+    ) -> Result<Response, StatusCode> {
+        match state.scenario {
+            Scenario::Ok
+            | Scenario::EmptyObjectRequired
+            | Scenario::Legacy
+            | Scenario::SuiPubSub
+            | Scenario::ToolsListFailAfterFirst
+            | Scenario::ToolCallTimeout
+            | Scenario::ToolStructuredError
+            | Scenario::StructuredContent
+            | Scenario::ResourceReadFailOnce
+            | Scenario::SessionScopedResource
+            | Scenario::DynamicToolset
+            | Scenario::CanReapKeepAlive
+            | Scenario::CanReapAllowReap
+            | Scenario::CanReapTimeout => {
+                let inbound_etag = headers
+                    .get("if-none-match")
+                    .and_then(|value| value.to_str().ok());
+                if inbound_etag == Some("\"etag-v1\"") {
+                    return Ok(Response::builder()
+                        .status(StatusCode::NOT_MODIFIED)
+                        .header("x-poll-interval", "2")
+                        .header("etag", "\"etag-v1\"")
+                        .body(Body::empty())
+                        .unwrap());
+                }
+
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .header("x-poll-interval", "2")
+                    .header("etag", "\"etag-v1\"")
+                    .body(
+                        serde_json::to_vec(&json!([
+                            {"id": "evt-1", "type": "PushEvent"},
+                            {"id": "evt-2", "type": "IssuesEvent"}
+                        ]))
+                        .unwrap()
+                        .into(),
+                    )
+                    .unwrap())
+            }
+            Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
+            Scenario::Malformed => Ok(Response::builder()
+                .header("content-type", "application/json")
+                .body("[broken".into())
+                .unwrap()),
+            Scenario::Timeout => {
+                tokio::time::sleep(super::common::timeout_duration()).await;
+                Ok(Json(json!([])).into_response())
+            }
+        }
+    }
+
     Router::new()
         .route("/openapi.json", get(serve_schema))
         .route("/health", get(health_check))
         .route("/stream", get(stream_json))
         .route("/poll/events", get(poll_events))
         .route("/poll/github-events", get(poll_github_events))
+        .route(
+            "/poll/github-events-conditional",
+            get(poll_github_events_conditional),
+        )
         .route("/poll/telegram-updates", get(poll_telegram_updates))
         .route("/users", get(list_users).post(create_user))
         .route("/users/:id", get(get_user))

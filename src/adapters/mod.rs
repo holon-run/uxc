@@ -166,6 +166,10 @@ pub struct ExecutionMetadata {
     pub duration_ms: u64,
     #[allow(dead_code)]
     pub operation: String,
+    #[allow(dead_code)]
+    pub response_status_code: Option<u16>,
+    #[allow(dead_code)]
+    pub response_headers: HashMap<String, String>,
 }
 
 /// Adapter trait - must be implemented by all protocol adapters

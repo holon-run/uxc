@@ -1274,6 +1274,8 @@ impl Adapter for GraphQLAdapter {
             metadata: ExecutionMetadata {
                 duration_ms: start.elapsed().as_millis() as u64,
                 operation: operation.to_string(),
+                response_status_code: None,
+                response_headers: HashMap::new(),
             },
         })
     }
