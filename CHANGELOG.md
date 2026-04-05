@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-04-05
+
+### Added
+- Added poll subscription support for top-level array responses, making REST feeds like GitHub-style event arrays usable without wrapping them in an extra object.
+- Added poll configuration support to the `@holon-run/uxc-daemon-client` package so local integrations can start poll-mode subscriptions through the daemon client.
+
+### Fixed
+- Improved poll-mode HTTP behavior with ETag handling, `304 Not Modified` support, and `x-poll-interval` response hints for adaptive polling against event feeds.
+- Expanded docs and install examples to cover the v0.13 runtime/import surface and current patch release version.
+
 ## [0.13.0] - 2026-04-03
 
 ### Added
@@ -384,7 +394,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/holon-run/uxc/releases/tag/v0.13.1
 [0.13.0]: https://github.com/holon-run/uxc/releases/tag/v0.13.0
 [0.12.2]: https://github.com/holon-run/uxc/releases/tag/v0.12.2
 [0.12.1]: https://github.com/holon-run/uxc/releases/tag/v0.12.1
