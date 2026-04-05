@@ -61,6 +61,27 @@ It does not require an `NPM_TOKEN`.
 
 Windows users should run UXC through WSL.
 
+## Post-release Checklist
+
+After the workflow creates the GitHub Release, review and update the release page.
+
+Do not keep the default auto-generated PR list as the final release notes.
+Replace it with a short curated summary that matches the shipped version:
+
+- highlight the main user-facing changes
+- keep the scope aligned with the actual tagged release
+- include install commands for the tagged version when helpful
+
+Typical command flow:
+
+```bash
+gh release view vX.Y.Z
+gh release edit vX.Y.Z --notes-file /path/to/release-notes.md
+```
+
+For patch releases, keep the notes short and focused.
+For feature releases, summarize the product direction as well as the main technical additions.
+
 ## Rollback
 
 If release failed after tag push:
