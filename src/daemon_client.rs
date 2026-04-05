@@ -25,6 +25,7 @@ pub struct DaemonClientOptions {
     pub schema_mapping_file: Option<String>,
     pub daemon_exclusive: Vec<String>,
     pub daemon_idle_ttl: Option<u64>,
+    pub request_headers: HashMap<String, String>,
 }
 
 impl From<DaemonClientOptions> for RuntimeInvokeOptions {
@@ -44,6 +45,7 @@ impl From<DaemonClientOptions> for RuntimeInvokeOptions {
             schema_mapping_file: value.schema_mapping_file,
             daemon_exclusive: value.daemon_exclusive,
             daemon_idle_ttl: value.daemon_idle_ttl,
+            request_headers: value.request_headers,
         }
     }
 }

@@ -22,6 +22,7 @@ export interface RuntimeInvokeOptions {
   schema_mapping_file?: string;
   daemon_exclusive?: string[];
   daemon_idle_ttl?: number;
+  request_headers?: Record<string, string>;
 }
 
 export interface RuntimeInvokeResponse {
@@ -41,6 +42,8 @@ export interface RuntimeMeta {
   cache_stale?: boolean | null;
   cache_fallback?: boolean | null;
   daemon_session_reused?: boolean | null;
+  response_status_code?: number | null;
+  response_headers?: Record<string, string> | null;
   artifact_truncated?: boolean | null;
   artifact_kind?: string | null;
   artifact_bytes?: number | null;

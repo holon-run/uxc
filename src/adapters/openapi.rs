@@ -27,6 +27,7 @@ pub struct OpenAPIAdapter {
     schema_url_override: Option<String>,
     force_refresh_schema: bool,
     request_timeout: Option<Duration>,
+    request_headers: HashMap<String, String>,
 }
 
 impl OpenAPIAdapter {
@@ -60,6 +61,7 @@ impl OpenAPIAdapter {
             schema_url_override: None,
             force_refresh_schema: false,
             request_timeout: None,
+            request_headers: HashMap::new(),
         }
     }
 
@@ -85,6 +87,11 @@ impl OpenAPIAdapter {
 
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.request_timeout = timeout;
+        self
+    }
+
+    pub fn with_request_headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.request_headers = headers;
         self
     }
 
@@ -1972,6 +1979,9 @@ impl Adapter for OpenAPIAdapter {
                 for (name, value) in &prepared_headers {
                     req = req.header(name, value);
                 }
+                for (name, value) in &self.request_headers {
+                    req = req.header(name, value);
+                }
                 let mut req = Self::apply_resolved_request_auth(req, &full_url);
                 if let Some(body) = &prepared_json_body {
                     req = req.json(body);
@@ -1984,6 +1994,19 @@ impl Adapter for OpenAPIAdapter {
             })
             .await?;
         let status = resp.status();
+        let response_headers = collect_response_headers(resp.headers());
+
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(ExecutionResult {
+                data: Value::Null,
+                metadata: ExecutionMetadata {
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    operation: operation.to_string(),
+                    response_status_code: Some(status.as_u16()),
+                    response_headers,
+                },
+            });
+        }
 
         // Check HTTP status and provide detailed error info
         if !status.is_success() {
@@ -2040,9 +2063,23 @@ impl Adapter for OpenAPIAdapter {
             metadata: ExecutionMetadata {
                 duration_ms: start.elapsed().as_millis() as u64,
                 operation: operation.to_string(),
+                response_status_code: Some(status.as_u16()),
+                response_headers,
             },
         })
     }
+}
+
+fn collect_response_headers(headers: &reqwest::header::HeaderMap) -> HashMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2655,6 +2692,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn execute_treats_304_not_modified_as_success_with_headers() {
+        let mut server = mockito::Server::new_async().await;
+        let schema_url = format!("{}/openapi.json", server.url());
+        let _schema = server
+            .mock("GET", "/openapi.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                  "openapi": "3.1.0",
+                  "info": {"title":"Test","version":"1.0.0"},
+                  "paths": {
+                    "/events": {
+                      "get": {
+                        "responses": {
+                          "200": {"description":"ok"},
+                          "304": {"description":"not_modified"}
+                        }
+                      }
+                    }
+                  }
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let _events = server
+            .mock("GET", "/events")
+            .with_status(304)
+            .with_header("ETag", "\"etag-v1\"")
+            .with_header("X-Poll-Interval", "5")
+            .create_async()
+            .await;
+
+        let adapter = OpenAPIAdapter::new().with_schema_url_override(Some(schema_url));
+        let result = adapter
+            .execute(&server.url(), "get:/events", HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.data.is_null());
+        assert_eq!(result.metadata.response_status_code, Some(304));
+        assert_eq!(
+            result
+                .metadata
+                .response_headers
+                .get("etag")
+                .map(String::as_str),
+            Some("\"etag-v1\"")
+        );
+        assert_eq!(
+            result
+                .metadata
+                .response_headers
+                .get("x-poll-interval")
+                .map(String::as_str),
+            Some("5")
+        );
     }
 
     #[tokio::test]

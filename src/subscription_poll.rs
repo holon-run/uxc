@@ -63,12 +63,16 @@ pub struct PollCheckpointState {
     pub tie_breaker: Option<Value>,
     #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
     pub seen_keys: VecDeque<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PollFetchResult {
     pub data: Value,
     pub duration_ms: Option<u64>,
+    pub status_code: Option<u16>,
+    pub response_headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,13 +82,19 @@ pub struct PollCycleOutput {
     pub skipped_items: usize,
     pub duration_ms: Option<u64>,
     pub checkpoint_meta: Option<Value>,
+    pub not_modified: bool,
+    pub poll_interval_secs: Option<u64>,
 }
 
 #[async_trait]
 pub trait PollRuntimeContext: Send {
     async fn load_checkpoint(&mut self) -> Result<Option<PollCheckpointState>>;
     async fn store_checkpoint(&mut self, checkpoint: &PollCheckpointState) -> Result<()>;
-    async fn fetch(&mut self, args: HashMap<String, Value>) -> Result<PollFetchResult>;
+    async fn fetch(
+        &mut self,
+        args: HashMap<String, Value>,
+        checkpoint: &PollCheckpointState,
+    ) -> Result<PollFetchResult>;
 }
 
 #[async_trait]
@@ -273,6 +283,7 @@ impl PollSubscriptionRunner {
                 "watermark": self.checkpoint.watermark.clone(),
                 "tie_breaker": self.checkpoint.tie_breaker.clone(),
                 "seen_window_len": self.checkpoint.seen_keys.len(),
+                "etag": self.checkpoint.etag.clone(),
             })
         });
 
@@ -282,6 +293,8 @@ impl PollSubscriptionRunner {
             skipped_items,
             duration_ms,
             checkpoint_meta,
+            not_modified: false,
+            poll_interval_secs: None,
         })
     }
 
@@ -430,6 +443,7 @@ pub async fn run_poll_subscription_runtime<C: PollRuntimeContext, O: PollRuntime
     stop_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     let mut runner = PollSubscriptionRunner::new(config.clone())?;
+    let default_interval_secs = config.interval_secs.max(1);
     if let Some(checkpoint) = context.load_checkpoint().await? {
         runner.restore_checkpoint(checkpoint);
     }
@@ -443,33 +457,83 @@ pub async fn run_poll_subscription_runtime<C: PollRuntimeContext, O: PollRuntime
         }
 
         let args = runner.build_request_args(&base_args);
-        let fetch = context.fetch(args).await;
+        let next_interval_secs: u64;
+        let fetch = context.fetch(args, runner.checkpoint()).await;
         match fetch {
             Ok(result) => {
-                let output = runner.process_response(result.data, result.duration_ms)?;
-                observer.update_status(Some("running"), None, false).await?;
-                let emitted_items = output.emitted_items.len();
-                for item in output.emitted_items {
-                    observer.emit("data", Some(item), None).await?;
+                let previous_checkpoint = runner.checkpoint().clone();
+                if let Some(etag) = extract_header_value(&result.response_headers, "etag") {
+                    runner.checkpoint.etag = Some(etag.to_string());
                 }
-                observer
-                    .emit(
-                        "poll",
-                        None,
-                        Some(json!({
-                            "fetched_items": output.fetched_items,
-                            "emitted_items": emitted_items,
-                            "skipped_items": output.skipped_items,
-                            "duration_ms": output.duration_ms,
-                        })),
-                    )
-                    .await?;
-                if let Some(meta) = output.checkpoint_meta {
-                    context.store_checkpoint(runner.checkpoint()).await?;
-                    observer.emit("checkpoint", None, Some(meta)).await?;
+
+                if let Some(interval) = parse_poll_interval_secs(&result.response_headers) {
+                    next_interval_secs = interval;
+                } else {
+                    next_interval_secs = default_interval_secs;
+                }
+
+                if result.status_code == Some(304) {
+                    observer.update_status(Some("running"), None, false).await?;
+                    observer
+                        .emit(
+                            "poll",
+                            None,
+                            Some(json!({
+                                "fetched_items": 0,
+                                "emitted_items": 0,
+                                "skipped_items": 0,
+                                "duration_ms": result.duration_ms,
+                                "not_modified": true,
+                                "poll_interval_secs": next_interval_secs,
+                            })),
+                        )
+                        .await?;
+                    if runner.checkpoint() != &previous_checkpoint {
+                        context.store_checkpoint(runner.checkpoint()).await?;
+                        observer
+                            .emit(
+                                "checkpoint",
+                                None,
+                                Some(json!({
+                                    "cursor": runner.checkpoint().cursor.clone(),
+                                    "watermark": runner.checkpoint().watermark.clone(),
+                                    "tie_breaker": runner.checkpoint().tie_breaker.clone(),
+                                    "seen_window_len": runner.checkpoint().seen_keys.len(),
+                                    "etag": runner.checkpoint().etag.clone(),
+                                })),
+                            )
+                            .await?;
+                    }
+                } else {
+                    let mut output = runner.process_response(result.data, result.duration_ms)?;
+                    output.poll_interval_secs = Some(next_interval_secs);
+                    observer.update_status(Some("running"), None, false).await?;
+                    let emitted_items = output.emitted_items.len();
+                    for item in output.emitted_items {
+                        observer.emit("data", Some(item), None).await?;
+                    }
+                    observer
+                        .emit(
+                            "poll",
+                            None,
+                            Some(json!({
+                                "fetched_items": output.fetched_items,
+                                "emitted_items": emitted_items,
+                                "skipped_items": output.skipped_items,
+                                "duration_ms": output.duration_ms,
+                                "not_modified": output.not_modified,
+                                "poll_interval_secs": output.poll_interval_secs,
+                            })),
+                        )
+                        .await?;
+                    if let Some(meta) = output.checkpoint_meta {
+                        context.store_checkpoint(runner.checkpoint()).await?;
+                        observer.emit("checkpoint", None, Some(meta)).await?;
+                    }
                 }
             }
             Err(err) => {
+                next_interval_secs = default_interval_secs;
                 let message = err.to_string();
                 observer
                     .emit("error", None, Some(json!({ "message": message })))
@@ -480,7 +544,7 @@ pub async fn run_poll_subscription_runtime<C: PollRuntimeContext, O: PollRuntime
             }
         }
 
-        if wait_for_stop_or_timeout(stop_rx, Duration::from_secs(config.interval_secs)).await {
+        if wait_for_stop_or_timeout(stop_rx, Duration::from_secs(next_interval_secs)).await {
             close_as_stopped(observer).await?;
             return Ok(());
         }
@@ -599,6 +663,24 @@ fn is_newer_item(
             },
         },
     }
+}
+
+fn extract_header_value<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
+    headers
+        .get(&name.to_ascii_lowercase())
+        .or_else(|| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value)
+        })
+        .map(String::as_str)
+}
+
+fn parse_poll_interval_secs(headers: &HashMap<String, String>) -> Option<u64> {
+    let raw = extract_header_value(headers, "x-poll-interval")?;
+    let parsed = raw.trim().parse::<u64>().ok()?;
+    Some(parsed.clamp(1, 3600))
 }
 
 fn stop_requested(stop_rx: &watch::Receiver<bool>) -> bool {
@@ -1085,5 +1167,22 @@ mod tests {
         assert!(err
             .to_string()
             .contains("extract_items_pointer must resolve to an array"));
+    }
+
+    #[test]
+    fn parse_poll_interval_from_headers_clamps_and_accepts_case_insensitive_name() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Poll-Interval".to_string(), "0".to_string());
+        assert_eq!(parse_poll_interval_secs(&headers), Some(1));
+
+        headers.insert("x-poll-interval".to_string(), "7200".to_string());
+        assert_eq!(parse_poll_interval_secs(&headers), Some(3600));
+    }
+
+    #[test]
+    fn extract_header_value_matches_case_insensitive_keys() {
+        let mut headers = HashMap::new();
+        headers.insert("ETag".to_string(), "\"abc\"".to_string());
+        assert_eq!(extract_header_value(&headers, "etag"), Some("\"abc\""));
     }
 }

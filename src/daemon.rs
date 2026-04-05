@@ -153,6 +153,8 @@ pub struct RuntimeInvokeOptions {
     pub daemon_exclusive: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_idle_ttl: Option<u64>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub request_headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +176,9 @@ pub struct RuntimeMeta {
     pub cache_stale: Option<bool>,
     pub cache_fallback: Option<bool>,
     pub daemon_session_reused: Option<bool>,
+    pub response_status_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<HashMap<String, String>>,
     pub artifact_truncated: Option<bool>,
     pub artifact_kind: Option<String>,
     pub artifact_bytes: Option<u64>,
@@ -2816,6 +2821,10 @@ impl DaemonRuntime {
             resolved.adapter,
             request_timeout_duration(request.options.timeout_ms),
         );
+        resolved.adapter = inject_request_headers_if_supported(
+            resolved.adapter,
+            request.options.request_headers.clone(),
+        );
         let mut meta = RuntimeMeta::default();
         if let Some(cache_meta) = resolved.cache_meta {
             meta.schema_involved = Some(true);
@@ -2854,9 +2863,12 @@ impl DaemonRuntime {
             meta.schema_involved = Some(true);
         }
 
-        let mut result: Result<(String, Option<String>, Value)> = if protocol == "mcp"
-            && matches!(request.action, RuntimeAction::Execute)
-        {
+        let mut result: Result<(
+            String,
+            Option<String>,
+            Value,
+            Option<adapters::ExecutionMetadata>,
+        )> = if protocol == "mcp" && matches!(request.action, RuntimeAction::Execute) {
             let prepared_args = prepare_runtime_execute_args(&resolved.adapter, &request).await?;
             // Clone the pre-computed stdio_spawn_options to avoid duplicate secret resolution
             let stdio_options = stdio_spawn_options.clone();
@@ -2880,7 +2892,7 @@ impl DaemonRuntime {
                 .await;
             }
 
-            Ok((kind, operation, data))
+            Ok((kind, operation, data, None))
         } else if protocol == "mcp" {
             if let Some(live_result) = invoke_live_stdio_mcp_help(
                 self,
@@ -2890,7 +2902,7 @@ impl DaemonRuntime {
             )
             .await?
             {
-                Ok(live_result)
+                Ok((live_result.0, live_result.1, live_result.2, None))
             } else {
                 invoke_with_adapter(&resolved.adapter, &request).await
             }
@@ -2921,6 +2933,10 @@ impl DaemonRuntime {
                         adapter = inject_timeout_if_supported(
                             adapter,
                             request_timeout_duration(request.options.timeout_ms),
+                        );
+                        adapter = inject_request_headers_if_supported(
+                            adapter,
+                            request.options.request_headers.clone(),
                         );
                         adapter =
                             inject_refresh_if_supported(adapter, request.options.refresh_schema);
@@ -2957,7 +2973,7 @@ impl DaemonRuntime {
                                 )
                                 .await?;
                             meta.daemon_session_reused = Some(reused);
-                            Ok((kind, operation, data))
+                            Ok((kind, operation, data, None))
                         } else {
                             invoke_with_adapter(&adapter, &request).await
                         };
@@ -2967,8 +2983,14 @@ impl DaemonRuntime {
         }
 
         match result {
-            Ok((kind, operation, mut data)) => {
+            Ok((kind, operation, mut data, execution_meta)) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
+                if let Some(execution_meta) = execution_meta {
+                    meta.response_status_code = execution_meta.response_status_code;
+                    if !execution_meta.response_headers.is_empty() {
+                        meta.response_headers = Some(execution_meta.response_headers);
+                    }
+                }
                 apply_runtime_artifact_compaction(&kind, &mut data, &mut meta)?;
                 self.log(
                     DaemonLogEntry::new(DaemonEventType::RuntimeInvokeSuccess)
@@ -5007,7 +5029,14 @@ impl PollRuntimeContext for DaemonPollContext {
     async fn fetch(
         &mut self,
         args: HashMap<String, Value>,
+        checkpoint: &crate::subscription_poll::PollCheckpointState,
     ) -> Result<crate::subscription_poll::PollFetchResult> {
+        let mut options = self.request.options.clone();
+        if let Some(etag) = checkpoint.etag.as_ref() {
+            options
+                .request_headers
+                .insert("if-none-match".to_string(), etag.clone());
+        }
         let response = self
             .runtime
             .invoke(RuntimeInvokeRequest {
@@ -5016,12 +5045,14 @@ impl PollRuntimeContext for DaemonPollContext {
                 action: RuntimeAction::Execute,
                 operation_id: self.request.operation_id.clone(),
                 args: Some(args),
-                options: self.request.options.clone(),
+                options,
             })
             .await?;
         Ok(crate::subscription_poll::PollFetchResult {
             data: response.data,
             duration_ms: response.duration_ms,
+            status_code: response.meta.response_status_code,
+            response_headers: response.meta.response_headers.unwrap_or_default(),
         })
     }
 }
@@ -6646,6 +6677,21 @@ fn inject_timeout_if_supported(
     }
 }
 
+fn inject_request_headers_if_supported(
+    adapter: adapters::AdapterEnum,
+    request_headers: HashMap<String, String>,
+) -> adapters::AdapterEnum {
+    if request_headers.is_empty() {
+        return adapter;
+    }
+    match adapter {
+        adapters::AdapterEnum::OpenAPI(a) => {
+            adapters::AdapterEnum::OpenAPI(a.with_request_headers(request_headers))
+        }
+        other => other,
+    }
+}
+
 fn request_timeout_duration(timeout_ms: Option<u64>) -> Option<Duration> {
     timeout_ms
         .and_then(|value| (value > 0).then_some(value))
@@ -6761,7 +6807,12 @@ async fn resolve_adapter_with_schema_cache(
 async fn invoke_with_adapter(
     adapter: &AdapterEnum,
     request: &RuntimeInvokeRequest,
-) -> Result<(String, Option<String>, Value)> {
+) -> Result<(
+    String,
+    Option<String>,
+    Value,
+    Option<adapters::ExecutionMetadata>,
+)> {
     match request.action {
         RuntimeAction::HostHelp => {
             let operations = adapter.list_operations(&request.endpoint).await?;
@@ -6791,7 +6842,7 @@ async fn invoke_with_adapter(
             if let Some(service) = service {
                 payload["service"] = serde_json::to_value(service)?;
             }
-            Ok(("host_help".to_string(), None, payload))
+            Ok(("host_help".to_string(), None, payload, None))
         }
         RuntimeAction::CodegenSchema => {
             let operations = adapter.list_operations(&request.endpoint).await?;
@@ -6814,6 +6865,7 @@ async fn invoke_with_adapter(
                 "codegen_host_schema".to_string(),
                 None,
                 serde_json::to_value(schema)?,
+                None,
             ))
         }
         RuntimeAction::OperationHelp => {
@@ -6826,6 +6878,7 @@ async fn invoke_with_adapter(
                 "operation_detail".to_string(),
                 Some(op.clone()),
                 serde_json::to_value(detail)?,
+                None,
             ))
         }
         RuntimeAction::Execute => {
@@ -6835,7 +6888,12 @@ async fn invoke_with_adapter(
                 .ok_or_else(|| anyhow!("operation_id is required"))?;
             let args = prepare_runtime_execute_args(adapter, request).await?;
             let result = adapter.execute(&request.endpoint, op, args).await?;
-            Ok(("call_result".to_string(), Some(op.clone()), result.data))
+            Ok((
+                "call_result".to_string(),
+                Some(op.clone()),
+                result.data,
+                Some(result.metadata),
+            ))
         }
     }
 }
@@ -7288,6 +7346,7 @@ mod tests {
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
+                request_headers: HashMap::new(),
             },
         };
 
@@ -7399,6 +7458,7 @@ mod tests {
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
+                request_headers: HashMap::new(),
             },
         };
 
@@ -7474,6 +7534,7 @@ mod tests {
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
+                request_headers: HashMap::new(),
             },
         };
 
@@ -7506,6 +7567,7 @@ mod tests {
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
+                request_headers: HashMap::new(),
             },
         };
 
@@ -7620,6 +7682,7 @@ mod tests {
                 schema_mapping_file: None,
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
+                request_headers: HashMap::new(),
             },
         }
     }
