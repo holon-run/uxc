@@ -1,0 +1,44 @@
+name: Publish npm Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish from, for example v0.13.1
+        required: true
+        type: string
+
+env:
+  NODE_VERSION: 22
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish-npm:
+    name: Publish npm from tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+          token: ''
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript package
+        run: npm run build:ts
+
+      - name: Publish npm package
+        env:
+          NODE_AUTH_TOKEN: ''
+        run: npm publish --workspace @holon-run/uxc-daemon-client --access public --provenance

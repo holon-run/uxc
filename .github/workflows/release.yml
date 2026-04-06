@@ -168,9 +168,6 @@ jobs:
           # Trusted publishing should use OIDC, not token-based npm auth.
           token: ''
 
-      - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest
-
       - name: Install dependencies
         run: npm ci
 
