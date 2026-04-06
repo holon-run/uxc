@@ -675,6 +675,17 @@ struct PersistedSubscriptionStore {
     jobs: Vec<PersistedSubscriptionRecord>,
 }
 
+fn record_should_persist(record: &PersistedSubscriptionRecord) -> bool {
+    record.view.durable
+        && record.view.auto_resume
+        && !sink_is_memory(&record.request.sink)
+        && !sink_is_memory(&record.view.sink)
+}
+
+fn persisted_record_sink_path(record: &PersistedSubscriptionRecord) -> Result<PathBuf> {
+    parse_file_sink(&record.request.sink).or_else(|_| parse_file_sink(&record.view.sink))
+}
+
 impl McpStdioSession {
     fn apply_request_metadata(&mut self, metadata: &StdioSessionRequestMetadata<'_>) {
         let (
@@ -2045,19 +2056,41 @@ impl SubscriptionManager {
         }
         let mut next_id = 0_u64;
         let mut jobs = HashMap::new();
+        let mut sanitized_records = Vec::new();
+        let mut skipped_records = 0_usize;
         for record in store.jobs {
             next_id = next_id.max(parse_subscription_numeric_id(&record.view.job_id).unwrap_or(0));
+
+            if !record_should_persist(&record) {
+                skipped_records += 1;
+                continue;
+            }
+
+            let sink_path = match persisted_record_sink_path(&record) {
+                Ok(path) => path,
+                Err(err) => {
+                    skipped_records += 1;
+                    tracing::warn!(
+                        "Ignoring persisted subscription {} during daemon init: {}",
+                        record.view.job_id,
+                        err
+                    );
+                    continue;
+                }
+            };
+
             let (stop_tx, _) = watch::channel(false);
             jobs.insert(
                 record.view.job_id.clone(),
                 Arc::new(SubscriptionJobEntry {
-                    request: record.request,
-                    sink_path: parse_file_sink(&record.view.sink)?,
-                    view: Arc::new(Mutex::new(record.view)),
+                    request: record.request.clone(),
+                    sink_path,
+                    view: Arc::new(Mutex::new(record.view.clone())),
                     stop_tx: Mutex::new(stop_tx),
                     task: Mutex::new(None),
                 }),
             );
+            sanitized_records.push(record);
         }
         *self
             .jobs
@@ -2067,6 +2100,14 @@ impl SubscriptionManager {
             .next_id
             .try_lock()
             .expect("subscription id counter should not be contended during init") = next_id;
+        if skipped_records > 0 {
+            write_subscription_store(&self.store_path, &sanitized_records)?;
+            tracing::warn!(
+                "Dropped {} invalid or non-resumable persisted subscriptions from {}",
+                skipped_records,
+                self.store_path.display()
+            );
+        }
         Ok(())
     }
 
@@ -2077,10 +2118,13 @@ impl SubscriptionManager {
         };
         let mut records = Vec::with_capacity(entries.len());
         for entry in entries {
-            records.push(PersistedSubscriptionRecord {
+            let record = PersistedSubscriptionRecord {
                 request: entry.request.clone(),
                 view: entry.view.lock().await.clone(),
-            });
+            };
+            if record_should_persist(&record) {
+                records.push(record);
+            }
         }
         records.sort_by(|a, b| a.view.job_id.cmp(&b.view.job_id));
         records
@@ -7703,6 +7747,86 @@ mod tests {
     fn test_runtime_with_store(temp: &tempfile::TempDir) -> DaemonRuntime {
         DaemonRuntime::try_new_with_subscription_store_path(temp.path().join("subscriptions.json"))
             .expect("test daemon runtime should initialize")
+    }
+
+    #[tokio::test]
+    async fn daemon_runtime_init_skips_persisted_memory_sink_records() {
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("subscriptions.json");
+        let record = PersistedSubscriptionRecord {
+            request: subscription_request("https://example.com/stream", "memory:"),
+            view: SubscriptionJobView {
+                job_id: "sub_1".to_string(),
+                mode: SubscriptionMode::Stream,
+                endpoint: "https://example.com/stream".to_string(),
+                protocol: "websocket".to_string(),
+                sink: "memory:".to_string(),
+                resource_uri: None,
+                status: "running".to_string(),
+                durable: false,
+                auto_resume: false,
+                resume_strategy: "none".to_string(),
+                created_at_unix: now_unix_secs(),
+                started_at_unix: Some(now_unix_secs()),
+                stopped_at_unix: None,
+                last_event_at_unix: None,
+                last_error: None,
+                restart_count: 0,
+                last_resume_at_unix: None,
+                last_resume_error: None,
+                reconnect_count: 0,
+                written_events: 0,
+            },
+        };
+        write_subscription_store(&store_path, &[record]).unwrap();
+
+        let runtime = DaemonRuntime::try_new_with_subscription_store_path(store_path.clone())
+            .expect("daemon runtime should tolerate memory sink records");
+        assert!(runtime.subscribe_list().await.is_empty());
+
+        let raw = std::fs::read_to_string(&store_path).unwrap();
+        let store: PersistedSubscriptionStore = serde_json::from_str(&raw).unwrap();
+        assert!(store.jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn daemon_runtime_init_skips_persisted_records_with_invalid_file_sink() {
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("subscriptions.json");
+        let record = PersistedSubscriptionRecord {
+            request: subscription_request("https://example.com/stream", "bad-sink"),
+            view: SubscriptionJobView {
+                job_id: "sub_2".to_string(),
+                mode: SubscriptionMode::Stream,
+                endpoint: "https://example.com/stream".to_string(),
+                protocol: "websocket".to_string(),
+                sink: "bad-sink".to_string(),
+                resource_uri: None,
+                status: "running".to_string(),
+                durable: true,
+                auto_resume: true,
+                resume_strategy: "reconnect".to_string(),
+                created_at_unix: now_unix_secs(),
+                started_at_unix: Some(now_unix_secs()),
+                stopped_at_unix: None,
+                last_event_at_unix: None,
+                last_error: None,
+                restart_count: 0,
+                last_resume_at_unix: None,
+                last_resume_error: None,
+                reconnect_count: 0,
+                written_events: 0,
+            },
+        };
+        write_subscription_store(&store_path, &[record]).unwrap();
+
+        let runtime = DaemonRuntime::try_new_with_subscription_store_path(store_path.clone())
+            .expect("daemon runtime should tolerate invalid sink records");
+        assert!(runtime.subscribe_list().await.is_empty());
+
+        let raw = std::fs::read_to_string(&store_path).unwrap();
+        let store: PersistedSubscriptionStore = serde_json::from_str(&raw).unwrap();
+        assert!(store.jobs.is_empty());
     }
 
     #[tokio::test]
