@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to republish npm from, for example v0.13.1
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -155,6 +161,7 @@ jobs:
   publish-npm:
     name: Publish npm Package
     needs: release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -177,6 +184,34 @@ jobs:
       - name: Publish npm package
         env:
           # Ensure npm does not try registry token auth; rely on OIDC trusted publishing.
+          NODE_AUTH_TOKEN: ''
+        run: npm publish --workspace @holon-run/uxc-daemon-client --access public --provenance
+
+  republish-npm:
+    name: Republish npm Package
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+          token: ''
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript package
+        run: npm run build:ts
+
+      - name: Publish npm package
+        env:
           NODE_AUTH_TOKEN: ''
         run: npm publish --workspace @holon-run/uxc-daemon-client --access public --provenance
 
