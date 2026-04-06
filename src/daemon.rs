@@ -2101,12 +2101,18 @@ impl SubscriptionManager {
             .try_lock()
             .expect("subscription id counter should not be contended during init") = next_id;
         if skipped_records > 0 {
-            write_subscription_store(&self.store_path, &sanitized_records)?;
             tracing::warn!(
                 "Dropped {} invalid or non-resumable persisted subscriptions from {}",
                 skipped_records,
                 self.store_path.display()
             );
+            if let Err(err) = write_subscription_store(&self.store_path, &sanitized_records) {
+                tracing::warn!(
+                    "Failed to rewrite sanitized subscription store {} after dropping invalid or non-resumable records: {}",
+                    self.store_path.display(),
+                    err
+                );
+            }
         }
         Ok(())
     }
