@@ -49,6 +49,7 @@ bash skills/line-openapi-skill/scripts/validate.sh
 bash skills/feishu-openapi-skill/scripts/validate.sh
 bash skills/whatsapp-openapi-skill/scripts/validate.sh
 bash skills/dingtalk-openapi-skill/scripts/validate.sh
+bash skills/x-openapi-skill/scripts/validate.sh
 ```
 
 ### Data, Browser, and Web3

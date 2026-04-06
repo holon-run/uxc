@@ -1,0 +1,4 @@
+interface:
+  display_name: "X API v2"
+  short_description: "Operate X API v2 via UXC + official OpenAPI schema with OAuth2 PKCE and stream-capable workflows"
+  default_prompt: "Use $x-openapi-skill to discover and execute X API v2 operations through UXC with OAuth2 PKCE user-context auth, optional app-only bearer reads, and read-first/write-confirmed guardrails."

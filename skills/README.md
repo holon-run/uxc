@@ -46,6 +46,7 @@ notes, and maintenance logs.
 - [`dingtalk-openapi-skill`](dingtalk-openapi-skill/SKILL.md)
 - [`line-openapi-skill`](line-openapi-skill/SKILL.md)
 - [`whatsapp-openapi-skill`](whatsapp-openapi-skill/SKILL.md)
+- [`x-openapi-skill`](x-openapi-skill/SKILL.md)
 
 ### Crypto and Web3
 
@@ -273,5 +274,8 @@ notes, and maintenance logs.
 
 - [whatsapp-openapi-skill](./whatsapp-openapi-skill/)
   Operate WhatsApp Business Platform Cloud API through UXC with a curated OpenAPI schema, bearer-token auth, and message/profile guardrails.
+
+- [x-openapi-skill](./x-openapi-skill/)
+  Operate X API v2 through UXC with the official OpenAPI schema, OAuth2 PKCE user-context auth, app-only bearer guidance, and read-first guardrails for timeline/bookmark/post workflows.
 
 <!-- INDEX:END -->
