@@ -1219,21 +1219,15 @@ fn test_ephemeral_subscribe_is_not_resumed_after_daemon_restart() {
 
     let status = run_uxc_in_home(&["subscribe", "status", &job_id], &test_home);
     assert!(
-        status.is_ok(),
-        "ephemeral subscribe status failed: {:?}",
+        status.is_err(),
+        "ephemeral subscribe should not survive restart: {:?}",
         status
     );
-    let status_json: serde_json::Value = serde_json::from_str(&status.unwrap()).unwrap();
-    assert_eq!(status_json["data"]["durable"], false);
-    assert_eq!(status_json["data"]["auto_resume"], false);
-    assert_eq!(status_json["data"]["status"], "stopped_after_restart");
-    assert!(status_json["data"]["last_resume_at_unix"].is_null());
-
-    let cleanup = run_uxc_in_home(&["subscribe", "stop", &job_id], &test_home);
+    let err = status.unwrap_err();
     assert!(
-        cleanup.is_ok(),
-        "ephemeral subscribe cleanup failed: {:?}",
-        cleanup
+        err.contains("subscription job not found"),
+        "unexpected ephemeral status error: {}",
+        err
     );
 }
 
