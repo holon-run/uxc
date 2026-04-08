@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-04-08
+
+### Added
+- Added GitHub credential import from the `gh` CLI so existing authenticated GitHub users can bootstrap UXC auth with less manual setup.
+
+### Fixed
+- Avoid partial writes when importing GitHub credentials from `gh`, so failed imports do not leave half-written auth state behind.
+- Pin Node.js and npm versions in the release workflow to restore npm trusted publishing reliability for `@holon-run/uxc-daemon-client`.
+
 ## [0.13.2] - 2026-04-08
 
 ### Added
@@ -404,7 +413,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.13.2...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.13.3...HEAD
+[0.13.3]: https://github.com/holon-run/uxc/releases/tag/v0.13.3
 [0.13.2]: https://github.com/holon-run/uxc/releases/tag/v0.13.2
 [0.13.1]: https://github.com/holon-run/uxc/releases/tag/v0.13.1
 [0.13.0]: https://github.com/holon-run/uxc/releases/tag/v0.13.0
