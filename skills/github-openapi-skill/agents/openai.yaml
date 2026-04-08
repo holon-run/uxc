@@ -1,0 +1,4 @@
+skill:
+  display_name: "GitHub REST API"
+  short_description: "Operate GitHub REST API via UXC using gh-imported auth and the official OpenAPI schema."
+  default_prompt: "Use $github-openapi-skill to call GitHub REST API operations through UXC with explicit gh auth import, help-first discovery, and read-first guardrails."

@@ -40,6 +40,7 @@ notes, and maintenance logs.
 - [`linear-graphql-skill`](linear-graphql-skill/SKILL.md)
 - [`slack-openapi-skill`](slack-openapi-skill/SKILL.md)
 - [`discord-openapi-skill`](discord-openapi-skill/SKILL.md)
+- [`github-openapi-skill`](github-openapi-skill/SKILL.md)
 - [`feishu-openapi-skill`](feishu-openapi-skill/SKILL.md)
 - [`telegram-openapi-skill`](telegram-openapi-skill/SKILL.md)
 - [`matrix-openapi-skill`](matrix-openapi-skill/SKILL.md)
@@ -172,6 +173,9 @@ notes, and maintenance logs.
 
 - [discord-openapi-skill](./discord-openapi-skill/)
   Operate Discord HTTP API through UXC with Discord OpenAPI schema. Bot token recommended for full API access including messages and server management. OAuth2 user authentication available for limited profile operations only.
+
+- [github-openapi-skill](./github-openapi-skill/)
+  Operate GitHub REST API through UXC with the official OpenAPI schema, explicit gh-to-uxc auth import, and read-first guardrails for repo, issue, pull request, and event workflows.
 
 - [dune-mcp-skill](./dune-mcp-skill/)
   Use Dune MCP through UXC for blockchain table discovery, SQL query creation/execution, execution result retrieval, and visualization with help-first schema inspection, explicit auth binding, and guarded credit-consuming operations.

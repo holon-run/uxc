@@ -52,6 +52,11 @@ enum OutputFormat {
     Text,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CredentialImportSourceArg {
+    Gh,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputMode {
     Json,
@@ -467,6 +472,33 @@ enum AuthCredentialCommands {
         /// Credential description
         #[arg(long)]
         description: Option<String>,
+    },
+
+    /// Import a credential from a local auth source
+    Import {
+        /// Credential ID
+        #[arg(value_name = "CREDENTIAL_ID")]
+        credential_id: String,
+
+        /// Import source
+        #[arg(long, value_enum)]
+        from: CredentialImportSourceArg,
+
+        /// Source hostname when supported by the importer
+        #[arg(long, default_value = "github.com")]
+        hostname: String,
+
+        /// Skip creating a standard endpoint auth binding
+        #[arg(long)]
+        skip_binding: bool,
+
+        /// Override binding ID when binding creation is enabled
+        #[arg(long)]
+        binding_id: Option<String>,
+
+        /// Overwrite existing credential and binding when IDs already exist
+        #[arg(long)]
+        force: bool,
     },
 
     /// Remove a credential
@@ -918,6 +950,15 @@ struct AuthRemoveData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct AuthImportData {
+    credential: AuthProfileView,
+    source: String,
+    hostname: String,
+    binding_created: bool,
+    binding: Option<AuthBindingSetData>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct AuthOAuthStartData {
     credential: String,
     flow: String,
@@ -1351,7 +1392,7 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
                     "credential" => {
                         path.push("credential".to_string());
                         if let Some(level2) = tokens.get(idx + 1).map(|s| s.as_str()) {
-                            if matches!(level2, "list" | "info" | "set" | "remove") {
+                            if matches!(level2, "list" | "info" | "set" | "import" | "remove") {
                                 path.push(level2.to_string());
                             }
                         }
@@ -1454,6 +1495,7 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
                 AuthCredentialCommands::List => Some(vec!["auth", "credential", "list"]),
                 AuthCredentialCommands::Info { .. } => Some(vec!["auth", "credential", "info"]),
                 AuthCredentialCommands::Set { .. } => Some(vec!["auth", "credential", "set"]),
+                AuthCredentialCommands::Import { .. } => Some(vec!["auth", "credential", "import"]),
                 AuthCredentialCommands::Remove { .. } => Some(vec!["auth", "credential", "remove"]),
             },
             AuthCommands::Info { .. } => Some(vec!["auth", "info"]),
@@ -2205,11 +2247,12 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth", "credential"] => HelpData {
             path: "uxc auth credential".to_string(),
             about: "Manage credentials".to_string(),
-            usage: "uxc auth credential <list|info|set|remove> ...".to_string(),
+            usage: "uxc auth credential <list|info|set|import|remove> ...".to_string(),
             commands: commands(&[
                 ("list", "List all credentials"),
                 ("info", "Show information about a specific credential"),
                 ("set", "Set or update a credential"),
+                ("import", "Import a credential from a local auth source"),
                 ("remove", "Remove a credential"),
             ]),
             notes: vec![],
@@ -2218,6 +2261,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc auth credential set demo --secret-env DEMO_TOKEN".to_string(),
                 "uxc auth credential set demo --secret-op op://Vault/Item/token".to_string(),
                 "uxc auth credential set binance --auth-type api_key --field api_key=env:BINANCE_API_KEY --field secret_key=env:BINANCE_SECRET_KEY".to_string(),
+                "uxc auth credential import github --from gh".to_string(),
             ],
         },
         ["auth", "credential", "list"] => HelpData {
@@ -2253,6 +2297,22 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc auth credential set flipside --auth-type api_key --query-param \"apiKey={{secret}}\" --secret-env FLIPSIDE_API_KEY".to_string(),
                 "uxc auth credential set binance --auth-type api_key --field api_key=env:BINANCE_API_KEY --field secret_key=env:BINANCE_SECRET_KEY --header \"X-API-Key={{field:api_key}}\"".to_string(),
                 "uxc auth credential set telegram-bot --auth-type api_key --secret-env TELEGRAM_BOT_TOKEN --path-prefix-template \"/bot{{secret}}\"".to_string(),
+            ],
+        },
+        ["auth", "credential", "import"] => HelpData {
+            path: "uxc auth credential import".to_string(),
+            about: "Import a credential from a local auth source".to_string(),
+            usage: "uxc auth credential import <credential_id> --from <gh> [--hostname <host>] [--skip-binding] [--binding-id <id>] [--force]".to_string(),
+            commands: vec![],
+            notes: vec![
+                "GitHub import reads the current token via `gh auth token` and stores it as a bearer credential.".to_string(),
+                "Binding creation is explicit and can be skipped with --skip-binding.".to_string(),
+                "For github.com the standard binding targets https://api.github.com; for GitHub Enterprise it targets https://<host>/api.".to_string(),
+            ],
+            examples: vec![
+                "uxc auth credential import github --from gh".to_string(),
+                "uxc auth credential import github-enterprise --from gh --hostname github.example.com".to_string(),
+                "uxc auth credential import github --from gh --skip-binding".to_string(),
             ],
         },
         ["auth", "credential", "remove"] => HelpData {
@@ -2823,6 +2883,35 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             }
             if let Some(desc) = credential.description {
                 println!("  Description: {}", desc);
+            }
+            Ok(())
+        }
+        Some("auth_import_result") => {
+            let data: AuthImportData = decode_envelope_data(envelope)?;
+            println!(
+                "Imported credential '{}' from {}.",
+                data.credential.name, data.source
+            );
+            println!("  Hostname: {}", data.hostname);
+            println!("  Type: {}", data.credential.auth_type);
+            println!("  Secret: {}", data.credential.api_key_masked);
+            if let Some(source) = data.credential.secret_source {
+                println!("  Source: {}", source.kind);
+            }
+            if let Some(desc) = data.credential.description {
+                println!("  Description: {}", desc);
+            }
+            if let Some(binding) = data.binding {
+                println!(
+                    "  Binding: {} -> {} (host={}, path_prefix={}, scheme={})",
+                    binding.id,
+                    binding.credential,
+                    binding.host,
+                    binding.path_prefix.unwrap_or_else(|| "/".to_string()),
+                    binding.scheme.unwrap_or_else(|| "*".to_string())
+                );
+            } else if !data.binding_created {
+                println!("  Binding: skipped");
             }
             Ok(())
         }
@@ -5968,6 +6057,21 @@ async fn handle_auth_credential_command(
                 None,
             ))
         }
+        AuthCredentialCommands::Import {
+            credential_id,
+            from,
+            hostname,
+            skip_binding,
+            binding_id,
+            force,
+        } => handle_auth_credential_import_command(
+            credential_id,
+            *from,
+            hostname,
+            *skip_binding,
+            binding_id.as_deref(),
+            *force,
+        ),
         AuthCredentialCommands::Remove { credential_id } => {
             let mut profiles = Profiles::load_profiles()?;
 
@@ -5994,6 +6098,194 @@ async fn handle_auth_credential_command(
                 None,
             ))
         }
+    }
+}
+
+fn handle_auth_credential_import_command(
+    credential_id: &str,
+    source: CredentialImportSourceArg,
+    hostname: &str,
+    skip_binding: bool,
+    binding_id_override: Option<&str>,
+    force: bool,
+) -> Result<OutputEnvelope> {
+    match source {
+        CredentialImportSourceArg::Gh => import_github_credential_from_gh(
+            credential_id,
+            hostname,
+            skip_binding,
+            binding_id_override,
+            force,
+        ),
+    }
+}
+
+fn import_github_credential_from_gh(
+    credential_id: &str,
+    hostname: &str,
+    skip_binding: bool,
+    binding_id_override: Option<&str>,
+    force: bool,
+) -> Result<OutputEnvelope> {
+    let normalized_hostname = normalize_github_hostname(hostname)?;
+    let token = read_gh_auth_token(&normalized_hostname)?;
+
+    let mut profiles = Profiles::load_profiles()?;
+    if profiles.has_profile(credential_id) && !force {
+        return Err(UxcError::InvalidArguments(format!(
+            "Credential '{}' already exists. Use --force to overwrite.",
+            credential_id
+        ))
+        .into());
+    }
+
+    let profile = Profile::new(token, AuthType::Bearer).with_description(format!(
+        "Imported from gh auth token for {}",
+        normalized_hostname
+    ));
+    profiles.set_profile(credential_id.to_string(), profile)?;
+    profiles.save_profiles()?;
+
+    let mut binding_view = None;
+    if !skip_binding {
+        let rule =
+            build_github_binding_rule(credential_id, &normalized_hostname, binding_id_override)?;
+        let mut bindings = AuthBindings::load_bindings()?;
+        let existing_index = bindings.bindings.iter().position(|item| item.id == rule.id);
+        if let Some(index) = existing_index {
+            if !force {
+                return Err(UxcError::InvalidArguments(format!(
+                    "Binding '{}' already exists. Use --force to overwrite.",
+                    rule.id
+                ))
+                .into());
+            }
+            bindings.bindings.remove(index);
+        }
+        bindings
+            .add_binding(rule.clone())
+            .map_err(|e| UxcError::InvalidArguments(e.to_string()))?;
+        bindings.save_bindings()?;
+        binding_view = Some(AuthBindingSetData {
+            id: rule.id,
+            credential: rule.credential,
+            host: rule.host,
+            path_prefix: rule.path_prefix,
+            scheme: rule.scheme,
+            signer: rule.signer,
+            priority: rule.priority,
+            enabled: rule.enabled,
+        });
+    }
+
+    let profile_data = profiles.get_profile(credential_id)?;
+    let data = serde_json::to_value(AuthImportData {
+        credential: to_auth_profile_view(credential_id, profile_data),
+        source: "gh".to_string(),
+        hostname: normalized_hostname,
+        binding_created: binding_view.is_some(),
+        binding: binding_view,
+    })?;
+    Ok(OutputEnvelope::success(
+        "auth_import_result",
+        "cli",
+        "uxc",
+        Some(credential_id),
+        data,
+        None,
+    ))
+}
+
+fn normalize_github_hostname(hostname: &str) -> Result<String> {
+    let trimmed = hostname.trim().trim_end_matches('/').to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Err(UxcError::InvalidArguments("--hostname cannot be empty".to_string()).into());
+    }
+    if trimmed.contains("://") || trimmed.contains('/') {
+        return Err(UxcError::InvalidArguments(
+            "--hostname must be a bare GitHub host without scheme or path".to_string(),
+        )
+        .into());
+    }
+    Ok(trimmed)
+}
+
+fn read_gh_auth_token(hostname: &str) -> Result<String> {
+    let output = std::process::Command::new("gh")
+        .args(["auth", "token", "--hostname", hostname])
+        .output()
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                UxcError::InvalidArguments(
+                    "'gh' CLI was not found in PATH. Install GitHub CLI or use manual credential setup."
+                        .to_string(),
+                )
+            } else {
+                UxcError::ExecutionFailed(format!("Failed to execute 'gh auth token': {}", err))
+            }
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        let message = if detail.is_empty() {
+            format!(
+                "Failed to import GitHub auth from gh for '{}'. Run `gh auth login --hostname {}` first.",
+                hostname, hostname
+            )
+        } else {
+            format!(
+                "Failed to import GitHub auth from gh for '{}': {}",
+                hostname, detail
+            )
+        };
+        return Err(UxcError::InvalidArguments(message).into());
+    }
+
+    let token = String::from_utf8(output.stdout).map_err(|_| {
+        UxcError::ExecutionFailed("`gh auth token` returned non-UTF8 output".to_string())
+    })?;
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err(UxcError::InvalidArguments(format!(
+            "`gh auth token --hostname {}` returned an empty token",
+            hostname
+        ))
+        .into());
+    }
+    Ok(token)
+}
+
+fn build_github_binding_rule(
+    credential_id: &str,
+    hostname: &str,
+    binding_id_override: Option<&str>,
+) -> Result<AuthBindingRule> {
+    let binding_id = binding_id_override
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| default_github_binding_id(credential_id, hostname));
+    let (host, path_prefix) = if hostname == "github.com" {
+        ("api.github.com".to_string(), Some("/".to_string()))
+    } else {
+        (hostname.to_string(), Some("/api".to_string()))
+    };
+    Ok(AuthBindingRule {
+        id: binding_id,
+        host,
+        path_prefix,
+        scheme: Some("https".to_string()),
+        credential: credential_id.to_string(),
+        signer: None,
+        priority: 100,
+        enabled: true,
+    })
+}
+
+fn default_github_binding_id(credential_id: &str, hostname: &str) -> String {
+    if hostname == "github.com" && credential_id == "github" {
+        "github-api".to_string()
+    } else {
+        format!("{}-github-api", credential_id)
     }
 }
 

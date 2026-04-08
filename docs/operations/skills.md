@@ -43,6 +43,7 @@ bash skills/uxc-skill-creator/scripts/validate.sh
 bash skills/notion-mcp-skill/scripts/validate.sh
 bash skills/notion-openapi-skill/scripts/validate.sh
 bash skills/discord-openapi-skill/scripts/validate.sh
+bash skills/github-openapi-skill/scripts/validate.sh
 bash skills/slack-openapi-skill/scripts/validate.sh
 bash skills/matrix-openapi-skill/scripts/validate.sh
 bash skills/line-openapi-skill/scripts/validate.sh

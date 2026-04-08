@@ -678,6 +678,30 @@ fn auth_credential_set_help_mentions_path_prefix_template() {
 
 #[test]
 #[serial]
+fn auth_credential_import_help_mentions_gh_source() {
+    let output = uxc_command()
+        .arg("auth")
+        .arg("credential")
+        .arg("import")
+        .arg("github")
+        .arg("--help")
+        .output()
+        .expect("failed to run uxc auth credential import --help");
+
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc auth credential import");
+    assert!(json["data"]["usage"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("--from <gh>"));
+}
+
+#[test]
+#[serial]
 fn host_help_keyword_is_treated_as_operation_literal() {
     let mut server = mockito::Server::new();
     let _schema = server
