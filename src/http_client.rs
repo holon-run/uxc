@@ -7,6 +7,8 @@ use std::time::Duration;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+const DEFAULT_USER_AGENT: &str = concat!("uxc/", env!("CARGO_PKG_VERSION"));
+
 #[cfg(test)]
 static FORCE_PRIMARY_BUILD_PANIC: AtomicBool = AtomicBool::new(false);
 
@@ -21,7 +23,9 @@ fn build_client(timeout: Duration, disable_proxy: bool) -> Result<Client> {
         panic!("forced primary reqwest client build panic");
     }
 
-    let mut builder = Client::builder().timeout(timeout);
+    let mut builder = Client::builder()
+        .timeout(timeout)
+        .user_agent(DEFAULT_USER_AGENT);
     if disable_proxy {
         builder = builder.no_proxy();
     }
@@ -66,6 +70,21 @@ pub fn build_resilient_http_client(timeout: Duration, usage: &str) -> Result<Cli
     }
 }
 
+pub fn default_http_client(usage: &str) -> Client {
+    build_resilient_http_client(Duration::from_secs(30), usage).unwrap_or_else(|err| {
+        tracing::warn!(
+            "Falling back to direct reqwest client for {} after resilient build failure: {}",
+            usage,
+            err
+        );
+        Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent(DEFAULT_USER_AGENT)
+            .build()
+            .expect("default HTTP client fallback should build")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +101,25 @@ mod tests {
         let client = build_resilient_http_client(Duration::from_secs(5), "unit test fallback");
         set_force_primary_build_panic(false);
         assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn build_resilient_http_client_sets_default_user_agent() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/user-agent")
+            .match_header("user-agent", DEFAULT_USER_AGENT)
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = build_resilient_http_client(Duration::from_secs(5), "user-agent test")
+            .expect("client should be created");
+        let response = client
+            .get(format!("{}/user-agent", server.url()))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert!(response.status().is_success());
     }
 }

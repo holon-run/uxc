@@ -6,6 +6,7 @@ use super::{
 };
 use crate::auth::{self, Profile};
 use crate::error::UxcError;
+use crate::http_client::default_http_client;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
@@ -52,7 +53,7 @@ impl OpenAPIAdapter {
 
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_http_client("OpenAPI adapter"),
             cache: None,
             auth_profile: None,
             runtime_auth_profile: Arc::new(Mutex::new(None)),

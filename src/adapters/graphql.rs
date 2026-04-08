@@ -11,6 +11,7 @@ use super::{
     ProtocolType,
 };
 use crate::auth::{self, Profile};
+use crate::http_client::default_http_client;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use serde_json::{Map, Value};
@@ -45,7 +46,7 @@ impl GraphQLAdapter {
 
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_http_client("GraphQL adapter"),
             cache: None,
             auth_profile: None,
             runtime_auth_profile: Arc::new(Mutex::new(None)),
