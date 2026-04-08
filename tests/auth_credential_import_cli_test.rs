@@ -259,3 +259,79 @@ fn auth_credential_import_from_gh_reports_gh_auth_failure() {
         .unwrap_or_default()
         .contains("not logged in"));
 }
+
+#[test]
+fn auth_credential_import_from_gh_does_not_persist_credential_when_binding_exists() {
+    let files = AuthFiles::new();
+    write_fake_gh_success(&files.bin_dir, "github.com", "gho_partial_state_token");
+
+    let create_existing_credential = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("existing")
+        .arg("--auth-type")
+        .arg("bearer")
+        .arg("--secret")
+        .arg("existing-token")
+        .output()
+        .expect("credential set should run");
+    assert!(
+        create_existing_credential.status.success(),
+        "existing credential should be created"
+    );
+
+    let create_existing_binding = uxc_command(&files)
+        .arg("auth")
+        .arg("binding")
+        .arg("add")
+        .arg("--id")
+        .arg("github-api")
+        .arg("--host")
+        .arg("api.github.com")
+        .arg("--path-prefix")
+        .arg("/")
+        .arg("--scheme")
+        .arg("https")
+        .arg("--credential")
+        .arg("existing")
+        .output()
+        .expect("binding add should run");
+    assert!(
+        create_existing_binding.status.success(),
+        "existing binding should be created"
+    );
+
+    let import_output = uxc_command(&files)
+        .env("PATH", prepend_path(&files.bin_dir))
+        .args(["auth", "credential", "import", "github", "--from", "gh"])
+        .output()
+        .expect("credential import should run");
+
+    assert!(!import_output.status.success(), "import should fail");
+    let import_json = parse_stdout_json(&import_output);
+    assert_eq!(import_json["ok"], false);
+    assert_eq!(import_json["error"]["code"], "INVALID_ARGUMENT");
+    assert!(import_json["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Binding 'github-api' already exists"));
+
+    let info_output = uxc_command(&files)
+        .arg("auth")
+        .arg("credential")
+        .arg("info")
+        .arg("github")
+        .output()
+        .expect("credential info should run");
+    assert!(
+        !info_output.status.success(),
+        "imported credential should not exist after failed binding preflight"
+    );
+    let info_json = parse_stdout_json(&info_output);
+    assert_eq!(info_json["ok"], false);
+    assert!(info_json["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Credential 'github' not found"));
+}
