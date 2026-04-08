@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-04-08
+
+### Added
+- Added `x-openapi-skill` for operating X API v2 through UXC with OAuth2 PKCE user-context auth, app-only bearer guidance, and stream/poll workflow notes.
+
+### Fixed
+- Improved daemon startup by ignoring invalid or non-resumable persisted subscriptions instead of failing noisy restore paths.
+- Tolerate sanitized subscription-store rewrite failures during daemon recovery so startup can continue after dropping bad records.
+- Repaired npm release publishing and republish flows in the release workflow so `@holon-run/uxc-daemon-client` can be published reliably again.
+
 ## [0.13.1] - 2026-04-05
 
 ### Added
@@ -394,7 +404,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/holon-run/uxc/releases/tag/v0.13.2
 [0.13.1]: https://github.com/holon-run/uxc/releases/tag/v0.13.1
 [0.13.0]: https://github.com/holon-run/uxc/releases/tag/v0.13.0
 [0.12.2]: https://github.com/holon-run/uxc/releases/tag/v0.12.2

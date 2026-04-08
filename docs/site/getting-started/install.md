@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.13.1
+curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.13.2
 ```
 
 ## Cargo
