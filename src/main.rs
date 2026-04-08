@@ -6129,6 +6129,19 @@ fn import_github_credential_from_gh(
 ) -> Result<OutputEnvelope> {
     let normalized_hostname = normalize_github_hostname(hostname)?;
     let token = read_gh_auth_token(&normalized_hostname)?;
+    let binding_rule = if skip_binding {
+        None
+    } else {
+        Some(build_github_binding_rule(
+            credential_id,
+            &normalized_hostname,
+            binding_id_override,
+        )?)
+    };
+
+    if let Some(rule) = binding_rule.as_ref() {
+        preflight_binding_rule_conflict(rule, force)?;
+    }
 
     let mut profiles = Profiles::load_profiles()?;
     if profiles.has_profile(credential_id) && !force {
@@ -6147,9 +6160,7 @@ fn import_github_credential_from_gh(
     profiles.save_profiles()?;
 
     let mut binding_view = None;
-    if !skip_binding {
-        let rule =
-            build_github_binding_rule(credential_id, &normalized_hostname, binding_id_override)?;
+    if let Some(rule) = binding_rule {
         let mut bindings = AuthBindings::load_bindings()?;
         let existing_index = bindings.bindings.iter().position(|item| item.id == rule.id);
         if let Some(index) = existing_index {
@@ -6194,6 +6205,18 @@ fn import_github_credential_from_gh(
         data,
         None,
     ))
+}
+
+fn preflight_binding_rule_conflict(rule: &AuthBindingRule, force: bool) -> Result<()> {
+    let bindings = AuthBindings::load_bindings()?;
+    if bindings.bindings.iter().any(|item| item.id == rule.id) && !force {
+        return Err(UxcError::InvalidArguments(format!(
+            "Binding '{}' already exists. Use --force to overwrite.",
+            rule.id
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn normalize_github_hostname(hostname: &str) -> Result<String> {
