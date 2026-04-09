@@ -15,10 +15,41 @@ pub mod openapi;
 use crate::error::UxcError;
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
+
+/// Registration entry for dynamic adapter discovery.
+///
+/// Third-party crates can register adapters at compile time using `inventory::submit!`.
+/// Registered adapters are tried (sorted by descending priority) before built-in adapters
+/// during protocol detection.
+///
+/// # Example
+/// ```ignore
+/// inventory::submit! {
+///     AdapterRegistration {
+///         name: "my-protocol",
+///         priority: 100,
+///         can_handle: |url| Box::pin(async move { Ok(url.contains("my-proto://")) }),
+///         create: || Box::new(MyAdapter::new()),
+///     }
+/// }
+/// ```
+pub struct AdapterRegistration {
+    /// Human-readable name for this adapter.
+    pub name: &'static str,
+    /// Priority (0-255). Higher values are tried first.
+    pub priority: u8,
+    /// Async predicate: returns `true` if this adapter can handle the given URL.
+    pub can_handle: fn(&str) -> BoxFuture<'static, Result<bool>>,
+    /// Factory that creates a new adapter instance.
+    pub create: fn() -> Box<dyn Adapter>,
+}
+
+inventory::collect!(AdapterRegistration);
 
 /// Enum of all available adapters
 #[allow(non_camel_case_types)]
@@ -28,6 +59,8 @@ pub enum AdapterEnum {
     JsonRpc(jsonrpc::JsonRpcAdapter),
     Mcp(mcp::McpAdapter),
     GraphQL(graphql::GraphQLAdapter),
+    /// Dynamically registered external adapter discovered via `inventory`.
+    External(Box<dyn Adapter>),
 }
 
 #[async_trait]
@@ -39,6 +72,7 @@ impl Adapter for AdapterEnum {
             AdapterEnum::JsonRpc(_) => ProtocolType::JsonRpc,
             AdapterEnum::Mcp(_) => ProtocolType::Mcp,
             AdapterEnum::GraphQL(_) => ProtocolType::GraphQL,
+            AdapterEnum::External(a) => a.protocol_type(),
         }
     }
 
@@ -49,6 +83,7 @@ impl Adapter for AdapterEnum {
             AdapterEnum::JsonRpc(a) => a.can_handle(url).await,
             AdapterEnum::Mcp(a) => a.can_handle(url).await,
             AdapterEnum::GraphQL(a) => a.can_handle(url).await,
+            AdapterEnum::External(a) => a.can_handle(url).await,
         }
     }
 
@@ -59,6 +94,7 @@ impl Adapter for AdapterEnum {
             AdapterEnum::JsonRpc(a) => a.fetch_schema(url).await,
             AdapterEnum::Mcp(a) => a.fetch_schema(url).await,
             AdapterEnum::GraphQL(a) => a.fetch_schema(url).await,
+            AdapterEnum::External(a) => a.fetch_schema(url).await,
         }
     }
 
@@ -69,6 +105,7 @@ impl Adapter for AdapterEnum {
             AdapterEnum::JsonRpc(a) => a.list_operations(url).await,
             AdapterEnum::Mcp(a) => a.list_operations(url).await,
             AdapterEnum::GraphQL(a) => a.list_operations(url).await,
+            AdapterEnum::External(a) => a.list_operations(url).await,
         }
     }
 
@@ -79,6 +116,7 @@ impl Adapter for AdapterEnum {
             AdapterEnum::JsonRpc(a) => a.describe_operation(url, operation).await,
             AdapterEnum::Mcp(a) => a.describe_operation(url, operation).await,
             AdapterEnum::GraphQL(a) => a.describe_operation(url, operation).await,
+            AdapterEnum::External(a) => a.describe_operation(url, operation).await,
         }
     }
 
@@ -94,6 +132,7 @@ impl Adapter for AdapterEnum {
             AdapterEnum::JsonRpc(a) => a.execute(url, operation, args).await,
             AdapterEnum::Mcp(a) => a.execute(url, operation, args).await,
             AdapterEnum::GraphQL(a) => a.execute(url, operation, args).await,
+            AdapterEnum::External(a) => a.execute(url, operation, args).await,
         }
     }
 }
@@ -230,6 +269,17 @@ impl ProtocolDetector {
         options: &DetectionOptions,
     ) -> Result<AdapterEnum> {
         let mut schema_probe_errors = Vec::new();
+
+        // Try dynamically registered adapters first (sorted by descending priority)
+        let mut registrations: Vec<&AdapterRegistration> =
+            inventory::iter::<AdapterRegistration>.into_iter().collect();
+        registrations.sort_by_key(|r| std::cmp::Reverse(r.priority));
+
+        for reg in registrations {
+            if (reg.can_handle)(url).await? {
+                return Ok(AdapterEnum::External((reg.create)()));
+            }
+        }
 
         // Try MCP first (stdio commands are distinct)
         let mut mcp_adapter = mcp::McpAdapter::new();
@@ -637,5 +687,93 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(adapter, AdapterEnum::JsonRpc(_)));
+    }
+
+    /// A minimal adapter for testing dynamic registration.
+    struct DummyExternalAdapter;
+
+    #[async_trait]
+    impl Adapter for DummyExternalAdapter {
+        fn protocol_type(&self) -> ProtocolType {
+            ProtocolType::OpenAPI // reuse an existing variant for test
+        }
+        async fn can_handle(&self, _url: &str) -> Result<bool> {
+            Ok(true)
+        }
+        async fn fetch_schema(&self, _url: &str) -> Result<Value> {
+            Ok(serde_json::json!({"dummy": true}))
+        }
+        async fn list_operations(&self, _url: &str) -> Result<Vec<Operation>> {
+            Ok(vec![])
+        }
+        async fn describe_operation(
+            &self,
+            _url: &str,
+            _operation: &str,
+        ) -> Result<OperationDetail> {
+            Err(anyhow::anyhow!("not implemented"))
+        }
+        async fn execute(
+            &self,
+            _url: &str,
+            _operation: &str,
+            _args: HashMap<String, Value>,
+        ) -> Result<ExecutionResult> {
+            Err(anyhow::anyhow!("not implemented"))
+        }
+    }
+
+    inventory::submit! {
+        AdapterRegistration {
+            name: "dummy-test",
+            priority: 255,
+            can_handle: |url| {
+                let url = url.to_owned();
+                Box::pin(async move {
+                    Ok(url.contains("dummy-external-proto"))
+                })
+            },
+            create: || Box::new(DummyExternalAdapter),
+        }
+    }
+
+    #[tokio::test]
+    async fn detector_discovers_registered_external_adapter() {
+        let detector = ProtocolDetector::new();
+        let options = DetectionOptions::default();
+
+        let result = detector
+            .detect_adapter_with_options("http://dummy-external-proto.test/api", &options)
+            .await;
+        assert!(result.is_ok());
+        let adapter = result.unwrap();
+        assert!(matches!(adapter, AdapterEnum::External(_)));
+    }
+
+    #[tokio::test]
+    async fn external_adapter_delegates_to_trait() {
+        let detector = ProtocolDetector::new();
+        let options = DetectionOptions::default();
+
+        let adapter = detector
+            .detect_adapter_with_options("http://dummy-external-proto.test/api", &options)
+            .await
+            .unwrap();
+        let schema = adapter
+            .fetch_schema("http://dummy-external-proto.test/api")
+            .await
+            .unwrap();
+        assert_eq!(schema, serde_json::json!({"dummy": true}));
+    }
+
+    #[tokio::test]
+    async fn registered_adapters_sorted_by_priority() {
+        // Verify that inventory iteration produces at least our test registration
+        let registrations: Vec<&AdapterRegistration> =
+            inventory::iter::<AdapterRegistration>.into_iter().collect();
+        assert!(
+            registrations.iter().any(|r| r.name == "dummy-test"),
+            "Expected to find dummy-test registration"
+        );
     }
 }

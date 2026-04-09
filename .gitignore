@@ -25,3 +25,4 @@ coverage/
 
 # Local agent settings
 .claude/settings.local.json
+.alma-snapshots

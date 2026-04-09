@@ -7935,6 +7935,7 @@ fn inject_cache_if_supported(
         adapters::AdapterEnum::GRpc(a) => adapters::AdapterEnum::GRpc(a.with_cache(cache)),
         adapters::AdapterEnum::JsonRpc(a) => adapters::AdapterEnum::JsonRpc(a.with_cache(cache)),
         adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_cache(cache)),
+        other @ adapters::AdapterEnum::External(_) => other,
     }
 }
 
@@ -7955,6 +7956,7 @@ fn inject_auth_if_supported(
                 adapters::AdapterEnum::JsonRpc(a.with_auth(profile))
             }
             adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_auth(profile)),
+            other @ adapters::AdapterEnum::External(_) => other,
         },
         None => adapter,
     }
@@ -7980,6 +7982,7 @@ fn inject_refresh_if_supported(
         adapters::AdapterEnum::Mcp(a) => {
             adapters::AdapterEnum::Mcp(a.with_refresh_schema(refresh_schema))
         }
+        other @ adapters::AdapterEnum::External(_) => other,
     }
 }
 
@@ -7999,6 +8002,7 @@ fn inject_timeout_if_supported(
             adapters::AdapterEnum::JsonRpc(a.with_timeout(timeout))
         }
         adapters::AdapterEnum::Mcp(a) => adapters::AdapterEnum::Mcp(a.with_timeout(timeout)),
+        other @ adapters::AdapterEnum::External(_) => other,
     }
 }
 
