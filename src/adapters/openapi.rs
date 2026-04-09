@@ -164,12 +164,22 @@ impl OpenAPIAdapter {
         }
     }
 
-    async fn refresh_effective_auth_profile(&self, force: bool) -> Result<Option<Profile>> {
+    async fn refresh_effective_auth_profile(
+        &self,
+        force: bool,
+        endpoint_hint: Option<&str>,
+    ) -> Result<Option<Profile>> {
         let _refresh_guard = self.oauth_refresh_lock.lock().await;
         let mut profile = self.effective_auth_profile().await;
         if let Some(active) = profile.as_mut() {
-            let refreshed =
-                auth::refresh_effective_auth_profile(active, &self.client, force, 60).await?;
+            let refreshed = auth::refresh_effective_auth_profile(
+                active,
+                &self.client,
+                force,
+                60,
+                endpoint_hint,
+            )
+            .await?;
             if refreshed {
                 crate::auth::persist_profile_if_named(active)?;
                 self.set_effective_auth_profile(active.clone()).await;
@@ -178,17 +188,25 @@ impl OpenAPIAdapter {
         Ok(profile)
     }
 
-    async fn send_with_oauth_retry<F>(&self, build_request: F) -> Result<reqwest::Response>
+    async fn send_with_oauth_retry<F>(
+        &self,
+        endpoint_hint: &str,
+        build_request: F,
+    ) -> Result<reqwest::Response>
     where
         F: Fn(Option<&Profile>) -> Result<reqwest::RequestBuilder>,
     {
-        let mut profile = self.refresh_effective_auth_profile(false).await?;
+        let mut profile = self
+            .refresh_effective_auth_profile(false, Some(endpoint_hint))
+            .await?;
 
         let mut response = build_request(profile.as_ref())?.send().await?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && crate::auth::supports_refresh_retry(profile.as_ref())
         {
-            profile = self.refresh_effective_auth_profile(true).await?;
+            profile = self
+                .refresh_effective_auth_profile(true, Some(endpoint_hint))
+                .await?;
             response = build_request(profile.as_ref())?.send().await?;
         }
 
@@ -272,7 +290,7 @@ impl OpenAPIAdapter {
         }
 
         let response = self
-            .send_with_oauth_retry(|profile| {
+            .send_with_oauth_retry(schema_url, |profile| {
                 let resolved = self.resolve_schema_auth_profile("GET", schema_url, profile)?;
                 let req = self
                     .client
@@ -405,7 +423,7 @@ impl OpenAPIAdapter {
 
         for full_url in Self::schema_candidates(&normalized) {
             let resp = match self
-                .send_with_oauth_retry(|profile| {
+                .send_with_oauth_retry(&full_url, |profile| {
                     let resolved = self.resolve_schema_auth_profile("GET", &full_url, profile)?;
                     let req = self
                         .client
@@ -1939,7 +1957,7 @@ impl Adapter for OpenAPIAdapter {
         let should_apply_auth = !matches!(auth_requirement, OperationAuthRequirement::Public);
 
         let resp = self
-            .send_with_oauth_retry(|profile| {
+            .send_with_oauth_retry(&prepared_url, |profile| {
                 let full_url = {
                     let mut parsed = url::Url::parse(&prepared_url).with_context(|| {
                         format!("Invalid prepared OpenAPI request URL '{}'", prepared_url)

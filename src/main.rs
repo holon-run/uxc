@@ -7448,7 +7448,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                 .into());
             }
 
-            auth::oauth::refresh_oauth_profile(&mut profile_data, &client).await?;
+            auth::oauth::refresh_oauth_profile(&mut profile_data, &client, None).await?;
             profiles.set_profile(credential_id.clone(), profile_data.clone())?;
             profiles.save_profiles()?;
 

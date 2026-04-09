@@ -322,8 +322,14 @@ impl McpHttpTransport {
     async fn maybe_refresh_auth_token(&self) -> Result<()> {
         let mut profile = self.auth_profile.lock().await.clone();
         if let Some(active) = profile.as_mut() {
-            let refreshed =
-                auth::refresh_effective_auth_profile(active, &self.client, false, 60).await?;
+            let refreshed = auth::refresh_effective_auth_profile(
+                active,
+                &self.client,
+                false,
+                60,
+                Some(&self.server_url),
+            )
+            .await?;
             if refreshed {
                 persist_profile_update(active).await?;
                 *self.auth_profile.lock().await = Some(active.clone());
@@ -338,7 +344,14 @@ impl McpHttpTransport {
         let mut profile = self.auth_profile.lock().await.clone().ok_or_else(|| {
             UxcError::OAuthRequired("No authentication profile available".to_string())
         })?;
-        auth::refresh_effective_auth_profile(&mut profile, &self.client, true, 60).await?;
+        auth::refresh_effective_auth_profile(
+            &mut profile,
+            &self.client,
+            true,
+            60,
+            Some(&self.server_url),
+        )
+        .await?;
         persist_profile_update(&profile).await?;
         *self.auth_profile.lock().await = Some(profile);
 
@@ -672,7 +685,8 @@ impl McpHttpTransport {
                     .expect("oauth probe path requires auth profile");
 
                 if let Err(err) =
-                    auth::refresh_effective_auth_profile(profile, &client, true, 60).await
+                    auth::refresh_effective_auth_profile(profile, &client, true, 60, Some(url))
+                        .await
                 {
                     return Ok(Self::probe_auth_failure_from_refresh_error(err));
                 }
@@ -736,7 +750,7 @@ impl McpHttpTransport {
                     .expect("oauth probe path requires auth profile");
 
                 if let Err(err) =
-                    auth::refresh_effective_auth_profile(profile, client, true, 60).await
+                    auth::refresh_effective_auth_profile(profile, client, true, 60, Some(url)).await
                 {
                     return Ok(Self::probe_auth_failure_from_refresh_error(err));
                 }
@@ -1475,8 +1489,14 @@ impl LegacySseTransport {
     async fn maybe_refresh_auth_token(&self) -> Result<()> {
         let mut profile = self.auth_profile.lock().await.clone();
         if let Some(active) = profile.as_mut() {
-            let refreshed =
-                auth::refresh_effective_auth_profile(active, &self.client, false, 60).await?;
+            let refreshed = auth::refresh_effective_auth_profile(
+                active,
+                &self.client,
+                false,
+                60,
+                Some(&self.connect_url),
+            )
+            .await?;
             if refreshed {
                 persist_profile_update(active).await?;
                 *self.auth_profile.lock().await = Some(active.clone());
@@ -1495,7 +1515,14 @@ impl LegacySseTransport {
         let mut profile = self.auth_profile.lock().await.clone().ok_or_else(|| {
             UxcError::OAuthRequired("No authentication profile available".to_string())
         })?;
-        auth::refresh_effective_auth_profile(&mut profile, &self.client, true, 60).await?;
+        auth::refresh_effective_auth_profile(
+            &mut profile,
+            &self.client,
+            true,
+            60,
+            Some(&self.connect_url),
+        )
+        .await?;
         persist_profile_update(&profile).await?;
         *self.auth_profile.lock().await = Some(profile);
         Ok(())

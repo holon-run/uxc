@@ -126,12 +126,22 @@ impl JsonRpcAdapter {
         req
     }
 
-    async fn refresh_effective_auth_profile(&self, force: bool) -> Result<Option<Profile>> {
+    async fn refresh_effective_auth_profile(
+        &self,
+        force: bool,
+        endpoint_hint: Option<&str>,
+    ) -> Result<Option<Profile>> {
         let _refresh_guard = self.oauth_refresh_lock.lock().await;
         let mut profile = self.effective_auth_profile().await;
         if let Some(active) = profile.as_mut() {
-            let refreshed =
-                auth::refresh_effective_auth_profile(active, &self.client, force, 60).await?;
+            let refreshed = auth::refresh_effective_auth_profile(
+                active,
+                &self.client,
+                force,
+                60,
+                endpoint_hint,
+            )
+            .await?;
             if refreshed {
                 crate::auth::persist_profile_if_named(active)?;
                 self.set_effective_auth_profile(active.clone()).await;
@@ -140,17 +150,25 @@ impl JsonRpcAdapter {
         Ok(profile)
     }
 
-    async fn send_with_oauth_retry<F>(&self, build_request: F) -> Result<reqwest::Response>
+    async fn send_with_oauth_retry<F>(
+        &self,
+        endpoint_hint: &str,
+        build_request: F,
+    ) -> Result<reqwest::Response>
     where
         F: Fn(Option<&Profile>) -> Result<reqwest::RequestBuilder>,
     {
-        let mut profile = self.refresh_effective_auth_profile(false).await?;
+        let mut profile = self
+            .refresh_effective_auth_profile(false, Some(endpoint_hint))
+            .await?;
 
         let mut response = build_request(profile.as_ref())?.send().await?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && crate::auth::supports_refresh_retry(profile.as_ref())
         {
-            profile = self.refresh_effective_auth_profile(true).await?;
+            profile = self
+                .refresh_effective_auth_profile(true, Some(endpoint_hint))
+                .await?;
             response = build_request(profile.as_ref())?.send().await?;
         }
 
@@ -232,7 +250,7 @@ impl JsonRpcAdapter {
         }
 
         let response = self
-            .send_with_oauth_retry(|profile| {
+            .send_with_oauth_retry(schema_url, |profile| {
                 let resolved = Self::resolve_auth_profile("GET", schema_url, profile)?;
                 let req = self
                     .client
@@ -577,7 +595,7 @@ impl JsonRpcAdapter {
         });
 
         let response = match self
-            .send_with_oauth_retry(|profile| {
+            .send_with_oauth_retry(url, |profile| {
                 let resolved = Self::resolve_auth_profile("POST", url, profile)?;
                 let req = self
                     .client
@@ -624,7 +642,7 @@ impl JsonRpcAdapter {
     ) -> Result<Option<ResolvedOpenRpc>> {
         for schema_url in candidates {
             let response = match self
-                .send_with_oauth_retry(|profile| {
+                .send_with_oauth_retry(&schema_url, |profile| {
                     let resolved = Self::resolve_auth_profile("GET", &schema_url, profile)?;
                     let req = self
                         .client
@@ -743,7 +761,7 @@ impl JsonRpcAdapter {
         }
 
         let response = self
-            .send_with_oauth_retry(|profile| {
+            .send_with_oauth_retry(rpc_url, |profile| {
                 let resolved = Self::resolve_auth_profile("POST", rpc_url, profile)?;
                 let req = self
                     .client

@@ -239,6 +239,7 @@ pub async fn maybe_refresh_oauth_profile(
     profile: &mut Profile,
     client: &Client,
     skew_seconds: i64,
+    endpoint_hint: Option<&str>,
 ) -> Result<bool> {
     if profile.auth_type != crate::auth::AuthType::OAuth {
         return Ok(false);
@@ -252,8 +253,55 @@ pub async fn maybe_refresh_oauth_profile(
         return Ok(false);
     }
 
-    refresh_oauth_profile(profile, client).await?;
+    refresh_oauth_profile(profile, client, endpoint_hint).await?;
     Ok(true)
+}
+
+fn oauth_login_endpoint_hint(profile: &Profile, endpoint_hint: Option<&str>) -> String {
+    endpoint_hint
+        .map(str::to_string)
+        .or_else(|| {
+            profile
+                .oauth
+                .as_ref()
+                .and_then(|oauth| oauth.resource_metadata_url.clone())
+        })
+        .or_else(|| {
+            profile
+                .oauth
+                .as_ref()
+                .and_then(|oauth| oauth.authorization_server.clone())
+        })
+        .or_else(|| {
+            profile
+                .oauth
+                .as_ref()
+                .and_then(|oauth| oauth.provider_issuer.clone())
+        })
+        .unwrap_or_else(|| "<url>".to_string())
+}
+
+fn oauth_login_credential_hint(profile: &Profile) -> String {
+    profile
+        .name
+        .clone()
+        .unwrap_or_else(|| "<credential_id>".to_string())
+}
+
+fn oauth_login_required_message(profile: &Profile, endpoint_hint: Option<&str>) -> String {
+    let credential_id = oauth_login_credential_hint(profile);
+    let endpoint = oauth_login_endpoint_hint(profile, endpoint_hint);
+    format!(
+        "No refresh token available for credential '{}' at '{}'.\n\
+         \n\
+         For agents:\n\
+           1. uxc auth oauth start {} --endpoint {} --redirect-uri <callback_uri>\n\
+           2. uxc auth oauth complete {} --session-id <session_id> --authorization-response '<callback_url_or_code>'\n\
+         \n\
+         Interactive fallback:\n\
+           uxc auth oauth login {} --endpoint {}",
+        credential_id, endpoint, credential_id, endpoint, credential_id, credential_id, endpoint
+    )
 }
 
 pub fn apply_token_to_profile(
@@ -931,7 +979,11 @@ pub async fn login_with_device_code(
     }
 }
 
-pub async fn refresh_oauth_profile(profile: &mut Profile, client: &Client) -> Result<()> {
+pub async fn refresh_oauth_profile(
+    profile: &mut Profile,
+    client: &Client,
+    endpoint_hint: Option<&str>,
+) -> Result<()> {
     let oauth = profile
         .oauth
         .as_mut()
@@ -986,11 +1038,7 @@ pub async fn refresh_oauth_profile(profile: &mut Profile, client: &Client) -> Re
         return Ok(());
     }
 
-    Err(UxcError::OAuthRequired(
-        "No refresh token available. Run 'uxc auth oauth login <credential_id> --endpoint <mcp_url>'"
-            .to_string(),
-    )
-    .into())
+    Err(UxcError::OAuthRequired(oauth_login_required_message(profile, endpoint_hint)).into())
 }
 
 pub fn parse_scopes(scopes: &[String]) -> Vec<String> {

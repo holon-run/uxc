@@ -210,13 +210,22 @@ impl GrpcAdapter {
         *self.runtime_auth_profile.lock().await = Some(profile);
     }
 
-    async fn refresh_effective_auth_profile(&self, force: bool) -> Result<Option<Profile>> {
+    async fn refresh_effective_auth_profile(
+        &self,
+        force: bool,
+        endpoint_hint: Option<&str>,
+    ) -> Result<Option<Profile>> {
         let _refresh_guard = self.oauth_refresh_lock.lock().await;
         let mut profile = self.effective_auth_profile().await;
         if let Some(active) = profile.as_mut() {
-            let refreshed =
-                auth::refresh_effective_auth_profile(active, &self.oauth_http_client, force, 60)
-                    .await?;
+            let refreshed = auth::refresh_effective_auth_profile(
+                active,
+                &self.oauth_http_client,
+                force,
+                60,
+                endpoint_hint,
+            )
+            .await?;
             if refreshed {
                 crate::auth::persist_profile_if_named(active)?;
                 self.set_effective_auth_profile(active.clone()).await;
@@ -941,7 +950,9 @@ impl GrpcAdapter {
         let attempts = Self::grpcurl_attempts(original_url, target);
         let mut last_error = String::new();
 
-        let profile = self.refresh_effective_auth_profile(false).await?;
+        let profile = self
+            .refresh_effective_auth_profile(false, Some(original_url))
+            .await?;
         let headers = if let Some(profile) = profile.as_ref() {
             profile.to_grpcurl_headers()?
         } else {
