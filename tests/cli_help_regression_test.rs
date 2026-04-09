@@ -823,6 +823,67 @@ fn link_help_flag_outputs_subcommand_help_json() {
 
 #[test]
 #[serial]
+fn source_help_flag_outputs_subcommand_help_json() {
+    let output = uxc_command()
+        .arg("source")
+        .arg("--help")
+        .output()
+        .expect("failed to run uxc source --help");
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc source");
+    assert!(json["data"]["usage"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("uxc source <ensure|status|stop|delete>"));
+}
+
+#[test]
+#[serial]
+fn source_ensure_help_flag_outputs_subcommand_help_json() {
+    let output = uxc_command()
+        .arg("source")
+        .arg("ensure")
+        .arg("--help")
+        .output()
+        .expect("failed to run uxc source ensure --help");
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc source ensure");
+    assert!(json["data"]["usage"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("<namespace> <source_key> <endpoint>"));
+}
+
+#[test]
+#[serial]
+fn stream_help_flag_outputs_subcommand_help_json() {
+    let output = uxc_command()
+        .arg("stream")
+        .arg("--help")
+        .output()
+        .expect("failed to run uxc stream --help");
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc stream");
+    assert!(json["data"]["usage"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("uxc stream <read|info|trim>"));
+}
+
+#[test]
+#[serial]
 fn operation_help_supports_url_without_scheme() {
     let mut server = mockito::Server::new();
     let _schema = server

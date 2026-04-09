@@ -16,6 +16,7 @@ pub mod daemon_client;
 pub mod daemon_log;
 pub mod error;
 pub mod http_client;
+pub mod managed_source_streams;
 pub mod output;
 pub mod protocol;
 pub mod schema_mapping;

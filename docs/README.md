@@ -20,6 +20,8 @@ For public product docs, use the docs site:
 - [`decisions/daemon-session-lifecycle.md`](./decisions/daemon-session-lifecycle.md): daemon session lifecycle contract note for #337
 - [`decisions/artifact-contract.md`](./decisions/artifact-contract.md): artifact contract note for #338
 - [`decisions/generated-runtime-clients.md`](./decisions/generated-runtime-clients.md): generated client design note for #334
+- [`decisions/source-ingress-stream-runtime.md`](./decisions/source-ingress-stream-runtime.md): managed source streams design note
+- [`decisions/uxc-agentinbox-source-integration.md`](./decisions/uxc-agentinbox-source-integration.md): `uxc` and `AgentInbox` source boundary and migration plan
 
 ## Public Docs Now Live on the Site
 

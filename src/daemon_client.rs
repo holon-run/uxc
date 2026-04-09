@@ -1,6 +1,9 @@
 use crate::auth::injected_env::InjectEnvSpec;
 use crate::daemon::{
-    self, DaemonSessionView, DaemonStatus, RuntimeAction, RuntimeInvokeOptions,
+    self, DaemonSessionView, DaemonStatus, ManagedSourceEnsureRequest, ManagedSourceEnsureResponse,
+    ManagedSourceSpec, ManagedSourceStatusRequest, ManagedSourceStopResponse, ManagedSourceView,
+    ManagedStreamInfo, ManagedStreamReadRequest, ManagedStreamReadResponse,
+    ManagedStreamTrimRequest, ManagedStreamTrimResponse, RuntimeAction, RuntimeInvokeOptions,
     RuntimeInvokeRequest, RuntimeInvokeResponse, SubscribeStartRequest, SubscribeStartResponse,
     SubscribeStopResponse, SubscriptionEventsRequest, SubscriptionEventsResponse,
     SubscriptionJobView, SubscriptionMode, SubscriptionTransportHint,
@@ -120,6 +123,7 @@ impl DaemonClient {
             mode: request.mode,
             poll_config: None,
             ephemeral: request.ephemeral,
+            internal: false,
             options: request.options.into(),
         };
         daemon::subscribe_start_client(&request).await
@@ -151,6 +155,74 @@ impl DaemonClient {
             wait_ms,
         })
         .await
+    }
+
+    pub async fn source_ensure(
+        &self,
+        namespace: impl Into<String>,
+        source_key: impl Into<String>,
+        spec: ManagedSourceSpec,
+    ) -> Result<ManagedSourceEnsureResponse> {
+        daemon::source_ensure_client(&ManagedSourceEnsureRequest {
+            namespace: namespace.into(),
+            source_key: source_key.into(),
+            spec,
+        })
+        .await
+    }
+
+    pub async fn source_status(
+        &self,
+        namespace: impl Into<String>,
+        source_key: impl Into<String>,
+    ) -> Result<ManagedSourceView> {
+        daemon::source_status_client(&ManagedSourceStatusRequest {
+            namespace: namespace.into(),
+            source_key: source_key.into(),
+        })
+        .await
+    }
+
+    pub async fn source_stop(
+        &self,
+        namespace: impl Into<String>,
+        source_key: impl Into<String>,
+    ) -> Result<ManagedSourceStopResponse> {
+        daemon::source_stop_client(&ManagedSourceStatusRequest {
+            namespace: namespace.into(),
+            source_key: source_key.into(),
+        })
+        .await
+    }
+
+    pub async fn source_delete(
+        &self,
+        namespace: impl Into<String>,
+        source_key: impl Into<String>,
+    ) -> Result<crate::daemon::ManagedSourceDeleteResponse> {
+        daemon::source_delete_client(&ManagedSourceStatusRequest {
+            namespace: namespace.into(),
+            source_key: source_key.into(),
+        })
+        .await
+    }
+
+    pub async fn stream_read(
+        &self,
+        request: ManagedStreamReadRequest,
+    ) -> Result<ManagedStreamReadResponse> {
+        daemon::stream_read_client(&request).await
+    }
+
+    pub async fn stream_info(&self, stream_id: &str) -> Result<ManagedStreamInfo> {
+        daemon::stream_info_client(stream_id).await
+    }
+
+    pub async fn stream_trim(
+        &self,
+        request: ManagedStreamTrimRequest,
+    ) -> Result<ManagedStreamTrimResponse> {
+        daemon::stream_trim_client(&request).await
     }
 }
 

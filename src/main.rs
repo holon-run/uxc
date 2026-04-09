@@ -24,6 +24,7 @@ mod daemon;
 mod daemon_log;
 mod error;
 mod http_client;
+mod managed_source_streams;
 mod output;
 mod schema_mapping;
 mod subscription_discord;
@@ -219,6 +220,18 @@ enum Commands {
         subscribe_command: SubscribeCommands,
     },
 
+    /// Manage daemon-backed managed sources
+    Source {
+        #[command(subcommand)]
+        source_command: SourceCommands,
+    },
+
+    /// Read managed source streams
+    Stream {
+        #[command(subcommand)]
+        stream_command: StreamCommands,
+    },
+
     /// Dynamic operation execution: `uxc <url> <operation_id> [key=value ...] ['{...}']`
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -349,6 +362,103 @@ enum SubscribeCommands {
         /// Subscription job ID
         #[arg(value_name = "JOB_ID")]
         job_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SourceCommands {
+    /// Ensure a managed source exists and is running
+    Ensure {
+        #[arg(value_name = "NAMESPACE")]
+        namespace: String,
+
+        #[arg(value_name = "SOURCE_KEY")]
+        source_key: String,
+
+        #[arg(value_name = "ENDPOINT")]
+        endpoint: String,
+
+        #[arg(value_name = "OPERATION_ID")]
+        operation_id: Option<String>,
+
+        #[arg(value_name = "ARG")]
+        args: Vec<String>,
+
+        #[arg(long = "input-json", value_name = "JSON")]
+        input_json: Option<String>,
+
+        #[arg(long = "resource-uri", value_name = "URI")]
+        resource_uri: Option<String>,
+
+        #[arg(long = "read-resource")]
+        read_resource: bool,
+
+        #[arg(long, value_enum)]
+        transport: Option<SubscribeTransportArg>,
+
+        #[arg(long = "subprotocol", value_name = "VALUE")]
+        subprotocols: Vec<String>,
+
+        #[arg(long = "init-frame", value_name = "TEXT_OR_JSON")]
+        init_frames: Vec<String>,
+
+        #[arg(long, value_enum, default_value = "stream")]
+        mode: SubscribeModeArg,
+
+        #[arg(long = "poll-config", value_name = "JSON")]
+        poll_config: Option<String>,
+    },
+    /// Show a managed source
+    Status {
+        #[arg(value_name = "NAMESPACE")]
+        namespace: String,
+
+        #[arg(value_name = "SOURCE_KEY")]
+        source_key: String,
+    },
+    /// Stop a managed source
+    Stop {
+        #[arg(value_name = "NAMESPACE")]
+        namespace: String,
+
+        #[arg(value_name = "SOURCE_KEY")]
+        source_key: String,
+    },
+    /// Delete a managed source binding while keeping its durable stream
+    Delete {
+        #[arg(value_name = "NAMESPACE")]
+        namespace: String,
+
+        #[arg(value_name = "SOURCE_KEY")]
+        source_key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum StreamCommands {
+    /// Read durable stream records
+    Read {
+        #[arg(value_name = "STREAM_ID")]
+        stream_id: String,
+
+        #[arg(long = "after-offset", default_value_t = 0)]
+        after_offset: u64,
+
+        #[arg(long = "limit", default_value_t = 100)]
+        limit: usize,
+    },
+    /// Show stream metadata
+    Info {
+        #[arg(value_name = "STREAM_ID")]
+        stream_id: String,
+    },
+    /// Trim stream rows before an offset
+    Trim {
+        #[arg(value_name = "STREAM_ID")]
+        stream_id: String,
+
+        #[arg(long = "before-offset")]
+        before_offset: u64,
     },
 }
 
@@ -1335,7 +1445,15 @@ fn raw_has_help_token(raw_args: &[String]) -> bool {
 fn is_top_level_command_token(token: &str) -> bool {
     matches!(
         token,
-        "help" | "config" | "cache" | "auth" | "link" | "daemon" | "subscribe"
+        "help"
+            | "config"
+            | "cache"
+            | "auth"
+            | "link"
+            | "daemon"
+            | "subscribe"
+            | "source"
+            | "stream"
     )
 }
 
@@ -1427,6 +1545,20 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
         "subscribe" => {
             if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
                 if matches!(level1, "start" | "list" | "status" | "stop") {
+                    path.push(level1.to_string());
+                }
+            }
+        }
+        "source" => {
+            if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
+                if matches!(level1, "ensure" | "status" | "stop" | "delete") {
+                    path.push(level1.to_string());
+                }
+            }
+        }
+        "stream" => {
+            if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
+                if matches!(level1, "read" | "info" | "trim") {
                     path.push(level1.to_string());
                 }
             }
@@ -1535,6 +1667,17 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             SubscribeCommands::List => Some(vec!["subscribe", "list"]),
             SubscribeCommands::Status { .. } => Some(vec!["subscribe", "status"]),
             SubscribeCommands::Stop { .. } => Some(vec!["subscribe", "stop"]),
+        },
+        Some(Commands::Source { source_command }) => match source_command {
+            SourceCommands::Ensure { .. } => Some(vec!["source", "ensure"]),
+            SourceCommands::Status { .. } => Some(vec!["source", "status"]),
+            SourceCommands::Stop { .. } => Some(vec!["source", "stop"]),
+            SourceCommands::Delete { .. } => Some(vec!["source", "delete"]),
+        },
+        Some(Commands::Stream { stream_command }) => match stream_command {
+            StreamCommands::Read { .. } => Some(vec!["stream", "read"]),
+            StreamCommands::Info { .. } => Some(vec!["stream", "info"]),
+            StreamCommands::Trim { .. } => Some(vec!["stream", "trim"]),
         },
         Some(Commands::External(_)) | None => None,
     }
@@ -1751,6 +1894,14 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
         return handle_subscribe_command(subscribe_command, cli).await;
     }
 
+    if let Some(Commands::Source { source_command }) = &cli.command {
+        return handle_source_command(source_command, cli).await;
+    }
+
+    if let Some(Commands::Stream { stream_command }) = &cli.command {
+        return handle_stream_command(stream_command).await;
+    }
+
     let url = cli
         .url
         .clone()
@@ -1927,6 +2078,8 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 ("link", "Create a host-bound shortcut command"),
                 ("daemon", "Manage local runtime daemon"),
                 ("subscribe", "Manage background subscriptions via daemon"),
+                ("source", "Manage daemon-backed source streams"),
+                ("stream", "Read and maintain durable source streams"),
             ]),
             notes: vec![
                 "Default output is JSON. Use --text for human-readable output.".to_string(),
@@ -2172,6 +2325,124 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: vec![],
             notes: vec![],
             examples: vec!["uxc subscribe stop sub_123".to_string()],
+        },
+        ["source"] => HelpData {
+            path: "uxc source".to_string(),
+            about: "Manage daemon-backed source streams".to_string(),
+            usage: "uxc source <ensure|status|stop|delete> ...".to_string(),
+            commands: commands(&[
+                ("ensure", "Ensure a managed source exists and is running"),
+                ("status", "Show a managed source"),
+                ("stop", "Stop a managed source"),
+                ("delete", "Delete a managed source binding"),
+            ]),
+            notes: vec![
+                "Managed source identity is the pair (namespace, source_key).".to_string(),
+                "Ensure reuses the same durable stream for the same managed source and only replaces the current run when the normalized spec changes.".to_string(),
+                "Managed source streams are raw-oriented in v1: stream records persist only payload rows, not lifecycle envelopes.".to_string(),
+            ],
+            examples: vec![
+                "uxc source ensure agentinbox github_repo:holon-run/uxc https://api.github.com get:/repos/{owner}/{repo}/events owner=holon-run repo=uxc --mode poll --poll-config '{\"interval_secs\":30,\"extract_items_pointer\":\"\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}'".to_string(),
+                "uxc source status agentinbox github_repo:holon-run/uxc".to_string(),
+                "uxc source stop agentinbox github_repo:holon-run/uxc".to_string(),
+                "uxc source delete agentinbox github_repo:holon-run/uxc".to_string(),
+            ],
+        },
+        ["source", "ensure"] => HelpData {
+            path: "uxc source ensure".to_string(),
+            about: "Ensure a managed source exists and is running".to_string(),
+            usage: "uxc source ensure <namespace> <source_key> <endpoint> [<operation_id> [key=value ... | '{...}']] [--transport websocket|discord-gateway|slack-socket-mode|feishu-long-connection] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>] [--read-resource]".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Managed source identity is (namespace, source_key); the durable stream stays stable across spec replacements for the same identity.".to_string(),
+                "Spec changes replace the current run and reset checkpoint state by default, while preserving the managed stream.".to_string(),
+                "Managed source streams persist only raw payload rows. Lifecycle/runtime events remain visible through source status rather than stream rows.".to_string(),
+                "Use the same transport, websocket, poll, GraphQL, JSON-RPC pubsub, MCP resource, Discord, Slack, and Feishu options as subscribe start, except sink/ephemeral are not accepted here.".to_string(),
+            ],
+            examples: vec![
+                "uxc source ensure agentinbox github_repo:holon-run/uxc https://api.github.com get:/repos/{owner}/{repo}/events owner=holon-run repo=uxc --mode poll --poll-config '{\"interval_secs\":30,\"extract_items_pointer\":\"\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}'".to_string(),
+                "uxc source ensure market okx:btc-usdt wss://ws.okx.com:8443/ws/v5/public --transport websocket --init-frame '{\"op\":\"subscribe\",\"args\":[{\"channel\":\"tickers\",\"instId\":\"BTC-USDT\"}]}'".to_string(),
+                "uxc source ensure team discord-gateway https://discord.com/api/v10 --transport discord-gateway --auth discord-bot '{\"intents\":37377}'".to_string(),
+            ],
+        },
+        ["source", "status"] => HelpData {
+            path: "uxc source status".to_string(),
+            about: "Show a managed source".to_string(),
+            usage: "uxc source status <namespace> <source_key>".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Shows the current run, stable stream ID, status, current spec fingerprint, and last persisted checkpoint for the managed source.".to_string(),
+            ],
+            examples: vec!["uxc source status agentinbox github_repo:holon-run/uxc".to_string()],
+        },
+        ["source", "stop"] => HelpData {
+            path: "uxc source stop".to_string(),
+            about: "Stop a managed source".to_string(),
+            usage: "uxc source stop <namespace> <source_key>".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Stop preserves the managed source binding and durable stream so a later ensure can restart the same source identity.".to_string(),
+            ],
+            examples: vec!["uxc source stop agentinbox github_repo:holon-run/uxc".to_string()],
+        },
+        ["source", "delete"] => HelpData {
+            path: "uxc source delete".to_string(),
+            about: "Delete a managed source binding".to_string(),
+            usage: "uxc source delete <namespace> <source_key>".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Delete removes the managed source binding and current run state, but leaves durable stream rows intact for later inspection.".to_string(),
+            ],
+            examples: vec!["uxc source delete agentinbox github_repo:holon-run/uxc".to_string()],
+        },
+        ["stream"] => HelpData {
+            path: "uxc stream".to_string(),
+            about: "Read and maintain durable source streams".to_string(),
+            usage: "uxc stream <read|info|trim> ...".to_string(),
+            commands: commands(&[
+                ("read", "Read durable stream records"),
+                ("info", "Show stream metadata"),
+                ("trim", "Trim stream rows before an offset"),
+            ]),
+            notes: vec![
+                "Stream records are raw payload rows written by managed sources.".to_string(),
+                "Use stream info to inspect offset bounds and retention; use stream trim for explicit admin cleanup.".to_string(),
+            ],
+            examples: vec![
+                "uxc stream read ms_123 --after-offset 10 --limit 50".to_string(),
+                "uxc stream info ms_123".to_string(),
+                "uxc stream trim ms_123 --before-offset 1000".to_string(),
+            ],
+        },
+        ["stream", "read"] => HelpData {
+            path: "uxc stream read".to_string(),
+            about: "Read durable stream records".to_string(),
+            usage: "uxc stream read <stream_id> [--after-offset <n>] [--limit <n>]".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Returns payload rows only, with monotonically increasing offsets inside the stream.".to_string(),
+            ],
+            examples: vec!["uxc stream read ms_123 --after-offset 10 --limit 50".to_string()],
+        },
+        ["stream", "info"] => HelpData {
+            path: "uxc stream info".to_string(),
+            about: "Show stream metadata".to_string(),
+            usage: "uxc stream info <stream_id>".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Includes managed source identity, offset bounds, row count, and the current retention policy.".to_string(),
+            ],
+            examples: vec!["uxc stream info ms_123".to_string()],
+        },
+        ["stream", "trim"] => HelpData {
+            path: "uxc stream trim".to_string(),
+            about: "Trim stream rows before an offset".to_string(),
+            usage: "uxc stream trim <stream_id> --before-offset <n>".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Deletes all rows with offset less than the requested boundary.".to_string(),
+            ],
+            examples: vec!["uxc stream trim ms_123 --before-offset 1000".to_string()],
         },
         ["cache"] => HelpData {
             path: "uxc cache".to_string(),
@@ -3100,7 +3371,9 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
             | Some(Commands::Auth { .. })
             | Some(Commands::Link { .. })
             | Some(Commands::Daemon { .. })
-            | Some(Commands::Subscribe { .. }) => Err(UxcError::InvalidArguments(
+            | Some(Commands::Subscribe { .. })
+            | Some(Commands::Source { .. })
+            | Some(Commands::Stream { .. }) => Err(UxcError::InvalidArguments(
                 "--codegen-schema is only supported for endpoint invocations".to_string(),
             )
             .into()),
@@ -3115,7 +3388,9 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
         | Some(Commands::Auth { .. })
         | Some(Commands::Link { .. })
         | Some(Commands::Daemon { .. })
-        | Some(Commands::Subscribe { .. }) => Err(UxcError::InvalidArguments(
+        | Some(Commands::Subscribe { .. })
+        | Some(Commands::Source { .. })
+        | Some(Commands::Stream { .. }) => Err(UxcError::InvalidArguments(
             "Internal routing error for management command".to_string(),
         )
         .into()),
@@ -5507,6 +5782,7 @@ async fn handle_subscribe_command(
                 },
                 poll_config,
                 ephemeral: *ephemeral,
+                internal: false,
                 options: daemon::RuntimeInvokeOptions {
                     auth: cli.auth.clone(),
                     inject_env: collect_inject_env_specs(cli)?,
@@ -5546,6 +5822,442 @@ async fn handle_subscribe_command(
 
     Ok(envelope.with_daemon_meta(
         daemon_used,
+        daemon_autostarted,
+        daemon_restarted_for_version_mismatch,
+        None,
+    ))
+}
+
+fn build_managed_source_spec(
+    endpoint: &str,
+    operation_id: &Option<String>,
+    args: &[String],
+    input_json: &Option<String>,
+    resource_uri: &Option<String>,
+    read_resource: bool,
+    transport: &Option<SubscribeTransportArg>,
+    subprotocols: &[String],
+    init_frames: &[String],
+    mode: &SubscribeModeArg,
+    poll_config: &Option<String>,
+    cli: &Cli,
+) -> Result<daemon::ManagedSourceSpec> {
+    let transport_hint = transport.as_ref().map(|value| match value {
+        SubscribeTransportArg::Websocket => daemon::SubscriptionTransportHint::Websocket,
+        SubscribeTransportArg::DiscordGateway => daemon::SubscriptionTransportHint::DiscordGateway,
+        SubscribeTransportArg::SlackSocketMode => {
+            daemon::SubscriptionTransportHint::SlackSocketMode
+        }
+        SubscribeTransportArg::FeishuLongConnection => {
+            daemon::SubscriptionTransportHint::FeishuLongConnection
+        }
+    });
+    let mut transport_operation_id = operation_id.clone();
+    let mut transport_input_json = input_json.clone();
+    if matches!(
+        transport_hint,
+        Some(daemon::SubscriptionTransportHint::DiscordGateway)
+    ) {
+        if let Some(candidate) = transport_operation_id.as_deref() {
+            if serde_json::from_str::<Value>(candidate)
+                .ok()
+                .is_some_and(|value| value.is_object())
+            {
+                if transport_input_json.is_some() {
+                    return Err(UxcError::InvalidArguments(
+                        "Cannot provide both --input-json and positional JSON payload".to_string(),
+                    )
+                    .into());
+                }
+                transport_input_json = Some(candidate.to_string());
+                transport_operation_id = None;
+            }
+        }
+    }
+    if !matches!(
+        transport_hint,
+        Some(daemon::SubscriptionTransportHint::Websocket)
+    ) && (!subprotocols.is_empty() || !init_frames.is_empty())
+    {
+        return Err(UxcError::InvalidArguments(
+            "--subprotocol and --init-frame require explicit --transport websocket".to_string(),
+        )
+        .into());
+    }
+    if matches!(
+        transport_hint,
+        Some(daemon::SubscriptionTransportHint::Websocket)
+    ) {
+        if operation_id.is_some() {
+            return Err(UxcError::InvalidArguments(
+                "--transport websocket cannot be combined with an operation_id".to_string(),
+            )
+            .into());
+        }
+        if resource_uri.is_some() {
+            return Err(UxcError::InvalidArguments(
+                "--transport websocket cannot be combined with --resource-uri".to_string(),
+            )
+            .into());
+        }
+        if !matches!(mode, SubscribeModeArg::Stream) {
+            return Err(UxcError::InvalidArguments(
+                "--transport websocket is only valid with --mode stream".to_string(),
+            )
+            .into());
+        }
+    }
+    if matches!(
+        transport_hint,
+        Some(daemon::SubscriptionTransportHint::DiscordGateway)
+    ) {
+        if transport_operation_id.is_some() {
+            return Err(UxcError::InvalidArguments(
+                "--transport discord-gateway cannot be combined with an operation_id".to_string(),
+            )
+            .into());
+        }
+        if resource_uri.is_some() {
+            return Err(UxcError::InvalidArguments(
+                "--transport discord-gateway cannot be combined with --resource-uri".to_string(),
+            )
+            .into());
+        }
+        if !matches!(mode, SubscribeModeArg::Stream) {
+            return Err(UxcError::InvalidArguments(
+                "--transport discord-gateway is only valid with --mode stream".to_string(),
+            )
+            .into());
+        }
+    }
+    if matches!(
+        transport_hint,
+        Some(daemon::SubscriptionTransportHint::SlackSocketMode)
+    ) {
+        if operation_id.is_some() {
+            return Err(UxcError::InvalidArguments(
+                "--transport slack-socket-mode cannot be combined with an operation_id".to_string(),
+            )
+            .into());
+        }
+        if resource_uri.is_some() {
+            return Err(UxcError::InvalidArguments(
+                "--transport slack-socket-mode cannot be combined with --resource-uri".to_string(),
+            )
+            .into());
+        }
+        if !matches!(mode, SubscribeModeArg::Stream) {
+            return Err(UxcError::InvalidArguments(
+                "--transport slack-socket-mode is only valid with --mode stream".to_string(),
+            )
+            .into());
+        }
+    }
+    if matches!(
+        transport_hint,
+        Some(daemon::SubscriptionTransportHint::FeishuLongConnection)
+    ) {
+        if operation_id.is_some() {
+            return Err(UxcError::InvalidArguments(
+                "--transport feishu-long-connection cannot be combined with an operation_id"
+                    .to_string(),
+            )
+            .into());
+        }
+        if resource_uri.is_some() {
+            return Err(UxcError::InvalidArguments(
+                "--transport feishu-long-connection cannot be combined with --resource-uri"
+                    .to_string(),
+            )
+            .into());
+        }
+        if !matches!(mode, SubscribeModeArg::Stream) {
+            return Err(UxcError::InvalidArguments(
+                "--transport feishu-long-connection is only valid with --mode stream".to_string(),
+            )
+            .into());
+        }
+    }
+    if read_resource && resource_uri.is_none() {
+        return Err(UxcError::InvalidArguments(
+            "--read-resource requires --resource-uri".to_string(),
+        )
+        .into());
+    }
+    if read_resource && !matches!(mode, SubscribeModeArg::Stream) {
+        return Err(UxcError::InvalidArguments(
+            "--read-resource is only valid with --mode stream".to_string(),
+        )
+        .into());
+    }
+
+    let (normalized_args, normalized_input_json) = match transport_operation_id.as_ref() {
+        Some(op) => {
+            let mut explicit_args = Vec::new();
+            let mut positional = Vec::new();
+            for arg in args {
+                if arg.contains('=') {
+                    explicit_args.push(arg.clone());
+                } else {
+                    positional.push(arg.clone());
+                }
+            }
+            normalize_operation_inputs(
+                op,
+                explicit_args,
+                transport_input_json.clone(),
+                &positional,
+            )?
+        }
+        None => {
+            if matches!(
+                transport_hint,
+                Some(daemon::SubscriptionTransportHint::DiscordGateway)
+            ) || matches!(
+                transport_hint,
+                Some(daemon::SubscriptionTransportHint::FeishuLongConnection)
+            ) {
+                let fallback_op = if matches!(
+                    transport_hint,
+                    Some(daemon::SubscriptionTransportHint::DiscordGateway)
+                ) {
+                    "discord-gateway"
+                } else {
+                    "feishu-long-connection"
+                };
+                let mut explicit_args = Vec::new();
+                let mut positional = Vec::new();
+                for arg in args {
+                    if arg.contains('=') {
+                        explicit_args.push(arg.clone());
+                    } else {
+                        positional.push(arg.clone());
+                    }
+                }
+                normalize_operation_inputs(
+                    fallback_op,
+                    explicit_args,
+                    transport_input_json.clone(),
+                    &positional,
+                )?
+            } else if transport_input_json.is_some() || !args.is_empty() {
+                return Err(UxcError::InvalidArguments(
+                    "source ensure only accepts operation arguments when <operation_id> is provided"
+                        .to_string(),
+                )
+                .into());
+            } else {
+                (Vec::new(), None)
+            }
+        }
+    };
+
+    let args_map = if let Some(op) = transport_operation_id.as_ref() {
+        Some(
+            parse_arguments(normalized_args, normalized_input_json).map_err(|err| {
+                UxcError::InvalidArguments(format!(
+                    "Invalid arguments for source operation '{}': {}",
+                    op, err
+                ))
+            })?,
+        )
+    } else if transport_hint.is_some()
+        && (normalized_input_json.is_some() || !normalized_args.is_empty())
+    {
+        Some(
+            parse_arguments(normalized_args, normalized_input_json).map_err(|err| {
+                UxcError::InvalidArguments(format!("Invalid transport arguments: {}", err))
+            })?,
+        )
+    } else {
+        None
+    };
+
+    let poll_config = match poll_config {
+        Some(raw) => Some(serde_json::from_str::<Value>(raw).map_err(|err| {
+            UxcError::InvalidArguments(format!("Invalid JSON for --poll-config: {}", err))
+        })?),
+        None => None,
+    };
+
+    Ok(daemon::ManagedSourceSpec {
+        endpoint: normalize_endpoint_url(endpoint),
+        operation_id: transport_operation_id,
+        args: args_map,
+        resource_uri: resource_uri.clone(),
+        read_resource,
+        transport_hint,
+        subprotocols: subprotocols.to_vec(),
+        initial_text_frames: init_frames.to_vec(),
+        mode: match mode {
+            SubscribeModeArg::Stream => daemon::SubscriptionMode::Stream,
+            SubscribeModeArg::Poll => daemon::SubscriptionMode::Poll,
+        },
+        poll_config,
+        options: daemon::RuntimeInvokeOptions {
+            auth: cli.auth.clone(),
+            inject_env: collect_inject_env_specs(cli)?,
+            no_cache: cli.no_cache,
+            cache_ttl: cli.cache_ttl,
+            timeout_ms: cli.timeout_ms,
+            refresh_schema: cli.refresh_schema,
+            schema_url: None,
+            link_name: std::env::var("UXC_LINK_NAME").ok(),
+            link_skill: env_var_nonempty("UXC_LINK_SKILL"),
+            link_skill_doc: env_var_nonempty("UXC_LINK_SKILL_DOC"),
+            link_skill_path: env_var_nonempty("UXC_LINK_SKILL_PATH"),
+            schema_mapping_file: None,
+            daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
+            daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
+            request_headers: HashMap::new(),
+        },
+    })
+}
+
+async fn handle_source_command(command: &SourceCommands, cli: &Cli) -> Result<OutputEnvelope> {
+    if cli.schema_url.is_some() {
+        return Err(UxcError::InvalidArguments(
+            "--schema-url is not supported for source commands".to_string(),
+        )
+        .into());
+    }
+    let daemon_ensure = daemon::ensure_compatible_daemon_running().await?;
+    let daemon_autostarted =
+        Some(daemon_ensure.started_now && !daemon_ensure.restarted_for_version_mismatch);
+    let daemon_restarted_for_version_mismatch = Some(daemon_ensure.restarted_for_version_mismatch);
+
+    let envelope = match command {
+        SourceCommands::Ensure {
+            namespace,
+            source_key,
+            endpoint,
+            operation_id,
+            args,
+            input_json,
+            resource_uri,
+            read_resource,
+            transport,
+            subprotocols,
+            init_frames,
+            mode,
+            poll_config,
+        } => {
+            let spec = build_managed_source_spec(
+                endpoint,
+                operation_id,
+                args,
+                input_json,
+                resource_uri,
+                *read_resource,
+                transport,
+                subprotocols,
+                init_frames,
+                mode,
+                poll_config,
+                cli,
+            )?;
+            let data = serde_json::to_value(
+                daemon::source_ensure_client(&daemon::ManagedSourceEnsureRequest {
+                    namespace: namespace.clone(),
+                    source_key: source_key.clone(),
+                    spec,
+                })
+                .await?,
+            )?;
+            OutputEnvelope::success("source_ensure_result", "cli", "uxc", None, data, None)
+        }
+        SourceCommands::Status {
+            namespace,
+            source_key,
+        } => {
+            let data = serde_json::to_value(
+                daemon::source_status_client(&daemon::ManagedSourceStatusRequest {
+                    namespace: namespace.clone(),
+                    source_key: source_key.clone(),
+                })
+                .await?,
+            )?;
+            OutputEnvelope::success("source_status", "cli", "uxc", None, data, None)
+        }
+        SourceCommands::Stop {
+            namespace,
+            source_key,
+        } => {
+            let data = serde_json::to_value(
+                daemon::source_stop_client(&daemon::ManagedSourceStatusRequest {
+                    namespace: namespace.clone(),
+                    source_key: source_key.clone(),
+                })
+                .await?,
+            )?;
+            OutputEnvelope::success("source_stop_result", "cli", "uxc", None, data, None)
+        }
+        SourceCommands::Delete {
+            namespace,
+            source_key,
+        } => {
+            let data = serde_json::to_value(
+                daemon::source_delete_client(&daemon::ManagedSourceStatusRequest {
+                    namespace: namespace.clone(),
+                    source_key: source_key.clone(),
+                })
+                .await?,
+            )?;
+            OutputEnvelope::success("source_delete_result", "cli", "uxc", None, data, None)
+        }
+    };
+
+    Ok(envelope.with_daemon_meta(
+        true,
+        daemon_autostarted,
+        daemon_restarted_for_version_mismatch,
+        None,
+    ))
+}
+
+async fn handle_stream_command(command: &StreamCommands) -> Result<OutputEnvelope> {
+    let daemon_ensure = daemon::ensure_compatible_daemon_running().await?;
+    let daemon_autostarted =
+        Some(daemon_ensure.started_now && !daemon_ensure.restarted_for_version_mismatch);
+    let daemon_restarted_for_version_mismatch = Some(daemon_ensure.restarted_for_version_mismatch);
+
+    let envelope = match command {
+        StreamCommands::Read {
+            stream_id,
+            after_offset,
+            limit,
+        } => {
+            let data = serde_json::to_value(
+                daemon::stream_read_client(&daemon::ManagedStreamReadRequest {
+                    stream_id: stream_id.clone(),
+                    after_offset: *after_offset,
+                    limit: *limit,
+                })
+                .await?,
+            )?;
+            OutputEnvelope::success("stream_read", "cli", "uxc", None, data, None)
+        }
+        StreamCommands::Info { stream_id } => {
+            let data = serde_json::to_value(daemon::stream_info_client(stream_id).await?)?;
+            OutputEnvelope::success("stream_info", "cli", "uxc", None, data, None)
+        }
+        StreamCommands::Trim {
+            stream_id,
+            before_offset,
+        } => {
+            let data = serde_json::to_value(
+                daemon::stream_trim_client(&daemon::ManagedStreamTrimRequest {
+                    stream_id: stream_id.clone(),
+                    before_offset: *before_offset,
+                })
+                .await?,
+            )?;
+            OutputEnvelope::success("stream_trim_result", "cli", "uxc", None, data, None)
+        }
+    };
+
+    Ok(envelope.with_daemon_meta(
+        true,
         daemon_autostarted,
         daemon_restarted_for_version_mismatch,
         None,
