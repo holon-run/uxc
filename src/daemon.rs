@@ -13,6 +13,9 @@ use crate::error::{
     structured_error_from_anyhow, structured_error_from_jsonrpc_error, StructuredError,
     StructuredErrorPayload, UxcError,
 };
+use crate::managed_source_streams::{
+    ManagedSourceRecord, ManagedSourceStore, StreamEventRecord, StreamInfoRecord,
+};
 use crate::subscription_discord::{
     derive_gateway_bot_endpoint, parse_gateway_bot_response, prepare_gateway_websocket_url,
     DiscordGatewayBotResponse, DiscordGatewayHandler, DiscordGatewayRuntimeConfig,
@@ -86,6 +89,8 @@ const SUBSCRIPTION_TERMINAL_TTL_SECS: u64 = 60;
 const SUBSCRIPTION_EVENTS_DEFAULT_LIMIT: usize = 100;
 const SUBSCRIPTION_EVENTS_MAX_LIMIT: usize = 500;
 const SUBSCRIPTION_EVENTS_MAX_WAIT_MS: u64 = 15_000;
+const MANAGED_STREAM_EVENTS_DEFAULT_LIMIT: usize = 100;
+const MANAGED_STREAM_EVENTS_MAX_LIMIT: usize = 500;
 const MCP_NOTIFICATION_HISTORY_LIMIT: usize = 256;
 const ARTIFACT_COMPACTION_THRESHOLD_BYTES: usize = 64 * 1024;
 const ARTIFACT_PREVIEW_MAX_OBJECT_KEYS: usize = 20;
@@ -211,6 +216,8 @@ pub struct SubscribeStartRequest {
     /// If true, do not auto-resume this subscription after daemon restart.
     #[serde(default)]
     pub ephemeral: bool,
+    #[serde(default)]
+    pub internal: bool,
     pub options: RuntimeInvokeOptions,
 }
 
@@ -312,8 +319,138 @@ pub struct SubscriptionEventEnvelope {
     pub meta: Option<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceSpec {
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<HashMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_uri: Option<String>,
+    #[serde(default)]
+    pub read_resource: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_hint: Option<SubscriptionTransportHint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subprotocols: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_text_frames: Vec<String>,
+    pub mode: SubscriptionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_config: Option<Value>,
+    pub options: RuntimeInvokeOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceEnsureRequest {
+    pub namespace: String,
+    pub source_key: String,
+    pub spec: ManagedSourceSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceEnsureResponse {
+    pub namespace: String,
+    pub source_key: String,
+    pub run_id: String,
+    pub stream_id: String,
+    pub status: String,
+    pub reused: bool,
+    pub replaced_previous: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceStatusRequest {
+    pub namespace: String,
+    pub source_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceView {
+    pub namespace: String,
+    pub source_key: String,
+    pub run_id: String,
+    pub stream_id: String,
+    pub spec_key: String,
+    pub status: String,
+    pub created_at_unix: u64,
+    pub updated_at_unix: u64,
+    pub started_at_unix: Option<u64>,
+    pub stopped_at_unix: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceStopResponse {
+    pub namespace: String,
+    pub source_key: String,
+    pub stopped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceDeleteResponse {
+    pub namespace: String,
+    pub source_key: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedStreamEvent {
+    pub stream_id: String,
+    pub offset: u64,
+    pub ingested_at_unix: u64,
+    pub raw_payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedStreamReadRequest {
+    pub stream_id: String,
+    #[serde(default)]
+    pub after_offset: u64,
+    #[serde(default = "default_managed_stream_events_limit")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedStreamReadResponse {
+    pub stream_id: String,
+    pub events: Vec<ManagedStreamEvent>,
+    pub next_after_offset: u64,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedStreamInfo {
+    pub stream_id: String,
+    pub namespace: String,
+    pub source_key: String,
+    pub created_at_unix: u64,
+    pub earliest_offset: Option<u64>,
+    pub latest_offset: Option<u64>,
+    pub event_count: u64,
+    pub retention_max_rows: u64,
+    pub retention_max_age_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedStreamTrimRequest {
+    pub stream_id: String,
+    pub before_offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedStreamTrimResponse {
+    pub stream_id: String,
+    pub trimmed: u64,
+}
+
 fn default_subscription_events_limit() -> usize {
     SUBSCRIPTION_EVENTS_DEFAULT_LIMIT
+}
+
+fn default_managed_stream_events_limit() -> usize {
+    MANAGED_STREAM_EVENTS_DEFAULT_LIMIT
 }
 
 fn should_read_mcp_resource_snapshot(notification: &JsonRpcNotification) -> bool {
@@ -633,6 +770,23 @@ struct SubscriptionManager {
     terminal_jobs: Arc<Mutex<HashMap<String, TerminalSubscriptionEntry>>>,
     next_id: Arc<Mutex<u64>>,
     store_path: PathBuf,
+}
+
+#[derive(Clone)]
+struct ManagedSourceManager {
+    entries: Arc<Mutex<HashMap<String, Arc<ManagedSourceEntry>>>>,
+    store: ManagedSourceStore,
+}
+
+struct ManagedSourceEntry {
+    namespace: String,
+    source_key: String,
+    stream_id: String,
+    state: Arc<Mutex<ManagedSourceView>>,
+    underlying_job_id: Arc<Mutex<Option<String>>>,
+    mirrored_after_seq: Arc<Mutex<u64>>,
+    stop_tx: Mutex<watch::Sender<bool>>,
+    tail_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 struct SubscriptionJobEntry {
@@ -2508,6 +2662,9 @@ impl SubscriptionManager {
         };
         let mut views = Vec::with_capacity(entries.len());
         for entry in entries {
+            if entry.request.internal {
+                continue;
+            }
             views.push(entry.view.lock().await.clone());
         }
         views.sort_by(|a, b| a.job_id.cmp(&b.job_id));
@@ -2613,13 +2770,14 @@ impl SubscriptionManager {
                 None
             };
 
-            let (status, sink_path) = if let Some(entry) = active_entry {
+            let (status, sink_path, retain_all) = if let Some(entry) = active_entry {
                 (
                     entry.view.lock().await.status.clone(),
                     entry.sink_path.clone(),
+                    entry.request.internal,
                 )
             } else if let Some(entry) = terminal_entry {
-                (entry.view.status.clone(), entry.sink_path.clone())
+                (entry.view.status.clone(), entry.sink_path.clone(), false)
             } else {
                 return Err(UxcError::OperationNotFound(format!(
                     "subscription job not found: {}",
@@ -2628,7 +2786,8 @@ impl SubscriptionManager {
                 .into());
             };
 
-            let loaded = load_subscription_events(&sink_path, request.after_seq, limit).await?;
+            let loaded =
+                load_subscription_events(&sink_path, request.after_seq, limit, retain_all).await?;
             if !loaded.events.is_empty() || wait_ms == 0 || status != "running" {
                 return Ok(SubscriptionEventsResponse {
                     job_id: request.job_id.clone(),
@@ -2651,6 +2810,584 @@ impl SubscriptionManager {
 
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+}
+
+impl ManagedSourceManager {
+    fn new(store: ManagedSourceStore) -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            store,
+        }
+    }
+
+    async fn ensure(
+        &self,
+        runtime: &DaemonRuntime,
+        request: ManagedSourceEnsureRequest,
+    ) -> Result<ManagedSourceEnsureResponse> {
+        validate_managed_source_identity(&request.namespace, &request.source_key)?;
+        let spec_key = compute_managed_source_spec_key(&request.spec)?;
+        let identity_key = managed_source_identity_key(&request.namespace, &request.source_key);
+        let existing = self
+            .store
+            .get_source(&request.namespace, &request.source_key)
+            .await?;
+
+        let mut reused = false;
+        let mut replaced_previous = false;
+        let record = if let Some(existing) = existing {
+            if existing.spec_key == spec_key && existing.underlying_job_id.is_some() {
+                reused = true;
+                existing
+            } else {
+                if existing.underlying_job_id.is_some() {
+                    let _ = self
+                        .stop_internal(runtime, &request.namespace, &request.source_key)
+                        .await;
+                }
+                replaced_previous = existing.spec_key != spec_key;
+                ManagedSourceRecord {
+                    namespace: request.namespace.clone(),
+                    source_key: request.source_key.clone(),
+                    spec_json: serde_json::to_value(&request.spec)?,
+                    spec_key,
+                    run_id: new_managed_source_run_id(),
+                    stream_id: existing.stream_id,
+                    status: "starting".to_string(),
+                    created_at_unix: existing.created_at_unix,
+                    updated_at_unix: now_unix_secs(),
+                    started_at_unix: None,
+                    stopped_at_unix: None,
+                    last_error: None,
+                    underlying_job_id: None,
+                    mirrored_after_seq: 0,
+                }
+            }
+        } else {
+            ManagedSourceRecord {
+                namespace: request.namespace.clone(),
+                source_key: request.source_key.clone(),
+                spec_json: serde_json::to_value(&request.spec)?,
+                spec_key,
+                run_id: new_managed_source_run_id(),
+                stream_id: managed_stream_id(&request.namespace, &request.source_key),
+                status: "starting".to_string(),
+                created_at_unix: now_unix_secs(),
+                updated_at_unix: now_unix_secs(),
+                started_at_unix: None,
+                stopped_at_unix: None,
+                last_error: None,
+                underlying_job_id: None,
+                mirrored_after_seq: 0,
+            }
+        };
+
+        if reused {
+            self.ensure_tailer_for_record(runtime, record.clone())
+                .await?;
+            let state = self.status(&request.namespace, &request.source_key).await?;
+            return Ok(ManagedSourceEnsureResponse {
+                namespace: state.namespace,
+                source_key: state.source_key,
+                run_id: state.run_id,
+                stream_id: state.stream_id,
+                status: state.status,
+                reused: true,
+                replaced_previous: false,
+            });
+        }
+
+        let started = self
+            .start_managed_source(runtime, record, request.spec.clone())
+            .await?;
+        self.entries.lock().await.remove(&identity_key);
+        self.ensure_tailer_for_record(runtime, started.clone())
+            .await?;
+        let state = self.status(&request.namespace, &request.source_key).await?;
+        Ok(ManagedSourceEnsureResponse {
+            namespace: state.namespace,
+            source_key: state.source_key,
+            run_id: state.run_id,
+            stream_id: state.stream_id,
+            status: state.status,
+            reused: false,
+            replaced_previous,
+        })
+    }
+
+    async fn status(&self, namespace: &str, source_key: &str) -> Result<ManagedSourceView> {
+        let identity_key = managed_source_identity_key(namespace, source_key);
+        if let Some(entry) = self.entries.lock().await.get(&identity_key).cloned() {
+            return Ok(entry.state.lock().await.clone());
+        }
+        let record = self
+            .store
+            .get_source(namespace, source_key)
+            .await?
+            .ok_or_else(|| {
+                UxcError::OperationNotFound(format!(
+                    "managed source not found: {}/{}",
+                    namespace, source_key
+                ))
+            })?;
+        Ok(view_from_record(&record))
+    }
+
+    async fn stop(
+        &self,
+        runtime: &DaemonRuntime,
+        request: &ManagedSourceStatusRequest,
+    ) -> Result<ManagedSourceStopResponse> {
+        validate_managed_source_identity(&request.namespace, &request.source_key)?;
+        self.stop_internal(runtime, &request.namespace, &request.source_key)
+            .await?;
+        Ok(ManagedSourceStopResponse {
+            namespace: request.namespace.clone(),
+            source_key: request.source_key.clone(),
+            stopped: true,
+        })
+    }
+
+    async fn delete(
+        &self,
+        runtime: &DaemonRuntime,
+        request: &ManagedSourceStatusRequest,
+    ) -> Result<ManagedSourceDeleteResponse> {
+        validate_managed_source_identity(&request.namespace, &request.source_key)?;
+        let _ = self
+            .stop_internal(runtime, &request.namespace, &request.source_key)
+            .await;
+        self.store
+            .delete_source(&request.namespace, &request.source_key)
+            .await?;
+        self.entries
+            .lock()
+            .await
+            .remove(&managed_source_identity_key(
+                &request.namespace,
+                &request.source_key,
+            ));
+        Ok(ManagedSourceDeleteResponse {
+            namespace: request.namespace.clone(),
+            source_key: request.source_key.clone(),
+            deleted: true,
+        })
+    }
+
+    async fn resume_all(&self, runtime: &DaemonRuntime) -> Result<()> {
+        let records = self.store.load_sources().await?;
+        for record in records {
+            if record.status == "stopped" {
+                continue;
+            }
+            if let Err(err) = self.ensure_tailer_for_record(runtime, record.clone()).await {
+                tracing::warn!(
+                    "failed to resume managed source {}/{}: {}",
+                    record.namespace,
+                    record.source_key,
+                    err
+                );
+                self.store
+                    .clear_source_job(
+                        &record.namespace,
+                        &record.source_key,
+                        "failed",
+                        now_unix_secs(),
+                        Some(now_unix_secs()),
+                        Some(err.to_string()),
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn stream_read(
+        &self,
+        request: &ManagedStreamReadRequest,
+    ) -> Result<ManagedStreamReadResponse> {
+        let limit = request.limit.clamp(1, MANAGED_STREAM_EVENTS_MAX_LIMIT);
+        let page = self
+            .store
+            .read_stream(&request.stream_id, request.after_offset, limit)
+            .await?;
+        Ok(ManagedStreamReadResponse {
+            stream_id: request.stream_id.clone(),
+            events: page.events.into_iter().map(stream_event_view).collect(),
+            next_after_offset: page.next_after_offset,
+            has_more: page.has_more,
+        })
+    }
+
+    async fn stream_info(&self, stream_id: &str) -> Result<ManagedStreamInfo> {
+        let info = self.store.stream_info(stream_id).await?.ok_or_else(|| {
+            UxcError::OperationNotFound(format!("managed stream not found: {}", stream_id))
+        })?;
+        Ok(stream_info_view(&info))
+    }
+
+    async fn stream_trim(
+        &self,
+        request: &ManagedStreamTrimRequest,
+    ) -> Result<ManagedStreamTrimResponse> {
+        let trimmed = self
+            .store
+            .trim_stream_before(&request.stream_id, request.before_offset)
+            .await?;
+        Ok(ManagedStreamTrimResponse {
+            stream_id: request.stream_id.clone(),
+            trimmed,
+        })
+    }
+
+    async fn start_managed_source(
+        &self,
+        runtime: &DaemonRuntime,
+        mut record: ManagedSourceRecord,
+        spec: ManagedSourceSpec,
+    ) -> Result<ManagedSourceRecord> {
+        let sink_path = runtime.managed_source_sink_path(&record.run_id);
+        let subscription = managed_source_subscribe_request(&record, &spec, &sink_path);
+        let started = runtime.subscriptions.start(runtime, &subscription).await?;
+        record.status = started.status;
+        record.updated_at_unix = now_unix_secs();
+        record.started_at_unix = Some(now_unix_secs());
+        record.stopped_at_unix = None;
+        record.last_error = None;
+        record.underlying_job_id = Some(started.job_id);
+        record.mirrored_after_seq = 0;
+        self.store.upsert_source(&record, true).await?;
+        Ok(record)
+    }
+
+    async fn ensure_tailer_for_record(
+        &self,
+        runtime: &DaemonRuntime,
+        record: ManagedSourceRecord,
+    ) -> Result<()> {
+        let Some(job_id) = record.underlying_job_id.clone() else {
+            return Err(anyhow!(
+                "managed source {}/{} has no underlying subscription job",
+                record.namespace,
+                record.source_key
+            ));
+        };
+        let identity_key = managed_source_identity_key(&record.namespace, &record.source_key);
+        if self.entries.lock().await.contains_key(&identity_key) {
+            return Ok(());
+        }
+
+        let state = Arc::new(Mutex::new(view_from_record(&record)));
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let entry = Arc::new(ManagedSourceEntry {
+            namespace: record.namespace.clone(),
+            source_key: record.source_key.clone(),
+            stream_id: record.stream_id.clone(),
+            state: state.clone(),
+            underlying_job_id: Arc::new(Mutex::new(Some(job_id.clone()))),
+            mirrored_after_seq: Arc::new(Mutex::new(record.mirrored_after_seq)),
+            stop_tx: Mutex::new(stop_tx),
+            tail_task: Mutex::new(None),
+        });
+        self.entries
+            .lock()
+            .await
+            .insert(identity_key.clone(), entry.clone());
+        let manager = self.clone();
+        let runtime = runtime.clone();
+        let tail_entry = entry.clone();
+        let task = tokio::spawn(async move {
+            manager
+                .tail_managed_source(runtime, identity_key, tail_entry, job_id, stop_rx)
+                .await;
+        });
+        *entry.tail_task.lock().await = Some(task);
+        Ok(())
+    }
+
+    async fn tail_managed_source(
+        &self,
+        runtime: DaemonRuntime,
+        identity_key: String,
+        entry: Arc<ManagedSourceEntry>,
+        job_id: String,
+        stop_rx: watch::Receiver<bool>,
+    ) {
+        let mut after_seq = *entry.mirrored_after_seq.lock().await;
+        loop {
+            if *stop_rx.borrow() {
+                break;
+            }
+            let result = runtime
+                .subscriptions
+                .events(&SubscriptionEventsRequest {
+                    job_id: job_id.clone(),
+                    after_seq,
+                    limit: SUBSCRIPTION_EVENTS_MAX_LIMIT,
+                    wait_ms: SUBSCRIPTION_EVENTS_MAX_WAIT_MS,
+                })
+                .await;
+            let batch = match result {
+                Ok(batch) => batch,
+                Err(err) => {
+                    let _ = self
+                        .store
+                        .clear_source_job(
+                            &entry.namespace,
+                            &entry.source_key,
+                            "failed",
+                            now_unix_secs(),
+                            Some(now_unix_secs()),
+                            Some(err.to_string()),
+                        )
+                        .await;
+                    let mut state = entry.state.lock().await;
+                    state.status = "failed".to_string();
+                    state.updated_at_unix = now_unix_secs();
+                    state.stopped_at_unix = Some(now_unix_secs());
+                    state.last_error = Some(err.to_string());
+                    break;
+                }
+            };
+
+            for event in &batch.events {
+                if let Some(payload) = event.data.as_ref() {
+                    let _ = self
+                        .store
+                        .append_event(&entry.stream_id, event.timestamp_unix, payload)
+                        .await;
+                }
+            }
+            if batch.next_after_seq > after_seq {
+                after_seq = batch.next_after_seq;
+                *entry.mirrored_after_seq.lock().await = after_seq;
+                let _ = self
+                    .store
+                    .update_source_runtime(
+                        &entry.namespace,
+                        &entry.source_key,
+                        &batch.status,
+                        now_unix_secs(),
+                        Some(now_unix_secs()),
+                        None,
+                        None,
+                        None,
+                        Some(after_seq),
+                    )
+                    .await;
+            }
+            {
+                let mut state = entry.state.lock().await;
+                state.status = batch.status.clone();
+                state.updated_at_unix = now_unix_secs();
+                if batch.status != "running" {
+                    state.stopped_at_unix = Some(now_unix_secs());
+                }
+            }
+            if batch.status != "running" && batch.events.is_empty() {
+                let _ = self
+                    .store
+                    .clear_source_job(
+                        &entry.namespace,
+                        &entry.source_key,
+                        &batch.status,
+                        now_unix_secs(),
+                        Some(now_unix_secs()),
+                        None,
+                    )
+                    .await;
+                break;
+            }
+        }
+
+        self.entries.lock().await.remove(&identity_key);
+    }
+
+    async fn stop_internal(
+        &self,
+        runtime: &DaemonRuntime,
+        namespace: &str,
+        source_key: &str,
+    ) -> Result<()> {
+        let identity_key = managed_source_identity_key(namespace, source_key);
+        let stored = self
+            .store
+            .get_source(namespace, source_key)
+            .await?
+            .ok_or_else(|| {
+                UxcError::OperationNotFound(format!(
+                    "managed source not found: {}/{}",
+                    namespace, source_key
+                ))
+            })?;
+        let active_entry = { self.entries.lock().await.get(&identity_key).cloned() };
+        if let Some(entry) = active_entry {
+            let _ = entry.stop_tx.lock().await.send(true);
+            if let Some(job_id) = entry.underlying_job_id.lock().await.clone() {
+                let runtime = runtime.clone();
+                tokio::spawn(async move {
+                    let _ = runtime.subscriptions.stop(&job_id).await;
+                });
+            }
+            if let Some(task) = entry.tail_task.lock().await.take() {
+                let task = task;
+                task.abort();
+                let _ = task.await;
+            }
+            self.entries.lock().await.remove(&identity_key);
+        } else if let Some(job_id) = stored.underlying_job_id.clone() {
+            let runtime = runtime.clone();
+            tokio::spawn(async move {
+                let _ = runtime.subscriptions.stop(&job_id).await;
+            });
+        }
+        self.store
+            .clear_source_job(
+                namespace,
+                source_key,
+                "stopped",
+                now_unix_secs(),
+                Some(now_unix_secs()),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+fn validate_managed_source_identity(namespace: &str, source_key: &str) -> Result<()> {
+    if namespace.trim().is_empty() {
+        bail!("managed source namespace cannot be empty");
+    }
+    if source_key.trim().is_empty() {
+        bail!("managed source source_key cannot be empty");
+    }
+    Ok(())
+}
+
+fn managed_source_identity_key(namespace: &str, source_key: &str) -> String {
+    format!("{namespace}\u{0}{source_key}")
+}
+
+fn managed_source_streams_db_path(base_dir: &Path) -> PathBuf {
+    base_dir.join("managed-source-streams.db")
+}
+
+fn managed_source_sink_path(base_dir: &Path, run_id: &str) -> PathBuf {
+    base_dir
+        .join("managed-source-sinks")
+        .join(format!("{run_id}.ndjson"))
+}
+
+fn managed_stream_id(namespace: &str, source_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(namespace.as_bytes());
+    hasher.update([0]);
+    hasher.update(source_key.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("stream_{}", &digest[..16])
+}
+
+fn new_managed_source_run_id() -> String {
+    format!(
+        "run_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
+}
+
+fn compute_managed_source_spec_key(spec: &ManagedSourceSpec) -> Result<String> {
+    let payload = json!({
+        "endpoint": spec.endpoint,
+        "operation_id": spec.operation_id,
+        "args": spec.args,
+        "resource_uri": spec.resource_uri,
+        "read_resource": spec.read_resource,
+        "transport_hint": spec.transport_hint,
+        "subprotocols": spec.subprotocols,
+        "initial_text_frames": spec.initial_text_frames,
+        "mode": spec.mode,
+        "poll_config": spec.poll_config,
+        "auth": spec.options.auth,
+        "inject_env": spec
+            .options
+            .inject_env
+            .iter()
+            .map(|spec| json!({"name": spec.name, "template": spec.template}))
+            .collect::<Vec<_>>(),
+        "timeout_ms": spec.options.timeout_ms,
+        "request_headers": spec.options.request_headers,
+        "schema_url": spec.options.schema_url,
+    });
+    let bytes = serde_json::to_vec(&payload)?;
+    let digest = Sha256::digest(bytes);
+    Ok(format!("{:x}", digest))
+}
+
+fn managed_source_subscribe_request(
+    record: &ManagedSourceRecord,
+    spec: &ManagedSourceSpec,
+    sink_path: &Path,
+) -> SubscribeStartRequest {
+    SubscribeStartRequest {
+        request_id: format!("managed-source:{}:{}", record.namespace, record.source_key),
+        endpoint: spec.endpoint.clone(),
+        sink: format!("file:{}", sink_path.display()),
+        operation_id: spec.operation_id.clone(),
+        args: spec.args.clone(),
+        resource_uri: spec.resource_uri.clone(),
+        read_resource: spec.read_resource,
+        transport_hint: spec.transport_hint.clone(),
+        subprotocols: spec.subprotocols.clone(),
+        initial_text_frames: spec.initial_text_frames.clone(),
+        mode: spec.mode,
+        poll_config: spec.poll_config.clone(),
+        ephemeral: false,
+        internal: true,
+        options: spec.options.clone(),
+    }
+}
+
+fn view_from_record(record: &ManagedSourceRecord) -> ManagedSourceView {
+    ManagedSourceView {
+        namespace: record.namespace.clone(),
+        source_key: record.source_key.clone(),
+        run_id: record.run_id.clone(),
+        stream_id: record.stream_id.clone(),
+        spec_key: record.spec_key.clone(),
+        status: record.status.clone(),
+        created_at_unix: record.created_at_unix,
+        updated_at_unix: record.updated_at_unix,
+        started_at_unix: record.started_at_unix,
+        stopped_at_unix: record.stopped_at_unix,
+        last_error: record.last_error.clone(),
+    }
+}
+
+fn stream_event_view(record: StreamEventRecord) -> ManagedStreamEvent {
+    ManagedStreamEvent {
+        stream_id: record.stream_id,
+        offset: record.offset,
+        ingested_at_unix: record.ingested_at_unix,
+        raw_payload: record.raw_payload,
+    }
+}
+
+fn stream_info_view(record: &StreamInfoRecord) -> ManagedStreamInfo {
+    ManagedStreamInfo {
+        stream_id: record.stream_id.clone(),
+        namespace: record.namespace.clone(),
+        source_key: record.source_key.clone(),
+        created_at_unix: record.created_at_unix,
+        earliest_offset: record.earliest_offset,
+        latest_offset: record.latest_offset,
+        event_count: record.event_count,
+        retention_max_rows: record.retention_max_rows,
+        retention_max_age_secs: record.retention_max_age_secs,
     }
 }
 
@@ -2677,6 +3414,8 @@ pub struct DaemonRuntime {
     state: Arc<Mutex<ServerState>>,
     mcp: McpSessionManager,
     subscriptions: SubscriptionManager,
+    managed_sources: ManagedSourceManager,
+    managed_source_base_dir: PathBuf,
     should_stop: Arc<RwLock<bool>>,
     schema_mapping_lock: Arc<Mutex<()>>,
     logger: Option<DaemonLogger>,
@@ -2693,6 +3432,12 @@ impl DaemonRuntime {
 
     fn try_new_with_subscription_store_path(store_path: PathBuf) -> Result<Self> {
         let logger = Self::initialize_logger();
+        let managed_source_base_dir = store_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(daemon_dir);
+        let managed_source_store =
+            ManagedSourceStore::new(managed_source_streams_db_path(&managed_source_base_dir))?;
         Ok(Self {
             state: Arc::new(Mutex::new(ServerState {
                 started_at_unix: now_unix_secs(),
@@ -2700,6 +3445,8 @@ impl DaemonRuntime {
             })),
             mcp: McpSessionManager::new(logger.clone()),
             subscriptions: SubscriptionManager::new(store_path)?,
+            managed_sources: ManagedSourceManager::new(managed_source_store),
+            managed_source_base_dir,
             should_stop: Arc::new(RwLock::new(false)),
             schema_mapping_lock: Arc::new(Mutex::new(())),
             logger,
@@ -3131,6 +3878,62 @@ impl DaemonRuntime {
         self.subscriptions.resume_all(self).await
     }
 
+    pub async fn source_ensure(
+        &self,
+        request: ManagedSourceEnsureRequest,
+    ) -> Result<ManagedSourceEnsureResponse> {
+        self.managed_sources.ensure(self, request).await
+    }
+
+    pub async fn source_status(
+        &self,
+        request: &ManagedSourceStatusRequest,
+    ) -> Result<ManagedSourceView> {
+        self.managed_sources
+            .status(&request.namespace, &request.source_key)
+            .await
+    }
+
+    pub async fn source_stop(
+        &self,
+        request: &ManagedSourceStatusRequest,
+    ) -> Result<ManagedSourceStopResponse> {
+        self.managed_sources.stop(self, request).await
+    }
+
+    pub async fn source_delete(
+        &self,
+        request: &ManagedSourceStatusRequest,
+    ) -> Result<ManagedSourceDeleteResponse> {
+        self.managed_sources.delete(self, request).await
+    }
+
+    pub async fn stream_read(
+        &self,
+        request: &ManagedStreamReadRequest,
+    ) -> Result<ManagedStreamReadResponse> {
+        self.managed_sources.stream_read(request).await
+    }
+
+    pub async fn stream_info(&self, stream_id: &str) -> Result<ManagedStreamInfo> {
+        self.managed_sources.stream_info(stream_id).await
+    }
+
+    pub async fn stream_trim(
+        &self,
+        request: &ManagedStreamTrimRequest,
+    ) -> Result<ManagedStreamTrimResponse> {
+        self.managed_sources.stream_trim(request).await
+    }
+
+    pub async fn resume_managed_sources(&self) -> Result<()> {
+        self.managed_sources.resume_all(self).await
+    }
+
+    fn managed_source_sink_path(&self, run_id: &str) -> PathBuf {
+        managed_source_sink_path(&self.managed_source_base_dir, run_id)
+    }
+
     async fn detect_poll_subscription_protocol(
         &self,
         request: &SubscribeStartRequest,
@@ -3451,6 +4254,7 @@ async fn load_subscription_events(
     path: &Path,
     after_seq: u64,
     limit: usize,
+    retain_all: bool,
 ) -> Result<LoadedSubscriptionEvents> {
     let raw = match tokio::fs::read_to_string(path).await {
         Ok(raw) => raw,
@@ -3477,10 +4281,14 @@ async fn load_subscription_events(
         events.push(event);
     }
 
-    let retained_start = events
-        .len()
-        .saturating_sub(SUBSCRIPTION_EVENT_HISTORY_LIMIT);
-    let retained = &events[retained_start..];
+    let retained = if retain_all {
+        events.as_slice()
+    } else {
+        let retained_start = events
+            .len()
+            .saturating_sub(SUBSCRIPTION_EVENT_HISTORY_LIMIT);
+        &events[retained_start..]
+    };
     if let Some(first) = retained.first() {
         if after_seq > 0 && after_seq < first.seq.saturating_sub(1) {
             return Err(UxcError::InvalidArguments(format!(
@@ -5596,6 +6404,107 @@ pub async fn subscribe_events_client(
 }
 
 #[cfg(unix)]
+pub async fn source_ensure_client(
+    request: &ManagedSourceEnsureRequest,
+) -> Result<ManagedSourceEnsureResponse> {
+    let value = client_call("source.ensure", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn source_ensure_client(
+    _request: &ManagedSourceEnsureRequest,
+) -> Result<ManagedSourceEnsureResponse> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+pub async fn source_status_client(
+    request: &ManagedSourceStatusRequest,
+) -> Result<ManagedSourceView> {
+    let value = client_call("source.status", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn source_status_client(
+    _request: &ManagedSourceStatusRequest,
+) -> Result<ManagedSourceView> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+pub async fn source_stop_client(
+    request: &ManagedSourceStatusRequest,
+) -> Result<ManagedSourceStopResponse> {
+    let value = client_call("source.stop", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn source_stop_client(
+    _request: &ManagedSourceStatusRequest,
+) -> Result<ManagedSourceStopResponse> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+pub async fn source_delete_client(
+    request: &ManagedSourceStatusRequest,
+) -> Result<ManagedSourceDeleteResponse> {
+    let value = client_call("source.delete", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn source_delete_client(
+    _request: &ManagedSourceStatusRequest,
+) -> Result<ManagedSourceDeleteResponse> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+pub async fn stream_read_client(
+    request: &ManagedStreamReadRequest,
+) -> Result<ManagedStreamReadResponse> {
+    let value = client_call("stream.read", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn stream_read_client(
+    _request: &ManagedStreamReadRequest,
+) -> Result<ManagedStreamReadResponse> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+pub async fn stream_info_client(stream_id: &str) -> Result<ManagedStreamInfo> {
+    let value = client_call("stream.info", Some(json!({ "stream_id": stream_id }))).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn stream_info_client(_stream_id: &str) -> Result<ManagedStreamInfo> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+pub async fn stream_trim_client(
+    request: &ManagedStreamTrimRequest,
+) -> Result<ManagedStreamTrimResponse> {
+    let value = client_call("stream.trim", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn stream_trim_client(
+    _request: &ManagedStreamTrimRequest,
+) -> Result<ManagedStreamTrimResponse> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
 async fn start_daemon_process() -> Result<()> {
     let dir = daemon_dir();
     ensure_private_dir(&dir)?;
@@ -5725,6 +6634,9 @@ pub async fn run_daemon_server() -> Result<()> {
     tokio::spawn(async move {
         if let Err(err) = resume_runtime.resume_persisted_subscriptions().await {
             tracing::warn!("Failed to resume persisted subscriptions: {}", err);
+        }
+        if let Err(err) = resume_runtime.resume_managed_sources().await {
+            tracing::warn!("Failed to resume managed sources: {}", err);
         }
     });
 
@@ -6038,6 +6950,323 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 }
             };
             match runtime.subscribe_events(&events).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
+        "source.ensure" => {
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                        data: None,
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let ensure: ManagedSourceEnsureRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                            data: None,
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
+            match runtime.source_ensure(ensure).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
+        "source.status" => {
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                        data: None,
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let status: ManagedSourceStatusRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                            data: None,
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
+            match runtime.source_status(&status).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
+        "source.stop" => {
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                        data: None,
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let stop: ManagedSourceStatusRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                            data: None,
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
+            match runtime.source_stop(&stop).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
+        "source.delete" => {
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                        data: None,
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let delete: ManagedSourceStatusRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                            data: None,
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
+            match runtime.source_delete(&delete).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
+        "stream.read" => {
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                        data: None,
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let read: ManagedStreamReadRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                            data: None,
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
+            match runtime.stream_read(&read).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
+        "stream.info" => {
+            let Some(stream_id) = req
+                .params
+                .as_ref()
+                .and_then(|v| v.get("stream_id"))
+                .and_then(Value::as_str)
+            else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing stream_id".to_string(),
+                        data: None,
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            match runtime.stream_info(stream_id).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
+        "stream.trim" => {
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                        data: None,
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let trim: ManagedStreamTrimRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                            data: None,
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
+            match runtime.stream_trim(&trim).await {
                 Ok(result) => JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: req.id,
@@ -7717,6 +8946,39 @@ mod tests {
             mode: SubscriptionMode::Stream,
             poll_config: None,
             ephemeral: false,
+            internal: false,
+            options: RuntimeInvokeOptions {
+                auth: None,
+                inject_env: Vec::new(),
+                no_cache: false,
+                cache_ttl: None,
+                timeout_ms: None,
+                refresh_schema: false,
+                schema_url: None,
+                link_name: None,
+                link_skill: None,
+                link_skill_doc: None,
+                link_skill_path: None,
+                schema_mapping_file: None,
+                daemon_exclusive: Vec::new(),
+                daemon_idle_ttl: None,
+                request_headers: HashMap::new(),
+            },
+        }
+    }
+
+    fn managed_source_spec(endpoint: &str) -> ManagedSourceSpec {
+        ManagedSourceSpec {
+            endpoint: endpoint.to_string(),
+            operation_id: None,
+            args: None,
+            resource_uri: None,
+            read_resource: false,
+            transport_hint: Some(SubscriptionTransportHint::Websocket),
+            subprotocols: Vec::new(),
+            initial_text_frames: Vec::new(),
+            mode: SubscriptionMode::Stream,
+            poll_config: None,
             options: RuntimeInvokeOptions {
                 auth: None,
                 inject_env: Vec::new(),
@@ -8031,6 +9293,202 @@ mod tests {
             }
         }
         assert!(saw_closed, "expected closed event after stop");
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_source_ensure_mirrors_payloads_into_stream() {
+        let temp = tempdir().unwrap();
+        let (endpoint, _connects, server_task) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":42}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+
+        let runtime = test_runtime_with_store(&temp);
+        let ensured = runtime
+            .source_ensure(ManagedSourceEnsureRequest {
+                namespace: "test".to_string(),
+                source_key: "websocket:demo".to_string(),
+                spec: managed_source_spec(&endpoint),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ensured.stream_id,
+            managed_stream_id("test", "websocket:demo")
+        );
+        assert!(runtime.subscribe_list().await.is_empty());
+
+        let mut seen = None;
+        for _ in 0..30 {
+            let page = runtime
+                .stream_read(&ManagedStreamReadRequest {
+                    stream_id: ensured.stream_id.clone(),
+                    after_offset: 0,
+                    limit: 10,
+                })
+                .await
+                .unwrap();
+            if let Some(first) = page.events.first() {
+                seen = Some(first.raw_payload.clone());
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(100)).await;
+        }
+
+        assert_eq!(seen, Some(json!({"value":42})));
+
+        let stopped = runtime
+            .source_stop(&ManagedSourceStatusRequest {
+                namespace: "test".to_string(),
+                source_key: "websocket:demo".to_string(),
+            })
+            .await
+            .unwrap();
+        assert!(stopped.stopped);
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_source_spec_change_replaces_run_but_keeps_stream() {
+        let temp = tempdir().unwrap();
+        let (endpoint_one, _connects_one, server_task_one) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":"one"}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+        let (endpoint_two, _connects_two, server_task_two) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":"two"}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+
+        let runtime = test_runtime_with_store(&temp);
+        let first = runtime
+            .source_ensure(ManagedSourceEnsureRequest {
+                namespace: "test".to_string(),
+                source_key: "replaceable".to_string(),
+                spec: managed_source_spec(&endpoint_one),
+            })
+            .await
+            .unwrap();
+
+        for _ in 0..20 {
+            let page = runtime
+                .stream_read(&ManagedStreamReadRequest {
+                    stream_id: first.stream_id.clone(),
+                    after_offset: 0,
+                    limit: 10,
+                })
+                .await
+                .unwrap();
+            if !page.events.is_empty() {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(100)).await;
+        }
+
+        let second = runtime
+            .source_ensure(ManagedSourceEnsureRequest {
+                namespace: "test".to_string(),
+                source_key: "replaceable".to_string(),
+                spec: managed_source_spec(&endpoint_two),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(first.stream_id, second.stream_id);
+        assert_ne!(first.run_id, second.run_id);
+        assert!(second.replaced_previous);
+
+        let mut seen_second = false;
+        for _ in 0..30 {
+            let page = runtime
+                .stream_read(&ManagedStreamReadRequest {
+                    stream_id: second.stream_id.clone(),
+                    after_offset: 1,
+                    limit: 10,
+                })
+                .await
+                .unwrap();
+            if page
+                .events
+                .iter()
+                .any(|event| event.raw_payload == json!({"value":"two"}))
+            {
+                seen_second = true;
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(100)).await;
+        }
+        assert!(seen_second);
+
+        runtime
+            .source_stop(&ManagedSourceStatusRequest {
+                namespace: "test".to_string(),
+                source_key: "replaceable".to_string(),
+            })
+            .await
+            .unwrap();
+        server_task_one.abort();
+        server_task_two.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_source_delete_keeps_stream_rows() {
+        let temp = tempdir().unwrap();
+        let (endpoint, _connects, server_task) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":"persisted"}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+
+        let runtime = test_runtime_with_store(&temp);
+        let ensured = runtime
+            .source_ensure(ManagedSourceEnsureRequest {
+                namespace: "test".to_string(),
+                source_key: "delete-me".to_string(),
+                spec: managed_source_spec(&endpoint),
+            })
+            .await
+            .unwrap();
+
+        for _ in 0..30 {
+            let info = runtime.stream_info(&ensured.stream_id).await.unwrap();
+            if info.event_count > 0 {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(100)).await;
+        }
+
+        runtime
+            .source_delete(&ManagedSourceStatusRequest {
+                namespace: "test".to_string(),
+                source_key: "delete-me".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let page = runtime
+            .stream_read(&ManagedStreamReadRequest {
+                stream_id: ensured.stream_id.clone(),
+                after_offset: 0,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert!(page
+            .events
+            .iter()
+            .any(|event| event.raw_payload == json!({"value":"persisted"})));
 
         server_task.abort();
     }

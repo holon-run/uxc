@@ -120,6 +120,92 @@ export interface SubscribeStopResponse {
   stopped: boolean;
 }
 
+export interface ManagedSourceSpec {
+  endpoint: string;
+  operation_id?: string | null;
+  args?: Record<string, unknown> | null;
+  resource_uri?: string | null;
+  read_resource?: boolean;
+  transport_hint?:
+    | "websocket"
+    | "discord_gateway"
+    | "slack_socket_mode"
+    | "feishu_long_connection"
+    | null;
+  subprotocols?: string[];
+  initial_text_frames?: string[];
+  mode: "stream" | "poll";
+  poll_config?: PollSubscriptionConfig | null;
+  options?: RuntimeInvokeOptions;
+}
+
+export interface ManagedSourceEnsureResponse {
+  namespace: string;
+  source_key: string;
+  run_id: string;
+  stream_id: string;
+  status: string;
+  reused: boolean;
+  replaced_previous: boolean;
+}
+
+export interface ManagedSourceView {
+  namespace: string;
+  source_key: string;
+  run_id: string;
+  stream_id: string;
+  spec_key: string;
+  status: string;
+  created_at_unix: number;
+  updated_at_unix: number;
+  started_at_unix?: number | null;
+  stopped_at_unix?: number | null;
+  last_error?: string | null;
+}
+
+export interface ManagedSourceStopResponse {
+  namespace: string;
+  source_key: string;
+  stopped: boolean;
+}
+
+export interface ManagedSourceDeleteResponse {
+  namespace: string;
+  source_key: string;
+  deleted: boolean;
+}
+
+export interface ManagedStreamEvent {
+  stream_id: string;
+  offset: number;
+  ingested_at_unix: number;
+  raw_payload: unknown;
+}
+
+export interface ManagedStreamReadResponse {
+  stream_id: string;
+  events: ManagedStreamEvent[];
+  next_after_offset: number;
+  has_more: boolean;
+}
+
+export interface ManagedStreamInfo {
+  stream_id: string;
+  namespace: string;
+  source_key: string;
+  created_at_unix: number;
+  earliest_offset?: number | null;
+  latest_offset?: number | null;
+  event_count: number;
+  retention_max_rows: number;
+  retention_max_age_secs: number;
+}
+
+export interface ManagedStreamTrimResponse {
+  stream_id: string;
+  trimmed: number;
+}
+
 export interface SubscriptionJobView {
   job_id: string;
   mode: "stream" | "poll";
@@ -361,6 +447,71 @@ export class UxcDaemonClient {
       after_seq: args.afterSeq ?? 0,
       limit: args.limit ?? 100,
       wait_ms: args.waitMs ?? 15_000,
+    });
+  }
+
+  async sourceEnsure(args: {
+    namespace: string;
+    sourceKey: string;
+    spec: ManagedSourceSpec;
+  }): Promise<ManagedSourceEnsureResponse> {
+    return this.request("source.ensure", {
+      namespace: args.namespace,
+      source_key: args.sourceKey,
+      spec: {
+        ...args.spec,
+        resource_uri: args.spec.resource_uri ?? null,
+        read_resource: args.spec.read_resource ?? false,
+        transport_hint: args.spec.transport_hint ?? null,
+        subprotocols: args.spec.subprotocols ?? [],
+        initial_text_frames: args.spec.initial_text_frames ?? [],
+        poll_config: args.spec.poll_config ?? null,
+        options: normalizeOptions(args.spec.options),
+      },
+    });
+  }
+
+  async sourceStatus(namespace: string, sourceKey: string): Promise<ManagedSourceView> {
+    return this.request("source.status", {
+      namespace,
+      source_key: sourceKey,
+    });
+  }
+
+  async sourceStop(namespace: string, sourceKey: string): Promise<ManagedSourceStopResponse> {
+    return this.request("source.stop", {
+      namespace,
+      source_key: sourceKey,
+    });
+  }
+
+  async sourceDelete(namespace: string, sourceKey: string): Promise<ManagedSourceDeleteResponse> {
+    return this.request("source.delete", {
+      namespace,
+      source_key: sourceKey,
+    });
+  }
+
+  async streamRead(args: {
+    streamId: string;
+    afterOffset?: number;
+    limit?: number;
+  }): Promise<ManagedStreamReadResponse> {
+    return this.request("stream.read", {
+      stream_id: args.streamId,
+      after_offset: args.afterOffset ?? 0,
+      limit: args.limit ?? 100,
+    });
+  }
+
+  async streamInfo(streamId: string): Promise<ManagedStreamInfo> {
+    return this.request("stream.info", { stream_id: streamId });
+  }
+
+  async streamTrim(streamId: string, beforeOffset: number): Promise<ManagedStreamTrimResponse> {
+    return this.request("stream.trim", {
+      stream_id: streamId,
+      before_offset: beforeOffset,
     });
   }
 
