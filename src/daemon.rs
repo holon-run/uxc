@@ -14,7 +14,8 @@ use crate::error::{
     StructuredErrorPayload, UxcError,
 };
 use crate::managed_source_streams::{
-    ManagedSourceRecord, ManagedSourceStore, StreamEventRecord, StreamInfoRecord,
+    ManagedSourceRecord, ManagedSourceStore, SourceRuntimeUpdate, StreamEventRecord,
+    StreamInfoRecord,
 };
 use crate::subscription_discord::{
     derive_gateway_bot_endpoint, parse_gateway_bot_response, prepare_gateway_websocket_url,
@@ -736,32 +737,34 @@ struct StdioSessionRequestMetadata<'a> {
     exclusive_keys: &'a [String],
 }
 
+struct ResolvedStdioRequestMetadata {
+    idle_ttl_secs: u64,
+    link_name: Option<String>,
+    link_skill: Option<String>,
+    link_skill_doc: Option<String>,
+    link_skill_path: Option<String>,
+    endpoint: String,
+    daemon_exclusive: Vec<String>,
+}
+
 fn resolve_stdio_request_metadata(
     metadata: &StdioSessionRequestMetadata<'_>,
     existing_exclusive_keys: &[String],
-) -> (
-    u64,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    String,
-    Vec<String>,
-) {
+) -> ResolvedStdioRequestMetadata {
     let daemon_exclusive = if metadata.exclusive_keys.is_empty() {
         existing_exclusive_keys.to_vec()
     } else {
         metadata.exclusive_keys.to_vec()
     };
-    (
-        metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
-        metadata.link_name.map(str::to_string),
-        metadata.link_skill.map(str::to_string),
-        metadata.link_skill_doc.map(str::to_string),
-        metadata.link_skill_path.map(str::to_string),
-        metadata.endpoint.to_string(),
+    ResolvedStdioRequestMetadata {
+        idle_ttl_secs: metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
+        link_name: metadata.link_name.map(str::to_string),
+        link_skill: metadata.link_skill.map(str::to_string),
+        link_skill_doc: metadata.link_skill_doc.map(str::to_string),
+        link_skill_path: metadata.link_skill_path.map(str::to_string),
+        endpoint: metadata.endpoint.to_string(),
         daemon_exclusive,
-    )
+    }
 }
 
 #[derive(Clone, Default)]
@@ -842,22 +845,14 @@ fn persisted_record_sink_path(record: &PersistedSubscriptionRecord) -> Result<Pa
 
 impl McpStdioSession {
     fn apply_request_metadata(&mut self, metadata: &StdioSessionRequestMetadata<'_>) {
-        let (
-            idle_ttl_secs,
-            link_name,
-            link_skill,
-            link_skill_doc,
-            link_skill_path,
-            endpoint,
-            daemon_exclusive,
-        ) = resolve_stdio_request_metadata(metadata, &self.daemon_exclusive);
-        self.idle_ttl_secs = idle_ttl_secs;
-        self.link_name = link_name;
-        self.link_skill = link_skill;
-        self.link_skill_doc = link_skill_doc;
-        self.link_skill_path = link_skill_path;
-        self.endpoint = endpoint;
-        self.daemon_exclusive = daemon_exclusive;
+        let resolved = resolve_stdio_request_metadata(metadata, &self.daemon_exclusive);
+        self.idle_ttl_secs = resolved.idle_ttl_secs;
+        self.link_name = resolved.link_name;
+        self.link_skill = resolved.link_skill;
+        self.link_skill_doc = resolved.link_skill_doc;
+        self.link_skill_path = resolved.link_skill_path;
+        self.endpoint = resolved.endpoint;
+        self.daemon_exclusive = resolved.daemon_exclusive;
     }
 
     async fn refresh_tools_if_needed(
@@ -3153,29 +3148,81 @@ impl ManagedSourceManager {
 
             for event in &batch.events {
                 if let Some(payload) = event.data.as_ref() {
-                    let _ = self
+                    if let Err(err) = self
                         .store
                         .append_event(&entry.stream_id, event.timestamp_unix, payload)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            "failed to append managed source event for {}/{}: {}",
+                            entry.namespace,
+                            entry.source_key,
+                            err
+                        );
+                        let now = now_unix_secs();
+                        let mut state = entry.state.lock().await;
+                        state.status = "failed".to_string();
+                        state.updated_at_unix = now;
+                        state.stopped_at_unix = Some(now);
+                        state.last_error = Some(err.to_string());
+                        drop(state);
+                        if let Err(store_err) = self
+                            .store
+                            .clear_source_job(
+                                &entry.namespace,
+                                &entry.source_key,
+                                "failed",
+                                now,
+                                Some(now),
+                                Some(err.to_string()),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "failed to persist managed source failure for {}/{}: {}",
+                                entry.namespace,
+                                entry.source_key,
+                                store_err
+                            );
+                        }
+                        break;
+                    }
                 }
             }
             if batch.next_after_seq > after_seq {
                 after_seq = batch.next_after_seq;
                 *entry.mirrored_after_seq.lock().await = after_seq;
-                let _ = self
+                if let Err(err) = self
                     .store
                     .update_source_runtime(
                         &entry.namespace,
                         &entry.source_key,
-                        &batch.status,
-                        now_unix_secs(),
-                        Some(now_unix_secs()),
-                        None,
-                        None,
-                        None,
-                        Some(after_seq),
+                        SourceRuntimeUpdate {
+                            status: batch.status.clone(),
+                            updated_at_unix: now_unix_secs(),
+                            started_at_unix: None,
+                            stopped_at_unix: None,
+                            last_error: None,
+                            underlying_job_id: None,
+                            mirrored_after_seq: Some(after_seq),
+                        },
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        "failed to persist managed source runtime update for {}/{}: {}",
+                        entry.namespace,
+                        entry.source_key,
+                        err
+                    );
+                    let now = now_unix_secs();
+                    let mut state = entry.state.lock().await;
+                    state.status = "failed".to_string();
+                    state.updated_at_unix = now;
+                    state.stopped_at_unix = Some(now);
+                    state.last_error = Some(err.to_string());
+                    break;
+                }
             }
             {
                 let mut state = entry.state.lock().await;
@@ -3320,7 +3367,6 @@ fn compute_managed_source_spec_key(spec: &ManagedSourceSpec) -> Result<String> {
             .map(|spec| json!({"name": spec.name, "template": spec.template}))
             .collect::<Vec<_>>(),
         "timeout_ms": spec.options.timeout_ms,
-        "request_headers": spec.options.request_headers,
         "schema_url": spec.options.schema_url,
     });
     let bytes = serde_json::to_vec(&payload)?;
@@ -8646,15 +8692,7 @@ mod tests {
 
     #[test]
     fn resolve_stdio_request_metadata_resets_ttl_and_link_name_from_current_request() {
-        let (
-            idle_ttl_secs,
-            link_name,
-            link_skill,
-            link_skill_doc,
-            link_skill_path,
-            endpoint,
-            daemon_exclusive,
-        ) = resolve_stdio_request_metadata(
+        let resolved = resolve_stdio_request_metadata(
             &StdioSessionRequestMetadata {
                 idle_ttl_secs: None,
                 link_name: None,
@@ -8667,26 +8705,18 @@ mod tests {
             &["/tmp/profile".to_string()],
         );
 
-        assert_eq!(idle_ttl_secs, MCP_IDLE_TTL_SECS);
-        assert_eq!(link_name, None);
-        assert_eq!(link_skill, None);
-        assert_eq!(link_skill_doc, None);
-        assert_eq!(link_skill_path, None);
-        assert_eq!(endpoint, "https://new.example.com");
-        assert_eq!(daemon_exclusive, vec!["/tmp/profile".to_string()]);
+        assert_eq!(resolved.idle_ttl_secs, MCP_IDLE_TTL_SECS);
+        assert_eq!(resolved.link_name, None);
+        assert_eq!(resolved.link_skill, None);
+        assert_eq!(resolved.link_skill_doc, None);
+        assert_eq!(resolved.link_skill_path, None);
+        assert_eq!(resolved.endpoint, "https://new.example.com");
+        assert_eq!(resolved.daemon_exclusive, vec!["/tmp/profile".to_string()]);
     }
 
     #[test]
     fn resolve_stdio_request_metadata_accepts_zero_ttl_override() {
-        let (
-            idle_ttl_secs,
-            link_name,
-            link_skill,
-            link_skill_doc,
-            link_skill_path,
-            endpoint,
-            daemon_exclusive,
-        ) = resolve_stdio_request_metadata(
+        let resolved = resolve_stdio_request_metadata(
             &StdioSessionRequestMetadata {
                 idle_ttl_secs: Some(0),
                 link_name: Some("board-link"),
@@ -8699,19 +8729,22 @@ mod tests {
             &[],
         );
 
-        assert_eq!(idle_ttl_secs, 0);
-        assert_eq!(link_name, Some("board-link".to_string()));
-        assert_eq!(link_skill, Some("board-webmcp".to_string()));
+        assert_eq!(resolved.idle_ttl_secs, 0);
+        assert_eq!(resolved.link_name, Some("board-link".to_string()));
+        assert_eq!(resolved.link_skill, Some("board-webmcp".to_string()));
         assert_eq!(
-            link_skill_doc,
+            resolved.link_skill_doc,
             Some("https://uxc.holon.run/skills/board-webmcp/".to_string())
         );
         assert_eq!(
-            link_skill_path,
+            resolved.link_skill_path,
             Some("skills/board-webmcp/SKILL.md".to_string())
         );
-        assert_eq!(endpoint, "https://new.example.com");
-        assert_eq!(daemon_exclusive, vec!["/tmp/new-profile".to_string()]);
+        assert_eq!(resolved.endpoint, "https://new.example.com");
+        assert_eq!(
+            resolved.daemon_exclusive,
+            vec!["/tmp/new-profile".to_string()]
+        );
     }
 
     #[test]

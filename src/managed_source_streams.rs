@@ -65,6 +65,17 @@ pub struct StreamInfoRecord {
     pub retention_max_age_secs: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SourceRuntimeUpdate {
+    pub status: String,
+    pub updated_at_unix: u64,
+    pub started_at_unix: Option<u64>,
+    pub stopped_at_unix: Option<u64>,
+    pub last_error: Option<String>,
+    pub underlying_job_id: Option<String>,
+    pub mirrored_after_seq: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct ManagedSourceStore {
     path: PathBuf,
@@ -236,19 +247,12 @@ impl ManagedSourceStore {
         &self,
         namespace: &str,
         source_key: &str,
-        status: &str,
-        updated_at_unix: u64,
-        started_at_unix: Option<u64>,
-        stopped_at_unix: Option<u64>,
-        last_error: Option<String>,
-        underlying_job_id: Option<String>,
-        mirrored_after_seq: Option<u64>,
+        update: SourceRuntimeUpdate,
     ) -> Result<()> {
         let _guard = self.gate.lock().await;
         let path = self.path.clone();
         let namespace = namespace.to_string();
         let source_key = source_key.to_string();
-        let status = status.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
             conn.execute(
@@ -266,13 +270,13 @@ impl ManagedSourceStore {
                 params![
                     namespace,
                     source_key,
-                    status,
-                    updated_at_unix,
-                    started_at_unix,
-                    stopped_at_unix,
-                    last_error,
-                    underlying_job_id,
-                    mirrored_after_seq
+                    update.status,
+                    update.updated_at_unix,
+                    update.started_at_unix,
+                    update.stopped_at_unix,
+                    update.last_error,
+                    update.underlying_job_id,
+                    update.mirrored_after_seq
                 ],
             )?;
             Ok(())

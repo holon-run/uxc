@@ -36,8 +36,8 @@ Examples:
 
 Implementation references:
 
-- [../agentinbox/src/sources/github.ts](/Users/jolestar/opensource/src/github.com/holon-run/agentinbox/src/sources/github.ts)
-- [../agentinbox/src/sources/feishu.ts](/Users/jolestar/opensource/src/github.com/holon-run/agentinbox/src/sources/feishu.ts)
+- `../agentinbox/src/sources/github.ts`
+- `../agentinbox/src/sources/feishu.ts`
 
 This creates a fragile contract:
 
@@ -53,7 +53,7 @@ This creates a fragile contract:
 
 Reference:
 
-- [../agentinbox/docs/site/concepts/eventbus-backend.md](/Users/jolestar/opensource/src/github.com/holon-run/agentinbox/docs/site/concepts/eventbus-backend.md)
+- `../agentinbox/docs/site/concepts/eventbus-backend.md`
 
 ## Target Boundary
 
@@ -98,7 +98,7 @@ boundary already documented in `AgentInbox`'s architecture note.
 
 Reference:
 
-- [../agentinbox/docs/site/concepts/architecture.md](/Users/jolestar/opensource/src/github.com/holon-run/agentinbox/docs/site/concepts/architecture.md)
+- `../agentinbox/docs/site/concepts/architecture.md`
 
 ## Why Not Make `uxc` The Consumer Broker
 
