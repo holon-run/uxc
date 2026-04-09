@@ -5,6 +5,23 @@
 //! - Schema retrieval
 //! - Operation discovery
 //! - Execution
+//!
+//! ## Plugin System
+//!
+//! External adapters can be loaded at runtime from `~/.config/uxc/plugins/`.
+//! Plugins are cdylib crates that export a `uxc_plugin_register` function:
+//!
+//! ```ignore
+//! #[no_mangle]
+//! pub extern "C" fn uxc_plugin_register(registrar: &mut dyn PluginRegistrar) {
+//!     registrar.register_adapter(PluginAdapterEntry {
+//!         name: "feishu",
+//!         priority: 100,
+//!         can_handle: |url| url.starts_with("feishu://") || url.contains("feishu.cn"),
+//!         create: || Box::new(FeishuAdapter::new()),
+//!     });
+//! }
+//! ```
 
 pub mod graphql;
 pub mod grpc;
@@ -21,23 +38,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Registration entry for dynamic adapter discovery.
+// ─── Compile-time registration (inventory) ───
+
+/// Registration entry for compile-time adapter discovery via `inventory::submit!`.
 ///
-/// Third-party crates can register adapters at compile time using `inventory::submit!`.
-/// Registered adapters are tried (sorted by descending priority) before built-in adapters
-/// during protocol detection.
-///
-/// # Example
-/// ```ignore
-/// inventory::submit! {
-///     AdapterRegistration {
-///         name: "my-protocol",
-///         priority: 100,
-///         can_handle: |url| Box::pin(async move { Ok(url.contains("my-proto://")) }),
-///         create: || Box::new(MyAdapter::new()),
-///     }
-/// }
-/// ```
+/// Kept for backward compatibility. New plugins should prefer the C ABI plugin system.
 pub struct AdapterRegistration {
     /// Human-readable name for this adapter.
     pub name: &'static str,
@@ -50,6 +55,40 @@ pub struct AdapterRegistration {
 }
 
 inventory::collect!(AdapterRegistration);
+
+// ─── Runtime plugin system (C ABI) ───
+
+/// Entry describing one adapter provided by a plugin.
+/// Uses simple `fn` pointers for C ABI safety — no generics, no async, no closures.
+pub struct PluginAdapterEntry {
+    /// Human-readable name for this adapter.
+    pub name: &'static str,
+    /// Priority (0-255). Higher values are tried first.
+    pub priority: u8,
+    /// Sync predicate: returns `true` if this adapter can handle the given URL.
+    pub can_handle: fn(&str) -> bool,
+    /// Factory that creates a new boxed adapter instance.
+    pub create: fn() -> Box<dyn Adapter>,
+}
+
+/// Trait implemented by uxc's plugin host. Plugins call methods on this to register adapters.
+#[allow(dead_code)] // Used by external plugins, not uxc itself
+pub trait PluginRegistrar {
+    fn register_adapter(&mut self, entry: PluginAdapterEntry);
+}
+
+/// Signature of the plugin entry point function.
+/// Plugins must export: `#[no_mangle] pub extern "C" fn uxc_plugin_register(registrar: &mut dyn PluginRegistrar)`
+#[allow(improper_ctypes_definitions)] // Rust-to-Rust ABI — trait object is safe in practice
+pub type PluginEntryFn = unsafe extern "C" fn(registrar: &mut dyn PluginRegistrar);
+
+/// Global plugin state: loaded libraries + registered adapter entries.
+struct PluginState {
+    _libs: Vec<libloading::Library>,
+    adapters: Vec<PluginAdapterEntry>,
+}
+
+static PLUGIN_STATE: std::sync::OnceLock<PluginState> = std::sync::OnceLock::new();
 
 /// Enum of all available adapters
 #[allow(non_camel_case_types)]
@@ -250,9 +289,103 @@ pub struct DetectionOptions {
     pub request_timeout: Option<Duration>,
 }
 
+/// Concrete registrar that collects adapter entries during plugin initialization.
+struct PluginRegistrarImpl {
+    adapters: Vec<PluginAdapterEntry>,
+}
+
+impl PluginRegistrar for PluginRegistrarImpl {
+    fn register_adapter(&mut self, entry: PluginAdapterEntry) {
+        tracing::debug!("Plugin registered adapter: {}", entry.name);
+        self.adapters.push(entry);
+    }
+}
+
 impl ProtocolDetector {
     pub fn new() -> Self {
+        PLUGIN_STATE.get_or_init(Self::load_plugins);
         Self
+    }
+
+    /// Load plugin shared libraries from ~/.config/uxc/plugins/
+    ///
+    /// For each library, looks up the `uxc_plugin_register` symbol and calls it
+    /// with a registrar so the plugin can register its adapters.
+    fn load_plugins() -> PluginState {
+        let mut libs = Vec::new();
+        let mut registrar = PluginRegistrarImpl {
+            adapters: Vec::new(),
+        };
+
+        let plugin_dir = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|h| std::path::PathBuf::from(h).join(".config/uxc/plugins"))
+            .unwrap_or_default();
+
+        if !plugin_dir.exists() {
+            return PluginState {
+                _libs: libs,
+                adapters: registrar.adapters,
+            };
+        }
+
+        let entries = match std::fs::read_dir(&plugin_dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                return PluginState {
+                    _libs: libs,
+                    adapters: registrar.adapters,
+                }
+            }
+        };
+
+        let extension = std::env::consts::DLL_EXTENSION;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some(extension) {
+                continue;
+            }
+
+            let lib = match unsafe { libloading::Library::new(&path) } {
+                Ok(lib) => lib,
+                Err(err) => {
+                    tracing::warn!("Failed to load plugin {}: {}", path.display(), err);
+                    continue;
+                }
+            };
+
+            // Look up the C ABI entry point
+            let register_fn: libloading::Symbol<PluginEntryFn> =
+                match unsafe { lib.get(b"uxc_plugin_register") } {
+                    Ok(f) => f,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Plugin {} missing uxc_plugin_register symbol: {}",
+                            path.display(),
+                            err
+                        );
+                        continue;
+                    }
+                };
+
+            unsafe { register_fn(&mut registrar) };
+            tracing::debug!("Loaded plugin: {}", path.display());
+            libs.push(lib);
+        }
+
+        if !libs.is_empty() {
+            tracing::info!(
+                "Loaded {} plugin(s), {} adapter(s) registered",
+                libs.len(),
+                registrar.adapters.len()
+            );
+        }
+
+        PluginState {
+            _libs: libs,
+            adapters: registrar.adapters,
+        }
     }
 
     /// Get adapter for a URL (auto-detects protocol)
@@ -270,14 +403,28 @@ impl ProtocolDetector {
     ) -> Result<AdapterEnum> {
         let mut schema_probe_errors = Vec::new();
 
-        // Try dynamically registered adapters first (sorted by descending priority)
+        // 1. Try compile-time registered adapters (inventory)
         let mut registrations: Vec<&AdapterRegistration> =
             inventory::iter::<AdapterRegistration>.into_iter().collect();
         registrations.sort_by_key(|r| std::cmp::Reverse(r.priority));
 
         for reg in registrations {
             if (reg.can_handle)(url).await? {
+                tracing::debug!("Matched external adapter: {}", reg.name);
                 return Ok(AdapterEnum::External((reg.create)()));
+            }
+        }
+
+        // 2. Try runtime-loaded plugin adapters (C ABI)
+        if let Some(state) = PLUGIN_STATE.get() {
+            let mut plugins: Vec<&PluginAdapterEntry> = state.adapters.iter().collect();
+            plugins.sort_by_key(|e| std::cmp::Reverse(e.priority));
+
+            for entry in plugins {
+                if (entry.can_handle)(url) {
+                    tracing::debug!("Matched plugin adapter: {}", entry.name);
+                    return Ok(AdapterEnum::External((entry.create)()));
+                }
             }
         }
 

@@ -52,6 +52,9 @@ async-trait = "0.1"
 futures = "0.3"
 inventory = "0.3"
 
+# Dynamic plugin loading
+libloading = "0.8"
+
 # Web server for test servers
 axum = { version = "0.7", optional = true, features = ["ws"] }
 

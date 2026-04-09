@@ -31,7 +31,7 @@ pub mod subscription_websocket;
 #[cfg(feature = "test-server")]
 pub mod test_server;
 
-pub use adapters::{Adapter, ProtocolType};
+pub use adapters::{Adapter, PluginAdapterEntry, PluginRegistrar, ProtocolType};
 pub use cache::{create_cache, create_default_cache, Cache, CacheConfig, CacheResult};
 pub use error::{Result, UxcError};
 pub use output::OutputEnvelope;
