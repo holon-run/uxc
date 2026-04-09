@@ -5828,21 +5828,25 @@ async fn handle_subscribe_command(
     ))
 }
 
-fn build_managed_source_spec(
-    endpoint: &str,
-    operation_id: &Option<String>,
-    args: &[String],
-    input_json: &Option<String>,
-    resource_uri: &Option<String>,
+struct ManagedSourceSpecInput<'a> {
+    endpoint: &'a str,
+    operation_id: &'a Option<String>,
+    args: &'a [String],
+    input_json: &'a Option<String>,
+    resource_uri: &'a Option<String>,
     read_resource: bool,
-    transport: &Option<SubscribeTransportArg>,
-    subprotocols: &[String],
-    init_frames: &[String],
-    mode: &SubscribeModeArg,
-    poll_config: &Option<String>,
+    transport: &'a Option<SubscribeTransportArg>,
+    subprotocols: &'a [String],
+    init_frames: &'a [String],
+    mode: &'a SubscribeModeArg,
+    poll_config: &'a Option<String>,
+}
+
+fn build_managed_source_spec(
+    input: ManagedSourceSpecInput<'_>,
     cli: &Cli,
 ) -> Result<daemon::ManagedSourceSpec> {
-    let transport_hint = transport.as_ref().map(|value| match value {
+    let transport_hint = input.transport.as_ref().map(|value| match value {
         SubscribeTransportArg::Websocket => daemon::SubscriptionTransportHint::Websocket,
         SubscribeTransportArg::DiscordGateway => daemon::SubscriptionTransportHint::DiscordGateway,
         SubscribeTransportArg::SlackSocketMode => {
@@ -5852,8 +5856,8 @@ fn build_managed_source_spec(
             daemon::SubscriptionTransportHint::FeishuLongConnection
         }
     });
-    let mut transport_operation_id = operation_id.clone();
-    let mut transport_input_json = input_json.clone();
+    let mut transport_operation_id = input.operation_id.clone();
+    let mut transport_input_json = input.input_json.clone();
     if matches!(
         transport_hint,
         Some(daemon::SubscriptionTransportHint::DiscordGateway)
@@ -5877,7 +5881,7 @@ fn build_managed_source_spec(
     if !matches!(
         transport_hint,
         Some(daemon::SubscriptionTransportHint::Websocket)
-    ) && (!subprotocols.is_empty() || !init_frames.is_empty())
+    ) && (!input.subprotocols.is_empty() || !input.init_frames.is_empty())
     {
         return Err(UxcError::InvalidArguments(
             "--subprotocol and --init-frame require explicit --transport websocket".to_string(),
@@ -5888,19 +5892,19 @@ fn build_managed_source_spec(
         transport_hint,
         Some(daemon::SubscriptionTransportHint::Websocket)
     ) {
-        if operation_id.is_some() {
+        if input.operation_id.is_some() {
             return Err(UxcError::InvalidArguments(
                 "--transport websocket cannot be combined with an operation_id".to_string(),
             )
             .into());
         }
-        if resource_uri.is_some() {
+        if input.resource_uri.is_some() {
             return Err(UxcError::InvalidArguments(
                 "--transport websocket cannot be combined with --resource-uri".to_string(),
             )
             .into());
         }
-        if !matches!(mode, SubscribeModeArg::Stream) {
+        if !matches!(input.mode, SubscribeModeArg::Stream) {
             return Err(UxcError::InvalidArguments(
                 "--transport websocket is only valid with --mode stream".to_string(),
             )
@@ -5917,13 +5921,13 @@ fn build_managed_source_spec(
             )
             .into());
         }
-        if resource_uri.is_some() {
+        if input.resource_uri.is_some() {
             return Err(UxcError::InvalidArguments(
                 "--transport discord-gateway cannot be combined with --resource-uri".to_string(),
             )
             .into());
         }
-        if !matches!(mode, SubscribeModeArg::Stream) {
+        if !matches!(input.mode, SubscribeModeArg::Stream) {
             return Err(UxcError::InvalidArguments(
                 "--transport discord-gateway is only valid with --mode stream".to_string(),
             )
@@ -5934,19 +5938,19 @@ fn build_managed_source_spec(
         transport_hint,
         Some(daemon::SubscriptionTransportHint::SlackSocketMode)
     ) {
-        if operation_id.is_some() {
+        if input.operation_id.is_some() {
             return Err(UxcError::InvalidArguments(
                 "--transport slack-socket-mode cannot be combined with an operation_id".to_string(),
             )
             .into());
         }
-        if resource_uri.is_some() {
+        if input.resource_uri.is_some() {
             return Err(UxcError::InvalidArguments(
                 "--transport slack-socket-mode cannot be combined with --resource-uri".to_string(),
             )
             .into());
         }
-        if !matches!(mode, SubscribeModeArg::Stream) {
+        if !matches!(input.mode, SubscribeModeArg::Stream) {
             return Err(UxcError::InvalidArguments(
                 "--transport slack-socket-mode is only valid with --mode stream".to_string(),
             )
@@ -5957,34 +5961,34 @@ fn build_managed_source_spec(
         transport_hint,
         Some(daemon::SubscriptionTransportHint::FeishuLongConnection)
     ) {
-        if operation_id.is_some() {
+        if input.operation_id.is_some() {
             return Err(UxcError::InvalidArguments(
                 "--transport feishu-long-connection cannot be combined with an operation_id"
                     .to_string(),
             )
             .into());
         }
-        if resource_uri.is_some() {
+        if input.resource_uri.is_some() {
             return Err(UxcError::InvalidArguments(
                 "--transport feishu-long-connection cannot be combined with --resource-uri"
                     .to_string(),
             )
             .into());
         }
-        if !matches!(mode, SubscribeModeArg::Stream) {
+        if !matches!(input.mode, SubscribeModeArg::Stream) {
             return Err(UxcError::InvalidArguments(
                 "--transport feishu-long-connection is only valid with --mode stream".to_string(),
             )
             .into());
         }
     }
-    if read_resource && resource_uri.is_none() {
+    if input.read_resource && input.resource_uri.is_none() {
         return Err(UxcError::InvalidArguments(
             "--read-resource requires --resource-uri".to_string(),
         )
         .into());
     }
-    if read_resource && !matches!(mode, SubscribeModeArg::Stream) {
+    if input.read_resource && !matches!(input.mode, SubscribeModeArg::Stream) {
         return Err(UxcError::InvalidArguments(
             "--read-resource is only valid with --mode stream".to_string(),
         )
@@ -5995,7 +5999,7 @@ fn build_managed_source_spec(
         Some(op) => {
             let mut explicit_args = Vec::new();
             let mut positional = Vec::new();
-            for arg in args {
+            for arg in input.args {
                 if arg.contains('=') {
                     explicit_args.push(arg.clone());
                 } else {
@@ -6027,7 +6031,7 @@ fn build_managed_source_spec(
                 };
                 let mut explicit_args = Vec::new();
                 let mut positional = Vec::new();
-                for arg in args {
+                for arg in input.args {
                     if arg.contains('=') {
                         explicit_args.push(arg.clone());
                     } else {
@@ -6040,7 +6044,7 @@ fn build_managed_source_spec(
                     transport_input_json.clone(),
                     &positional,
                 )?
-            } else if transport_input_json.is_some() || !args.is_empty() {
+            } else if transport_input_json.is_some() || !input.args.is_empty() {
                 return Err(UxcError::InvalidArguments(
                     "source ensure only accepts operation arguments when <operation_id> is provided"
                         .to_string(),
@@ -6073,7 +6077,7 @@ fn build_managed_source_spec(
         None
     };
 
-    let poll_config = match poll_config {
+    let poll_config = match input.poll_config {
         Some(raw) => Some(serde_json::from_str::<Value>(raw).map_err(|err| {
             UxcError::InvalidArguments(format!("Invalid JSON for --poll-config: {}", err))
         })?),
@@ -6081,15 +6085,15 @@ fn build_managed_source_spec(
     };
 
     Ok(daemon::ManagedSourceSpec {
-        endpoint: normalize_endpoint_url(endpoint),
+        endpoint: normalize_endpoint_url(input.endpoint),
         operation_id: transport_operation_id,
         args: args_map,
-        resource_uri: resource_uri.clone(),
-        read_resource,
+        resource_uri: input.resource_uri.clone(),
+        read_resource: input.read_resource,
         transport_hint,
-        subprotocols: subprotocols.to_vec(),
-        initial_text_frames: init_frames.to_vec(),
-        mode: match mode {
+        subprotocols: input.subprotocols.to_vec(),
+        initial_text_frames: input.init_frames.to_vec(),
+        mode: match input.mode {
             SubscribeModeArg::Stream => daemon::SubscriptionMode::Stream,
             SubscribeModeArg::Poll => daemon::SubscriptionMode::Poll,
         },
@@ -6143,17 +6147,19 @@ async fn handle_source_command(command: &SourceCommands, cli: &Cli) -> Result<Ou
             poll_config,
         } => {
             let spec = build_managed_source_spec(
-                endpoint,
-                operation_id,
-                args,
-                input_json,
-                resource_uri,
-                *read_resource,
-                transport,
-                subprotocols,
-                init_frames,
-                mode,
-                poll_config,
+                ManagedSourceSpecInput {
+                    endpoint,
+                    operation_id,
+                    args,
+                    input_json,
+                    resource_uri,
+                    read_resource: *read_resource,
+                    transport,
+                    subprotocols,
+                    init_frames,
+                    mode,
+                    poll_config,
+                },
                 cli,
             )?;
             let data = serde_json::to_value(

@@ -40,9 +40,9 @@ stores:
 
 Implementation reference:
 
-- [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L180)
-- [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L267)
-- [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L667)
+- [src/daemon.rs](../../src/daemon.rs)
+- [src/daemon.rs](../../src/daemon.rs)
+- [src/daemon.rs](../../src/daemon.rs)
 
 This model is adequate for:
 
@@ -200,8 +200,7 @@ Suggested JSON shape:
 {
   "stream_id": "stream_1",
   "offset": 42,
-  "source_key": "holon-run/uxc",
-  "ingested_at": "2026-04-09T10:00:02Z",
+  "ingested_at_unix": 1775728802,
   "raw_payload": {}
 }
 ```
@@ -210,12 +209,8 @@ Required properties:
 
 - `stream_id`
 - `offset`
-- `ingested_at`
+- `ingested_at_unix`
 - `raw_payload`
-
-Optional-but-strongly-recommended properties:
-
-- `source_key`
 
 `raw_payload` should remain provider-native and complete enough for replay,
 debugging, and future remapping.
