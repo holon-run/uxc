@@ -1513,13 +1513,20 @@ pub async fn refresh_effective_auth_profile(
     client: &reqwest::Client,
     force: bool,
     oauth_skew_seconds: i64,
+    endpoint_hint: Option<&str>,
 ) -> Result<bool> {
     if profile.auth_type == AuthType::OAuth {
         if force {
-            oauth::refresh_oauth_profile(profile, client).await?;
+            oauth::refresh_oauth_profile(profile, client, endpoint_hint).await?;
             return Ok(true);
         }
-        return oauth::maybe_refresh_oauth_profile(profile, client, oauth_skew_seconds).await;
+        return oauth::maybe_refresh_oauth_profile(
+            profile,
+            client,
+            oauth_skew_seconds,
+            endpoint_hint,
+        )
+        .await;
     }
 
     if profile.auth_type == AuthType::Bearer && profile.has_bootstrap_config() {

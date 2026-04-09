@@ -7419,13 +7419,31 @@ async fn client_call(method: &str, params: Option<Value>) -> Result<Value> {
             return Err(UxcError::OperationNotFound(err.message).into());
         }
         if err.code == ERR_OAUTH_REQUIRED {
-            return Err(UxcError::OAuthRequired(err.message).into());
+            return Err(structured_error_from_jsonrpc_error(
+                i64::from(err.code),
+                &err.message,
+                None,
+                "OAUTH_REQUIRED",
+            )
+            .into());
         }
         if err.code == ERR_OAUTH_REFRESH_FAILED {
-            return Err(UxcError::OAuthRefreshFailed(err.message).into());
+            return Err(structured_error_from_jsonrpc_error(
+                i64::from(err.code),
+                &err.message,
+                None,
+                "OAUTH_REFRESH_FAILED",
+            )
+            .into());
         }
         if err.code == ERR_OAUTH_SCOPE_INSUFFICIENT {
-            return Err(UxcError::OAuthScopeInsufficient(err.message).into());
+            return Err(structured_error_from_jsonrpc_error(
+                i64::from(err.code),
+                &err.message,
+                None,
+                "OAUTH_SCOPE_INSUFFICIENT",
+            )
+            .into());
         }
         bail!("{}", err.message);
     }
@@ -9088,6 +9106,28 @@ mod tests {
         let raw = std::fs::read_to_string(&store_path).unwrap();
         let store: PersistedSubscriptionStore = serde_json::from_str(&raw).unwrap();
         assert!(store.jobs.is_empty());
+    }
+
+    #[test]
+    fn client_call_error_path_does_not_double_prefix_oauth_messages() {
+        let err = structured_error_from_jsonrpc_error(
+            i64::from(ERR_OAUTH_REQUIRED),
+            "OAuth required: No refresh token available for credential 'x-api-user' at 'https://api.x.com'.\n\nFor agents:\n  1. uxc auth oauth start x-api-user --endpoint https://api.x.com --redirect-uri <callback_uri>\n  2. uxc auth oauth complete x-api-user --session-id <session_id> --authorization-response '<callback_url_or_code>'\n\nInteractive fallback:\n  uxc auth oauth login x-api-user --endpoint https://api.x.com",
+            None,
+            "OAUTH_REQUIRED",
+        );
+        assert_eq!(err.code, "OAUTH_REQUIRED");
+        assert_eq!(
+            err.message,
+            "OAuth required: No refresh token available for credential 'x-api-user' at 'https://api.x.com'.\n\nFor agents:\n  1. uxc auth oauth start x-api-user --endpoint https://api.x.com --redirect-uri <callback_uri>\n  2. uxc auth oauth complete x-api-user --session-id <session_id> --authorization-response '<callback_url_or_code>'\n\nInteractive fallback:\n  uxc auth oauth login x-api-user --endpoint https://api.x.com"
+        );
+        assert!(
+            !err.message.contains("OAuth required: OAuth required:"),
+            "oauth-required message should not duplicate display prefixes"
+        );
+        assert!(err.message.contains("For agents:"));
+        assert!(err.message.contains("uxc auth oauth start x-api-user"));
+        assert!(err.message.contains("Interactive fallback:"));
     }
 
     #[tokio::test]

@@ -119,12 +119,22 @@ impl GraphQLAdapter {
         req
     }
 
-    async fn refresh_effective_auth_profile(&self, force: bool) -> Result<Option<Profile>> {
+    async fn refresh_effective_auth_profile(
+        &self,
+        force: bool,
+        endpoint_hint: Option<&str>,
+    ) -> Result<Option<Profile>> {
         let _refresh_guard = self.oauth_refresh_lock.lock().await;
         let mut profile = self.effective_auth_profile().await;
         if let Some(active) = profile.as_mut() {
-            let refreshed =
-                auth::refresh_effective_auth_profile(active, &self.client, force, 60).await?;
+            let refreshed = auth::refresh_effective_auth_profile(
+                active,
+                &self.client,
+                force,
+                60,
+                endpoint_hint,
+            )
+            .await?;
             if refreshed {
                 crate::auth::persist_profile_if_named(active)?;
                 self.set_effective_auth_profile(active.clone()).await;
@@ -139,7 +149,9 @@ impl GraphQLAdapter {
         payload: &Value,
         timeout: Option<Duration>,
     ) -> Result<reqwest::Response> {
-        let mut profile = self.refresh_effective_auth_profile(false).await?;
+        let mut profile = self
+            .refresh_effective_auth_profile(false, Some(url))
+            .await?;
         let resolved = Self::resolve_auth_profile("POST", url, profile.as_ref())?;
 
         let mut req = self
@@ -155,7 +167,7 @@ impl GraphQLAdapter {
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
             && crate::auth::supports_refresh_retry(profile.as_ref())
         {
-            profile = self.refresh_effective_auth_profile(true).await?;
+            profile = self.refresh_effective_auth_profile(true, Some(url)).await?;
             let resolved = Self::resolve_auth_profile("POST", url, profile.as_ref())?;
 
             let mut retry_req = self
