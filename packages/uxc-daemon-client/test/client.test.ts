@@ -1,21 +1,24 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { WebSocketServer } from "ws";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { generateTypeScriptClient, UxcDaemonClient, type CodegenHostSchemaV1 } from "../src/index.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 const execFileAsync = promisify(execFile);
+const thisDir = dirname(fileURLToPath(import.meta.url));
+const defaultUxcBin = resolve(thisDir, "..", "..", "..", "target", "debug", "uxc");
 
 describe("UxcDaemonClient", () => {
   let homeDir = "";
   let runtimeDir = "";
   let client: UxcDaemonClient;
-  let uxcBin = process.env.UXC_BIN ?? join(process.cwd(), "target", "debug", "uxc");
+  let uxcBin = process.env.UXC_BIN ?? defaultUxcBin;
 
   beforeAll(async () => {
     homeDir = await mkdtemp(join(tmpdir(), "uxc-sdk-home-"));
@@ -274,6 +277,70 @@ describe("UxcDaemonClient", () => {
       await server.stop();
     }
   });
+
+  test("managed source stream lifecycle works through daemon client methods", async () => {
+    const server = await createWebSocketServer();
+    const namespace = "sdk-test";
+    const sourceKey = `websocket:${Date.now()}`;
+    try {
+      const ensured = await client.sourceEnsure({
+        namespace,
+        sourceKey,
+        spec: {
+          endpoint: server.endpoint,
+          mode: "stream",
+          transport_hint: "websocket",
+        },
+      });
+
+      expect(ensured.namespace).toBe(namespace);
+      expect(ensured.source_key).toBe(sourceKey);
+      expect(ensured.stream_id).toBeTruthy();
+      expect(ensured.run_id).toBeTruthy();
+
+      const status = await client.sourceStatus(namespace, sourceKey);
+      expect(status.namespace).toBe(namespace);
+      expect(status.source_key).toBe(sourceKey);
+      expect(status.stream_id).toBe(ensured.stream_id);
+
+      const initialRead = await waitForManagedStreamEvent(client, ensured.stream_id);
+      expect(initialRead.events[0]?.raw_payload).toEqual({ value: 42 });
+
+      const info = await client.streamInfo(ensured.stream_id);
+      expect(info.stream_id).toBe(ensured.stream_id);
+      expect(info.namespace).toBe(namespace);
+      expect(info.source_key).toBe(sourceKey);
+      expect(info.event_count).toBeGreaterThanOrEqual(1);
+
+      const stopped = await client.sourceStop(namespace, sourceKey);
+      expect(stopped.stopped).toBe(true);
+
+      const stoppedStatus = await client.sourceStatus(namespace, sourceKey);
+      expect(stoppedStatus.status).toBe("stopped");
+
+      const deleted = await client.sourceDelete(namespace, sourceKey);
+      expect(deleted.deleted).toBe(true);
+
+      const preserved = await client.streamRead({
+        streamId: ensured.stream_id,
+        afterOffset: 0,
+        limit: 10,
+      });
+      expect(preserved.events.length).toBeGreaterThanOrEqual(1);
+
+      const trimmed = await client.streamTrim(ensured.stream_id, 1_000_000);
+      expect(trimmed.trimmed).toBeGreaterThanOrEqual(1);
+
+      const afterTrim = await client.streamRead({
+        streamId: ensured.stream_id,
+        afterOffset: 0,
+        limit: 10,
+      });
+      expect(afterTrim.events).toHaveLength(0);
+    } finally {
+      await server.stop();
+    }
+  });
 });
 
 function createOpenApiServer() {
@@ -345,4 +412,24 @@ async function createWebSocketServer() {
       });
     },
   };
+}
+
+async function waitForManagedStreamEvent(
+  client: UxcDaemonClient,
+  streamId: string,
+  timeoutMs = 5_000,
+): Promise<Awaited<ReturnType<UxcDaemonClient["streamRead"]>>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const page = await client.streamRead({
+      streamId,
+      afterOffset: 0,
+      limit: 10,
+    });
+    if (page.events.length > 0) {
+      return page;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`timed out waiting for managed stream event on ${streamId}`);
 }
