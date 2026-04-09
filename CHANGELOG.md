@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-04-09
+
+### Added
+- Added managed source streams in the daemon/runtime surface so long-lived source-backed streaming flows can be created and reused through the daemon and TypeScript client.
+
+### Fixed
+- Refined managed source stream handling after review, tightening daemon behavior around the new runtime path.
+- Expanded TypeScript daemon-client coverage for managed source flows to lock the new surface down with integration-oriented tests.
+
 ## [0.13.3] - 2026-04-08
 
 ### Added
@@ -413,7 +422,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.13.3...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/holon-run/uxc/releases/tag/v0.14.0
 [0.13.3]: https://github.com/holon-run/uxc/releases/tag/v0.13.3
 [0.13.2]: https://github.com/holon-run/uxc/releases/tag/v0.13.2
 [0.13.1]: https://github.com/holon-run/uxc/releases/tag/v0.13.1
