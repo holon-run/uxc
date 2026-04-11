@@ -1979,6 +1979,9 @@ async fn execute_endpoint_via_daemon(
             daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
             daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
             request_headers: HashMap::new(),
+            cwd: std::env::current_dir()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned()),
         },
     };
 
@@ -5799,6 +5802,9 @@ async fn handle_subscribe_command(
                     daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
                     daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
                     request_headers: HashMap::new(),
+                    cwd: std::env::current_dir()
+                        .ok()
+                        .map(|path| path.to_string_lossy().into_owned()),
                 },
             };
             let data = serde_json::to_value(daemon::subscribe_start_client(&request).await?)?;
@@ -6114,6 +6120,9 @@ fn build_managed_source_spec(
             daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
             daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
             request_headers: HashMap::new(),
+            cwd: std::env::current_dir()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned()),
         },
     })
 }

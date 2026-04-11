@@ -259,6 +259,65 @@ fn daemon_sessions_surface_link_source_metadata() {
     daemon_stop_best_effort();
 }
 
+#[cfg(unix)]
+#[test]
+#[serial]
+fn daemon_start_preserves_request_cwd_for_relative_stdio_endpoint_commands() {
+    let home = common::fresh_test_home_dir();
+    daemon_stop_best_effort_with_home(&home);
+
+    let workdir = tempfile::tempdir().expect("tempdir should be created");
+    let server = test_server_binary("mcp-stdio");
+    let relative_server = workdir.path().join("mcp-stdio-rel");
+    std::os::unix::fs::symlink(&server, &relative_server).expect("symlink should be created");
+    let endpoint = "./mcp-stdio-rel ok";
+
+    let start = uxc_command_with_home(&home)
+        .current_dir(workdir.path())
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let cold = uxc_command_with_home(&home)
+        .current_dir(workdir.path())
+        .arg(endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"first"}"#)
+        .output()
+        .expect("cold call should run");
+    assert!(
+        cold.status.success(),
+        "cold call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&cold.stdout),
+        String::from_utf8_lossy(&cold.stderr)
+    );
+
+    let warm = uxc_command_with_home(&home)
+        .current_dir(workdir.path())
+        .arg(endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"second"}"#)
+        .output()
+        .expect("warm call should run");
+    assert!(
+        warm.status.success(),
+        "warm call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&warm.stdout),
+        String::from_utf8_lossy(&warm.stderr)
+    );
+
+    let warm_json: serde_json::Value =
+        serde_json::from_slice(&warm.stdout).expect("warm stdout should be valid JSON");
+    assert_eq!(warm_json["ok"], true);
+    assert_eq!(warm_json["meta"]["daemon_session_reused"], true);
+
+    daemon_stop_best_effort_with_home(&home);
+}
+
 #[test]
 #[serial]
 fn daemon_sessions_expose_stateful_lifecycle_contract_when_idle_reap_is_deferred() {

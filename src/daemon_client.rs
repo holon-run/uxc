@@ -29,6 +29,7 @@ pub struct DaemonClientOptions {
     pub daemon_exclusive: Vec<String>,
     pub daemon_idle_ttl: Option<u64>,
     pub request_headers: HashMap<String, String>,
+    pub cwd: Option<String>,
 }
 
 impl From<DaemonClientOptions> for RuntimeInvokeOptions {
@@ -49,6 +50,7 @@ impl From<DaemonClientOptions> for RuntimeInvokeOptions {
             daemon_exclusive: value.daemon_exclusive,
             daemon_idle_ttl: value.daemon_idle_ttl,
             request_headers: value.request_headers,
+            cwd: value.cwd,
         }
     }
 }
