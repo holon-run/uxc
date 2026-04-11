@@ -72,7 +72,8 @@ const STOP_POLL_INTERVAL_MS: u64 = 100;
 const START_LOCK_STALE_SECS: u64 = 30;
 const STDIO_INIT_LOCK_STALE_SECS: u64 = 30;
 const MCP_IDLE_TTL_SECS: u64 = 600;
-const MCP_CAN_REAP_PROBE_TIMEOUT_MS: u64 = 1_000;
+const MCP_CAN_REAP_PROBE_TIMEOUT_MS: u64 = 250;
+const MCP_IDLE_CLEANUP_INTERVAL_MS: u64 = 500;
 const MCP_CAN_REAP_RETRY_AFTER_SECS: u64 = 30;
 // Five seconds is long enough for cooperative stdio servers to notice stdin EOF
 // and release external resources, while still bounding daemon-side eviction stalls.
@@ -1319,6 +1320,14 @@ impl McpSessionManager {
             // Use try_lock to avoid blocking on sessions that may be held across .await in invoke_mcp.
             // If a session is busy, we'll check it again in the next cleanup cycle.
             if let Ok(mut guard) = session.try_lock() {
+                // Daemon-exclusive stdio sessions back long-lived local browser workers.
+                // Probing them with background MCP requests is intrusive because stdio MCP is
+                // single-lane: even a timed-out can_reap probe can still occupy the server and
+                // delay foreground requests that arrive moments later. Keep these sessions until
+                // the owner explicitly restarts/reaps them.
+                if !guard.daemon_exclusive.is_empty() {
+                    continue;
+                }
                 if guard.idle_ttl_secs == 0 {
                     continue;
                 }
@@ -1378,9 +1387,14 @@ impl McpSessionManager {
                             }
                         }
                         Err(err) => {
-                            guard.next_can_reap_probe_after = None;
+                            let method_not_found = can_reap_method_not_found(&err);
+                            guard.next_can_reap_probe_after = if method_not_found {
+                                None
+                            } else {
+                                Some(now + Duration::from_secs(MCP_CAN_REAP_RETRY_AFTER_SECS))
+                            };
                             guard.can_reap_contract = CanReapContractView {
-                                support: if can_reap_method_not_found(&err) {
+                                support: if method_not_found {
                                     CanReapContractSupport::Unsupported
                                 } else {
                                     CanReapContractSupport::Error
@@ -1390,9 +1404,18 @@ impl McpSessionManager {
                                 reason: None,
                                 retry_after_secs: None,
                                 state: None,
-                                last_error_summary: (!can_reap_method_not_found(&err))
+                                last_error_summary: (!method_not_found)
                                     .then(|| can_reap_error_summary(&err)),
                             };
+                            if !method_not_found {
+                                let contract = guard.can_reap_contract.clone();
+                                drop(guard);
+                                self.upsert_stdio_snapshot(key, |snapshot| {
+                                    snapshot.can_reap_contract = contract;
+                                })
+                                .await;
+                                continue;
+                            }
                         }
                     }
                     let contract = guard.can_reap_contract.clone();
@@ -3535,7 +3558,6 @@ impl DaemonRuntime {
     }
 
     async fn invoke_inner(&self, request: RuntimeInvokeRequest) -> Result<RuntimeInvokeResponse> {
-        self.mcp.cleanup_idle().await;
         {
             let mut st = self.state.lock().await;
             st.request_count = st.request_count.saturating_add(1);
@@ -6683,6 +6705,19 @@ pub async fn run_daemon_server() -> Result<()> {
         }
         if let Err(err) = resume_runtime.resume_managed_sources().await {
             tracing::warn!("Failed to resume managed sources: {}", err);
+        }
+    });
+    let cleanup_runtime = runtime.clone();
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(Duration::from_millis(MCP_IDLE_CLEANUP_INTERVAL_MS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if cleanup_runtime.should_stop().await {
+                break;
+            }
+            cleanup_runtime.mcp.cleanup_idle().await;
         }
     });
 
