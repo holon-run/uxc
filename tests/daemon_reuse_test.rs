@@ -419,6 +419,67 @@ fn can_reap_true_allows_idle_session_to_be_reaped_before_reuse() {
 
 #[test]
 #[serial]
+fn daemon_exclusive_stdio_sessions_skip_intrusive_idle_reap_probes() {
+    daemon_stop_best_effort();
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} can_reap_timeout", bin.display());
+
+    let start = uxc_command()
+        .env("UXC_TEST_TIMEOUT_MS", "3000")
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let first = uxc_command()
+        .env("UXC_DAEMON_EXCLUSIVE", "~/.uxc/test-exclusive")
+        .arg("--daemon-idle-ttl")
+        .arg("1")
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"seed"}"#)
+        .output()
+        .expect("first call should run");
+    assert!(first.status.success());
+
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let started = std::time::Instant::now();
+    let second = uxc_command()
+        .env("UXC_DAEMON_EXCLUSIVE", "~/.uxc/test-exclusive")
+        .arg("--daemon-idle-ttl")
+        .arg("1")
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"reuse"}"#)
+        .output()
+        .expect("second call should run");
+    let elapsed = started.elapsed();
+    assert!(
+        second.status.success(),
+        "second call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        elapsed < Duration::from_millis(900),
+        "expected daemon-exclusive session reuse to avoid idle cleanup probe delay, took {:?}",
+        elapsed
+    );
+
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second stdout should be valid JSON");
+    assert_eq!(second_json["meta"]["daemon_session_reused"], true);
+
+    daemon_stop_best_effort();
+}
+
+#[test]
+#[serial]
 fn daemon_sessions_reports_active_state_for_busy_stdio_session() {
     daemon_stop_best_effort();
 
