@@ -39,6 +39,40 @@ pub fn run(scenario: Scenario) -> Result<()> {
 
         if req.get("id").is_none() {
             // Notification
+            if method == "notifications/initialized" {
+                match scenario {
+                    Scenario::LifecycleStatefulHold => {
+                        respond(
+                            &mut out,
+                            json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/uxc.lifecycle_changed",
+                                "params": {
+                                    "auto_reap_allowed": false,
+                                    "retention_reason": "interactive",
+                                    "retry_after_secs": 30,
+                                    "updated_at_unix": 1_700_000_001u64
+                                }
+                            }),
+                        )?;
+                    }
+                    Scenario::LifecycleStatefulAllow => {
+                        respond(
+                            &mut out,
+                            json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/uxc.lifecycle_changed",
+                                "params": {
+                                    "auto_reap_allowed": true,
+                                    "updated_at_unix": 1_700_000_002u64
+                                }
+                            }),
+                        )?;
+                    }
+                    Scenario::LifecycleStatefulNoSnapshot => {}
+                    _ => {}
+                }
+            }
             continue;
         }
 
@@ -94,39 +128,20 @@ pub fn run(scenario: Scenario) -> Result<()> {
                     }),
                 )?;
             }
-            "uxc/can_reap" => {
-                if matches!(scenario, Scenario::CanReapTimeout) {
-                    std::thread::sleep(super::common::timeout_duration());
-                }
-                if matches!(scenario, Scenario::CanReapKeepAlive) {
+            "uxc/lifecycle_contract" => {
+                if matches!(
+                    scenario,
+                    Scenario::LifecycleStatefulHold
+                        | Scenario::LifecycleStatefulAllow
+                        | Scenario::LifecycleStatefulNoSnapshot
+                ) {
                     respond(
                         &mut out,
                         json!({
                             "jsonrpc": "2.0",
                             "id": id,
                             "result": {
-                                "can_reap": false,
-                                "reason": "interactive_session",
-                                "retry_after_secs": 30,
-                                "state": {
-                                    "interactive": true,
-                                    "owns_external_resource": true,
-                                    "waiting_for_human": false
-                                }
-                            }
-                        }),
-                    )?;
-                    continue;
-                }
-                if matches!(scenario, Scenario::CanReapAllowReap) {
-                    respond(
-                        &mut out,
-                        json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "can_reap": true,
-                                "reason": "idle_session"
+                                "reap_policy": "stateful"
                             }
                         }),
                     )?;

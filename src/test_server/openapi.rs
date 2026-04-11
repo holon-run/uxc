@@ -308,9 +308,11 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
             | Scenario::DynamicToolset
-            | Scenario::CanReapKeepAlive
-            | Scenario::CanReapAllowReap
-            | Scenario::CanReapTimeout => Ok(Json(json!({"status": "ok"})).into_response()),
+            | Scenario::LifecycleStatefulHold
+            | Scenario::LifecycleStatefulAllow
+            | Scenario::LifecycleStatefulNoSnapshot => {
+                Ok(Json(json!({"status": "ok"})).into_response())
+            }
             Scenario::AuthRequired => Err(StatusCode::UNAUTHORIZED),
             Scenario::Malformed => {
                 // Return invalid JSON
@@ -340,9 +342,9 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
             | Scenario::DynamicToolset
-            | Scenario::CanReapKeepAlive
-            | Scenario::CanReapAllowReap
-            | Scenario::CanReapTimeout => {
+            | Scenario::LifecycleStatefulHold
+            | Scenario::LifecycleStatefulAllow
+            | Scenario::LifecycleStatefulNoSnapshot => {
                 let users = vec![
                     json!({"id": 1, "name": "Alice", "email": "alice@example.com"}),
                     json!({"id": 2, "name": "Bob", "email": "bob@example.com"}),
@@ -378,9 +380,9 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
             | Scenario::DynamicToolset
-            | Scenario::CanReapKeepAlive
-            | Scenario::CanReapAllowReap
-            | Scenario::CanReapTimeout => {
+            | Scenario::LifecycleStatefulHold
+            | Scenario::LifecycleStatefulAllow
+            | Scenario::LifecycleStatefulNoSnapshot => {
                 let name = payload
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -424,9 +426,9 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
             | Scenario::DynamicToolset
-            | Scenario::CanReapKeepAlive
-            | Scenario::CanReapAllowReap
-            | Scenario::CanReapTimeout => {
+            | Scenario::LifecycleStatefulHold
+            | Scenario::LifecycleStatefulAllow
+            | Scenario::LifecycleStatefulNoSnapshot => {
                 if id == 1 {
                     Ok(
                         Json(json!({"id": 1, "name": "Alice", "email": "alice@example.com"}))
@@ -466,9 +468,9 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
             | Scenario::DynamicToolset
-            | Scenario::CanReapKeepAlive
-            | Scenario::CanReapAllowReap
-            | Scenario::CanReapTimeout => {
+            | Scenario::LifecycleStatefulHold
+            | Scenario::LifecycleStatefulAllow
+            | Scenario::LifecycleStatefulNoSnapshot => {
                 let body = Body::from_stream(stream::iter(vec![
                     Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
                         br#"{"type":"tick","value":1}
@@ -518,9 +520,9 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
             | Scenario::DynamicToolset
-            | Scenario::CanReapKeepAlive
-            | Scenario::CanReapAllowReap
-            | Scenario::CanReapTimeout => {
+            | Scenario::LifecycleStatefulHold
+            | Scenario::LifecycleStatefulAllow
+            | Scenario::LifecycleStatefulNoSnapshot => {
                 let response = match query.cursor.as_deref() {
                     None => json!({
                         "items": [
@@ -570,9 +572,9 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
             | Scenario::DynamicToolset
-            | Scenario::CanReapKeepAlive
-            | Scenario::CanReapAllowReap
-            | Scenario::CanReapTimeout => {
+            | Scenario::LifecycleStatefulHold
+            | Scenario::LifecycleStatefulAllow
+            | Scenario::LifecycleStatefulNoSnapshot => {
                 let response = match query.offset {
                     None | Some(0) => json!({
                         "ok": true,
@@ -629,9 +631,9 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
             | Scenario::DynamicToolset
-            | Scenario::CanReapKeepAlive
-            | Scenario::CanReapAllowReap
-            | Scenario::CanReapTimeout => {
+            | Scenario::LifecycleStatefulHold
+            | Scenario::LifecycleStatefulAllow
+            | Scenario::LifecycleStatefulNoSnapshot => {
                 let since = query.since.unwrap_or(0);
                 let response = if since >= 3 {
                     json!([])
@@ -672,9 +674,9 @@ fn create_router(state: ServerState) -> Router {
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
             | Scenario::DynamicToolset
-            | Scenario::CanReapKeepAlive
-            | Scenario::CanReapAllowReap
-            | Scenario::CanReapTimeout => {
+            | Scenario::LifecycleStatefulHold
+            | Scenario::LifecycleStatefulAllow
+            | Scenario::LifecycleStatefulNoSnapshot => {
                 let inbound_etag = headers
                     .get("if-none-match")
                     .and_then(|value| value.to_str().ok());

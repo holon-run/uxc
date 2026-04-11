@@ -1,10 +1,10 @@
 # Daemon Session Lifecycle Contract
 
-This note records the lifecycle contract for issue #337.
+This note records the target daemon session lifecycle contract for issue `#337`.
 
 ## Summary
 
-UXC's daemon is the stable execution surface for long-lived runtimes, especially MCP stdio
+`uxc`'s daemon is the stable execution surface for long-lived runtimes, especially MCP stdio
 sessions. The lifecycle contract needs to explain:
 
 - what defines a reusable session
@@ -12,10 +12,12 @@ sessions. The lifecycle contract needs to explain:
 - what metadata may change across reuse
 - when a session is considered idle
 - when idle reap is allowed
+- what lifecycle state a child may report
 - what users and generated clients may observe from `uxc daemon sessions`
 
-This note defines a v1 contract for daemon-backed session lifecycle. It is primarily about MCP
-stdio sessions, because that is where reuse, exclusivity, and reaping semantics already exist.
+This note defines the target contract for daemon-backed session lifecycle. It is primarily about
+MCP stdio sessions, because that is where reuse, exclusivity, and idle-reap semantics already
+exist.
 
 ## Scope
 
@@ -26,6 +28,7 @@ This note covers:
 - daemon exclusivity
 - idle semantics
 - idle reap behavior
+- child-reported lifecycle state
 - observable daemon session state
 
 This note does not cover:
@@ -53,32 +56,27 @@ The current stdio session stores mutable runtime metadata such as:
 - `link_name`
 - `endpoint`
 - `daemon_exclusive`
-- `can_reap_contract`
+- lifecycle declaration
+- latest lifecycle snapshot
 
 Implementation reference:
 
 - [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L498)
 - [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L627)
 
-The current cleanup path already treats stdio sessions differently from HTTP sessions and probes
-`can_reap` before removing an idle stdio session.
+The current cleanup path has already moved off the foreground request path and currently skips
+intrusive background probes for `daemon_exclusive` stdio sessions.
 
 Implementation reference:
 
-- [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L1077)
+- [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L1312)
 
-MCP stdio subscriptions already reuse stdio sessions through the same `get_or_create_stdio(...)`
-path, but the current lifecycle model does not define a separate attachment contract. Session
-retention is still expressed through daemon-known busy/subscription state plus runtime-reported
-`can_reap`.
-
-Implementation reference:
-
-- [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L4983)
+The current implementation is being refactored away from live runtime probes and toward static
+lifecycle declaration plus pushed lifecycle snapshots.
 
 ## Model
 
-The lifecycle model is split into three layers.
+The lifecycle model is split into four layers.
 
 ### 1. Session Identity
 
@@ -86,20 +84,19 @@ Session identity answers:
 
 - does this request refer to the same runtime session?
 
-For stdio, v1 identity is:
+For stdio, identity is:
 
 - endpoint
 - auth fingerprint
 - injected env fingerprint
 - transport/runtime family
 
-For current implementation, this is equivalent to the current stdio session key contract.
-
 Identity does not include:
 
 - `link_name`
 - `daemon_idle_ttl`
 - `daemon_exclusive`
+- lifecycle contract fields
 
 Those fields affect how a session is presented, owned, or cleaned up, but they do not define which
 underlying runtime process is being reused.
@@ -120,18 +117,32 @@ For v1, ownership policy includes:
 
 `daemon_exclusive` is an ownership boundary, not part of identity.
 
-### 3. Presentation and Cleanup Hints
+### 3. Lifecycle Contract
 
-Presentation and cleanup hints answer:
+Lifecycle contract answers:
+
+- how should the daemon decide whether automatic idle reap is allowed for this child kind?
+- what dynamic state may the child report without exposing child-specific internals?
+
+The contract is split into:
+
+- a static lifecycle declaration, fetched once at startup
+- a dynamic lifecycle snapshot, pushed from the child to the daemon as notifications
+
+The daemon should not rely on live request-time lifecycle probes as the primary cleanup decision
+mechanism for stdio sessions.
+
+### 4. Presentation Hints
+
+Presentation hints answer:
 
 - how should this session be shown to users?
-- how should this session be cleaned up when it becomes idle?
 
 For v1, these include:
 
 - `link_name`
-- `idle_ttl_secs`
-- future source metadata such as skill/docs origin
+- source link metadata such as skill/docs origin
+- endpoint presentation metadata
 
 These hints may change when a request reuses a matching session.
 
@@ -201,6 +212,59 @@ This aligns with current behavior:
 - idle owners may be replaced
 - busy owners may not be evicted
 
+Lifecycle policy does not override ownership policy. A child may be stateful for idle cleanup while
+still participating in explicit ownership hand-off rules.
+
+## Static Lifecycle Declaration
+
+Each stdio child may declare a static lifecycle contract once at startup.
+
+The static declaration should contain a small, generic cleanup policy surface:
+
+- `reap_policy: "safe_idle_reap" | "stateful"`
+
+The daemon should use `reap_policy` as the authoritative cleanup-class input.
+
+### Reap Policies
+
+`safe_idle_reap`
+
+- generic disposable stdio helper
+- daemon-local idle signals are sufficient for automatic reap
+
+`stateful`
+
+- automatic reap depends on child-reported lifecycle state
+- the daemon must not infer child state from provider-specific internals
+- the daemon must not send live background request probes just to discover current cleanup state
+
+If no static lifecycle declaration is present, the daemon may continue using current generic stdio
+behavior as a compatibility fallback until migration is complete.
+
+## Dynamic Lifecycle Snapshot
+
+For `stateful` workers, the child should push lifecycle state changes to the daemon as
+notifications.
+
+The daemon should cache only a compressed, generic lifecycle snapshot. It should not need to
+understand child-specific state machines such as browser presentation mode, bootstrap mode, or
+auth internals.
+
+Suggested fields are:
+
+- `auto_reap_allowed: boolean`
+- `retention_reason: "interactive" | "waiting_for_human" | "external_resource" | "active_runtime" | null`
+- `retry_after_secs: number | null`
+- `updated_at_unix: number`
+
+The child should send:
+
+- an initial snapshot once the session is initialized
+- an updated snapshot whenever the effective auto-reap decision changes
+
+For `stateful` workers, the dynamic lifecycle snapshot is the primary runtime-side input for
+automatic reap decisions.
+
 ## Idle Semantics
 
 `idle_ttl_secs` is a session-level cleanup policy.
@@ -226,19 +290,32 @@ Idle reap is allowed only when all of the following are true:
 2. the session is not currently busy from the daemon's point of view
 3. `idle_ttl_secs != 0`
 4. idle time exceeds the configured cutoff
-5. `can_reap` allows removal, or the runtime does not support `can_reap` and the daemon falls back
-   to current best-effort cleanup rules
+5. the lifecycle policy allows removal
 
-For MCP stdio sessions, `can_reap` is the runtime-side guard after daemon-side idleness. It is not
-the primary definition of idleness.
+Lifecycle policy is evaluated as follows:
 
-### Deferred Reap
+- `safe_idle_reap`
+  - daemon-local idle signals are sufficient
+- `stateful`
+  - the daemon must consult the latest cached lifecycle snapshot
+  - automatic reap is allowed only when `auto_reap_allowed == true`
+  - if no lifecycle snapshot is available, the daemon should keep the session rather than guess
 
-When `can_reap` says the session should be kept alive:
+The daemon must not perform synchronous request-path probing to decide whether an idle stdio session
+may be reaped.
 
-- the daemon must not remove the session
-- the daemon should record the observed `can_reap_contract`
-- the daemon may retry after the indicated delay or a default retry interval
+## Child Exit And Terminal State
+
+If the underlying runtime has become permanently unusable, the child should not remain indefinitely
+alive in a misleading "ready" state.
+
+For `stateful` workers, the child should:
+
+- proactively update lifecycle state when retention conditions change
+- proactively exit when the owner session is terminally gone and the process can no longer provide
+  meaningful service
+
+The daemon should still treat child process exit as the final authoritative terminal signal.
 
 ## Subscriptions
 
@@ -269,7 +346,9 @@ V1 observable guarantees should include:
 - `daemon_exclusive`
 - `in_flight_requests`
 - `reuse_eligible`
-- `can_reap_contract`
+- `lifecycle_contract`
+- `last_lifecycle_update_at_unix`
+- `last_lifecycle_snapshot`
 
 Future lifecycle work may add more explicit retention-oriented fields, for example:
 
@@ -294,18 +373,29 @@ That avoids unnecessary breakage for:
 - current daemon-exclusive workflows
 - current `daemon sessions` tooling
 
-The main change is not the identity key itself. The main change is making ownership and idle/reap
-semantics explicit instead of leaving them implicit in implementation details.
+The main lifecycle change is:
+
+- move from live probe-driven runtime cleanup hints
+- to static lifecycle declaration plus pushed lifecycle state plus local daemon state
+
+This note supersedes the older assumption that live runtime probes should be the default
+runtime-side guard for stdio idle cleanup.
 
 ## Follow-Up Work
 
-The follow-up issues under #337 remain useful as implementation slices:
+The follow-up issues under `#337` remain useful as implementation slices:
 
 - `#340`: session identity and reuse rules
 - `#341`: ownership / idle-reap semantics
 - `#342`: observable daemon session state contract
 
-## Open Questions
+Additional lifecycle follow-up from the browser-worker path:
 
-- Should `daemon_exclusive` conflicts surface richer observable state in `daemon sessions`?
-- Should subscription-held state be exposed directly, or summarized into a pinned-state view?
+- `#368`: stateful stdio worker cleanup contract
+
+## V1 Follow-Through Decisions
+
+- `daemon_exclusive` remains an ownership rule, not a lifecycle policy.
+- `stateful` workers must proactively report lifecycle changes; the daemon should not poll them on
+  the request path.
+- `uxc` should rely on lifecycle declaration plus pushed snapshots, not live runtime probes.

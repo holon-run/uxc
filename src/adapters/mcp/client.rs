@@ -11,25 +11,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct CanReapState {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub interactive: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owns_external_resource: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waiting_for_human: Option<bool>,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleReapPolicy {
+    SafeIdleReap,
+    Stateful,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CanReapProbeResult {
-    pub can_reap: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry_after_secs: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state: Option<CanReapState>,
+pub struct LifecycleContract {
+    pub reap_policy: LifecycleReapPolicy,
 }
 
 /// MCP stdio client
@@ -182,24 +173,15 @@ impl McpStdioClient {
         self.transport.drain_notifications().await
     }
 
-    pub async fn probe_can_reap(
-        &mut self,
-        idle_for_secs: u64,
-        idle_ttl_secs: u64,
-        timeout: Duration,
-    ) -> Result<CanReapProbeResult> {
-        let params = json!({
-            "idle_for_secs": idle_for_secs,
-            "idle_ttl_secs": idle_ttl_secs,
-        });
+    pub async fn lifecycle_contract(&mut self, timeout: Duration) -> Result<LifecycleContract> {
         let result = self
             .transport
-            .send_request_with_timeout("uxc/can_reap", Some(params), timeout)
+            .send_request_with_timeout("uxc/lifecycle_contract", Some(json!({})), timeout)
             .await
-            .context("Failed to probe uxc/can_reap")?;
-        let probe: CanReapProbeResult =
-            serde_json::from_value(result).context("Failed to parse can_reap probe result")?;
-        Ok(probe)
+            .context("Failed to fetch uxc/lifecycle_contract")?;
+        let contract: LifecycleContract =
+            serde_json::from_value(result).context("Failed to parse lifecycle contract result")?;
+        Ok(contract)
     }
 
     /// List available tools
@@ -749,12 +731,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_can_reap_parses_successful_response() {
+    async fn lifecycle_contract_parses_successful_response() {
         let script = r#"
             read line
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1.0"}}}'
             read line
-            echo '{"jsonrpc":"2.0","id":2,"result":{"can_reap":false,"reason":"interactive_session","retry_after_secs":30,"state":{"interactive":true,"owns_external_resource":true}}}'
+            echo '{"jsonrpc":"2.0","id":2,"result":{"reap_policy":"stateful"}}'
         "#;
 
         let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
@@ -762,24 +744,14 @@ mod tests {
             .unwrap();
 
         let result = client
-            .probe_can_reap(123, 600, Duration::from_millis(50))
+            .lifecycle_contract(Duration::from_millis(50))
             .await
             .unwrap();
-        assert!(!result.can_reap);
-        assert_eq!(result.reason.as_deref(), Some("interactive_session"));
-        assert_eq!(result.retry_after_secs, Some(30));
-        assert_eq!(
-            result.state,
-            Some(CanReapState {
-                interactive: Some(true),
-                owns_external_resource: Some(true),
-                waiting_for_human: None,
-            })
-        );
+        assert_eq!(result.reap_policy, LifecycleReapPolicy::Stateful);
     }
 
     #[tokio::test]
-    async fn probe_can_reap_surfaces_method_not_found_code() {
+    async fn lifecycle_contract_surfaces_method_not_found_code() {
         let script = r#"
             read line
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1.0"}}}'
@@ -792,7 +764,7 @@ mod tests {
             .unwrap();
 
         let err = client
-            .probe_can_reap(123, 600, Duration::from_millis(50))
+            .lifecycle_contract(Duration::from_millis(50))
             .await
             .unwrap_err();
         let structured = structured_error_from_anyhow(&err).expect("structured error");

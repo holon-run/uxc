@@ -259,8 +259,17 @@ fn lifecycle_contract() -> Value {
             "not_busy",
             "idle_ttl_non_zero",
             "idle_exceeded",
-            "can_reap_or_best_effort_cleanup"
+            "lifecycle_policy_allows_reap"
         ],
+        "mcp_stdio_lifecycle": {
+            "declaration_method": "uxc/lifecycle_contract",
+            "state_change_notification": "notifications/uxc.lifecycle_changed",
+            "reap_policies": [
+                "safe_idle_reap",
+                "stateful"
+            ],
+            "stateful_requires_cached_snapshot": true
+        },
         "observable_session_fields": [
             "endpoint",
             "protocol",
@@ -270,7 +279,9 @@ fn lifecycle_contract() -> Value {
             "daemon_exclusive",
             "in_flight_requests",
             "reuse_eligible",
-            "can_reap_contract"
+            "lifecycle_contract",
+            "last_lifecycle_update_at_unix",
+            "last_lifecycle_snapshot"
         ]
     })
 }

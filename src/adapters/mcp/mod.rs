@@ -12,7 +12,7 @@ use crate::auth::Profile;
 use crate::error::UxcError;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-pub use client::{CanReapState, McpStdioClient};
+pub use client::{LifecycleReapPolicy, McpStdioClient};
 pub use http_transport::{McpHttpTransport, McpRemoteTransport, ResolvedMcpHttpTransport};
 use serde_json::Value;
 use std::collections::HashMap;

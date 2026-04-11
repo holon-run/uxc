@@ -277,20 +277,21 @@ fn daemon_sessions_surface_link_source_metadata() {
 
 #[test]
 #[serial]
-fn daemon_sessions_expose_supported_can_reap_contract_when_idle_reap_is_deferred() {
-    daemon_stop_best_effort();
+fn daemon_sessions_expose_stateful_lifecycle_contract_when_idle_reap_is_deferred() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
     let bin = test_server_binary("mcp-stdio");
-    let endpoint = format!("{} can_reap_keep_alive", bin.display());
+    let endpoint = format!("{} lifecycle_stateful_hold", bin.display());
 
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
         .expect("daemon start should run");
     assert!(start.status.success());
 
-    let first = uxc_command()
+    let first = uxc_command_with_home(temp_home.path())
         .arg("--daemon-idle-ttl")
         .arg("1")
         .arg(&endpoint)
@@ -303,7 +304,7 @@ fn daemon_sessions_expose_supported_can_reap_contract_when_idle_reap_is_deferred
 
     std::thread::sleep(Duration::from_millis(1500));
 
-    let second = uxc_command()
+    let second = uxc_command_with_home(temp_home.path())
         .arg(&endpoint)
         .arg("echo")
         .arg("--input-json")
@@ -316,7 +317,7 @@ fn daemon_sessions_expose_supported_can_reap_contract_when_idle_reap_is_deferred
         serde_json::from_slice(&second.stdout).expect("second stdout should be valid JSON");
     assert_eq!(second_json["meta"]["daemon_session_reused"], true);
 
-    let sessions = uxc_command()
+    let sessions = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("sessions")
         .output()
@@ -329,34 +330,41 @@ fn daemon_sessions_expose_supported_can_reap_contract_when_idle_reap_is_deferred
         .as_array()
         .expect("session list should be an array");
     assert_eq!(sessions.len(), 1, "expected one stdio session");
-    let contract = &sessions[0]["can_reap_contract"];
-    assert_eq!(contract["support"], "supported");
-    assert_eq!(contract["can_reap"], false);
-    assert_eq!(contract["reason"], "interactive_session");
-    assert_eq!(contract["retry_after_secs"], 30);
-    assert_eq!(contract["state"]["interactive"], true);
-    assert_eq!(contract["state"]["owns_external_resource"], true);
-    assert_eq!(contract["state"]["waiting_for_human"], false);
+    assert_eq!(sessions[0]["lifecycle_contract"]["reap_policy"], "stateful");
+    assert_eq!(
+        sessions[0]["last_lifecycle_snapshot"]["auto_reap_allowed"],
+        false
+    );
+    assert_eq!(
+        sessions[0]["last_lifecycle_snapshot"]["retention_reason"],
+        "interactive"
+    );
+    assert_eq!(
+        sessions[0]["last_lifecycle_snapshot"]["retry_after_secs"],
+        30
+    );
+    assert_eq!(sessions[0]["last_lifecycle_update_at_unix"], 1700000001u64);
 
-    daemon_stop_best_effort();
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]
 #[serial]
-fn can_reap_true_allows_idle_session_to_be_reaped_before_reuse() {
-    daemon_stop_best_effort();
+fn stateful_session_with_auto_reap_allowed_is_reaped_before_reuse() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
     let bin = test_server_binary("mcp-stdio");
-    let endpoint = format!("{} can_reap_allow_reap", bin.display());
+    let endpoint = format!("{} lifecycle_stateful_allow", bin.display());
 
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
         .expect("daemon start should run");
     assert!(start.status.success());
 
-    let first = uxc_command()
+    let first = uxc_command_with_home(temp_home.path())
         .arg("--daemon-idle-ttl")
         .arg("1")
         .arg(&endpoint)
@@ -367,7 +375,7 @@ fn can_reap_true_allows_idle_session_to_be_reaped_before_reuse() {
         .expect("first call should run");
     assert!(first.status.success());
 
-    let first_sessions = uxc_command()
+    let first_sessions = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("sessions")
         .output()
@@ -381,7 +389,7 @@ fn can_reap_true_allows_idle_session_to_be_reaped_before_reuse() {
 
     std::thread::sleep(Duration::from_millis(1500));
 
-    let second = uxc_command()
+    let second = uxc_command_with_home(temp_home.path())
         .arg(&endpoint)
         .arg("echo")
         .arg("--input-json")
@@ -394,10 +402,10 @@ fn can_reap_true_allows_idle_session_to_be_reaped_before_reuse() {
         serde_json::from_slice(&second.stdout).expect("second stdout should be valid JSON");
     assert!(
         second_json["meta"]["daemon_session_reused"] != true,
-        "expected second call to use a fresh session after can_reap=true"
+        "expected second call to use a fresh session after auto_reap_allowed=true"
     );
 
-    let second_sessions = uxc_command()
+    let second_sessions = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("sessions")
         .output()
@@ -410,31 +418,30 @@ fn can_reap_true_allows_idle_session_to_be_reaped_before_reuse() {
         .expect("child pid should be present");
     assert_ne!(first_pid, second_pid, "expected a new MCP child process");
     assert_eq!(
-        second_sessions_json["data"][0]["can_reap_contract"]["support"],
-        "unknown"
+        second_sessions_json["data"][0]["lifecycle_contract"]["reap_policy"],
+        "stateful"
     );
 
-    daemon_stop_best_effort();
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]
 #[serial]
-fn daemon_exclusive_stdio_sessions_skip_intrusive_idle_reap_probes() {
-    daemon_stop_best_effort();
+fn stateful_session_without_snapshot_is_kept_for_reuse() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
     let bin = test_server_binary("mcp-stdio");
-    let endpoint = format!("{} can_reap_timeout", bin.display());
+    let endpoint = format!("{} lifecycle_stateful_no_snapshot", bin.display());
 
-    let start = uxc_command()
-        .env("UXC_TEST_TIMEOUT_MS", "3000")
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
         .expect("daemon start should run");
     assert!(start.status.success());
 
-    let first = uxc_command()
-        .env("UXC_DAEMON_EXCLUSIVE", "~/.uxc/test-exclusive")
+    let first = uxc_command_with_home(temp_home.path())
         .arg("--daemon-idle-ttl")
         .arg("1")
         .arg(&endpoint)
@@ -447,35 +454,34 @@ fn daemon_exclusive_stdio_sessions_skip_intrusive_idle_reap_probes() {
 
     std::thread::sleep(Duration::from_millis(1500));
 
-    let started = std::time::Instant::now();
-    let second = uxc_command()
-        .env("UXC_DAEMON_EXCLUSIVE", "~/.uxc/test-exclusive")
-        .arg("--daemon-idle-ttl")
-        .arg("1")
+    let second = uxc_command_with_home(temp_home.path())
         .arg(&endpoint)
         .arg("echo")
         .arg("--input-json")
         .arg(r#"{"message":"reuse"}"#)
         .output()
         .expect("second call should run");
-    let elapsed = started.elapsed();
-    assert!(
-        second.status.success(),
-        "second call should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&second.stdout),
-        String::from_utf8_lossy(&second.stderr)
-    );
-    assert!(
-        elapsed < Duration::from_millis(900),
-        "expected daemon-exclusive session reuse to avoid idle cleanup probe delay, took {:?}",
-        elapsed
-    );
+    assert!(second.status.success());
 
     let second_json: serde_json::Value =
         serde_json::from_slice(&second.stdout).expect("second stdout should be valid JSON");
     assert_eq!(second_json["meta"]["daemon_session_reused"], true);
 
-    daemon_stop_best_effort();
+    let sessions = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("sessions")
+        .output()
+        .expect("daemon sessions should run");
+    assert!(sessions.status.success());
+    let sessions_json: serde_json::Value =
+        serde_json::from_slice(&sessions.stdout).expect("valid daemon sessions json");
+    assert_eq!(
+        sessions_json["data"][0]["lifecycle_contract"]["reap_policy"],
+        "stateful"
+    );
+    assert!(sessions_json["data"][0]["last_lifecycle_snapshot"].is_null());
+
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]
@@ -669,11 +675,11 @@ fn daemon_status_not_blocked_by_stuck_mcp_invoke() {
     assert_eq!(json["kind"], "daemon_status");
     assert_eq!(json["data"]["running"], true);
 
-    let first_output = first.join().expect("first timeout thread panicked");
+    let _first_output = first.join().expect("first timeout thread panicked");
     // The timeout calls are expected to succeed (they timeout after 4s)
     // We don't assert on status.success() because the test is about
     // daemon status being responsive, not about the timeout calls themselves
-    let second_output = second.join().expect("second timeout thread panicked");
+    let _second_output = second.join().expect("second timeout thread panicked");
 
     daemon_stop_best_effort();
 }

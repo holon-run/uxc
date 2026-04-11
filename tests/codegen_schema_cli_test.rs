@@ -60,6 +60,10 @@ fn endpoint_codegen_schema_exports_runtime_contract_boundaries() {
         true
     );
     assert_eq!(
+        json["data"]["runtime"]["lifecycle_contract"]["mcp_stdio_lifecycle"]["declaration_method"],
+        "uxc/lifecycle_contract"
+    );
+    assert_eq!(
         json["data"]["runtime"]["artifact_contract"]["compaction_model"]["meta_fields"][4],
         "artifact_ref"
     );

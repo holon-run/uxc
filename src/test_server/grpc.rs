@@ -35,9 +35,9 @@ impl addsvc::add_server::Add for AddService {
             | Scenario::ResourceReadFailOnce
             | Scenario::SessionScopedResource
             | Scenario::DynamicToolset
-            | Scenario::CanReapKeepAlive
-            | Scenario::CanReapAllowReap
-            | Scenario::CanReapTimeout => {
+            | Scenario::LifecycleStatefulHold
+            | Scenario::LifecycleStatefulAllow
+            | Scenario::LifecycleStatefulNoSnapshot => {
                 let req = request.into_inner();
                 Ok(Response::new(addsvc::SumReply { v: req.a + req.b }))
             }
