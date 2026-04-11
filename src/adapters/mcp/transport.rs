@@ -39,6 +39,7 @@ pub trait StdioProcessExecutor: Send + Sync {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StdioSpawnOptions {
     pub env_overrides: Vec<(String, String)>,
+    pub cwd: Option<PathBuf>,
 }
 
 /// Result of spawning a process
@@ -88,14 +89,25 @@ impl StdioProcessExecutor for DefaultStdioProcessExecutor {
                 .collect::<Vec<_>>();
             tracing::debug!("Injecting child env vars for MCP stdio: {:?}", env_names);
         }
+        if let Some(cwd) = options.cwd.as_ref() {
+            tracing::debug!(
+                "Using child working directory for MCP stdio: {}",
+                cwd.display()
+            );
+        }
 
         // Spawn the process
-        let mut child = Command::new(cmd)
+        let mut command = Command::new(cmd);
+        command
             .args(&full_args)
             .envs(options.env_overrides.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(cwd) = options.cwd.as_ref() {
+            command.current_dir(cwd);
+        }
+        let mut child = command
             .spawn()
             .context("Failed to spawn MCP server process")?;
 
@@ -1320,6 +1332,7 @@ mod tests {
         let mock = Arc::new(MockStdioExecutor::new());
         let options = StdioSpawnOptions {
             env_overrides: vec![("TOKEN".to_string(), "secret".to_string())],
+            cwd: None,
         };
         let _ = McpStdioTransport::connect_with_executor("test", &[], options, mock.clone()).await;
         let captured = mock.captured_env_overrides.lock().unwrap().clone();

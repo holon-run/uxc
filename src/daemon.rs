@@ -160,6 +160,8 @@ pub struct RuntimeInvokeOptions {
     pub daemon_idle_ttl: Option<u64>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub request_headers: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4060,6 +4062,7 @@ impl DaemonRuntime {
                 &request.endpoint,
                 auth_profile.as_ref(),
                 &request.options.inject_env,
+                request.options.cwd.as_deref(),
             )?;
             self.mcp.get_stdio(&key).await.is_some()
         } else if adapters::mcp::McpAdapter::is_http_url(&request.endpoint) {
@@ -4113,8 +4116,12 @@ impl DaemonRuntime {
                         .unwrap_or_default()
                 }
             };
-            let key =
-                stdio_session_key(endpoint, auth_profile.as_ref(), &request.options.inject_env)?;
+            let key = stdio_session_key(
+                endpoint,
+                auth_profile.as_ref(),
+                &request.options.inject_env,
+                request.options.cwd.as_deref(),
+            )?;
             let (session, reused) = self
                 .mcp
                 .get_or_create_stdio(
@@ -6034,6 +6041,7 @@ async fn run_mcp_subscription_job(
         &request.endpoint,
         auth_profile.as_ref(),
         &request.options.inject_env,
+        request.options.cwd.as_deref(),
     )?;
     let (session, _) = runtime
         .mcp
@@ -7656,12 +7664,14 @@ fn stdio_session_key(
     endpoint: &str,
     profile: Option<&Profile>,
     inject_env: &[InjectEnvSpec],
+    cwd: Option<&str>,
 ) -> Result<String> {
     Ok(format!(
-        "stdio:{}:{}:{}",
+        "stdio:{}:{}:{}:{}",
         endpoint,
         auth_fingerprint(profile),
-        stdio_env_fingerprint(inject_env, profile)?
+        stdio_env_fingerprint(inject_env, profile)?,
+        cwd.unwrap_or("")
     ))
 }
 
@@ -7683,22 +7693,30 @@ fn build_stdio_spawn_options(
     options: &RuntimeInvokeOptions,
     profile: Option<&Profile>,
 ) -> Result<Option<adapters::mcp::StdioSpawnOptions>> {
-    if options.inject_env.is_empty() {
+    let cwd = options.cwd.as_deref().map(PathBuf::from);
+    if options.inject_env.is_empty() && cwd.is_none() {
         return Ok(None);
     }
     if !adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
         return Err(UxcError::InvalidArguments(
-            "--inject-env is only supported for stdio endpoints".to_string(),
+            "--inject-env and request cwd are only supported for stdio endpoints".to_string(),
         )
         .into());
     }
-    let profile = profile.ok_or_else(|| {
-        UxcError::InvalidArguments(
-            "--inject-env requires a credential. Use --auth <credential_id> for direct stdio calls, or --credential <credential_id> when creating a link.".to_string(),
-        )
-    })?;
-    let env_overrides = render_injected_env(&options.inject_env, profile)?;
-    Ok(Some(adapters::mcp::StdioSpawnOptions { env_overrides }))
+    let env_overrides = if options.inject_env.is_empty() {
+        Vec::new()
+    } else {
+        let profile = profile.ok_or_else(|| {
+            UxcError::InvalidArguments(
+                "--inject-env requires a credential. Use --auth <credential_id> for direct stdio calls, or --credential <credential_id> when creating a link.".to_string(),
+            )
+        })?;
+        render_injected_env(&options.inject_env, profile)?
+    };
+    Ok(Some(adapters::mcp::StdioSpawnOptions {
+        env_overrides,
+        cwd,
+    }))
 }
 
 fn normalize_exclusive_keys(keys: &[String]) -> Vec<String> {
@@ -8259,8 +8277,12 @@ async fn invoke_live_stdio_mcp_help(
         return Ok(None);
     }
 
-    let session_key =
-        stdio_session_key(&request.endpoint, auth_profile, &request.options.inject_env)?;
+    let session_key = stdio_session_key(
+        &request.endpoint,
+        auth_profile,
+        &request.options.inject_env,
+        request.options.cwd.as_deref(),
+    )?;
     let Some(session) = runtime.mcp.get_stdio(&session_key).await else {
         return Ok(None);
     };
@@ -8691,6 +8713,7 @@ mod tests {
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
                 request_headers: HashMap::new(),
+                cwd: None,
             },
         };
 
@@ -8790,6 +8813,7 @@ mod tests {
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
                 request_headers: HashMap::new(),
+                cwd: None,
             },
         };
 
@@ -8866,6 +8890,7 @@ mod tests {
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
                 request_headers: HashMap::new(),
+                cwd: None,
             },
         };
 
@@ -8899,6 +8924,7 @@ mod tests {
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
                 request_headers: HashMap::new(),
+                cwd: None,
             },
         };
 
@@ -9015,6 +9041,7 @@ mod tests {
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
                 request_headers: HashMap::new(),
+                cwd: None,
             },
         }
     }
@@ -9047,6 +9074,7 @@ mod tests {
                 daemon_exclusive: Vec::new(),
                 daemon_idle_ttl: None,
                 request_headers: HashMap::new(),
+                cwd: None,
             },
         }
     }
