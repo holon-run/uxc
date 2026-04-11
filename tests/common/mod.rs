@@ -1,6 +1,7 @@
 //! Common utilities for local E2E tests
 
 use anyhow::Result;
+use assert_cmd::Command as AssertCommand;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -46,6 +47,21 @@ pub fn uxc_binary() -> PathBuf {
         assert!(status.success(), "Failed to build uxc binary");
         debug_bin
     }
+}
+
+#[allow(deprecated)]
+pub fn uxc_command() -> AssertCommand {
+    AssertCommand::cargo_bin("uxc").expect("uxc binary should build")
+}
+
+pub fn uxc_command_with_home(home: &std::path::Path) -> AssertCommand {
+    let runtime_dir = home.join("runtime");
+    fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let mut cmd = uxc_command();
+    cmd.env("HOME", home);
+    cmd.env("USERPROFILE", home);
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd
 }
 
 /// Path to test server binaries

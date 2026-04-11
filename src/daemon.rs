@@ -587,6 +587,24 @@ pub struct LifecycleSnapshotView {
     pub updated_at_unix: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleContractFetchState {
+    Unsupported,
+    Available,
+    Unknown,
+}
+
+fn lifecycle_contract_fetch_state(err: &anyhow::Error) -> LifecycleContractFetchState {
+    let jsonrpc_code = structured_error_from_anyhow(err)
+        .and_then(|payload| payload.details)
+        .and_then(|details| details.get("jsonrpc_code").and_then(Value::as_i64));
+    if jsonrpc_code == Some(-32601) {
+        LifecycleContractFetchState::Unsupported
+    } else {
+        LifecycleContractFetchState::Unknown
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct JsonRpcRequest {
     jsonrpc: String,
@@ -674,6 +692,7 @@ struct McpStdioSession {
     endpoint: String,
     daemon_exclusive: Vec<String>,
     lifecycle_contract: Option<LifecycleContractView>,
+    lifecycle_contract_fetch_state: LifecycleContractFetchState,
     last_lifecycle_update_at_unix: Option<u64>,
     last_lifecycle_snapshot: Option<LifecycleSnapshotView>,
 }
@@ -694,6 +713,7 @@ struct McpStdioSessionSnapshot {
     in_flight_requests: u64,
     reuse_eligible: bool,
     lifecycle_contract: Option<LifecycleContractView>,
+    lifecycle_contract_fetch_state: LifecycleContractFetchState,
     last_lifecycle_update_at_unix: Option<u64>,
     last_lifecycle_snapshot: Option<LifecycleSnapshotView>,
     last_error_summary: Option<String>,
@@ -1296,17 +1316,25 @@ impl McpSessionManager {
                 let now = Instant::now();
                 let cutoff = now - Duration::from_secs(guard.idle_ttl_secs);
                 if guard.last_used < cutoff {
-                    let lifecycle_allows_reap = match guard
-                        .lifecycle_contract
-                        .as_ref()
-                        .map(|contract| contract.reap_policy)
-                        .unwrap_or(adapters::mcp::LifecycleReapPolicy::SafeIdleReap)
-                    {
-                        adapters::mcp::LifecycleReapPolicy::SafeIdleReap => true,
-                        adapters::mcp::LifecycleReapPolicy::Stateful => guard
+                    let lifecycle_allows_reap = match (
+                        guard.lifecycle_contract_fetch_state,
+                        guard
+                            .lifecycle_contract
+                            .as_ref()
+                            .map(|contract| contract.reap_policy),
+                    ) {
+                        (_, Some(adapters::mcp::LifecycleReapPolicy::SafeIdleReap)) => true,
+                        (LifecycleContractFetchState::Unsupported, None) => true,
+                        (
+                            LifecycleContractFetchState::Unsupported
+                            | LifecycleContractFetchState::Available,
+                            Some(adapters::mcp::LifecycleReapPolicy::Stateful),
+                        ) => guard
                             .last_lifecycle_snapshot
                             .as_ref()
                             .is_some_and(|snapshot| snapshot.auto_reap_allowed),
+                        (LifecycleContractFetchState::Unknown, _) => false,
+                        (LifecycleContractFetchState::Available, None) => false,
                     };
                     if !lifecycle_allows_reap {
                         continue;
@@ -1470,18 +1498,38 @@ impl McpSessionManager {
             ),
         )
         .await?;
-        let lifecycle_contract = match client
+        let (lifecycle_contract, lifecycle_contract_fetch_state) = match client
             .lifecycle_contract(request_timeout.unwrap_or_else(
                 adapters::mcp::transport::McpStdioTransport::default_request_timeout,
             ))
             .await
         {
-            Ok(contract) => Some(LifecycleContractView {
-                reap_policy: contract.reap_policy,
-            }),
+            Ok(contract) => (
+                Some(LifecycleContractView {
+                    reap_policy: contract.reap_policy,
+                }),
+                LifecycleContractFetchState::Available,
+            ),
             Err(err) => {
-                tracing::debug!(session_key = %session_key, error = %err, "MCP stdio child did not declare lifecycle contract");
-                None
+                let fetch_state = lifecycle_contract_fetch_state(&err);
+                match fetch_state {
+                    LifecycleContractFetchState::Unsupported => {
+                        tracing::debug!(
+                            session_key = %session_key,
+                            error = %err,
+                            "MCP stdio child does not declare lifecycle contract"
+                        );
+                    }
+                    LifecycleContractFetchState::Unknown => {
+                        tracing::warn!(
+                            session_key = %session_key,
+                            error = %err,
+                            "Failed to fetch MCP stdio lifecycle contract; automatic idle reap will stay disabled"
+                        );
+                    }
+                    LifecycleContractFetchState::Available => {}
+                }
+                (None, fetch_state)
             }
         };
         let created_at_unix = now_unix_secs();
@@ -1504,6 +1552,7 @@ impl McpSessionManager {
             endpoint: metadata.endpoint.to_string(),
             daemon_exclusive: exclusive_keys.clone(),
             lifecycle_contract: lifecycle_contract.clone(),
+            lifecycle_contract_fetch_state,
             last_lifecycle_update_at_unix: None,
             last_lifecycle_snapshot: None,
         }));
@@ -1529,6 +1578,7 @@ impl McpSessionManager {
                 in_flight_requests: 0,
                 reuse_eligible: true,
                 lifecycle_contract,
+                lifecycle_contract_fetch_state,
                 last_lifecycle_update_at_unix: None,
                 last_lifecycle_snapshot: None,
                 last_error_summary: None,
@@ -1607,6 +1657,7 @@ impl McpSessionManager {
         let last_used_at_unix = guard.last_used_at_unix;
         let daemon_exclusive = guard.daemon_exclusive.clone();
         let lifecycle_contract = guard.lifecycle_contract.clone();
+        let lifecycle_contract_fetch_state = guard.lifecycle_contract_fetch_state;
         let last_lifecycle_update_at_unix = guard.last_lifecycle_update_at_unix;
         let last_lifecycle_snapshot = guard.last_lifecycle_snapshot.clone();
         drop(guard);
@@ -1621,6 +1672,7 @@ impl McpSessionManager {
             snapshot.last_used_at_unix = last_used_at_unix;
             snapshot.daemon_exclusive = daemon_exclusive;
             snapshot.lifecycle_contract = lifecycle_contract;
+            snapshot.lifecycle_contract_fetch_state = lifecycle_contract_fetch_state;
             snapshot.last_lifecycle_update_at_unix = last_lifecycle_update_at_unix;
             snapshot.last_lifecycle_snapshot = last_lifecycle_snapshot;
             snapshot.recent_stderr = recent_stderr;
@@ -1990,6 +2042,7 @@ impl McpSessionManager {
                     snapshot.idle_ttl_secs = guard.idle_ttl_secs;
                     snapshot.daemon_exclusive = guard.daemon_exclusive.clone();
                     snapshot.lifecycle_contract = guard.lifecycle_contract.clone();
+                    snapshot.lifecycle_contract_fetch_state = guard.lifecycle_contract_fetch_state;
                     snapshot.last_lifecycle_update_at_unix = guard.last_lifecycle_update_at_unix;
                     snapshot.last_lifecycle_snapshot = guard.last_lifecycle_snapshot.clone();
                     snapshot.recent_stderr = recent_stderr;

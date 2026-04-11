@@ -4,20 +4,9 @@
 
 mod common;
 
-use common::test_server_binary;
+use common::{test_server_binary, uxc_command, uxc_command_with_home};
 use serial_test::serial;
 use std::fs;
-use std::path::Path;
-
-fn uxc_command_with_home(home: &Path) -> assert_cmd::Command {
-    let runtime_dir = home.join("runtime");
-    fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
-    let mut cmd = uxc_command();
-    cmd.env("HOME", home);
-    cmd.env("USERPROFILE", home);
-    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
-    cmd
-}
 
 #[test]
 #[serial]
@@ -296,13 +285,17 @@ fn daemon_log_contains_lifecycle_snapshot_metadata_for_stateful_stdio_sessions()
     thread::sleep(Duration::from_millis(200));
 
     let content = fs::read_to_string(&log_file).expect("should be able to read daemon log");
+    let entries = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid log json"))
+        .collect::<Vec<_>>();
     assert!(
-        content.contains("\"lifecycle_contract\":{\"reap_policy\":\"stateful\"}"),
-        "log should include the stateful lifecycle contract"
-    );
-    assert!(
-        content.contains("\"retention_reason\":\"interactive\""),
-        "log should include the latest lifecycle retention reason"
+        entries.iter().any(|entry| {
+            entry["meta"]["lifecycle_contract"]["reap_policy"] == "stateful"
+                && entry["meta"]["last_lifecycle_snapshot"]["retention_reason"] == "interactive"
+        }),
+        "log should include lifecycle metadata for a stateful interactive session"
     );
 
     let _ = uxc_command_with_home(temp_home.path())
@@ -310,9 +303,4 @@ fn daemon_log_contains_lifecycle_snapshot_metadata_for_stateful_stdio_sessions()
         .arg("stop")
         .output();
     let _ = fs::remove_file(&log_file);
-}
-
-#[allow(deprecated)]
-fn uxc_command() -> assert_cmd::Command {
-    assert_cmd::Command::cargo_bin(env!("CARGO_PKG_NAME")).unwrap()
 }
