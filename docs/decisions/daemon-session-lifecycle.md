@@ -48,7 +48,7 @@ The current stdio session key is based on:
 
 Implementation reference:
 
-- [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L6183)
+- [src/daemon.rs](../../src/daemon.rs)
 
 The current stdio session stores mutable runtime metadata such as:
 
@@ -61,15 +61,14 @@ The current stdio session stores mutable runtime metadata such as:
 
 Implementation reference:
 
-- [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L498)
-- [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L627)
+- [src/daemon.rs](../../src/daemon.rs)
 
 The current cleanup path has already moved off the foreground request path and currently skips
 intrusive background probes for `daemon_exclusive` stdio sessions.
 
 Implementation reference:
 
-- [src/daemon.rs](/Users/jolestar/opensource/src/github.com/holon-run/uxc/src/daemon.rs#L1312)
+- [src/daemon.rs](../../src/daemon.rs)
 
 The current implementation is being refactored away from live runtime probes and toward static
 lifecycle declaration plus pushed lifecycle snapshots.
@@ -238,8 +237,11 @@ The daemon should use `reap_policy` as the authoritative cleanup-class input.
 - the daemon must not infer child state from provider-specific internals
 - the daemon must not send live background request probes just to discover current cleanup state
 
-If no static lifecycle declaration is present, the daemon may continue using current generic stdio
-behavior as a compatibility fallback until migration is complete.
+If the child explicitly does not support static lifecycle declaration, the daemon may continue
+using current generic stdio behavior as a compatibility fallback until migration is complete.
+
+If lifecycle declaration fetch fails for another reason, the daemon should keep the session rather
+than guess that `safe_idle_reap` applies.
 
 ## Dynamic Lifecycle Snapshot
 

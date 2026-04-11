@@ -1,7 +1,6 @@
 mod common;
 
-use assert_cmd::Command;
-use common::test_server_binary;
+use common::{test_server_binary, uxc_command, uxc_command_with_home};
 use serial_test::serial;
 use std::fs;
 #[cfg(unix)]
@@ -10,23 +9,8 @@ use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-#[allow(deprecated)]
-fn uxc_command() -> Command {
-    Command::cargo_bin("uxc").expect("uxc binary should build")
-}
-
 fn daemon_stop_best_effort() {
     let _ = uxc_command().arg("daemon").arg("stop").output();
-}
-
-fn uxc_command_with_home(home: &Path) -> Command {
-    let runtime_dir = home.join("runtime");
-    fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
-    let mut cmd = uxc_command();
-    cmd.env("HOME", home);
-    cmd.env("USERPROFILE", home);
-    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
-    cmd
 }
 
 fn daemon_stop_best_effort_with_home(home: &Path) {
