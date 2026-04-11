@@ -6,6 +6,18 @@ mod common;
 
 use common::test_server_binary;
 use serial_test::serial;
+use std::fs;
+use std::path::Path;
+
+fn uxc_command_with_home(home: &Path) -> assert_cmd::Command {
+    let runtime_dir = home.join("runtime");
+    fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let mut cmd = uxc_command();
+    cmd.env("HOME", home);
+    cmd.env("USERPROFILE", home);
+    cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
+    cmd
+}
 
 #[test]
 #[serial]
@@ -232,28 +244,25 @@ fn daemon_log_contains_stdio_session_lifecycle_events() {
 
 #[test]
 #[serial]
-fn daemon_log_contains_reap_deferred_event_when_can_reap_is_false() {
-    use std::fs;
+fn daemon_log_contains_lifecycle_snapshot_metadata_for_stateful_stdio_sessions() {
     use std::path::PathBuf;
     use std::thread;
     use std::time::Duration;
 
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    let _ = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output();
 
-    let log_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir).join("uxc")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".uxc").join("daemon")
-    } else {
-        return;
-    };
+    let log_dir = PathBuf::from(temp_home.path()).join("runtime").join("uxc");
 
     let log_file = log_dir.join("daemon.log");
     if log_file.exists() {
         let _ = fs::remove_file(&log_file);
     }
 
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
@@ -261,8 +270,8 @@ fn daemon_log_contains_reap_deferred_event_when_can_reap_is_false() {
     assert!(start.status.success());
 
     let bin = test_server_binary("mcp-stdio");
-    let endpoint = format!("{} can_reap_keep_alive", bin.display());
-    let first = uxc_command()
+    let endpoint = format!("{} lifecycle_stateful_hold", bin.display());
+    let first = uxc_command_with_home(temp_home.path())
         .arg("--daemon-idle-ttl")
         .arg("1")
         .arg(&endpoint)
@@ -275,7 +284,7 @@ fn daemon_log_contains_reap_deferred_event_when_can_reap_is_false() {
 
     thread::sleep(Duration::from_millis(1500));
 
-    let second = uxc_command()
+    let second = uxc_command_with_home(temp_home.path())
         .arg(&endpoint)
         .arg("echo")
         .arg("--input-json")
@@ -288,15 +297,18 @@ fn daemon_log_contains_reap_deferred_event_when_can_reap_is_false() {
 
     let content = fs::read_to_string(&log_file).expect("should be able to read daemon log");
     assert!(
-        content.contains("daemon_session_reap_deferred"),
-        "log should contain daemon_session_reap_deferred event"
+        content.contains("\"lifecycle_contract\":{\"reap_policy\":\"stateful\"}"),
+        "log should include the stateful lifecycle contract"
     );
     assert!(
-        content.contains("interactive_session"),
-        "log should include the can_reap defer reason"
+        content.contains("\"retention_reason\":\"interactive\""),
+        "log should include the latest lifecycle retention reason"
     );
 
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let _ = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output();
     let _ = fs::remove_file(&log_file);
 }
 

@@ -60,9 +60,9 @@ fn pubsub_profile(scenario: Scenario) -> Option<JsonRpcPubSubProfile> {
     match scenario {
         Scenario::Ok
         | Scenario::Legacy
-        | Scenario::CanReapKeepAlive
-        | Scenario::CanReapAllowReap
-        | Scenario::CanReapTimeout => Some(JsonRpcPubSubProfile::DerivedUnsubscribe),
+        | Scenario::LifecycleStatefulHold
+        | Scenario::LifecycleStatefulAllow
+        | Scenario::LifecycleStatefulNoSnapshot => Some(JsonRpcPubSubProfile::DerivedUnsubscribe),
         Scenario::SuiPubSub => Some(JsonRpcPubSubProfile::CloseOnly),
         _ => None,
     }
@@ -329,9 +329,9 @@ async fn execute_method(
         | Scenario::ResourceReadFailOnce
         | Scenario::SessionScopedResource
         | Scenario::DynamicToolset
-        | Scenario::CanReapKeepAlive
-        | Scenario::CanReapAllowReap
-        | Scenario::CanReapTimeout => {
+        | Scenario::LifecycleStatefulHold
+        | Scenario::LifecycleStatefulAllow
+        | Scenario::LifecycleStatefulNoSnapshot => {
             let result = match method {
                 "rpc.discover" => schema_value(state.scenario),
                 "health" => json!({"status": "ok"}),

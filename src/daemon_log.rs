@@ -49,7 +49,6 @@ pub enum DaemonEventType {
     DaemonSessionCreated,
     DaemonSessionReused,
     DaemonSessionUnhealthy,
-    DaemonSessionReapDeferred,
     DaemonSessionRemoved,
 }
 
