@@ -20,6 +20,23 @@ pub async fn prepare_execute_args(
     prepare_execute_args_with_adapter(adapter, endpoint, operation_id, raw_args).await
 }
 
+pub fn prepare_execute_args_from_detail(
+    protocol: ProtocolType,
+    operation_id: &str,
+    detail: &OperationDetail,
+    raw_args: HashMap<String, Value>,
+) -> Result<HashMap<String, Value>> {
+    if raw_args.is_empty() {
+        return Ok(raw_args);
+    }
+
+    let Some(schema) = normalize_operation_schema(protocol, detail) else {
+        return Ok(raw_args);
+    };
+
+    coerce_execute_args(operation_id, raw_args, schema)
+}
+
 async fn prepare_execute_args_with_adapter<A: Adapter + Sync>(
     adapter: &A,
     endpoint: &str,
@@ -34,10 +51,14 @@ async fn prepare_execute_args_with_adapter<A: Adapter + Sync>(
         Ok(detail) => detail,
         Err(_) => return Ok(raw_args),
     };
-    let Some(schema) = normalize_operation_schema(adapter.protocol_type(), &detail) else {
-        return Ok(raw_args);
-    };
+    prepare_execute_args_from_detail(adapter.protocol_type(), operation_id, &detail, raw_args)
+}
 
+fn coerce_execute_args(
+    operation_id: &str,
+    raw_args: HashMap<String, Value>,
+    schema: NormalizedSchema,
+) -> Result<HashMap<String, Value>> {
     let value = coerce_value(
         &Value::Object(raw_args.into_iter().collect()),
         &schema.root,
