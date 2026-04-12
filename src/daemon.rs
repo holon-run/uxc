@@ -14,8 +14,8 @@ use crate::error::{
     StructuredErrorPayload, UxcError,
 };
 use crate::managed_source_streams::{
-    ManagedSourceRecord, ManagedSourceStore, SourceRuntimeUpdate, StreamEventRecord,
-    StreamInfoRecord,
+    ManagedSourceListRecord, ManagedSourceRecord, ManagedSourceStore, SourceRuntimeUpdate,
+    StreamEventRecord, StreamInfoRecord,
 };
 use crate::subscription_discord::{
     derive_gateway_bot_endpoint, parse_gateway_bot_response, prepare_gateway_websocket_url,
@@ -2912,8 +2912,8 @@ impl ManagedSourceManager {
     }
 
     async fn list(&self) -> Result<Vec<ManagedSourceListEntry>> {
-        let records = self.store.load_sources().await?;
-        Ok(records.iter().map(list_entry_from_record).collect())
+        let records = self.store.load_source_list_records().await?;
+        Ok(records.iter().map(list_entry_from_list_record).collect())
     }
 
     async fn summary(&self) -> Result<(usize, usize, usize)> {
@@ -3410,7 +3410,7 @@ fn view_from_record(record: &ManagedSourceRecord) -> ManagedSourceView {
     }
 }
 
-fn list_entry_from_record(record: &ManagedSourceRecord) -> ManagedSourceListEntry {
+fn list_entry_from_list_record(record: &ManagedSourceListRecord) -> ManagedSourceListEntry {
     ManagedSourceListEntry {
         namespace: record.namespace.clone(),
         source_key: record.source_key.clone(),
@@ -3880,7 +3880,16 @@ impl DaemonRuntime {
         let state = self.state.lock().await;
         let (stdio_sessions, http_sessions, reuse_hits) = self.mcp.status_counts().await;
         let (managed_sources, managed_sources_running, managed_streams) =
-            self.managed_sources.summary().await.unwrap_or((0, 0, 0));
+            match self.managed_sources.summary().await {
+                Ok(summary) => summary,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "Failed to summarize managed sources for daemon status"
+                    );
+                    (0, 0, 0)
+                }
+            };
         let log_file: Option<String> = self
             .logger
             .as_ref()

@@ -73,6 +73,17 @@ pub struct ManagedSourceStoreSummary {
 }
 
 #[derive(Debug, Clone)]
+pub struct ManagedSourceListRecord {
+    pub namespace: String,
+    pub source_key: String,
+    pub status: String,
+    pub run_id: String,
+    pub stream_id: String,
+    pub updated_at_unix: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct SourceRuntimeUpdate {
     pub status: String,
     pub updated_at_unix: u64,
@@ -188,6 +199,42 @@ impl ManagedSourceStore {
                 out.push(row?);
             }
             Ok(out)
+        })
+        .await?
+    }
+
+    pub async fn load_source_list_records(&self) -> Result<Vec<ManagedSourceListRecord>> {
+        let _guard = self.gate.lock().await;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            let mut stmt = conn.prepare(
+                r#"
+                select
+                    namespace,
+                    source_key,
+                    status,
+                    run_id,
+                    stream_id,
+                    updated_at_unix,
+                    last_error
+                from managed_sources
+                order by updated_at_unix desc, namespace asc, source_key asc
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ManagedSourceListRecord {
+                    namespace: row.get(0)?,
+                    source_key: row.get(1)?,
+                    status: row.get(2)?,
+                    run_id: row.get(3)?,
+                    stream_id: row.get(4)?,
+                    updated_at_unix: row.get(5)?,
+                    last_error: row.get(6)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
         })
         .await?
     }
