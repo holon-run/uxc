@@ -10310,8 +10310,9 @@ impl DaemonOwnerLockGuard {
                 .into());
             }
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("Failed to lock daemon owner lock {}", path.display()));
+                return Err(err).with_context(|| {
+                    format!("Failed to lock daemon owner lock {}", path.display())
+                });
             }
         }
 
