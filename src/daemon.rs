@@ -2,7 +2,7 @@ use crate::adapters::mcp::types::{JsonRpcNotification, ResourceContents};
 use crate::adapters::{
     self, Adapter, AdapterEnum, DetectionOptions, Operation, ProtocolDetector, ProtocolType,
 };
-use crate::arg_coercion::prepare_execute_args;
+use crate::arg_coercion::{prepare_execute_args, prepare_execute_args_from_detail};
 use crate::auth::injected_env::{fingerprint_injected_env, render_injected_env, InjectEnvSpec};
 use crate::auth::{self, Profile};
 use crate::cache::{self, Cache, CacheConfig};
@@ -3863,7 +3863,11 @@ impl DaemonRuntime {
             Value,
             Option<adapters::ExecutionMetadata>,
         )> = if protocol == "mcp" && matches!(request.action, RuntimeAction::Execute) {
-            let prepared_args = prepare_runtime_execute_args(&resolved.adapter, &request).await?;
+            let prepared_args = if adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+                request.args.clone().unwrap_or_default()
+            } else {
+                prepare_runtime_execute_args(&resolved.adapter, &request).await?
+            };
             // Clone the pre-computed stdio_spawn_options to avoid duplicate secret resolution
             let stdio_options = stdio_spawn_options.clone();
             let (kind, operation, data, reused) = self
@@ -3954,7 +3958,11 @@ impl DaemonRuntime {
                             && matches!(request.action, RuntimeAction::Execute)
                         {
                             let prepared_args =
-                                prepare_runtime_execute_args(&adapter, &request).await?;
+                                if adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+                                    request.args.clone().unwrap_or_default()
+                                } else {
+                                    prepare_runtime_execute_args(&adapter, &request).await?
+                                };
                             // For cache fallback, recompute stdio_spawn_options since we don't have
                             // the original detection_options available
                             let (kind, operation, data, reused) = self
@@ -4279,7 +4287,7 @@ impl DaemonRuntime {
     async fn invoke_mcp_execute(
         &self,
         request: &RuntimeInvokeRequest,
-        args: HashMap<String, Value>,
+        raw_args: HashMap<String, Value>,
         auth_profile: Option<Profile>,
         precomputed_stdio_spawn_options: Option<adapters::mcp::StdioSpawnOptions>,
         cache: Arc<dyn Cache>,
@@ -4289,7 +4297,6 @@ impl DaemonRuntime {
             .operation_id
             .as_ref()
             .ok_or_else(|| anyhow!("operation_id is required"))?;
-        let arguments = Some(Value::Object(args.into_iter().collect()));
 
         if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
             let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;
@@ -4331,15 +4338,17 @@ impl DaemonRuntime {
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
             guard.last_used_at_unix = now_unix_secs();
+            let timeout = request_timeout_duration(request.options.timeout_ms).unwrap_or_else(
+                adapters::mcp::transport::McpStdioTransport::default_request_timeout,
+            );
+            let args = prepare_live_stdio_mcp_execute_args(
+                &mut guard, endpoint, &cache, op, raw_args, timeout,
+            )
+            .await?;
+            let arguments = Some(Value::Object(args.into_iter().collect()));
             let result = guard
                 .client
-                .call_tool_with_timeout(
-                    op,
-                    arguments,
-                    request_timeout_duration(request.options.timeout_ms).unwrap_or_else(
-                        adapters::mcp::transport::McpStdioTransport::default_request_timeout,
-                    ),
-                )
+                .call_tool_with_timeout(op, arguments, timeout)
                 .await;
             let _ = guard
                 .mark_tools_dirty_from_notifications(endpoint, &cache)
@@ -4392,6 +4401,7 @@ impl DaemonRuntime {
                     .await?
             };
             session.mark_used().await;
+            let arguments = Some(Value::Object(raw_args.into_iter().collect()));
             let result = session.transport.call_tool(op, arguments).await?;
             let _ = session.collect_pending_notifications().await;
             Ok((
@@ -8777,6 +8787,54 @@ fn operation_detail_from_mcp_tool(tool: &adapters::mcp::types::Tool) -> adapters
         return_type: Some("ToolContent".to_string()),
         input_schema: tool.inputSchema.clone(),
     }
+}
+
+async fn prepare_live_stdio_mcp_execute_args(
+    session: &mut McpStdioSession,
+    endpoint: &str,
+    cache: &Arc<dyn Cache>,
+    operation_id: &str,
+    raw_args: HashMap<String, Value>,
+    timeout: Duration,
+) -> Result<HashMap<String, Value>> {
+    if raw_args.is_empty() {
+        return Ok(raw_args);
+    }
+
+    let _ = session
+        .mark_tools_dirty_from_notifications(endpoint, cache)
+        .await;
+    let tools = match session
+        .refresh_tools_if_needed(endpoint, cache, timeout)
+        .await
+    {
+        Ok(tools) => tools,
+        Err(err) => {
+            tracing::debug!(
+                endpoint = %endpoint,
+                operation_id = %operation_id,
+                error = %err,
+                "Failed to refresh live MCP stdio tool catalog for arg coercion; using raw args"
+            );
+            return Ok(raw_args);
+        }
+    };
+
+    let Some(tool) = tools.iter().find(|tool| tool.name == *operation_id) else {
+        tracing::debug!(
+            endpoint = %endpoint,
+            operation_id = %operation_id,
+            "Live MCP stdio tool catalog did not contain requested operation; using raw args"
+        );
+        return Ok(raw_args);
+    };
+
+    prepare_execute_args_from_detail(
+        ProtocolType::Mcp,
+        operation_id,
+        &operation_detail_from_mcp_tool(tool),
+        raw_args,
+    )
 }
 
 fn to_operation_summary(protocol: &str, op: &Operation) -> OperationSummary {
