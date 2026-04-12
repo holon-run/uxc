@@ -282,6 +282,8 @@ enum DaemonCommands {
     Start,
     /// Stop daemon process
     Stop,
+    /// Diagnose and safely repair stale local daemon state
+    Doctor,
     /// Show daemon status
     Status,
     /// List MCP daemon sessions
@@ -1690,6 +1692,7 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
         Some(Commands::Daemon { daemon_command }) => match daemon_command {
             DaemonCommands::Start => Some(vec!["daemon", "start"]),
             DaemonCommands::Stop => Some(vec!["daemon", "stop"]),
+            DaemonCommands::Doctor => Some(vec!["daemon", "doctor"]),
             DaemonCommands::Status => Some(vec!["daemon", "status"]),
             DaemonCommands::Sessions => Some(vec!["daemon", "sessions"]),
             DaemonCommands::Session { session_command } => match session_command {
@@ -2205,10 +2208,11 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["daemon"] => HelpData {
             path: "uxc daemon".to_string(),
             about: "Manage local runtime daemon".to_string(),
-            usage: "uxc daemon <start|stop|status|sessions|session|restart>".to_string(),
+            usage: "uxc daemon <start|stop|doctor|status|sessions|session|restart>".to_string(),
             commands: commands(&[
                 ("start", "Start daemon process"),
                 ("stop", "Stop daemon process"),
+                ("doctor", "Diagnose and safely repair local daemon state"),
                 ("status", "Show daemon status"),
                 ("sessions", "List daemon MCP sessions"),
                 ("session", "Manage one daemon-backed MCP session"),
@@ -2222,6 +2226,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc daemon status".to_string(),
                 "uxc daemon start".to_string(),
                 "uxc daemon stop".to_string(),
+                "uxc daemon doctor".to_string(),
                 "uxc daemon restart".to_string(),
             ],
         },
@@ -2254,6 +2259,17 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: vec![],
             notes: vec![],
             examples: vec!["uxc daemon stop".to_string()],
+        },
+        ["daemon", "doctor"] => HelpData {
+            path: "uxc daemon doctor".to_string(),
+            about: "Diagnose and safely repair local daemon state".to_string(),
+            usage: "uxc daemon doctor".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Inspects the daemon owner lock, owner pid metadata, and socket path. Removes stale local artifacts only when no live daemon owner exists."
+                    .to_string(),
+            ],
+            examples: vec!["uxc daemon doctor".to_string()],
         },
         ["daemon", "status"] => HelpData {
             path: "uxc daemon status".to_string(),
@@ -3017,6 +3033,22 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             }
             Ok(())
         }
+        Some("daemon_doctor_result") => {
+            let data = envelope.data.clone().unwrap_or(Value::Null);
+            if let Some(status) = data.get("status").and_then(Value::as_str) {
+                println!("Status: {}", status);
+            }
+            if let Some(message) = data.get("message").and_then(Value::as_str) {
+                println!("Message: {}", message);
+            }
+            if let Some(socket) = data.get("socket").and_then(Value::as_str) {
+                println!("Socket: {}", socket);
+            }
+            if let Some(repaired) = data.get("repaired").and_then(Value::as_bool) {
+                println!("Repaired: {}", repaired);
+            }
+            Ok(())
+        }
         Some("daemon_status") => {
             let data = envelope.data.clone().unwrap_or(Value::Null);
             let running = data
@@ -3048,6 +3080,15 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             }
             if let Some(requests) = data.get("request_count").and_then(Value::as_u64) {
                 println!("Requests: {}", requests);
+            }
+            if let Some(owner_lock_held) = data.get("owner_lock_held").and_then(Value::as_bool) {
+                println!("Owner Lock Held: {}", owner_lock_held);
+            }
+            if let Some(owner_pid) = data.get("owner_pid").and_then(Value::as_u64) {
+                println!("Owner PID: {}", owner_pid);
+            }
+            if let Some(owner_pid_alive) = data.get("owner_pid_alive").and_then(Value::as_bool) {
+                println!("Owner PID Alive: {}", owner_pid_alive);
             }
             Ok(())
         }
@@ -5447,6 +5488,17 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
                 None,
             ))
         }
+        DaemonCommands::Doctor => {
+            let result = daemon::daemon_doctor_local_result()?;
+            Ok(OutputEnvelope::success(
+                "daemon_doctor_result",
+                "cli",
+                "uxc",
+                None,
+                serde_json::to_value(result)?,
+                None,
+            ))
+        }
         DaemonCommands::Status => {
             let status = match daemon::daemon_status_local().await {
                 Ok(status) => {
@@ -5466,19 +5518,31 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
                     }
                     value
                 }
-                Err(err) => json!({
-                    "running": false,
-                    "socket": daemon::socket_path().display().to_string(),
-                    "client_version": env!("CARGO_PKG_VERSION"),
-                    "version_mismatch": false,
-                    "managed_sources": 0,
-                    "managed_sources_running": 0,
-                    "managed_streams": 0,
-                    "error": {
-                        "code": "DAEMON_UNREACHABLE",
-                        "message": err.to_string()
+                Err(err) => {
+                    let diagnostics = daemon::daemon_local_diagnostics()?;
+                    let mut value =
+                        serde_json::to_value(daemon::daemon_status_from_diagnostics(&diagnostics))?;
+                    let error_code = if diagnostics.owner_lock_held && diagnostics.owner_pid_alive {
+                        "DAEMON_OWNER_UNREACHABLE"
+                    } else {
+                        "DAEMON_UNREACHABLE"
+                    };
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert(
+                            "client_version".to_string(),
+                            Value::String(env!("CARGO_PKG_VERSION").to_string()),
+                        );
+                        obj.insert("version_mismatch".to_string(), Value::Bool(false));
+                        obj.insert(
+                            "error".to_string(),
+                            json!({
+                                "code": error_code,
+                                "message": err.to_string()
+                            }),
+                        );
                     }
-                }),
+                    value
+                }
             };
             Ok(OutputEnvelope::success(
                 "daemon_status",
