@@ -93,33 +93,6 @@ export type RuntimeResult<TData = unknown, TMeta = Record<string, unknown>> = Om
   meta: TMeta;
 };
 
-export interface SubscriptionEventEnvelope {
-  version: string;
-  job_id: string;
-  seq: number;
-  timestamp_unix: number;
-  protocol: string;
-  source_kind: string;
-  event_kind: string;
-  data?: unknown;
-  meta?: unknown;
-}
-
-export interface SubscribeStartResponse {
-  job_id: string;
-  mode: "stream" | "poll";
-  protocol: string;
-  endpoint: string;
-  sink: string;
-  resource_uri?: string | null;
-  status: string;
-}
-
-export interface SubscribeStopResponse {
-  job_id: string;
-  stopped: boolean;
-}
-
 export interface ManagedSourceSpec {
   endpoint: string;
   operation_id?: string | null;
@@ -216,29 +189,6 @@ export interface ManagedStreamTrimResponse {
   trimmed: number;
 }
 
-export interface SubscriptionJobView {
-  job_id: string;
-  mode: "stream" | "poll";
-  endpoint: string;
-  protocol: string;
-  sink: string;
-  resource_uri?: string | null;
-  status: string;
-  durable: boolean;
-  auto_resume: boolean;
-  resume_strategy: string;
-  created_at_unix: number;
-  started_at_unix?: number | null;
-  stopped_at_unix?: number | null;
-  last_event_at_unix?: number | null;
-  last_error?: string | null;
-  restart_count: number;
-  last_resume_at_unix?: number | null;
-  last_resume_error?: string | null;
-  reconnect_count: number;
-  written_events: number;
-}
-
 export interface DaemonStatus {
   running: boolean;
   pid?: number | null;
@@ -261,14 +211,6 @@ export interface DaemonSessionKillResponse {
   killed: boolean;
 }
 
-export interface SubscriptionEventsResponse {
-  job_id: string;
-  status: string;
-  events: SubscriptionEventEnvelope[];
-  next_after_seq: number;
-  has_more: boolean;
-}
-
 export interface UxcDaemonClientOptions {
   socketPath?: string;
   binaryPath?: string;
@@ -282,24 +224,6 @@ export interface GenerateTypeScriptClientOptions {
   className?: string;
   packageImport?: string;
   includeSchemaJson?: boolean;
-}
-
-export interface SubscribeStartArgs {
-  endpoint: string;
-  resourceUri?: string;
-  operationId?: string;
-  args?: Record<string, unknown>;
-  mode?: "stream" | "poll";
-  pollConfig?: PollSubscriptionConfig;
-  options?: RuntimeInvokeOptions;
-  sink?: `file:${string}` | "memory:";
-  ephemeral?: boolean;
-  readResource?: boolean;
-  transportHint?:
-    | "websocket"
-    | "discord_gateway"
-    | "slack_socket_mode"
-    | "feishu_long_connection";
 }
 
 export interface PollSubscriptionConfig {
@@ -421,58 +345,6 @@ export class UxcDaemonClient {
     return generateTypeScriptClient(schema, args.emitter);
   }
 
-  async subscribeStart(args: SubscribeStartArgs): Promise<SubscribeStartResponse> {
-    const mode = args.mode ?? (args.pollConfig ? "poll" : "stream");
-    if (mode === "poll" && !args.pollConfig) {
-      throw new Error("pollConfig is required when mode is 'poll'");
-    }
-    if (mode !== "poll" && args.pollConfig) {
-      throw new Error("pollConfig is only valid when mode is 'poll'");
-    }
-    return this.request("subscription.start", {
-      request_id: requestId("subscribe"),
-      endpoint: args.endpoint,
-      sink: args.sink ?? "memory:",
-      operation_id: args.operationId ?? null,
-      args: args.args ?? null,
-      resource_uri: args.resourceUri ?? null,
-      read_resource: args.readResource ?? false,
-      transport_hint: args.transportHint ?? null,
-      subprotocols: [],
-      initial_text_frames: [],
-      mode,
-      poll_config: args.pollConfig ?? null,
-      ephemeral: args.ephemeral ?? (args.sink ?? "memory:") === "memory:",
-      options: normalizeOptions(args.options),
-    });
-  }
-
-  async subscribeList(): Promise<SubscriptionJobView[]> {
-    return this.request("subscription.list");
-  }
-
-  async subscribeStatus(jobId: string): Promise<SubscriptionJobView> {
-    return this.request("subscription.status", { job_id: jobId });
-  }
-
-  async subscribeStop(jobId: string): Promise<SubscribeStopResponse> {
-    return this.request("subscription.stop", { job_id: jobId });
-  }
-
-  async subscriptionEvents(args: {
-    jobId: string;
-    afterSeq?: number;
-    limit?: number;
-    waitMs?: number;
-  }): Promise<SubscriptionEventsResponse> {
-    return this.request("subscription.events", {
-      job_id: args.jobId,
-      after_seq: args.afterSeq ?? 0,
-      limit: args.limit ?? 100,
-      wait_ms: args.waitMs ?? 15_000,
-    });
-  }
-
   async sourceEnsure(args: {
     namespace: string;
     sourceKey: string;
@@ -540,40 +412,6 @@ export class UxcDaemonClient {
       stream_id: streamId,
       before_offset: beforeOffset,
     });
-  }
-
-  async *subscribeEvents(
-    jobId: string,
-    options: {
-      afterSeq?: number;
-      limit?: number;
-      waitMs?: number;
-      signal?: AbortSignal;
-    } = {},
-  ): AsyncIterable<SubscriptionEventEnvelope> {
-    let afterSeq = options.afterSeq ?? 0;
-    while (true) {
-      if (options.signal?.aborted) {
-        return;
-      }
-      const batch = await this.subscriptionEvents({
-        jobId,
-        afterSeq,
-        limit: options.limit,
-        waitMs: options.waitMs,
-      });
-      for (const event of batch.events) {
-        afterSeq = event.seq;
-        yield event;
-      }
-      if (batch.status !== "running" && batch.events.length === 0) {
-        return;
-      }
-      if (batch.events.length === 0 && batch.status === "running") {
-        continue;
-      }
-      afterSeq = batch.next_after_seq;
-    }
   }
 
   async request<T>(method: string, params?: unknown): Promise<T> {

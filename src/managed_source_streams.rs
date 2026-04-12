@@ -23,8 +23,6 @@ pub struct ManagedSourceRecord {
     pub started_at_unix: Option<u64>,
     pub stopped_at_unix: Option<u64>,
     pub last_error: Option<String>,
-    pub underlying_job_id: Option<String>,
-    pub mirrored_after_seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,8 +88,6 @@ pub struct SourceRuntimeUpdate {
     pub started_at_unix: Option<u64>,
     pub stopped_at_unix: Option<u64>,
     pub last_error: Option<String>,
-    pub underlying_job_id: Option<String>,
-    pub mirrored_after_seq: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -186,9 +182,7 @@ impl ManagedSourceStore {
                     updated_at_unix,
                     started_at_unix,
                     stopped_at_unix,
-                    last_error,
-                    underlying_job_id,
-                    mirrored_after_seq
+                    last_error
                 from managed_sources
                 order by namespace, source_key
                 "#,
@@ -287,9 +281,7 @@ impl ManagedSourceStore {
                     updated_at_unix,
                     started_at_unix,
                     stopped_at_unix,
-                    last_error,
-                    underlying_job_id,
-                    mirrored_after_seq
+                    last_error
                 from managed_sources
                 where namespace = ?1 and source_key = ?2
                 "#,
@@ -339,9 +331,7 @@ impl ManagedSourceStore {
                     updated_at_unix = ?4,
                     started_at_unix = ?5,
                     stopped_at_unix = ?6,
-                    last_error = ?7,
-                    underlying_job_id = coalesce(?8, underlying_job_id),
-                    mirrored_after_seq = coalesce(?9, mirrored_after_seq)
+                    last_error = ?7
                 where namespace = ?1 and source_key = ?2
                 "#,
                 params![
@@ -351,9 +341,7 @@ impl ManagedSourceStore {
                     update.updated_at_unix,
                     update.started_at_unix,
                     update.stopped_at_unix,
-                    update.last_error,
-                    update.underlying_job_id,
-                    update.mirrored_after_seq
+                    update.last_error
                 ],
             )?;
             Ok(())
@@ -383,9 +371,7 @@ impl ManagedSourceStore {
                 set status = ?3,
                     updated_at_unix = ?4,
                     stopped_at_unix = ?5,
-                    last_error = ?6,
-                    underlying_job_id = null,
-                    mirrored_after_seq = 0
+                    last_error = ?6
                 where namespace = ?1 and source_key = ?2
                 "#,
                 params![
@@ -583,8 +569,6 @@ fn row_to_managed_source_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Man
         started_at_unix: row.get(9)?,
         stopped_at_unix: row.get(10)?,
         last_error: row.get(11)?,
-        underlying_job_id: row.get(12)?,
-        mirrored_after_seq: row.get(13)?,
     })
 }
 
@@ -607,11 +591,9 @@ fn upsert_source_tx(
             updated_at_unix,
             started_at_unix,
             stopped_at_unix,
-            last_error,
-            underlying_job_id,
-            mirrored_after_seq
+            last_error
         )
-        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         on conflict(namespace, source_key) do update set
             spec_json = excluded.spec_json,
             spec_key = excluded.spec_key,
@@ -621,9 +603,7 @@ fn upsert_source_tx(
             updated_at_unix = excluded.updated_at_unix,
             started_at_unix = excluded.started_at_unix,
             stopped_at_unix = excluded.stopped_at_unix,
-            last_error = excluded.last_error,
-            underlying_job_id = excluded.underlying_job_id,
-            mirrored_after_seq = excluded.mirrored_after_seq
+            last_error = excluded.last_error
         "#,
         params![
             record.namespace,
@@ -637,9 +617,7 @@ fn upsert_source_tx(
             record.updated_at_unix,
             record.started_at_unix,
             record.stopped_at_unix,
-            record.last_error,
-            record.underlying_job_id,
-            record.mirrored_after_seq
+            record.last_error
         ],
     )?;
     if create_stream {

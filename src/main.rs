@@ -214,12 +214,6 @@ enum Commands {
         daemon_command: DaemonCommands,
     },
 
-    /// Manage background subscriptions via daemon
-    Subscribe {
-        #[command(subcommand)]
-        subscribe_command: SubscribeCommands,
-    },
-
     /// Manage daemon-backed managed sources
     Source {
         #[command(subcommand)]
@@ -307,78 +301,6 @@ enum DaemonSessionCommands {
         /// Session key from `uxc daemon sessions`
         #[arg(value_name = "SESSION_KEY")]
         session_key: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum SubscribeCommands {
-    /// Start a background subscription job
-    Start {
-        /// HTTP stream URL, WebSocket JSON-RPC endpoint, GraphQL endpoint, or MCP endpoint/stdio command
-        #[arg(value_name = "ENDPOINT")]
-        endpoint: String,
-
-        /// Optional operation ID for protocol-aware subscriptions (for example subscription/messageAdded or eth_subscribe)
-        #[arg(value_name = "OPERATION_ID")]
-        operation_id: Option<String>,
-
-        /// Operation arguments as key=value pairs or one positional JSON object
-        #[arg(value_name = "ARG")]
-        args: Vec<String>,
-
-        /// JSON object payload for operation arguments
-        #[arg(long = "input-json", value_name = "JSON")]
-        input_json: Option<String>,
-
-        /// File sink spec, for example file:/tmp/events.ndjson
-        #[arg(long, value_name = "file:/path.ndjson")]
-        sink: String,
-
-        /// MCP resource URI to subscribe to
-        #[arg(long = "resource-uri", value_name = "URI")]
-        resource_uri: Option<String>,
-
-        /// For MCP resource subscriptions, emit resource snapshots by calling resources/read
-        #[arg(long = "read-resource")]
-        read_resource: bool,
-
-        /// Explicit stream transport hint
-        #[arg(long, value_enum)]
-        transport: Option<SubscribeTransportArg>,
-
-        /// WebSocket subprotocol to advertise during handshake (repeatable)
-        #[arg(long = "subprotocol", value_name = "VALUE")]
-        subprotocols: Vec<String>,
-
-        /// Initial WebSocket text frame to send after connect (repeatable)
-        #[arg(long = "init-frame", value_name = "TEXT_OR_JSON")]
-        init_frames: Vec<String>,
-
-        /// Event acquisition mode
-        #[arg(long, value_enum, default_value = "stream")]
-        mode: SubscribeModeArg,
-
-        /// JSON object describing poll interval, extraction, and checkpoint strategy
-        #[arg(long = "poll-config", value_name = "JSON")]
-        poll_config: Option<String>,
-
-        /// Do not auto-resume this subscription after daemon restart
-        #[arg(long)]
-        ephemeral: bool,
-    },
-    /// List background subscription jobs
-    List,
-    /// Show a background subscription job
-    Status {
-        /// Subscription job ID
-        #[arg(value_name = "JOB_ID")]
-        job_id: String,
-    },
-    /// Stop a background subscription job
-    Stop {
-        /// Subscription job ID
-        #[arg(value_name = "JOB_ID")]
-        job_id: String,
     },
 }
 
@@ -1129,11 +1051,6 @@ struct AuthBindingRemoveData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct SubscribeListData {
-    jobs: Vec<daemon::SubscriptionJobView>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 struct SourceListData {
     sources: Vec<daemon::ManagedSourceListEntry>,
 }
@@ -1469,15 +1386,7 @@ fn raw_has_help_token(raw_args: &[String]) -> bool {
 fn is_top_level_command_token(token: &str) -> bool {
     matches!(
         token,
-        "help"
-            | "config"
-            | "cache"
-            | "auth"
-            | "link"
-            | "daemon"
-            | "subscribe"
-            | "source"
-            | "stream"
+        "help" | "config" | "cache" | "auth" | "link" | "daemon" | "source" | "stream"
     )
 }
 
@@ -1574,13 +1483,6 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
                         }
                     }
                     _ => {}
-                }
-            }
-        }
-        "subscribe" => {
-            if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
-                if matches!(level1, "start" | "list" | "status" | "stop") {
-                    path.push(level1.to_string());
                 }
             }
         }
@@ -1700,12 +1602,6 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             },
             DaemonCommands::Restart => Some(vec!["daemon", "restart"]),
             DaemonCommands::Serve => Some(vec!["daemon", "_serve"]),
-        },
-        Some(Commands::Subscribe { subscribe_command }) => match subscribe_command {
-            SubscribeCommands::Start { .. } => Some(vec!["subscribe", "start"]),
-            SubscribeCommands::List => Some(vec!["subscribe", "list"]),
-            SubscribeCommands::Status { .. } => Some(vec!["subscribe", "status"]),
-            SubscribeCommands::Stop { .. } => Some(vec!["subscribe", "stop"]),
         },
         Some(Commands::Source { source_command }) => match source_command {
             SourceCommands::List => Some(vec!["source", "list"]),
@@ -1930,10 +1826,6 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
         return handle_daemon_command(daemon_command).await;
     }
 
-    if let Some(Commands::Subscribe { subscribe_command }) = &cli.command {
-        return handle_subscribe_command(subscribe_command, cli).await;
-    }
-
     if let Some(Commands::Source { source_command }) = &cli.command {
         return handle_source_command(source_command, cli).await;
     }
@@ -2120,7 +2012,6 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 ("auth", "Manage credentials, bindings, and OAuth"),
                 ("link", "Create a host-bound shortcut command"),
                 ("daemon", "Manage local runtime daemon"),
-                ("subscribe", "Manage background subscriptions via daemon"),
                 ("source", "Manage daemon-backed source streams"),
                 ("stream", "Read and maintain durable source streams"),
             ]),
@@ -2312,105 +2203,6 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             notes: vec![],
             examples: vec!["uxc daemon restart".to_string()],
         },
-        ["subscribe"] => HelpData {
-            path: "uxc subscribe".to_string(),
-            about: "Manage background subscriptions via daemon".to_string(),
-            usage: "uxc subscribe <start|list|status|stop> ...".to_string(),
-            commands: commands(&[
-                ("start", "Start a background subscription job"),
-                ("list", "List background subscription jobs"),
-                ("status", "Show a background subscription job"),
-                ("stop", "Stop a background subscription job"),
-            ]),
-            notes: vec![
-                "Supports stream subscriptions plus polling-based subscriptions under the same daemon-backed job model.".to_string(),
-                "Use --sink file:/path.ndjson to append normalized event envelopes to a file."
-                    .to_string(),
-                "Subscriptions are durable by default and auto-resume after daemon restart; pass --ephemeral to avoid restart recovery."
-                    .to_string(),
-                "Stream mode covers raw HTTP JSON streams, GraphQL subscriptions, JSON-RPC pubsub over WebSocket, explicit raw WebSocket streams, Slack Socket Mode, and MCP resource subscriptions; poll mode repeatedly executes a normal operation and emits only new items."
-                    .to_string(),
-                "For MCP resource subscriptions, add --read-resource if the sink should also capture resources/read snapshots after each update notification."
-                    .to_string(),
-            ],
-            examples: vec![
-                "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
-                    .to_string(),
-                "uxc subscribe start https://example.com/stream --ephemeral --sink file:/tmp/oneshot.ndjson".to_string(),
-                "uxc subscribe start wss://stream.binance.com:9443/ws/btcusdt@trade --transport websocket --sink file:/tmp/binance.ndjson".to_string(),
-                "uxc subscribe start https://discord.com/api/v10 --transport discord-gateway --auth discord-bot --sink file:/tmp/discord.ndjson".to_string(),
-                "uxc subscribe start https://slack.com/api --transport slack-socket-mode --auth slack-app --sink file:/tmp/slack.ndjson".to_string(),
-                "uxc subscribe start https://open.feishu.cn/open-apis --transport feishu-long-connection --auth feishu-tenant --sink file:/tmp/feishu.ndjson".to_string(),
-                "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\"}' --sink file:/tmp/graphql.ndjson".to_string(),
-                "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"newHeads\"]}' --sink file:/tmp/heads.ndjson".to_string(),
-                "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"request_cursor_arg\":\"cursor\",\"response_cursor_pointer\":\"/next_cursor\",\"checkpoint_strategy\":{\"type\":\"cursor_only\"}}' --sink file:/tmp/poll.ndjson".to_string(),
-                "uxc subscribe start https://api.telegram.org post:/getUpdates --mode poll --poll-config '{\"interval_secs\":2,\"extract_items_pointer\":\"/result\",\"request_cursor_arg\":\"offset\",\"cursor_from_item_pointer\":\"/update_id\",\"cursor_transform\":\"increment\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/update_id\"}}' --sink file:/tmp/telegram.ndjson".to_string(),
-                "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --read-resource --sink file:/tmp/mcp-http.ndjson".to_string(),
-                "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --read-resource --sink file:/tmp/mcp.ndjson".to_string(),
-                "uxc subscribe list".to_string(),
-                "uxc subscribe status sub_123".to_string(),
-                "uxc subscribe stop sub_123".to_string(),
-            ],
-        },
-        ["subscribe", "start"] => HelpData {
-            path: "uxc subscribe start".to_string(),
-            about: "Start a background subscription job".to_string(),
-            usage: "uxc subscribe start <endpoint> [<operation_id> [key=value ... | '{...}']] --sink file:<path> [--ephemeral] [--transport websocket|discord-gateway|slack-socket-mode|feishu-long-connection] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>] [--read-resource]".to_string(),
-            commands: vec![],
-            notes: vec![
-                "For raw HTTP streams, omit <operation_id> and use <endpoint> as the final stream URL.".to_string(),
-                "For generic raw WebSocket streams, pass --transport websocket plus a ws:// or wss:// endpoint; --subprotocol and --init-frame are optional and can be repeated independently.".to_string(),
-                "For Discord Gateway, pass --transport discord-gateway plus a Discord REST API base such as https://discord.com/api/v10 and a bot token via --auth; optional config may be provided as positional JSON or via --input-json to set intents, os, browser, or device.".to_string(),
-                "For Slack Socket Mode, pass --transport slack-socket-mode plus a Slack Web API base endpoint such as https://slack.com/api and an app-level xapp token via --auth; the runtime opens a fresh temporary WebSocket URL on each connect attempt.".to_string(),
-                "For Feishu or Lark long connection, pass --transport feishu-long-connection plus an Open Platform base endpoint such as https://open.feishu.cn/open-apis and a credential whose fields include app_id and app_secret; the runtime opens a fresh temporary WebSocket URL on each connect attempt.".to_string(),
-                "Raw WebSocket sink events preserve frame type in meta: JSON text frames populate data, plain text frames populate meta.text, and binary frames populate meta.base64.".to_string(),
-                "For GraphQL subscriptions, pass subscription/<field>; the runtime derives ws(s) from the HTTP endpoint, reuses auth/cache behavior, and automatically falls back between modern and legacy GraphQL websocket profiles.".to_string(),
-                "For JSON-RPC pubsub, pass a ws:// or wss:// endpoint plus a method ending in _subscribe; send raw JSON-RPC params through '{\"params\":...}'.".to_string(),
-                "For MCP, pass either an MCP HTTP endpoint or a stdio command plus --resource-uri <uri>; add --read-resource to append resources/read snapshots alongside update notifications.".to_string(),
-                "For poll mode, pass a normal operation ID plus --mode poll and --poll-config '{...}'; poll config controls interval, extraction, checkpoint strategy, and optional item-derived request cursors. Use extract_items_pointer:\"\" when the response root is already an array. Poll runtime automatically tracks ETag/If-None-Match and honors X-Poll-Interval when provided by the endpoint.".to_string(),
-                "Subscriptions are durable by default. Use --ephemeral when the job should not auto-resume after daemon restart.".to_string(),
-            ],
-            examples: vec![
-                "uxc subscribe start https://example.com/stream --sink file:/tmp/events.ndjson"
-                    .to_string(),
-                "uxc subscribe start https://example.com/stream --ephemeral --sink file:/tmp/oneshot.ndjson".to_string(),
-                "uxc subscribe start wss://ws.okx.com:8443/ws/v5/public --transport websocket --init-frame '{\"op\":\"subscribe\",\"args\":[{\"channel\":\"tickers\",\"instId\":\"BTC-USDT\"}]}' --sink file:/tmp/okx.ndjson".to_string(),
-                "uxc subscribe start https://discord.com/api/v10 --transport discord-gateway --auth discord-bot '{\"intents\":37377}' --sink file:/tmp/discord.ndjson".to_string(),
-                "uxc subscribe start https://slack.com/api --transport slack-socket-mode --auth slack-app --sink file:/tmp/slack.ndjson".to_string(),
-                "uxc subscribe start https://open.feishu.cn/open-apis --transport feishu-long-connection --auth feishu-tenant --sink file:/tmp/feishu.ndjson".to_string(),
-                "uxc subscribe start https://example.com/graphql subscription/messageAdded '{\"roomId\":\"abc\",\"_select\":\"id body\"}' --sink file:/tmp/graphql.ndjson".to_string(),
-                "uxc subscribe start wss://example.com/ws eth_subscribe '{\"params\":[\"logs\",{\"address\":\"0xabc\"}]}' --sink file:/tmp/logs.ndjson".to_string(),
-                "uxc subscribe start https://example.com/api get:/events --mode poll --poll-config '{\"interval_secs\":5,\"extract_items_pointer\":\"/items\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}' --sink file:/tmp/events.ndjson".to_string(),
-                "uxc subscribe start https://api.github.com get:/repos/{owner}/{repo}/events owner=holon-run repo=uxc --mode poll --poll-config '{\"interval_secs\":30,\"extract_items_pointer\":\"\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}' --sink file:/tmp/github-events.ndjson".to_string(),
-                "uxc subscribe start https://api.telegram.org post:/getUpdates --mode poll --poll-config '{\"interval_secs\":2,\"extract_items_pointer\":\"/result\",\"request_cursor_arg\":\"offset\",\"cursor_from_item_pointer\":\"/update_id\",\"cursor_transform\":\"increment\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/update_id\"}}' --sink file:/tmp/telegram.ndjson".to_string(),
-                "uxc subscribe start https://example.com/mcp --resource-uri file:///tmp/log --read-resource --sink file:/tmp/mcp-http.ndjson".to_string(),
-                "uxc subscribe start \"npx -y my-mcp-server\" --resource-uri file:///tmp/log --read-resource --sink file:/tmp/mcp.ndjson".to_string(),
-            ],
-        },
-        ["subscribe", "list"] => HelpData {
-            path: "uxc subscribe list".to_string(),
-            about: "List background subscription jobs".to_string(),
-            usage: "uxc subscribe list".to_string(),
-            commands: vec![],
-            notes: vec![],
-            examples: vec!["uxc subscribe list".to_string()],
-        },
-        ["subscribe", "status"] => HelpData {
-            path: "uxc subscribe status".to_string(),
-            about: "Show a background subscription job".to_string(),
-            usage: "uxc subscribe status <job_id>".to_string(),
-            commands: vec![],
-            notes: vec![],
-            examples: vec!["uxc subscribe status sub_123".to_string()],
-        },
-        ["subscribe", "stop"] => HelpData {
-            path: "uxc subscribe stop".to_string(),
-            about: "Stop a background subscription job".to_string(),
-            usage: "uxc subscribe stop <job_id>".to_string(),
-            commands: vec![],
-            notes: vec![],
-            examples: vec!["uxc subscribe stop sub_123".to_string()],
-        },
         ["source"] => HelpData {
             path: "uxc source".to_string(),
             about: "Manage daemon-backed source streams".to_string(),
@@ -2455,7 +2247,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "Managed source identity is (namespace, source_key); the durable stream stays stable across spec replacements for the same identity.".to_string(),
                 "Spec changes replace the current run and reset checkpoint state by default, while preserving the managed stream.".to_string(),
                 "Managed source streams persist only raw payload rows. Lifecycle/runtime events remain visible through source status rather than stream rows.".to_string(),
-                "Use the same transport, websocket, poll, GraphQL, JSON-RPC pubsub, MCP resource, Discord, Slack, and Feishu options as subscribe start, except sink/ephemeral are not accepted here.".to_string(),
+                "Supports raw websocket, GraphQL subscription, JSON-RPC pubsub, MCP resource subscriptions, Discord Gateway, Slack Socket Mode, Feishu long connection, and poll mode.".to_string(),
             ],
             examples: vec![
                 "uxc source ensure agentinbox github_repo:holon-run/uxc https://api.github.com get:/repos/{owner}/{repo}/events owner=holon-run repo=uxc --mode poll --poll-config '{\"interval_secs\":30,\"extract_items_pointer\":\"\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}'".to_string(),
@@ -3109,64 +2901,6 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             }
             Ok(())
         }
-        Some("subscribe_start_result") => {
-            let data = envelope.data.clone().unwrap_or(Value::Null);
-            if let Some(job_id) = data.get("job_id").and_then(Value::as_str) {
-                println!("Job ID: {}", job_id);
-            }
-            if let Some(status) = data.get("status").and_then(Value::as_str) {
-                println!("Status: {}", status);
-            }
-            if let Some(protocol) = data.get("protocol").and_then(Value::as_str) {
-                println!("Protocol: {}", protocol);
-            }
-            if let Some(sink) = data.get("sink").and_then(Value::as_str) {
-                println!("Sink: {}", sink);
-            }
-            Ok(())
-        }
-        Some("subscribe_list") => {
-            let data: SubscribeListData = decode_envelope_data(envelope)?;
-            if data.jobs.is_empty() {
-                println!("No subscription jobs.");
-                return Ok(());
-            }
-            for job in data.jobs {
-                println!(
-                    "{} [{}] {} -> {}",
-                    job.job_id, job.protocol, job.status, job.sink
-                );
-            }
-            Ok(())
-        }
-        Some("subscribe_status") => {
-            let data: daemon::SubscriptionJobView = decode_envelope_data(envelope)?;
-            println!("Job ID: {}", data.job_id);
-            println!("Status: {}", data.status);
-            println!("Protocol: {}", data.protocol);
-            println!("Endpoint: {}", data.endpoint);
-            println!("Sink: {}", data.sink);
-            if let Some(resource_uri) = data.resource_uri {
-                println!("Resource URI: {}", resource_uri);
-            }
-            if let Some(last_error) = data.last_error {
-                println!("Last Error: {}", last_error);
-            }
-            Ok(())
-        }
-        Some("subscribe_stop_result") => {
-            let data = envelope.data.clone().unwrap_or(Value::Null);
-            if data
-                .get("stopped")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                println!("Subscription stopped.");
-            } else {
-                println!("Subscription was not running.");
-            }
-            Ok(())
-        }
         Some("auth_list") => {
             let data: AuthListData = decode_envelope_data(envelope)?;
             if data.credentials.is_empty() {
@@ -3494,7 +3228,6 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
             | Some(Commands::Auth { .. })
             | Some(Commands::Link { .. })
             | Some(Commands::Daemon { .. })
-            | Some(Commands::Subscribe { .. })
             | Some(Commands::Source { .. })
             | Some(Commands::Stream { .. }) => Err(UxcError::InvalidArguments(
                 "--codegen-schema is only supported for endpoint invocations".to_string(),
@@ -3511,7 +3244,6 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
         | Some(Commands::Auth { .. })
         | Some(Commands::Link { .. })
         | Some(Commands::Daemon { .. })
-        | Some(Commands::Subscribe { .. })
         | Some(Commands::Source { .. })
         | Some(Commands::Stream { .. }) => Err(UxcError::InvalidArguments(
             "Internal routing error for management command".to_string(),
@@ -5613,388 +5345,6 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
             ))
         }
     }
-}
-
-async fn handle_subscribe_command(
-    command: &SubscribeCommands,
-    cli: &Cli,
-) -> Result<OutputEnvelope> {
-    if cli.schema_url.is_some() {
-        return Err(UxcError::InvalidArguments(
-            "--schema-url is not supported for subscribe commands".to_string(),
-        )
-        .into());
-    }
-
-    let daemon_used = daemon::daemon_supported();
-    let daemon_ensure = if daemon_used {
-        Some(daemon::ensure_compatible_daemon_running().await?)
-    } else {
-        None
-    };
-    let daemon_autostarted = daemon_ensure
-        .as_ref()
-        .map(|outcome| outcome.started_now && !outcome.restarted_for_version_mismatch);
-    let daemon_restarted_for_version_mismatch = daemon_ensure
-        .as_ref()
-        .map(|outcome| outcome.restarted_for_version_mismatch);
-
-    let envelope = match command {
-        SubscribeCommands::Start {
-            endpoint,
-            operation_id,
-            args,
-            input_json,
-            sink,
-            resource_uri,
-            read_resource,
-            transport,
-            subprotocols,
-            init_frames,
-            mode,
-            poll_config,
-            ephemeral,
-        } => {
-            let transport_hint = transport.as_ref().map(|value| match value {
-                SubscribeTransportArg::Websocket => daemon::SubscriptionTransportHint::Websocket,
-                SubscribeTransportArg::DiscordGateway => {
-                    daemon::SubscriptionTransportHint::DiscordGateway
-                }
-                SubscribeTransportArg::SlackSocketMode => {
-                    daemon::SubscriptionTransportHint::SlackSocketMode
-                }
-                SubscribeTransportArg::FeishuLongConnection => {
-                    daemon::SubscriptionTransportHint::FeishuLongConnection
-                }
-            });
-            let mut transport_operation_id = operation_id.clone();
-            let mut transport_input_json = input_json.clone();
-            if matches!(
-                transport_hint,
-                Some(daemon::SubscriptionTransportHint::DiscordGateway)
-            ) {
-                if let Some(candidate) = transport_operation_id.as_deref() {
-                    if serde_json::from_str::<Value>(candidate)
-                        .ok()
-                        .is_some_and(|value| value.is_object())
-                    {
-                        if transport_input_json.is_some() {
-                            return Err(UxcError::InvalidArguments(
-                                "Cannot provide both --input-json and positional JSON payload"
-                                    .to_string(),
-                            )
-                            .into());
-                        }
-                        transport_input_json = Some(candidate.to_string());
-                        transport_operation_id = None;
-                    }
-                }
-            }
-            if !matches!(
-                transport_hint,
-                Some(daemon::SubscriptionTransportHint::Websocket)
-            ) && (!subprotocols.is_empty() || !init_frames.is_empty())
-            {
-                return Err(UxcError::InvalidArguments(
-                    "--subprotocol and --init-frame require explicit --transport websocket"
-                        .to_string(),
-                )
-                .into());
-            }
-            if matches!(
-                transport_hint,
-                Some(daemon::SubscriptionTransportHint::Websocket)
-            ) {
-                if operation_id.is_some() {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport websocket cannot be combined with an operation_id".to_string(),
-                    )
-                    .into());
-                }
-                if resource_uri.is_some() {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport websocket cannot be combined with --resource-uri".to_string(),
-                    )
-                    .into());
-                }
-                if !matches!(mode, SubscribeModeArg::Stream) {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport websocket is only valid with --mode stream".to_string(),
-                    )
-                    .into());
-                }
-            }
-            if matches!(
-                transport_hint,
-                Some(daemon::SubscriptionTransportHint::DiscordGateway)
-            ) {
-                if transport_operation_id.is_some() {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport discord-gateway cannot be combined with an operation_id"
-                            .to_string(),
-                    )
-                    .into());
-                }
-                if resource_uri.is_some() {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport discord-gateway cannot be combined with --resource-uri"
-                            .to_string(),
-                    )
-                    .into());
-                }
-                if !matches!(mode, SubscribeModeArg::Stream) {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport discord-gateway is only valid with --mode stream".to_string(),
-                    )
-                    .into());
-                }
-            }
-            if matches!(
-                transport_hint,
-                Some(daemon::SubscriptionTransportHint::SlackSocketMode)
-            ) {
-                if operation_id.is_some() {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport slack-socket-mode cannot be combined with an operation_id"
-                            .to_string(),
-                    )
-                    .into());
-                }
-                if resource_uri.is_some() {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport slack-socket-mode cannot be combined with --resource-uri"
-                            .to_string(),
-                    )
-                    .into());
-                }
-                if !matches!(mode, SubscribeModeArg::Stream) {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport slack-socket-mode is only valid with --mode stream"
-                            .to_string(),
-                    )
-                    .into());
-                }
-            }
-            if matches!(
-                transport_hint,
-                Some(daemon::SubscriptionTransportHint::FeishuLongConnection)
-            ) {
-                if operation_id.is_some() {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport feishu-long-connection cannot be combined with an operation_id"
-                            .to_string(),
-                    )
-                    .into());
-                }
-                if resource_uri.is_some() {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport feishu-long-connection cannot be combined with --resource-uri"
-                            .to_string(),
-                    )
-                    .into());
-                }
-                if !matches!(mode, SubscribeModeArg::Stream) {
-                    return Err(UxcError::InvalidArguments(
-                        "--transport feishu-long-connection is only valid with --mode stream"
-                            .to_string(),
-                    )
-                    .into());
-                }
-            }
-            if *read_resource && resource_uri.is_none() {
-                return Err(UxcError::InvalidArguments(
-                    "--read-resource requires --resource-uri".to_string(),
-                )
-                .into());
-            }
-            if *read_resource && !matches!(mode, SubscribeModeArg::Stream) {
-                return Err(UxcError::InvalidArguments(
-                    "--read-resource is only valid with --mode stream".to_string(),
-                )
-                .into());
-            }
-            let (normalized_args, normalized_input_json) = match transport_operation_id.as_ref() {
-                Some(op) => {
-                    let mut explicit_args = Vec::new();
-                    let mut positional = Vec::new();
-                    for arg in args {
-                        if arg.contains('=') {
-                            explicit_args.push(arg.clone());
-                        } else {
-                            positional.push(arg.clone());
-                        }
-                    }
-                    normalize_operation_inputs(
-                        op,
-                        explicit_args,
-                        transport_input_json.clone(),
-                        &positional,
-                    )?
-                }
-                None => {
-                    if matches!(
-                        transport_hint,
-                        Some(daemon::SubscriptionTransportHint::DiscordGateway)
-                    ) {
-                        let mut explicit_args = Vec::new();
-                        let mut positional = Vec::new();
-                        for arg in args {
-                            if arg.contains('=') {
-                                explicit_args.push(arg.clone());
-                            } else {
-                                positional.push(arg.clone());
-                            }
-                        }
-                        normalize_operation_inputs(
-                            "discord-gateway",
-                            explicit_args,
-                            transport_input_json.clone(),
-                            &positional,
-                        )?
-                    } else if matches!(
-                        transport_hint,
-                        Some(daemon::SubscriptionTransportHint::FeishuLongConnection)
-                    ) {
-                        let mut explicit_args = Vec::new();
-                        let mut positional = Vec::new();
-                        for arg in args {
-                            if arg.contains('=') {
-                                explicit_args.push(arg.clone());
-                            } else {
-                                positional.push(arg.clone());
-                            }
-                        }
-                        normalize_operation_inputs(
-                            "feishu-long-connection",
-                            explicit_args,
-                            transport_input_json.clone(),
-                            &positional,
-                        )?
-                    } else if transport_input_json.is_some() || !args.is_empty() {
-                        return Err(UxcError::InvalidArguments(
-                            "subscribe start only accepts operation arguments when <operation_id> is provided".to_string(),
-                        )
-                        .into());
-                    } else {
-                        (Vec::new(), None)
-                    }
-                }
-            };
-            let args_map = if let Some(op) = transport_operation_id.as_ref() {
-                Some(
-                    parse_arguments(normalized_args, normalized_input_json).map_err(|err| {
-                        UxcError::InvalidArguments(format!(
-                            "Invalid arguments for subscribe operation '{}': {}",
-                            op, err
-                        ))
-                    })?,
-                )
-            } else if matches!(
-                transport_hint,
-                Some(daemon::SubscriptionTransportHint::DiscordGateway)
-            ) && (normalized_input_json.is_some() || !normalized_args.is_empty())
-            {
-                Some(
-                    parse_arguments(normalized_args, normalized_input_json).map_err(|err| {
-                        UxcError::InvalidArguments(format!(
-                            "Invalid arguments for subscribe transport 'discord-gateway': {}",
-                            err
-                        ))
-                    })?,
-                )
-            } else if matches!(
-                transport_hint,
-                Some(daemon::SubscriptionTransportHint::FeishuLongConnection)
-            ) && (normalized_input_json.is_some() || !normalized_args.is_empty())
-            {
-                Some(
-                    parse_arguments(normalized_args, normalized_input_json).map_err(|err| {
-                        UxcError::InvalidArguments(format!(
-                            "Invalid arguments for subscribe transport 'feishu-long-connection': {}",
-                            err
-                        ))
-                    })?,
-                )
-            } else {
-                None
-            };
-            let poll_config = match poll_config {
-                Some(raw) => Some(serde_json::from_str::<Value>(raw).map_err(|err| {
-                    UxcError::InvalidArguments(format!("Invalid JSON for --poll-config: {}", err))
-                })?),
-                None => None,
-            };
-            let request = daemon::SubscribeStartRequest {
-                request_id: format!(
-                    "{}-{}",
-                    std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                ),
-                endpoint: normalize_endpoint_url(endpoint),
-                sink: sink.clone(),
-                operation_id: transport_operation_id,
-                args: args_map,
-                resource_uri: resource_uri.clone(),
-                read_resource: *read_resource,
-                transport_hint,
-                subprotocols: subprotocols.clone(),
-                initial_text_frames: init_frames.clone(),
-                mode: match mode {
-                    SubscribeModeArg::Stream => daemon::SubscriptionMode::Stream,
-                    SubscribeModeArg::Poll => daemon::SubscriptionMode::Poll,
-                },
-                poll_config,
-                ephemeral: *ephemeral,
-                internal: false,
-                options: daemon::RuntimeInvokeOptions {
-                    auth: cli.auth.clone(),
-                    inject_env: collect_inject_env_specs(cli)?,
-                    no_cache: cli.no_cache,
-                    cache_ttl: cli.cache_ttl,
-                    timeout_ms: cli.timeout_ms,
-                    refresh_schema: cli.refresh_schema,
-                    schema_url: None,
-                    link_name: std::env::var("UXC_LINK_NAME").ok(),
-                    link_skill: env_var_nonempty("UXC_LINK_SKILL"),
-                    link_skill_doc: env_var_nonempty("UXC_LINK_SKILL_DOC"),
-                    link_skill_path: env_var_nonempty("UXC_LINK_SKILL_PATH"),
-                    schema_mapping_file: None,
-                    daemon_exclusive: collect_daemon_exclusive_keys(cli)?,
-                    daemon_idle_ttl: collect_daemon_idle_ttl(cli)?,
-                    request_headers: HashMap::new(),
-                    cwd: std::env::current_dir()
-                        .ok()
-                        .map(|path| path.to_string_lossy().into_owned()),
-                },
-            };
-            let data = serde_json::to_value(daemon::subscribe_start_client(&request).await?)?;
-            OutputEnvelope::success("subscribe_start_result", "cli", "uxc", None, data, None)
-        }
-        SubscribeCommands::List => {
-            let data = serde_json::to_value(SubscribeListData {
-                jobs: daemon::subscribe_list_client().await?,
-            })?;
-            OutputEnvelope::success("subscribe_list", "cli", "uxc", None, data, None)
-        }
-        SubscribeCommands::Status { job_id } => {
-            let data = serde_json::to_value(daemon::subscribe_status_client(job_id).await?)?;
-            OutputEnvelope::success("subscribe_status", "cli", "uxc", None, data, None)
-        }
-        SubscribeCommands::Stop { job_id } => {
-            let data = serde_json::to_value(daemon::subscribe_stop_client(job_id).await?)?;
-            OutputEnvelope::success("subscribe_stop_result", "cli", "uxc", None, data, None)
-        }
-    };
-
-    Ok(envelope.with_daemon_meta(
-        daemon_used,
-        daemon_autostarted,
-        daemon_restarted_for_version_mismatch,
-        None,
-    ))
 }
 
 struct ManagedSourceSpecInput<'a> {
