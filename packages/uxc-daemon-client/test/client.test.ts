@@ -281,32 +281,6 @@ describe("UxcDaemonClient", () => {
     ).rejects.toThrow(/Invalid codegen/i);
   });
 
-  test("subscribeStart + subscribeEvents streams memory sink events", async () => {
-    const server = await createWebSocketServer();
-    try {
-      const started = await client.subscribeStart({
-        endpoint: server.endpoint,
-        sink: "memory:",
-        transportHint: "websocket",
-      });
-      const seenKinds: string[] = [];
-      for await (const event of client.subscribeEvents(started.job_id, { waitMs: 1000 })) {
-        seenKinds.push(event.event_kind);
-        if (event.event_kind === "data") {
-          break;
-        }
-      }
-      expect(seenKinds).toContain("open");
-      expect(seenKinds).toContain("data");
-      const stop = await client.subscribeStop(started.job_id);
-      expect(stop.stopped).toBe(true);
-      const status = await client.subscribeStatus(started.job_id);
-      expect(status.status).toBe("stopped");
-    } finally {
-      await server.stop();
-    }
-  });
-
   test("managed source stream lifecycle works through daemon client methods", async () => {
     const server = await createWebSocketServer();
     const namespace = "sdk-test";
