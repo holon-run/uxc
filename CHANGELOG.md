@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-04-13
+
+### Changed
+- Removed the legacy `uxc subscribe ...` CLI surface and daemon `subscription.*` RPCs, making managed `source` the only supported durable subscription surface.
+- Refactored managed source execution to own runner tasks, checkpoints, sink cursors, and restart behavior directly instead of layering on the removed legacy subscribe runtime.
+
+### Fixed
+- Stopped managed source recovery from recreating duplicate hidden legacy subscription jobs, which had been amplifying background polling load and blocking unrelated foreground requests.
+- Fixed managed source sink replay behavior so resumed runners continue from the last consumed cursor instead of re-reading the full sink file and duplicating stream rows.
+
 ## [0.14.0] - 2026-04-09
 
 ### Added
@@ -422,7 +432,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/holon-run/uxc/releases/tag/v0.15.0
 [0.14.0]: https://github.com/holon-run/uxc/releases/tag/v0.14.0
 [0.13.3]: https://github.com/holon-run/uxc/releases/tag/v0.13.3
 [0.13.2]: https://github.com/holon-run/uxc/releases/tag/v0.13.2
