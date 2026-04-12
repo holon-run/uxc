@@ -3862,16 +3862,18 @@ impl DaemonRuntime {
             Option<String>,
             Value,
             Option<adapters::ExecutionMetadata>,
-        )> = if protocol == "mcp"
-            && matches!(request.action, RuntimeAction::Execute)
-            && adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint)
-        {
+        )> = if protocol == "mcp" && matches!(request.action, RuntimeAction::Execute) {
+            let prepared_args = if adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+                request.args.clone().unwrap_or_default()
+            } else {
+                prepare_runtime_execute_args(&resolved.adapter, &request).await?
+            };
             // Clone the pre-computed stdio_spawn_options to avoid duplicate secret resolution
             let stdio_options = stdio_spawn_options.clone();
             let (kind, operation, data, reused) = self
                 .invoke_mcp_execute(
                     &request,
-                    request.args.clone().unwrap_or_default(),
+                    prepared_args,
                     execution_auth_profile.clone(),
                     stdio_options,
                     cache_for_mcp.clone(),
@@ -3954,14 +3956,19 @@ impl DaemonRuntime {
 
                         result = if protocol == "mcp"
                             && matches!(request.action, RuntimeAction::Execute)
-                            && adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint)
                         {
+                            let prepared_args =
+                                if adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+                                    request.args.clone().unwrap_or_default()
+                                } else {
+                                    prepare_runtime_execute_args(&adapter, &request).await?
+                                };
                             // For cache fallback, recompute stdio_spawn_options since we don't have
                             // the original detection_options available
                             let (kind, operation, data, reused) = self
                                 .invoke_mcp_execute(
                                     &request,
-                                    request.args.clone().unwrap_or_default(),
+                                    prepared_args,
                                     fallback_auth_profile.clone(),
                                     None,
                                     cache_for_fallback.clone(),
