@@ -5489,7 +5489,7 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
             ))
         }
         DaemonCommands::Doctor => {
-            let result = daemon::daemon_doctor_local_result()?;
+            let result = daemon::daemon_doctor_local_result().await?;
             Ok(OutputEnvelope::success(
                 "daemon_doctor_result",
                 "cli",
