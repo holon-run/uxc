@@ -5,9 +5,7 @@ use crate::daemon::{
     ManagedSourceSpec, ManagedSourceStatusRequest, ManagedSourceStopResponse, ManagedSourceView,
     ManagedStreamInfo, ManagedStreamReadRequest, ManagedStreamReadResponse,
     ManagedStreamTrimRequest, ManagedStreamTrimResponse, RuntimeAction, RuntimeInvokeOptions,
-    RuntimeInvokeRequest, RuntimeInvokeResponse, SubscribeStartRequest, SubscribeStartResponse,
-    SubscribeStopResponse, SubscriptionEventsRequest, SubscriptionEventsResponse,
-    SubscriptionJobView, SubscriptionMode, SubscriptionTransportHint,
+    RuntimeInvokeRequest, RuntimeInvokeResponse,
 };
 use anyhow::Result;
 use serde_json::Value;
@@ -59,20 +57,6 @@ impl From<DaemonClientOptions> for RuntimeInvokeOptions {
 #[derive(Debug, Clone, Default)]
 pub struct DaemonClient;
 
-#[derive(Debug, Clone)]
-pub struct DaemonSubscribeRequest {
-    pub endpoint: String,
-    pub sink: String,
-    pub operation_id: Option<String>,
-    pub args: Option<HashMap<String, Value>>,
-    pub resource_uri: Option<String>,
-    pub mode: SubscriptionMode,
-    pub transport_hint: Option<SubscriptionTransportHint>,
-    pub options: DaemonClientOptions,
-    pub read_resource: bool,
-    pub ephemeral: bool,
-}
-
 impl DaemonClient {
     pub fn new() -> Self {
         Self
@@ -116,58 +100,6 @@ impl DaemonClient {
             options: options.into(),
         };
         daemon::runtime_invoke_client(&request).await
-    }
-
-    pub async fn subscribe_start(
-        &self,
-        request: DaemonSubscribeRequest,
-    ) -> Result<SubscribeStartResponse> {
-        let request = SubscribeStartRequest {
-            request_id: default_request_id("subscribe"),
-            endpoint: request.endpoint,
-            sink: request.sink,
-            operation_id: request.operation_id,
-            args: request.args,
-            resource_uri: request.resource_uri,
-            read_resource: request.read_resource,
-            transport_hint: request.transport_hint,
-            subprotocols: Vec::new(),
-            initial_text_frames: Vec::new(),
-            mode: request.mode,
-            poll_config: None,
-            ephemeral: request.ephemeral,
-            internal: false,
-            options: request.options.into(),
-        };
-        daemon::subscribe_start_client(&request).await
-    }
-
-    pub async fn subscribe_list(&self) -> Result<Vec<SubscriptionJobView>> {
-        daemon::subscribe_list_client().await
-    }
-
-    pub async fn subscribe_status(&self, job_id: &str) -> Result<SubscriptionJobView> {
-        daemon::subscribe_status_client(job_id).await
-    }
-
-    pub async fn subscribe_stop(&self, job_id: &str) -> Result<SubscribeStopResponse> {
-        daemon::subscribe_stop_client(job_id).await
-    }
-
-    pub async fn subscribe_events(
-        &self,
-        job_id: impl Into<String>,
-        after_seq: u64,
-        limit: usize,
-        wait_ms: u64,
-    ) -> Result<SubscriptionEventsResponse> {
-        daemon::subscribe_events_client(&SubscriptionEventsRequest {
-            job_id: job_id.into(),
-            after_seq,
-            limit,
-            wait_ms,
-        })
-        .await
     }
 
     pub async fn source_ensure(

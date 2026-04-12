@@ -52,7 +52,7 @@ use std::fs;
 use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::Stdio;
 use std::sync::Arc;
@@ -80,15 +80,11 @@ const CONNECT_TIMEOUT_SECS: u64 = 2;
 const FRAME_IO_TIMEOUT_SECS: u64 = 120;
 const MAX_FRAME_BODY_BYTES: usize = 8 * 1024 * 1024;
 const SUBSCRIPTION_HTTP_TIMEOUT_SECS: u64 = 300;
-const SUBSCRIPTION_STOP_TIMEOUT_SECS: u64 = 5;
 const SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
 const SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS: u64 = 30;
 const SUBSCRIPTION_MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const SUBSCRIPTION_EVENT_HISTORY_LIMIT: usize = 1024;
-const SUBSCRIPTION_TERMINAL_TTL_SECS: u64 = 60;
-const SUBSCRIPTION_EVENTS_DEFAULT_LIMIT: usize = 100;
 const SUBSCRIPTION_EVENTS_MAX_LIMIT: usize = 500;
-const SUBSCRIPTION_EVENTS_MAX_WAIT_MS: u64 = 15_000;
 const MANAGED_STREAM_EVENTS_DEFAULT_LIMIT: usize = 100;
 const MANAGED_STREAM_EVENTS_MAX_LIMIT: usize = 500;
 const MCP_NOTIFICATION_HISTORY_LIMIT: usize = 256;
@@ -97,8 +93,6 @@ const ARTIFACT_PREVIEW_MAX_OBJECT_KEYS: usize = 20;
 const ARTIFACT_PREVIEW_MAX_ARRAY_ITEMS: usize = 20;
 const ARTIFACT_PREVIEW_MAX_STRING_CHARS: usize = 512;
 const ARTIFACT_PREVIEW_MAX_DEPTH: usize = 3;
-const SUB_STATUS_STOPPED_AFTER_RESTART: &str = "stopped_after_restart";
-const SUB_STATUS_RESUME_FAILED: &str = "resume_failed";
 const ERR_PROTOCOL_DETECTION: i32 = -32010;
 const ERR_OPERATION_NOT_FOUND: i32 = -32011;
 const ERR_OAUTH_REQUIRED: i32 = -32012;
@@ -221,43 +215,6 @@ pub struct SubscribeStartRequest {
     #[serde(default)]
     pub internal: bool,
     pub options: RuntimeInvokeOptions,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscribeStartResponse {
-    pub job_id: String,
-    pub mode: SubscriptionMode,
-    pub protocol: String,
-    pub endpoint: String,
-    pub sink: String,
-    pub resource_uri: Option<String>,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscribeStopResponse {
-    pub job_id: String,
-    pub stopped: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscriptionEventsRequest {
-    pub job_id: String,
-    #[serde(default)]
-    pub after_seq: u64,
-    #[serde(default = "default_subscription_events_limit")]
-    pub limit: usize,
-    #[serde(default)]
-    pub wait_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscriptionEventsResponse {
-    pub job_id: String,
-    pub status: String,
-    pub events: Vec<SubscriptionEventEnvelope>,
-    pub next_after_seq: u64,
-    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -456,10 +413,6 @@ pub struct ManagedStreamTrimRequest {
 pub struct ManagedStreamTrimResponse {
     pub stream_id: String,
     pub trimmed: u64,
-}
-
-fn default_subscription_events_limit() -> usize {
-    SUBSCRIPTION_EVENTS_DEFAULT_LIMIT
 }
 
 fn default_managed_stream_events_limit() -> usize {
@@ -814,15 +767,6 @@ fn resolve_stdio_request_metadata(
     }
 }
 
-#[derive(Clone, Default)]
-struct SubscriptionManager {
-    jobs: Arc<Mutex<HashMap<String, Arc<SubscriptionJobEntry>>>>,
-    terminal_jobs: Arc<Mutex<HashMap<String, TerminalSubscriptionEntry>>>,
-    next_id: Arc<Mutex<u64>>,
-    store_path: PathBuf,
-    memory_sink_dir: PathBuf,
-}
-
 #[derive(Clone)]
 struct ManagedSourceManager {
     entries: Arc<Mutex<HashMap<String, Arc<ManagedSourceEntry>>>>,
@@ -834,61 +778,8 @@ struct ManagedSourceEntry {
     source_key: String,
     stream_id: String,
     state: Arc<Mutex<ManagedSourceView>>,
-    underlying_job_id: Arc<Mutex<Option<String>>>,
-    mirrored_after_seq: Arc<Mutex<u64>>,
-    stop_tx: Mutex<watch::Sender<bool>>,
-    tail_task: Mutex<Option<JoinHandle<()>>>,
-}
-
-struct SubscriptionJobEntry {
-    request: SubscribeStartRequest,
-    sink_path: PathBuf,
-    view: Arc<Mutex<SubscriptionJobView>>,
-    /// Wrapped so resume can replace the sender for a reconstructed job.
     stop_tx: Mutex<watch::Sender<bool>>,
     task: Mutex<Option<JoinHandle<()>>>,
-}
-
-#[derive(Clone)]
-struct TerminalSubscriptionEntry {
-    view: SubscriptionJobView,
-    sink_path: PathBuf,
-    expires_at_unix: u64,
-    memory_backed: bool,
-}
-
-enum PreparedSubscriptionSink {
-    File(PathBuf),
-    Memory,
-}
-
-struct PreparedSubscription {
-    sink: PreparedSubscriptionSink,
-    sink_spec: String,
-    protocol: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedSubscriptionRecord {
-    request: SubscribeStartRequest,
-    view: SubscriptionJobView,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedSubscriptionStore {
-    version: String,
-    jobs: Vec<PersistedSubscriptionRecord>,
-}
-
-fn record_should_persist(record: &PersistedSubscriptionRecord) -> bool {
-    record.view.durable
-        && record.view.auto_resume
-        && !sink_is_memory(&record.request.sink)
-        && !sink_is_memory(&record.view.sink)
-}
-
-fn persisted_record_sink_path(record: &PersistedSubscriptionRecord) -> Result<PathBuf> {
-    parse_file_sink(&record.request.sink).or_else(|_| parse_file_sink(&record.view.sink))
 }
 
 impl McpStdioSession {
@@ -2248,690 +2139,7 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
         return Ok("http".to_string());
     }
 
-    bail!("subscribe start requires an http(s) endpoint or --resource-uri for MCP subscriptions")
-}
-
-impl SubscriptionManager {
-    fn new(store_path: PathBuf) -> Result<Self> {
-        let memory_sink_dir = store_path
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(daemon_dir)
-            .join("subscription-events");
-        let manager = Self {
-            jobs: Arc::new(Mutex::new(HashMap::new())),
-            terminal_jobs: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Arc::new(Mutex::new(0)),
-            store_path,
-            memory_sink_dir,
-        };
-        manager.load_persisted_records()?;
-        Ok(manager)
-    }
-
-    fn internal_memory_sink_path(&self, job_id: &str) -> PathBuf {
-        self.memory_sink_dir.join(format!("{}.ndjson", job_id))
-    }
-
-    fn load_persisted_records(&self) -> Result<()> {
-        if let Some(parent) = self.store_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create subscription store directory {}",
-                    parent.display()
-                )
-            })?;
-        }
-        if !self.store_path.exists() {
-            return Ok(());
-        }
-        let raw = fs::read_to_string(&self.store_path).with_context(|| {
-            format!(
-                "Failed to read subscription store {}",
-                self.store_path.display()
-            )
-        })?;
-        if raw.trim().is_empty() {
-            return Ok(());
-        }
-        let store: PersistedSubscriptionStore = match serde_json::from_str(&raw) {
-            Ok(store) => store,
-            Err(err) => {
-                quarantine_subscription_store(&self.store_path, "parse_error")?;
-                tracing::warn!(
-                    "Ignoring malformed subscription store {}: {}",
-                    self.store_path.display(),
-                    err
-                );
-                return Ok(());
-            }
-        };
-        if store.version != "v1" {
-            quarantine_subscription_store(&self.store_path, "unsupported_version")?;
-            tracing::warn!(
-                "Ignoring unsupported subscription store version '{}' at {}",
-                store.version,
-                self.store_path.display()
-            );
-            return Ok(());
-        }
-        let mut next_id = 0_u64;
-        let mut jobs = HashMap::new();
-        let mut sanitized_records = Vec::new();
-        let mut skipped_records = 0_usize;
-        for record in store.jobs {
-            next_id = next_id.max(parse_subscription_numeric_id(&record.view.job_id).unwrap_or(0));
-
-            if !record_should_persist(&record) {
-                skipped_records += 1;
-                continue;
-            }
-
-            let sink_path = match persisted_record_sink_path(&record) {
-                Ok(path) => path,
-                Err(err) => {
-                    skipped_records += 1;
-                    tracing::warn!(
-                        "Ignoring persisted subscription {} during daemon init: {}",
-                        record.view.job_id,
-                        err
-                    );
-                    continue;
-                }
-            };
-
-            let (stop_tx, _) = watch::channel(false);
-            jobs.insert(
-                record.view.job_id.clone(),
-                Arc::new(SubscriptionJobEntry {
-                    request: record.request.clone(),
-                    sink_path,
-                    view: Arc::new(Mutex::new(record.view.clone())),
-                    stop_tx: Mutex::new(stop_tx),
-                    task: Mutex::new(None),
-                }),
-            );
-            sanitized_records.push(record);
-        }
-        *self
-            .jobs
-            .try_lock()
-            .expect("subscription job map should not be contended during init") = jobs;
-        *self
-            .next_id
-            .try_lock()
-            .expect("subscription id counter should not be contended during init") = next_id;
-        if skipped_records > 0 {
-            tracing::warn!(
-                "Dropped {} invalid or non-resumable persisted subscriptions from {}",
-                skipped_records,
-                self.store_path.display()
-            );
-            if let Err(err) = write_subscription_store(&self.store_path, &sanitized_records) {
-                tracing::warn!(
-                    "Failed to rewrite sanitized subscription store {} after dropping invalid or non-resumable records: {}",
-                    self.store_path.display(),
-                    err
-                );
-            }
-        }
-        Ok(())
-    }
-
-    async fn snapshot_persisted_records(&self) -> Vec<PersistedSubscriptionRecord> {
-        let entries = {
-            let jobs = self.jobs.lock().await;
-            jobs.values().cloned().collect::<Vec<_>>()
-        };
-        let mut records = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let record = PersistedSubscriptionRecord {
-                request: entry.request.clone(),
-                view: entry.view.lock().await.clone(),
-            };
-            if record_should_persist(&record) {
-                records.push(record);
-            }
-        }
-        records.sort_by(|a, b| a.view.job_id.cmp(&b.view.job_id));
-        records
-    }
-
-    async fn persist_state(&self) -> Result<()> {
-        let records = self.snapshot_persisted_records().await;
-        write_subscription_store(&self.store_path, &records)
-    }
-
-    async fn cleanup_terminal_jobs(&self) {
-        let now = now_unix_secs();
-        let mut terminal = self.terminal_jobs.lock().await;
-        let mut expired = Vec::new();
-        for (job_id, entry) in terminal.iter() {
-            if entry.expires_at_unix <= now {
-                expired.push((job_id.clone(), entry.sink_path.clone(), entry.memory_backed));
-            }
-        }
-        for (job_id, _, _) in &expired {
-            terminal.remove(job_id);
-        }
-        drop(terminal);
-        for (_, path, memory_backed) in expired {
-            if memory_backed {
-                let _ = tokio::fs::remove_file(path).await;
-            }
-        }
-    }
-
-    async fn prepare_request(
-        &self,
-        runtime: &DaemonRuntime,
-        request: &SubscribeStartRequest,
-    ) -> Result<PreparedSubscription> {
-        let prepared_sink = match request.sink.as_str() {
-            "memory:" => PreparedSubscriptionSink::Memory,
-            _ => {
-                let sink_path = parse_file_sink(&request.sink)?;
-                if is_nonstandard_subscription_sink_path(&sink_path) {
-                    tracing::warn!(
-                        "subscription sink path is outside HOME/temp directories: {}. This path may be unavailable after daemon restart if permissions or mounts change.",
-                        sink_path.display()
-                    );
-                }
-                PreparedSubscriptionSink::File(sink_path)
-            }
-        };
-        let sink_spec = match &prepared_sink {
-            PreparedSubscriptionSink::File(sink_path) => format!("file:{}", sink_path.display()),
-            PreparedSubscriptionSink::Memory => "memory:".to_string(),
-        };
-        if request.resource_uri.is_some() && request.operation_id.is_some() {
-            bail!("subscribe start cannot combine --resource-uri with an operation_id");
-        }
-        if matches!(
-            request.transport_hint,
-            Some(SubscriptionTransportHint::Websocket)
-        ) {
-            if request.operation_id.is_some() {
-                bail!("websocket transport cannot be combined with an operation_id");
-            }
-            if request.resource_uri.is_some() {
-                bail!("websocket transport cannot be combined with --resource-uri");
-            }
-            if request.mode != SubscriptionMode::Stream {
-                bail!("websocket transport is only valid with stream mode");
-            }
-        } else if matches!(
-            request.transport_hint,
-            Some(SubscriptionTransportHint::DiscordGateway)
-        ) {
-            if request.operation_id.is_some() {
-                bail!("discord-gateway transport cannot be combined with an operation_id");
-            }
-            if request.resource_uri.is_some() {
-                bail!("discord-gateway transport cannot be combined with --resource-uri");
-            }
-            if request.mode != SubscriptionMode::Stream {
-                bail!("discord-gateway transport is only valid with stream mode");
-            }
-            if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
-                bail!("discord-gateway transport manages its own websocket setup and does not accept --subprotocol or --init-frame");
-            }
-        } else if matches!(
-            request.transport_hint,
-            Some(SubscriptionTransportHint::SlackSocketMode)
-        ) {
-            if request.operation_id.is_some() {
-                bail!("slack-socket-mode transport cannot be combined with an operation_id");
-            }
-            if request.resource_uri.is_some() {
-                bail!("slack-socket-mode transport cannot be combined with --resource-uri");
-            }
-            if request.mode != SubscriptionMode::Stream {
-                bail!("slack-socket-mode transport is only valid with stream mode");
-            }
-            if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
-                bail!("slack-socket-mode transport manages its own websocket setup and does not accept --subprotocol or --init-frame");
-            }
-        } else if matches!(
-            request.transport_hint,
-            Some(SubscriptionTransportHint::FeishuLongConnection)
-        ) {
-            if request.operation_id.is_some() {
-                bail!("feishu-long-connection transport cannot be combined with an operation_id");
-            }
-            if request.resource_uri.is_some() {
-                bail!("feishu-long-connection transport cannot be combined with --resource-uri");
-            }
-            if request.mode != SubscriptionMode::Stream {
-                bail!("feishu-long-connection transport is only valid with stream mode");
-            }
-            if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
-                bail!("feishu-long-connection transport manages its own websocket setup and does not accept --subprotocol or --init-frame");
-            }
-        } else if !request.subprotocols.is_empty() || !request.initial_text_frames.is_empty() {
-            bail!("websocket subprotocols and init frames require websocket transport");
-        }
-        if request.args.is_some()
-            && request.operation_id.is_none()
-            && !matches!(
-                request.transport_hint,
-                Some(SubscriptionTransportHint::DiscordGateway)
-                    | Some(SubscriptionTransportHint::FeishuLongConnection)
-            )
-        {
-            bail!("subscribe start cannot accept args without an operation_id");
-        }
-        match request.mode {
-            SubscriptionMode::Stream => {
-                if request.poll_config.is_some() {
-                    bail!("--poll-config is only valid with --mode poll");
-                }
-            }
-            SubscriptionMode::Poll => {
-                let _ = resolve_poll_subscription_config(request)?;
-            }
-        }
-        let protocol = match request.mode {
-            SubscriptionMode::Stream => resolve_stream_subscription_protocol(request)?,
-            SubscriptionMode::Poll => runtime.detect_poll_subscription_protocol(request).await?,
-        };
-        Ok(PreparedSubscription {
-            sink: prepared_sink,
-            sink_spec,
-            protocol,
-        })
-    }
-
-    fn spawn_job_task(
-        &self,
-        runtime: &DaemonRuntime,
-        job_id: &str,
-        request: &SubscribeStartRequest,
-        sink_path: PathBuf,
-        view: Arc<Mutex<SubscriptionJobView>>,
-        stop_rx: watch::Receiver<bool>,
-    ) -> JoinHandle<()> {
-        let manager = self.clone();
-        let request_clone = request.clone();
-        let job_id_clone = job_id.to_string();
-        let runtime_clone = runtime.clone();
-        tokio::spawn(async move {
-            let result = match request_clone.mode {
-                SubscriptionMode::Stream => {
-                    run_stream_subscription_job(
-                        &runtime_clone,
-                        &job_id_clone,
-                        &request_clone,
-                        sink_path,
-                        view.clone(),
-                        stop_rx,
-                    )
-                    .await
-                }
-                SubscriptionMode::Poll => {
-                    run_poll_subscription_job(
-                        &runtime_clone,
-                        &job_id_clone,
-                        &request_clone,
-                        sink_path,
-                        view.clone(),
-                        stop_rx,
-                    )
-                    .await
-                }
-            };
-
-            let mut guard = view.lock().await;
-            let was_resumed = guard.status == "resumed" || guard.restart_count > 0;
-            if guard.status != "stopped" {
-                match result {
-                    Ok(()) => {
-                        guard.status = "stopped".to_string();
-                    }
-                    Err(err) => {
-                        let message = err.to_string();
-                        if was_resumed {
-                            guard.status = SUB_STATUS_RESUME_FAILED.to_string();
-                            guard.last_resume_error = Some(message.clone());
-                        } else {
-                            guard.status = "failed".to_string();
-                        }
-                        guard.last_error = Some(message);
-                    }
-                }
-            }
-            guard.stopped_at_unix = Some(now_unix_secs());
-            drop(guard);
-            if let Err(err) = manager.persist_state().await {
-                tracing::warn!(
-                    "Failed to persist subscription state after task exit: {}",
-                    err
-                );
-            }
-        })
-    }
-
-    async fn resume_all(&self, runtime: &DaemonRuntime) -> Result<()> {
-        self.cleanup_terminal_jobs().await;
-        let entries = {
-            let jobs = self.jobs.lock().await;
-            jobs.values().cloned().collect::<Vec<_>>()
-        };
-        for entry in entries {
-            if entry.request.ephemeral {
-                let mut view = entry.view.lock().await;
-                view.status = SUB_STATUS_STOPPED_AFTER_RESTART.to_string();
-                view.stopped_at_unix = Some(now_unix_secs());
-                view.last_resume_error = None;
-                continue;
-            }
-
-            let prepared = match self.prepare_request(runtime, &entry.request).await {
-                Ok(prepared) => prepared,
-                Err(err) => {
-                    let mut view = entry.view.lock().await;
-                    view.status = SUB_STATUS_RESUME_FAILED.to_string();
-                    view.last_resume_error = Some(err.to_string());
-                    view.stopped_at_unix = Some(now_unix_secs());
-                    continue;
-                }
-            };
-            let sink_path = match prepared.sink {
-                PreparedSubscriptionSink::File(path) => path,
-                PreparedSubscriptionSink::Memory => {
-                    let mut view = entry.view.lock().await;
-                    view.status = SUB_STATUS_STOPPED_AFTER_RESTART.to_string();
-                    view.stopped_at_unix = Some(now_unix_secs());
-                    view.last_resume_error = None;
-                    continue;
-                }
-            };
-
-            let (stop_tx, stop_rx) = watch::channel(false);
-            {
-                let mut sender = entry.stop_tx.lock().await;
-                *sender = stop_tx;
-            }
-            let job_id = {
-                let mut view = entry.view.lock().await;
-                view.endpoint = entry.request.endpoint.clone();
-                view.protocol = prepared.protocol;
-                view.sink = prepared.sink_spec;
-                view.resource_uri = entry.request.resource_uri.clone();
-                view.status = "resumed".to_string();
-                view.durable = true;
-                view.auto_resume = true;
-                if view.resume_strategy.is_empty() {
-                    view.resume_strategy = "reconnect".to_string();
-                }
-                view.started_at_unix = Some(now_unix_secs());
-                view.stopped_at_unix = None;
-                view.last_error = None;
-                view.restart_count = view.restart_count.saturating_add(1);
-                view.last_resume_at_unix = Some(now_unix_secs());
-                view.last_resume_error = None;
-                view.job_id.clone()
-            };
-            let task = self.spawn_job_task(
-                runtime,
-                &job_id,
-                &entry.request,
-                sink_path,
-                entry.view.clone(),
-                stop_rx,
-            );
-            *entry.task.lock().await = Some(task);
-        }
-        self.persist_state().await
-    }
-
-    async fn start(
-        &self,
-        runtime: &DaemonRuntime,
-        request: &SubscribeStartRequest,
-    ) -> Result<SubscribeStartResponse> {
-        self.cleanup_terminal_jobs().await;
-        let prepared = self.prepare_request(runtime, request).await?;
-
-        let job_id = {
-            let mut next = self.next_id.lock().await;
-            *next += 1;
-            format!("sub_{}", *next)
-        };
-        let sink_path = match prepared.sink {
-            PreparedSubscriptionSink::File(path) => path,
-            PreparedSubscriptionSink::Memory => self.internal_memory_sink_path(&job_id),
-        };
-        if sink_is_memory(&request.sink) {
-            match fs::remove_file(&sink_path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(err).with_context(|| {
-                        format!(
-                            "Failed to reset in-memory subscription sink {}",
-                            sink_path.display()
-                        )
-                    });
-                }
-            }
-        }
-        let now = now_unix_secs();
-        let view = Arc::new(Mutex::new(SubscriptionJobView {
-            job_id: job_id.clone(),
-            mode: request.mode,
-            endpoint: request.endpoint.clone(),
-            protocol: prepared.protocol.clone(),
-            sink: prepared.sink_spec.clone(),
-            resource_uri: request.resource_uri.clone(),
-            status: "running".to_string(),
-            durable: !request.ephemeral && !sink_is_memory(&request.sink),
-            auto_resume: !request.ephemeral && !sink_is_memory(&request.sink),
-            resume_strategy: if request.ephemeral || sink_is_memory(&request.sink) {
-                "none".to_string()
-            } else {
-                "reconnect".to_string()
-            },
-            created_at_unix: now,
-            started_at_unix: Some(now),
-            stopped_at_unix: None,
-            last_event_at_unix: None,
-            last_error: None,
-            restart_count: 0,
-            last_resume_at_unix: None,
-            last_resume_error: None,
-            reconnect_count: 0,
-            written_events: 0,
-        }));
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let entry = Arc::new(SubscriptionJobEntry {
-            request: request.clone(),
-            sink_path: sink_path.clone(),
-            view: view.clone(),
-            stop_tx: Mutex::new(stop_tx),
-            task: Mutex::new(None),
-        });
-        {
-            let mut jobs = self.jobs.lock().await;
-            jobs.insert(job_id.clone(), entry.clone());
-        }
-        if let Err(err) = self.persist_state().await {
-            let mut jobs = self.jobs.lock().await;
-            jobs.remove(&job_id);
-            return Err(err);
-        }
-        let task = self.spawn_job_task(runtime, &job_id, request, sink_path, view.clone(), stop_rx);
-        *entry.task.lock().await = Some(task);
-
-        let guard = view.lock().await;
-        Ok(SubscribeStartResponse {
-            job_id,
-            mode: request.mode,
-            protocol: prepared.protocol,
-            endpoint: guard.endpoint.clone(),
-            sink: prepared.sink_spec,
-            resource_uri: guard.resource_uri.clone(),
-            status: guard.status.clone(),
-        })
-    }
-
-    async fn list(&self) -> Vec<SubscriptionJobView> {
-        self.cleanup_terminal_jobs().await;
-        let entries = {
-            let jobs = self.jobs.lock().await;
-            jobs.values().cloned().collect::<Vec<_>>()
-        };
-        let mut views = Vec::with_capacity(entries.len());
-        for entry in entries {
-            if entry.request.internal {
-                continue;
-            }
-            views.push(entry.view.lock().await.clone());
-        }
-        views.sort_by(|a, b| a.job_id.cmp(&b.job_id));
-        views
-    }
-
-    async fn status(&self, job_id: &str) -> Result<SubscriptionJobView> {
-        self.cleanup_terminal_jobs().await;
-        let entry = {
-            let jobs = self.jobs.lock().await;
-            jobs.get(job_id).cloned()
-        };
-        if let Some(entry) = entry {
-            return Ok(entry.view.lock().await.clone());
-        }
-        let terminal = {
-            let jobs = self.terminal_jobs.lock().await;
-            jobs.get(job_id).cloned()
-        };
-        terminal
-            .map(|entry| entry.view)
-            .ok_or_else(|| {
-                UxcError::OperationNotFound(format!("subscription job not found: {}", job_id))
-            })
-            .map_err(Into::into)
-    }
-
-    async fn stop(&self, job_id: &str) -> Result<SubscribeStopResponse> {
-        self.cleanup_terminal_jobs().await;
-        let entry = {
-            let jobs = self.jobs.lock().await;
-            jobs.get(job_id).cloned()
-        }
-        .ok_or_else(|| {
-            UxcError::OperationNotFound(format!("subscription job not found: {}", job_id))
-        })?;
-
-        let _ = entry.stop_tx.lock().await.send(true);
-        if let Some(mut handle) = entry.task.lock().await.take() {
-            if tokio::time::timeout(
-                Duration::from_secs(SUBSCRIPTION_STOP_TIMEOUT_SECS),
-                &mut handle,
-            )
-            .await
-            .is_err()
-            {
-                tracing::warn!(
-                    "subscription job {} did not stop within {}s; aborting task",
-                    job_id,
-                    SUBSCRIPTION_STOP_TIMEOUT_SECS
-                );
-                handle.abort();
-                let _ = handle.await;
-            }
-        }
-        let view = {
-            let mut guard = entry.view.lock().await;
-            guard.status = "stopped".to_string();
-            guard.stopped_at_unix = Some(now_unix_secs());
-            guard.clone()
-        };
-        {
-            let mut jobs = self.jobs.lock().await;
-            jobs.remove(job_id);
-        }
-        {
-            let mut terminal = self.terminal_jobs.lock().await;
-            terminal.insert(
-                job_id.to_string(),
-                TerminalSubscriptionEntry {
-                    view,
-                    sink_path: entry.sink_path.clone(),
-                    expires_at_unix: now_unix_secs().saturating_add(SUBSCRIPTION_TERMINAL_TTL_SECS),
-                    memory_backed: sink_is_memory(&entry.request.sink),
-                },
-            );
-        }
-        self.persist_state().await?;
-        Ok(SubscribeStopResponse {
-            job_id: job_id.to_string(),
-            stopped: true,
-        })
-    }
-
-    async fn events(
-        &self,
-        request: &SubscriptionEventsRequest,
-    ) -> Result<SubscriptionEventsResponse> {
-        self.cleanup_terminal_jobs().await;
-        let limit = request.limit.clamp(1, SUBSCRIPTION_EVENTS_MAX_LIMIT);
-        let wait_ms = request.wait_ms.min(SUBSCRIPTION_EVENTS_MAX_WAIT_MS);
-        let deadline = Instant::now() + Duration::from_millis(wait_ms);
-
-        loop {
-            let active_entry = {
-                let jobs = self.jobs.lock().await;
-                jobs.get(&request.job_id).cloned()
-            };
-            let terminal_entry = if active_entry.is_none() {
-                let jobs = self.terminal_jobs.lock().await;
-                jobs.get(&request.job_id).cloned()
-            } else {
-                None
-            };
-
-            let (status, sink_path, retain_all) = if let Some(entry) = active_entry {
-                (
-                    entry.view.lock().await.status.clone(),
-                    entry.sink_path.clone(),
-                    entry.request.internal,
-                )
-            } else if let Some(entry) = terminal_entry {
-                (entry.view.status.clone(), entry.sink_path.clone(), false)
-            } else {
-                return Err(UxcError::OperationNotFound(format!(
-                    "subscription job not found: {}",
-                    request.job_id
-                ))
-                .into());
-            };
-
-            let loaded =
-                load_subscription_events(&sink_path, request.after_seq, limit, retain_all).await?;
-            if !loaded.events.is_empty() || wait_ms == 0 || status != "running" {
-                return Ok(SubscriptionEventsResponse {
-                    job_id: request.job_id.clone(),
-                    status,
-                    events: loaded.events,
-                    next_after_seq: loaded.next_after_seq,
-                    has_more: loaded.has_more,
-                });
-            }
-
-            if Instant::now() >= deadline {
-                return Ok(SubscriptionEventsResponse {
-                    job_id: request.job_id.clone(),
-                    status,
-                    events: Vec::new(),
-                    next_after_seq: request.after_seq,
-                    has_more: false,
-                });
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
+    bail!("subscription execution requires an http(s) endpoint or --resource-uri for MCP subscriptions")
 }
 
 impl ManagedSourceManager {
@@ -2949,24 +2157,30 @@ impl ManagedSourceManager {
     ) -> Result<ManagedSourceEnsureResponse> {
         validate_managed_source_identity(&request.namespace, &request.source_key)?;
         let spec_key = compute_managed_source_spec_key(&request.spec)?;
-        let identity_key = managed_source_identity_key(&request.namespace, &request.source_key);
         let existing = self
             .store
             .get_source(&request.namespace, &request.source_key)
             .await?;
 
-        let mut reused = false;
         let mut replaced_previous = false;
         let record = if let Some(existing) = existing {
-            if existing.spec_key == spec_key && existing.underlying_job_id.is_some() {
-                reused = true;
-                existing
+            if existing.spec_key == spec_key {
+                self.ensure_runner_for_record(runtime, existing.clone(), request.spec.clone())
+                    .await?;
+                let state = self.status(&request.namespace, &request.source_key).await?;
+                return Ok(ManagedSourceEnsureResponse {
+                    namespace: state.namespace,
+                    source_key: state.source_key,
+                    run_id: state.run_id,
+                    stream_id: state.stream_id,
+                    status: state.status,
+                    reused: true,
+                    replaced_previous: false,
+                });
             } else {
-                if existing.underlying_job_id.is_some() {
-                    let _ = self
-                        .stop_internal(runtime, &request.namespace, &request.source_key)
-                        .await;
-                }
+                let _ = self
+                    .stop_internal(runtime, &request.namespace, &request.source_key)
+                    .await;
                 replaced_previous = existing.spec_key != spec_key;
                 ManagedSourceRecord {
                     namespace: request.namespace.clone(),
@@ -2981,8 +2195,6 @@ impl ManagedSourceManager {
                     started_at_unix: None,
                     stopped_at_unix: None,
                     last_error: None,
-                    underlying_job_id: None,
-                    mirrored_after_seq: 0,
                 }
             }
         } else {
@@ -2999,31 +2211,10 @@ impl ManagedSourceManager {
                 started_at_unix: None,
                 stopped_at_unix: None,
                 last_error: None,
-                underlying_job_id: None,
-                mirrored_after_seq: 0,
             }
         };
 
-        if reused {
-            self.ensure_tailer_for_record(runtime, record.clone())
-                .await?;
-            let state = self.status(&request.namespace, &request.source_key).await?;
-            return Ok(ManagedSourceEnsureResponse {
-                namespace: state.namespace,
-                source_key: state.source_key,
-                run_id: state.run_id,
-                stream_id: state.stream_id,
-                status: state.status,
-                reused: true,
-                replaced_previous: false,
-            });
-        }
-
-        let started = self
-            .start_managed_source(runtime, record, request.spec.clone())
-            .await?;
-        self.entries.lock().await.remove(&identity_key);
-        self.ensure_tailer_for_record(runtime, started.clone())
+        self.start_managed_source(runtime, record, request.spec.clone())
             .await?;
         let state = self.status(&request.namespace, &request.source_key).await?;
         Ok(ManagedSourceEnsureResponse {
@@ -3116,7 +2307,32 @@ impl ManagedSourceManager {
             if record.status == "stopped" {
                 continue;
             }
-            if let Err(err) = self.ensure_tailer_for_record(runtime, record.clone()).await {
+            let spec: ManagedSourceSpec = match serde_json::from_value(record.spec_json.clone()) {
+                Ok(spec) => spec,
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to decode managed source spec for {}/{}: {}",
+                        record.namespace,
+                        record.source_key,
+                        err
+                    );
+                    self.store
+                        .clear_source_job(
+                            &record.namespace,
+                            &record.source_key,
+                            "failed",
+                            now_unix_secs(),
+                            Some(now_unix_secs()),
+                            Some(err.to_string()),
+                        )
+                        .await?;
+                    continue;
+                }
+            };
+            if let Err(err) = self
+                .ensure_runner_for_record(runtime, record.clone(), spec)
+                .await
+            {
                 tracing::warn!(
                     "failed to resume managed source {}/{}: {}",
                     record.namespace,
@@ -3182,32 +2398,23 @@ impl ManagedSourceManager {
         mut record: ManagedSourceRecord,
         spec: ManagedSourceSpec,
     ) -> Result<ManagedSourceRecord> {
-        let sink_path = runtime.managed_source_sink_path(&record.run_id);
-        let subscription = managed_source_subscribe_request(&record, &spec, &sink_path);
-        let started = runtime.subscriptions.start(runtime, &subscription).await?;
-        record.status = started.status;
+        reset_managed_source_runtime_files(runtime, &record.run_id).await?;
+        record.status = "starting".to_string();
         record.updated_at_unix = now_unix_secs();
         record.started_at_unix = Some(now_unix_secs());
         record.stopped_at_unix = None;
         record.last_error = None;
-        record.underlying_job_id = Some(started.job_id);
-        record.mirrored_after_seq = 0;
         self.store.upsert_source(&record, true).await?;
+        self.ensure_runner_for_record(runtime, record.clone(), spec).await?;
         Ok(record)
     }
 
-    async fn ensure_tailer_for_record(
+    async fn ensure_runner_for_record(
         &self,
         runtime: &DaemonRuntime,
         record: ManagedSourceRecord,
+        spec: ManagedSourceSpec,
     ) -> Result<()> {
-        let Some(job_id) = record.underlying_job_id.clone() else {
-            return Err(anyhow!(
-                "managed source {}/{} has no underlying subscription job",
-                record.namespace,
-                record.source_key
-            ));
-        };
         let identity_key = managed_source_identity_key(&record.namespace, &record.source_key);
         if self.entries.lock().await.contains_key(&identity_key) {
             return Ok(());
@@ -3220,10 +2427,8 @@ impl ManagedSourceManager {
             source_key: record.source_key.clone(),
             stream_id: record.stream_id.clone(),
             state: state.clone(),
-            underlying_job_id: Arc::new(Mutex::new(Some(job_id.clone()))),
-            mirrored_after_seq: Arc::new(Mutex::new(record.mirrored_after_seq)),
             stop_tx: Mutex::new(stop_tx),
-            tail_task: Mutex::new(None),
+            task: Mutex::new(None),
         });
         self.entries
             .lock()
@@ -3231,39 +2436,48 @@ impl ManagedSourceManager {
             .insert(identity_key.clone(), entry.clone());
         let manager = self.clone();
         let runtime = runtime.clone();
-        let tail_entry = entry.clone();
+        let runner_entry = entry.clone();
         let task = tokio::spawn(async move {
             manager
-                .tail_managed_source(runtime, identity_key, tail_entry, job_id, stop_rx)
+                .run_managed_source(runtime, identity_key, runner_entry, record, spec, stop_rx)
                 .await;
         });
-        *entry.tail_task.lock().await = Some(task);
+        *entry.task.lock().await = Some(task);
         Ok(())
     }
 
-    async fn tail_managed_source(
+    async fn run_managed_source(
         &self,
         runtime: DaemonRuntime,
         identity_key: String,
         entry: Arc<ManagedSourceEntry>,
-        job_id: String,
-        stop_rx: watch::Receiver<bool>,
+        record: ManagedSourceRecord,
+        spec: ManagedSourceSpec,
+        mut stop_rx: watch::Receiver<bool>,
     ) {
-        let mut after_seq = *entry.mirrored_after_seq.lock().await;
+        let sink_path = runtime.managed_source_sink_path(&record.run_id);
+        let request = managed_source_subscription_request(&record, &spec, &sink_path);
+        let runtime_view = Arc::new(Mutex::new(subscription_view_for_managed_source(&record, &request)));
+        let runner_task = spawn_source_runtime_task(
+            runtime.clone(),
+            &record.run_id,
+            request,
+            sink_path.clone(),
+            runtime_view.clone(),
+            stop_rx.clone(),
+            runtime.managed_source_checkpoint_path(&record.run_id),
+        );
+
+        let mut after_seq = 0_u64;
         loop {
-            if *stop_rx.borrow() {
-                break;
-            }
-            let result = runtime
-                .subscriptions
-                .events(&SubscriptionEventsRequest {
-                    job_id: job_id.clone(),
-                    after_seq,
-                    limit: SUBSCRIPTION_EVENTS_MAX_LIMIT,
-                    wait_ms: SUBSCRIPTION_EVENTS_MAX_WAIT_MS,
-                })
-                .await;
-            let batch = match result {
+            let batch = match load_subscription_events(
+                &sink_path,
+                after_seq,
+                SUBSCRIPTION_EVENTS_MAX_LIMIT,
+                true,
+            )
+            .await
+            {
                 Ok(batch) => batch,
                 Err(err) => {
                     let _ = self
@@ -3287,107 +2501,93 @@ impl ManagedSourceManager {
             };
 
             for event in &batch.events {
-                if let Some(payload) = event.data.as_ref() {
+                if matches!(event.event_kind.as_str(), "data" | "snapshot") {
+                    let payload = event.data.as_ref().or(event.meta.as_ref());
+                    if let Some(payload) = payload {
                     if let Err(err) = self
-                        .store
-                        .append_event(&entry.stream_id, event.timestamp_unix, payload)
-                        .await
-                    {
-                        tracing::warn!(
-                            "failed to append managed source event for {}/{}: {}",
-                            entry.namespace,
-                            entry.source_key,
-                            err
-                        );
-                        let now = now_unix_secs();
-                        let mut state = entry.state.lock().await;
-                        state.status = "failed".to_string();
-                        state.updated_at_unix = now;
-                        state.stopped_at_unix = Some(now);
-                        state.last_error = Some(err.to_string());
-                        drop(state);
-                        if let Err(store_err) = self
                             .store
-                            .clear_source_job(
-                                &entry.namespace,
-                                &entry.source_key,
-                                "failed",
-                                now,
-                                Some(now),
-                                Some(err.to_string()),
-                            )
+                            .append_event(&entry.stream_id, event.timestamp_unix, payload)
                             .await
                         {
                             tracing::warn!(
-                                "failed to persist managed source failure for {}/{}: {}",
+                                "failed to append managed source event for {}/{}: {}",
                                 entry.namespace,
                                 entry.source_key,
-                                store_err
+                                err
                             );
+                            let now = now_unix_secs();
+                            let mut state = entry.state.lock().await;
+                            state.status = "failed".to_string();
+                            state.updated_at_unix = now;
+                            state.stopped_at_unix = Some(now);
+                            state.last_error = Some(err.to_string());
+                            drop(state);
+                            let _ = self
+                                .store
+                                .clear_source_job(
+                                    &entry.namespace,
+                                    &entry.source_key,
+                                    "failed",
+                                    now,
+                                    Some(now),
+                                    Some(err.to_string()),
+                                )
+                                .await;
+                            break;
                         }
-                        break;
                     }
                 }
             }
             if batch.next_after_seq > after_seq {
                 after_seq = batch.next_after_seq;
-                *entry.mirrored_after_seq.lock().await = after_seq;
-                if let Err(err) = self
-                    .store
-                    .update_source_runtime(
-                        &entry.namespace,
-                        &entry.source_key,
-                        SourceRuntimeUpdate {
-                            status: batch.status.clone(),
-                            updated_at_unix: now_unix_secs(),
-                            started_at_unix: None,
-                            stopped_at_unix: None,
-                            last_error: None,
-                            underlying_job_id: None,
-                            mirrored_after_seq: Some(after_seq),
-                        },
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        "failed to persist managed source runtime update for {}/{}: {}",
-                        entry.namespace,
-                        entry.source_key,
-                        err
-                    );
-                    let now = now_unix_secs();
-                    let mut state = entry.state.lock().await;
-                    state.status = "failed".to_string();
-                    state.updated_at_unix = now;
-                    state.stopped_at_unix = Some(now);
-                    state.last_error = Some(err.to_string());
-                    break;
-                }
             }
+            let fallback_status = runtime_view.lock().await.status.clone();
+            if let Err(err) = sync_managed_source_state(
+                &self.store,
+                &entry,
+                &runtime_view,
+                &fallback_status,
+            )
+            .await
             {
+                tracing::warn!(
+                    "failed to persist managed source runtime update for {}/{}: {}",
+                    entry.namespace,
+                    entry.source_key,
+                    err
+                );
+                let now = now_unix_secs();
                 let mut state = entry.state.lock().await;
-                state.status = batch.status.clone();
-                state.updated_at_unix = now_unix_secs();
-                if batch.status != "running" {
-                    state.stopped_at_unix = Some(now_unix_secs());
-                }
+                state.status = "failed".to_string();
+                state.updated_at_unix = now;
+                state.stopped_at_unix = Some(now);
+                state.last_error = Some(err.to_string());
+                break;
             }
-            if batch.status != "running" && batch.events.is_empty() {
-                let _ = self
-                    .store
-                    .clear_source_job(
-                        &entry.namespace,
-                        &entry.source_key,
-                        &batch.status,
-                        now_unix_secs(),
-                        Some(now_unix_secs()),
-                        None,
-                    )
-                    .await;
+
+            let snapshot = runtime_view.lock().await.clone();
+            let should_exit =
+                snapshot.status != "running" && batch.events.is_empty() && runner_task.is_finished();
+            if should_exit {
+                break;
+            }
+
+            if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_millis(100)).await
+                && runner_task.is_finished()
+            {
+                let snapshot = runtime_view.lock().await.clone();
+                let _ = sync_managed_source_state(
+                    &self.store,
+                    &entry,
+                    &runtime_view,
+                    &snapshot.status,
+                )
+                .await;
                 break;
             }
         }
 
+        let _ = runner_task.await;
         self.entries.lock().await.remove(&identity_key);
     }
 
@@ -3411,23 +2611,11 @@ impl ManagedSourceManager {
         let active_entry = { self.entries.lock().await.get(&identity_key).cloned() };
         if let Some(entry) = active_entry {
             let _ = entry.stop_tx.lock().await.send(true);
-            if let Some(job_id) = entry.underlying_job_id.lock().await.clone() {
-                let runtime = runtime.clone();
-                tokio::spawn(async move {
-                    let _ = runtime.subscriptions.stop(&job_id).await;
-                });
-            }
-            if let Some(task) = entry.tail_task.lock().await.take() {
+            if let Some(task) = entry.task.lock().await.take() {
                 let task = task;
-                task.abort();
                 let _ = task.await;
             }
             self.entries.lock().await.remove(&identity_key);
-        } else if let Some(job_id) = stored.underlying_job_id.clone() {
-            let runtime = runtime.clone();
-            tokio::spawn(async move {
-                let _ = runtime.subscriptions.stop(&job_id).await;
-            });
         }
         self.store
             .clear_source_job(
@@ -3439,6 +2627,7 @@ impl ManagedSourceManager {
                 None,
             )
             .await?;
+        let _ = tokio::fs::remove_file(runtime.managed_source_sink_path(&stored.run_id)).await;
         Ok(())
     }
 }
@@ -3465,6 +2654,12 @@ fn managed_source_sink_path(base_dir: &Path, run_id: &str) -> PathBuf {
     base_dir
         .join("managed-source-sinks")
         .join(format!("{run_id}.ndjson"))
+}
+
+fn managed_source_checkpoint_path(base_dir: &Path, run_id: &str) -> PathBuf {
+    base_dir
+        .join("managed-source-checkpoints")
+        .join(format!("{run_id}.checkpoint.json"))
 }
 
 fn managed_stream_id(namespace: &str, source_key: &str) -> String {
@@ -3514,7 +2709,7 @@ fn compute_managed_source_spec_key(spec: &ManagedSourceSpec) -> Result<String> {
     Ok(format!("{:x}", digest))
 }
 
-fn managed_source_subscribe_request(
+fn managed_source_subscription_request(
     record: &ManagedSourceRecord,
     spec: &ManagedSourceSpec,
     sink_path: &Path,
@@ -3536,6 +2731,135 @@ fn managed_source_subscribe_request(
         internal: true,
         options: spec.options.clone(),
     }
+}
+
+fn subscription_view_for_managed_source(
+    record: &ManagedSourceRecord,
+    request: &SubscribeStartRequest,
+) -> SubscriptionJobView {
+    let protocol = match request.mode {
+        SubscriptionMode::Stream => resolve_stream_subscription_protocol(request)
+            .unwrap_or_else(|_| "stream".to_string()),
+        SubscriptionMode::Poll => "poll".to_string(),
+    };
+    SubscriptionJobView {
+        job_id: format!("managed-source-{}", record.run_id),
+        mode: request.mode,
+        endpoint: request.endpoint.clone(),
+        protocol,
+        sink: request.sink.clone(),
+        resource_uri: request.resource_uri.clone(),
+        status: "starting".to_string(),
+        durable: true,
+        auto_resume: false,
+        resume_strategy: "managed_source".to_string(),
+        created_at_unix: record.created_at_unix,
+        started_at_unix: record.started_at_unix,
+        stopped_at_unix: record.stopped_at_unix,
+        last_event_at_unix: None,
+        last_error: record.last_error.clone(),
+        restart_count: 0,
+        last_resume_at_unix: None,
+        last_resume_error: None,
+        reconnect_count: 0,
+        written_events: 0,
+    }
+}
+
+async fn reset_managed_source_runtime_files(runtime: &DaemonRuntime, run_id: &str) -> Result<()> {
+    let _ = tokio::fs::remove_file(runtime.managed_source_sink_path(run_id)).await;
+    let _ = tokio::fs::remove_file(runtime.managed_source_checkpoint_path(run_id)).await;
+    Ok(())
+}
+
+fn spawn_source_runtime_task(
+    runtime: DaemonRuntime,
+    run_id: &str,
+    request: SubscribeStartRequest,
+    sink_path: PathBuf,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    stop_rx: watch::Receiver<bool>,
+    checkpoint_path: PathBuf,
+) -> JoinHandle<()> {
+    let run_id = run_id.to_string();
+    tokio::spawn(async move {
+        let result = match request.mode {
+            SubscriptionMode::Stream => {
+                run_stream_subscription_job(
+                    &runtime,
+                    &run_id,
+                    &request,
+                    sink_path,
+                    view.clone(),
+                    stop_rx,
+                )
+                .await
+            }
+            SubscriptionMode::Poll => {
+                run_poll_subscription_job_with_checkpoint(
+                    &runtime,
+                    &request,
+                    checkpoint_path,
+                    sink_path,
+                    view.clone(),
+                    stop_rx,
+                )
+                .await
+            }
+        };
+
+        let mut guard = view.lock().await;
+        if guard.status != "stopped" {
+            match result {
+                Ok(()) => guard.status = "stopped".to_string(),
+                Err(err) => {
+                    guard.status = "failed".to_string();
+                    guard.last_error = Some(err.to_string());
+                }
+            }
+        }
+        guard.stopped_at_unix = Some(now_unix_secs());
+    })
+}
+
+async fn sync_managed_source_state(
+    store: &ManagedSourceStore,
+    entry: &Arc<ManagedSourceEntry>,
+    runtime_view: &Arc<Mutex<SubscriptionJobView>>,
+    fallback_status: &str,
+) -> Result<()> {
+    let snapshot = runtime_view.lock().await.clone();
+    let now = now_unix_secs();
+    let status = if snapshot.status.is_empty() {
+        fallback_status.to_string()
+    } else {
+        snapshot.status.clone()
+    };
+    let stopped_at_unix = if status == "running" || status == "reconnecting" || status == "starting"
+    {
+        None
+    } else {
+        snapshot.stopped_at_unix.or(Some(now))
+    };
+    store.update_source_runtime(
+        &entry.namespace,
+        &entry.source_key,
+        SourceRuntimeUpdate {
+            status: status.clone(),
+            updated_at_unix: now,
+            started_at_unix: snapshot.started_at_unix,
+            stopped_at_unix,
+            last_error: snapshot.last_error.clone(),
+        },
+    )
+    .await?;
+    let mut state = entry.state.lock().await;
+    state.status = status;
+    state.updated_at_unix = now;
+    state.started_at_unix = snapshot.started_at_unix;
+    state.stopped_at_unix = stopped_at_unix;
+    state.last_error = snapshot.last_error;
+    Ok(())
 }
 
 fn view_from_record(record: &ManagedSourceRecord) -> ManagedSourceView {
@@ -3611,7 +2935,6 @@ struct ServiceSummary {
 pub struct DaemonRuntime {
     state: Arc<Mutex<ServerState>>,
     mcp: McpSessionManager,
-    subscriptions: SubscriptionManager,
     managed_sources: ManagedSourceManager,
     managed_source_base_dir: PathBuf,
     should_stop: Arc<RwLock<bool>>,
@@ -3625,15 +2948,11 @@ impl DaemonRuntime {
     }
 
     pub fn try_new() -> Result<Self> {
-        Self::try_new_with_subscription_store_path(subscription_store_path())
+        Self::try_new_with_managed_source_base_dir(daemon_dir())
     }
 
-    fn try_new_with_subscription_store_path(store_path: PathBuf) -> Result<Self> {
+    fn try_new_with_managed_source_base_dir(managed_source_base_dir: PathBuf) -> Result<Self> {
         let logger = Self::initialize_logger();
-        let managed_source_base_dir = store_path
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(daemon_dir);
         let managed_source_store =
             ManagedSourceStore::new(managed_source_streams_db_path(&managed_source_base_dir))?;
         Ok(Self {
@@ -3642,7 +2961,6 @@ impl DaemonRuntime {
                 request_count: 0,
             })),
             mcp: McpSessionManager::new(logger.clone()),
-            subscriptions: SubscriptionManager::new(store_path)?,
             managed_sources: ManagedSourceManager::new(managed_source_store),
             managed_source_base_dir,
             should_stop: Arc::new(RwLock::new(false)),
@@ -4070,36 +3388,6 @@ impl DaemonRuntime {
         self.managed_sources.list().await
     }
 
-    pub async fn subscribe_start(
-        &self,
-        request: SubscribeStartRequest,
-    ) -> Result<SubscribeStartResponse> {
-        self.subscriptions.start(self, &request).await
-    }
-
-    pub async fn subscribe_list(&self) -> Vec<SubscriptionJobView> {
-        self.subscriptions.list().await
-    }
-
-    pub async fn subscribe_status(&self, job_id: &str) -> Result<SubscriptionJobView> {
-        self.subscriptions.status(job_id).await
-    }
-
-    pub async fn subscribe_stop(&self, job_id: &str) -> Result<SubscribeStopResponse> {
-        self.subscriptions.stop(job_id).await
-    }
-
-    pub async fn subscribe_events(
-        &self,
-        request: &SubscriptionEventsRequest,
-    ) -> Result<SubscriptionEventsResponse> {
-        self.subscriptions.events(request).await
-    }
-
-    pub async fn resume_persisted_subscriptions(&self) -> Result<()> {
-        self.subscriptions.resume_all(self).await
-    }
-
     pub async fn source_ensure(
         &self,
         request: ManagedSourceEnsureRequest,
@@ -4156,51 +3444,9 @@ impl DaemonRuntime {
         managed_source_sink_path(&self.managed_source_base_dir, run_id)
     }
 
-    async fn detect_poll_subscription_protocol(
-        &self,
-        request: &SubscribeStartRequest,
-    ) -> Result<String> {
-        let operation_id = request
-            .operation_id
-            .as_deref()
-            .ok_or_else(|| anyhow!("poll subscriptions require an operation_id"))?;
-        if request.resource_uri.is_some() {
-            bail!("poll subscriptions do not support --resource-uri");
-        }
-        if request.transport_hint.is_some() {
-            bail!("poll subscriptions do not support transport hints");
-        }
-        if operation_id.starts_with("subscription/") {
-            bail!("poll subscriptions do not support GraphQL subscription/<field> operations");
-        }
-
-        let cache = self.build_cache(&request.options)?;
-        let root_auth_profile =
-            auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
-        let stdio_spawn_options = build_stdio_spawn_options(
-            &request.endpoint,
-            &request.options,
-            root_auth_profile.as_ref(),
-        )?;
-        let detection_options = DetectionOptions {
-            schema_url: request.options.schema_url.clone(),
-            auth_profile: root_auth_profile.clone(),
-            stdio_spawn_options,
-            request_timeout: request_timeout_duration(request.options.timeout_ms),
-        };
-        let resolved = resolve_adapter_with_schema_cache(
-            &request.endpoint,
-            &detection_options,
-            cache,
-            root_auth_profile,
-            request.options.no_cache,
-            request.options.refresh_schema,
-        )
-        .await?;
-
-        Ok(resolved.adapter.protocol_type().as_str().to_string())
+    fn managed_source_checkpoint_path(&self, run_id: &str) -> PathBuf {
+        managed_source_checkpoint_path(&self.managed_source_base_dir, run_id)
     }
-
     pub async fn request_stop(&self) {
         let mut stop = self.should_stop.write().await;
         *stop = true;
@@ -4409,46 +3655,31 @@ enum SubscriptionRunError {
     Fatal(anyhow::Error),
 }
 
+#[cfg(test)]
 fn parse_file_sink(spec: &str) -> Result<PathBuf> {
     let Some(path) = spec.strip_prefix("file:") else {
-        bail!("subscribe sink must use file:<path> or memory:");
+        bail!("subscription sink must use file:<path> or memory:");
     };
     if path.trim().is_empty() {
-        bail!("subscribe sink path cannot be empty");
+        bail!("subscription sink path cannot be empty");
     }
     let path = PathBuf::from(path);
     validate_subscription_sink_path(&path)?;
     Ok(path)
 }
 
-fn sink_is_memory(spec: &str) -> bool {
-    spec == "memory:"
-}
-
+#[cfg(test)]
 fn validate_subscription_sink_path(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() {
-        bail!("subscribe sink path cannot be empty");
+        bail!("subscription sink path cannot be empty");
     }
     if path
         .components()
-        .any(|component| matches!(component, Component::ParentDir))
+        .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        bail!("subscribe sink path cannot contain '..'");
+        bail!("subscription sink path cannot contain '..'");
     }
     Ok(())
-}
-
-fn is_nonstandard_subscription_sink_path(path: &Path) -> bool {
-    if !path.is_absolute() {
-        return false;
-    }
-    if let Some(home) = resolve_home_dir_for_tilde() {
-        if path.starts_with(&home) {
-            return false;
-        }
-    }
-    let temp_dir = std::env::temp_dir();
-    !path.starts_with(&temp_dir)
 }
 
 async fn open_subscription_sink(path: &Path) -> Result<tokio::fs::File> {
@@ -4468,7 +3699,6 @@ async fn open_subscription_sink(path: &Path) -> Result<tokio::fs::File> {
 struct LoadedSubscriptionEvents {
     events: Vec<SubscriptionEventEnvelope>,
     next_after_seq: u64,
-    has_more: bool,
 }
 
 async fn load_subscription_events(
@@ -4525,14 +3755,12 @@ async fn load_subscription_events(
         .filter(|event| event.seq > after_seq)
         .cloned()
         .collect::<Vec<_>>();
-    let has_more = filtered.len() > limit;
     let limited = filtered.into_iter().take(limit).collect::<Vec<_>>();
     let next_after_seq = limited.last().map(|event| event.seq).unwrap_or(after_seq);
 
     Ok(LoadedSubscriptionEvents {
         events: limited,
         next_after_seq,
-        has_more,
     })
 }
 
@@ -5805,7 +5033,7 @@ async fn resolve_graphql_subscription_prepared_operation(
         .as_ref()
         .ok_or_else(|| anyhow!("operation_id is required for GraphQL subscriptions"))?;
     if !operation_id.starts_with("subscription/") {
-        bail!("subscribe start currently supports only GraphQL subscription/<field> operation IDs");
+        bail!("subscription runtime currently supports only GraphQL subscription/<field> operation IDs");
     }
 
     let cache = if request.options.no_cache {
@@ -6136,20 +5364,10 @@ impl PollRuntimeContext for DaemonPollContext {
     }
 }
 
-fn subscription_checkpoint_path(job_id: &str) -> PathBuf {
-    daemon_dir()
-        .join("subscriptions")
-        .join(format!("{job_id}.checkpoint.json"))
-}
-
-async fn cleanup_subscription_checkpoint(job_id: &str) {
-    let _ = tokio::fs::remove_file(subscription_checkpoint_path(job_id)).await;
-}
-
-async fn run_poll_subscription_job(
+async fn run_poll_subscription_job_with_checkpoint(
     runtime: &DaemonRuntime,
-    job_id: &str,
     request: &SubscribeStartRequest,
+    checkpoint_path: PathBuf,
     sink_path: PathBuf,
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
@@ -6166,22 +5384,17 @@ async fn run_poll_subscription_job(
     let mut context = DaemonPollContext {
         runtime: runtime.clone(),
         request: request.clone(),
-        checkpoint_path: subscription_checkpoint_path(job_id),
+        checkpoint_path,
     };
 
-    let result = crate::subscription_poll::run_poll_subscription_runtime(
+    crate::subscription_poll::run_poll_subscription_runtime(
         config,
         request.args.clone().unwrap_or_default(),
         &mut context,
         &mut observer,
         &mut stop_rx,
     )
-    .await;
-
-    if result.is_ok() {
-        cleanup_subscription_checkpoint(job_id).await;
-    }
-    result
+    .await
 }
 
 async fn run_mcp_subscription_job(
@@ -6575,72 +5788,6 @@ pub async fn runtime_invoke_client(
 }
 
 #[cfg(unix)]
-pub async fn subscribe_start_client(
-    request: &SubscribeStartRequest,
-) -> Result<SubscribeStartResponse> {
-    let params = serde_json::to_value(request)?;
-    let value = client_call("subscription.start", Some(params)).await?;
-    Ok(serde_json::from_value(value)?)
-}
-
-#[cfg(not(unix))]
-pub async fn subscribe_start_client(
-    _request: &SubscribeStartRequest,
-) -> Result<SubscribeStartResponse> {
-    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
-}
-
-#[cfg(unix)]
-pub async fn subscribe_list_client() -> Result<Vec<SubscriptionJobView>> {
-    let value = client_call("subscription.list", None).await?;
-    Ok(serde_json::from_value(value)?)
-}
-
-#[cfg(not(unix))]
-pub async fn subscribe_list_client() -> Result<Vec<SubscriptionJobView>> {
-    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
-}
-
-#[cfg(unix)]
-pub async fn subscribe_status_client(job_id: &str) -> Result<SubscriptionJobView> {
-    let value = client_call("subscription.status", Some(json!({ "job_id": job_id }))).await?;
-    Ok(serde_json::from_value(value)?)
-}
-
-#[cfg(not(unix))]
-pub async fn subscribe_status_client(_job_id: &str) -> Result<SubscriptionJobView> {
-    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
-}
-
-#[cfg(unix)]
-pub async fn subscribe_stop_client(job_id: &str) -> Result<SubscribeStopResponse> {
-    let value = client_call("subscription.stop", Some(json!({ "job_id": job_id }))).await?;
-    Ok(serde_json::from_value(value)?)
-}
-
-#[cfg(not(unix))]
-pub async fn subscribe_stop_client(_job_id: &str) -> Result<SubscribeStopResponse> {
-    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
-}
-
-#[cfg(unix)]
-#[allow(dead_code)]
-pub async fn subscribe_events_client(
-    request: &SubscriptionEventsRequest,
-) -> Result<SubscriptionEventsResponse> {
-    let value = client_call("subscription.events", Some(serde_json::to_value(request)?)).await?;
-    Ok(serde_json::from_value(value)?)
-}
-
-#[cfg(not(unix))]
-#[allow(dead_code)]
-pub async fn subscribe_events_client(
-    _request: &SubscriptionEventsRequest,
-) -> Result<SubscriptionEventsResponse> {
-    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
-}
-
-#[cfg(unix)]
 pub async fn source_ensure_client(
     request: &ManagedSourceEnsureRequest,
 ) -> Result<ManagedSourceEnsureResponse> {
@@ -6880,9 +6027,6 @@ pub async fn run_daemon_server() -> Result<()> {
     let runtime = Arc::new(DaemonRuntime::try_new()?);
     let resume_runtime = runtime.clone();
     tokio::spawn(async move {
-        if let Err(err) = resume_runtime.resume_persisted_subscriptions().await {
-            tracing::warn!("Failed to resume persisted subscriptions: {}", err);
-        }
         if let Err(err) = resume_runtime.resume_managed_sources().await {
             tracing::warn!("Failed to resume managed sources: {}", err);
         }
@@ -7088,176 +6232,6 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 }
             };
             match runtime.invoke(invoke).await {
-                Ok(result) => JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: Some(serde_json::to_value(result)?),
-                    error: None,
-                },
-                Err(err) => JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: None,
-                    error: Some(jsonrpc_error_from_anyhow(&err)),
-                },
-            }
-        }
-        "subscription.start" => {
-            let Some(params) = req.params else {
-                let resp = JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32602,
-                        message: "Missing params".to_string(),
-                        data: None,
-                    }),
-                };
-                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
-                return Ok(());
-            };
-            let start: SubscribeStartRequest = match serde_json::from_value(params) {
-                Ok(value) => value,
-                Err(err) => {
-                    let resp = JsonRpcResponse {
-                        jsonrpc: JSONRPC_VERSION.to_string(),
-                        id: req.id,
-                        result: None,
-                        error: Some(JsonRpcError {
-                            code: -32602,
-                            message: format!("Invalid params: {err}"),
-                            data: None,
-                        }),
-                    };
-                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
-                    return Ok(());
-                }
-            };
-            match runtime.subscribe_start(start).await {
-                Ok(result) => JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: Some(serde_json::to_value(result)?),
-                    error: None,
-                },
-                Err(err) => JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: None,
-                    error: Some(jsonrpc_error_from_anyhow(&err)),
-                },
-            }
-        }
-        "subscription.list" => JsonRpcResponse {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id: req.id,
-            result: Some(serde_json::to_value(runtime.subscribe_list().await)?),
-            error: None,
-        },
-        "subscription.status" => {
-            let Some(job_id) = req
-                .params
-                .as_ref()
-                .and_then(|v| v.get("job_id"))
-                .and_then(Value::as_str)
-            else {
-                let resp = JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32602,
-                        message: "Missing job_id".to_string(),
-                        data: None,
-                    }),
-                };
-                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
-                return Ok(());
-            };
-            match runtime.subscribe_status(job_id).await {
-                Ok(result) => JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: Some(serde_json::to_value(result)?),
-                    error: None,
-                },
-                Err(err) => JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: None,
-                    error: Some(jsonrpc_error_from_anyhow(&err)),
-                },
-            }
-        }
-        "subscription.stop" => {
-            let Some(job_id) = req
-                .params
-                .as_ref()
-                .and_then(|v| v.get("job_id"))
-                .and_then(Value::as_str)
-            else {
-                let resp = JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32602,
-                        message: "Missing job_id".to_string(),
-                        data: None,
-                    }),
-                };
-                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
-                return Ok(());
-            };
-            match runtime.subscribe_stop(job_id).await {
-                Ok(result) => JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: Some(serde_json::to_value(result)?),
-                    error: None,
-                },
-                Err(err) => JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: None,
-                    error: Some(jsonrpc_error_from_anyhow(&err)),
-                },
-            }
-        }
-        "subscription.events" => {
-            let Some(params) = req.params else {
-                let resp = JsonRpcResponse {
-                    jsonrpc: JSONRPC_VERSION.to_string(),
-                    id: req.id,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32602,
-                        message: "Missing params".to_string(),
-                        data: None,
-                    }),
-                };
-                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
-                return Ok(());
-            };
-            let events: SubscriptionEventsRequest = match serde_json::from_value(params) {
-                Ok(value) => value,
-                Err(err) => {
-                    let resp = JsonRpcResponse {
-                        jsonrpc: JSONRPC_VERSION.to_string(),
-                        id: req.id,
-                        result: None,
-                        error: Some(JsonRpcError {
-                            code: -32602,
-                            message: format!("Invalid params: {err}"),
-                            data: None,
-                        }),
-                    };
-                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
-                    return Ok(());
-                }
-            };
-            match runtime.subscribe_events(&events).await {
                 Ok(result) => JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: req.id,
@@ -7825,55 +6799,6 @@ fn daemon_dir() -> PathBuf {
 
 pub fn socket_path() -> PathBuf {
     daemon_dir().join("uxc.sock")
-}
-
-fn subscription_store_path() -> PathBuf {
-    daemon_dir().join("subscriptions.json")
-}
-
-fn parse_subscription_numeric_id(job_id: &str) -> Option<u64> {
-    job_id.strip_prefix("sub_")?.parse().ok()
-}
-
-fn write_subscription_store(path: &Path, jobs: &[PersistedSubscriptionRecord]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed to create subscription store directory {}",
-                parent.display()
-            )
-        })?;
-    }
-    let store = PersistedSubscriptionStore {
-        version: "v1".to_string(),
-        jobs: jobs.to_vec(),
-    };
-    let tmp_path = path.with_extension("json.tmp");
-    let raw = serde_json::to_vec_pretty(&store)?;
-    fs::write(&tmp_path, raw).with_context(|| {
-        format!(
-            "Failed to write temporary subscription store {}",
-            tmp_path.display()
-        )
-    })?;
-    fs::rename(&tmp_path, path)
-        .with_context(|| format!("Failed to replace subscription store {}", path.display()))?;
-    Ok(())
-}
-
-fn quarantine_subscription_store(path: &Path, suffix: &str) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let quarantined = path.with_extension(format!("json.{suffix}.bak"));
-    fs::rename(path, &quarantined).with_context(|| {
-        format!(
-            "Failed to quarantine subscription store {} to {}",
-            path.display(),
-            quarantined.display()
-        )
-    })?;
-    Ok(())
 }
 
 fn best_effort_user_label() -> String {
@@ -9314,7 +8239,6 @@ mod tests {
     #[derive(Clone)]
     enum TestWsFrame {
         Text(&'static str),
-        Binary(Vec<u8>),
     }
 
     #[derive(Clone)]
@@ -9350,9 +8274,6 @@ mod tests {
                                 .await
                                 .unwrap();
                         }
-                        TestWsFrame::Binary(bytes) => {
-                            websocket.send(Message::Binary(bytes)).await.unwrap();
-                        }
                     }
                     tokio::time::sleep(StdDuration::from_millis(50)).await;
                 }
@@ -9366,44 +8287,6 @@ mod tests {
 
         (format!("ws://{}", addr), connects, task)
     }
-
-    fn subscription_request(endpoint: &str, sink: &str) -> SubscribeStartRequest {
-        SubscribeStartRequest {
-            request_id: "test-request".to_string(),
-            endpoint: endpoint.to_string(),
-            sink: sink.to_string(),
-            operation_id: None,
-            args: None,
-            resource_uri: None,
-            read_resource: false,
-            transport_hint: Some(SubscriptionTransportHint::Websocket),
-            subprotocols: Vec::new(),
-            initial_text_frames: Vec::new(),
-            mode: SubscriptionMode::Stream,
-            poll_config: None,
-            ephemeral: false,
-            internal: false,
-            options: RuntimeInvokeOptions {
-                auth: None,
-                inject_env: Vec::new(),
-                no_cache: false,
-                cache_ttl: None,
-                timeout_ms: None,
-                refresh_schema: false,
-                schema_url: None,
-                link_name: None,
-                link_skill: None,
-                link_skill_doc: None,
-                link_skill_path: None,
-                schema_mapping_file: None,
-                daemon_exclusive: Vec::new(),
-                daemon_idle_ttl: None,
-                request_headers: HashMap::new(),
-                cwd: None,
-            },
-        }
-    }
-
     fn managed_source_spec(endpoint: &str) -> ManagedSourceSpec {
         ManagedSourceSpec {
             endpoint: endpoint.to_string(),
@@ -9437,62 +8320,9 @@ mod tests {
         }
     }
 
-    async fn wait_for_file_contains(path: &Path, needle: &str, timeout: StdDuration) -> bool {
-        let start = Instant::now();
-        while start.elapsed() < timeout {
-            if let Ok(content) = tokio::fs::read_to_string(path).await {
-                if content.contains(needle) {
-                    return true;
-                }
-            }
-            tokio::time::sleep(StdDuration::from_millis(50)).await;
-        }
-        false
-    }
-
     fn test_runtime_with_store(temp: &tempfile::TempDir) -> DaemonRuntime {
-        DaemonRuntime::try_new_with_subscription_store_path(temp.path().join("subscriptions.json"))
+        DaemonRuntime::try_new_with_managed_source_base_dir(temp.path().to_path_buf())
             .expect("test daemon runtime should initialize")
-    }
-
-    #[tokio::test]
-    async fn daemon_runtime_init_skips_persisted_memory_sink_records() {
-        let temp = tempdir().unwrap();
-        let store_path = temp.path().join("subscriptions.json");
-        let record = PersistedSubscriptionRecord {
-            request: subscription_request("https://example.com/stream", "memory:"),
-            view: SubscriptionJobView {
-                job_id: "sub_1".to_string(),
-                mode: SubscriptionMode::Stream,
-                endpoint: "https://example.com/stream".to_string(),
-                protocol: "websocket".to_string(),
-                sink: "memory:".to_string(),
-                resource_uri: None,
-                status: "running".to_string(),
-                durable: false,
-                auto_resume: false,
-                resume_strategy: "none".to_string(),
-                created_at_unix: now_unix_secs(),
-                started_at_unix: Some(now_unix_secs()),
-                stopped_at_unix: None,
-                last_event_at_unix: None,
-                last_error: None,
-                restart_count: 0,
-                last_resume_at_unix: None,
-                last_resume_error: None,
-                reconnect_count: 0,
-                written_events: 0,
-            },
-        };
-        write_subscription_store(&store_path, &[record]).unwrap();
-
-        let runtime = DaemonRuntime::try_new_with_subscription_store_path(store_path.clone())
-            .expect("daemon runtime should tolerate memory sink records");
-        assert!(runtime.subscribe_list().await.is_empty());
-
-        let raw = std::fs::read_to_string(&store_path).unwrap();
-        let store: PersistedSubscriptionStore = serde_json::from_str(&raw).unwrap();
-        assert!(store.jobs.is_empty());
     }
 
     #[test]
@@ -9515,246 +8345,6 @@ mod tests {
         assert!(err.message.contains("For agents:"));
         assert!(err.message.contains("uxc auth oauth start x-api-user"));
         assert!(err.message.contains("Interactive fallback:"));
-    }
-
-    #[tokio::test]
-    async fn daemon_runtime_init_skips_persisted_records_with_invalid_file_sink() {
-        let temp = tempdir().unwrap();
-        let store_path = temp.path().join("subscriptions.json");
-        let record = PersistedSubscriptionRecord {
-            request: subscription_request("https://example.com/stream", "bad-sink"),
-            view: SubscriptionJobView {
-                job_id: "sub_2".to_string(),
-                mode: SubscriptionMode::Stream,
-                endpoint: "https://example.com/stream".to_string(),
-                protocol: "websocket".to_string(),
-                sink: "bad-sink".to_string(),
-                resource_uri: None,
-                status: "running".to_string(),
-                durable: true,
-                auto_resume: true,
-                resume_strategy: "reconnect".to_string(),
-                created_at_unix: now_unix_secs(),
-                started_at_unix: Some(now_unix_secs()),
-                stopped_at_unix: None,
-                last_event_at_unix: None,
-                last_error: None,
-                restart_count: 0,
-                last_resume_at_unix: None,
-                last_resume_error: None,
-                reconnect_count: 0,
-                written_events: 0,
-            },
-        };
-        write_subscription_store(&store_path, &[record]).unwrap();
-
-        let runtime = DaemonRuntime::try_new_with_subscription_store_path(store_path.clone())
-            .expect("daemon runtime should tolerate invalid sink records");
-        assert!(runtime.subscribe_list().await.is_empty());
-
-        let raw = std::fs::read_to_string(&store_path).unwrap();
-        let store: PersistedSubscriptionStore = serde_json::from_str(&raw).unwrap();
-        assert!(store.jobs.is_empty());
-    }
-
-    #[tokio::test]
-    async fn websocket_subscription_runtime_reconnects_and_stops_cleanly() {
-        let temp = tempdir().unwrap();
-        let sink_path = temp.path().join("websocket.ndjson");
-        let sink_spec = format!("file:{}", sink_path.display());
-        let (endpoint, connects, server_task) = start_test_websocket_server(vec![
-            TestWsConnectionPlan {
-                frames: vec![TestWsFrame::Text(r#"{"value":1}"#)],
-                hold_open_after_send: false,
-            },
-            TestWsConnectionPlan {
-                frames: vec![TestWsFrame::Text(r#"{"value":2}"#)],
-                hold_open_after_send: true,
-            },
-        ])
-        .await;
-
-        let runtime = test_runtime_with_store(&temp);
-        let response = runtime
-            .subscribe_start(subscription_request(&endpoint, &sink_spec))
-            .await
-            .unwrap();
-
-        assert_eq!(response.protocol, "websocket");
-        assert!(
-            wait_for_file_contains(&sink_path, r#""value":2"#, StdDuration::from_secs(5)).await,
-            "websocket sink did not receive second event"
-        );
-        assert!(
-            wait_for_file_contains(
-                &sink_path,
-                r#""event_kind":"reconnect""#,
-                StdDuration::from_secs(5)
-            )
-            .await,
-            "websocket sink did not record reconnect"
-        );
-
-        let status = runtime.subscribe_status(&response.job_id).await.unwrap();
-        assert_eq!(status.protocol, "websocket");
-        assert!(status.reconnect_count >= 1);
-        assert!(connects.load(Ordering::SeqCst) >= 2);
-
-        let stop = runtime.subscribe_stop(&response.job_id).await.unwrap();
-        assert!(stop.stopped);
-        assert!(
-            wait_for_file_contains(
-                &sink_path,
-                r#""reason":"stopped""#,
-                StdDuration::from_secs(5)
-            )
-            .await,
-            "websocket sink did not record stop"
-        );
-
-        server_task.abort();
-    }
-
-    #[tokio::test]
-    async fn websocket_subscription_runtime_preserves_text_and_binary_frames() {
-        let temp = tempdir().unwrap();
-        let sink_path = temp.path().join("websocket-frames.ndjson");
-        let sink_spec = format!("file:{}", sink_path.display());
-        let (endpoint, _connects, server_task) =
-            start_test_websocket_server(vec![TestWsConnectionPlan {
-                frames: vec![
-                    TestWsFrame::Text("tick"),
-                    TestWsFrame::Binary(vec![1, 2, 3]),
-                ],
-                hold_open_after_send: true,
-            }])
-            .await;
-
-        let runtime = test_runtime_with_store(&temp);
-        let response = runtime
-            .subscribe_start(subscription_request(&endpoint, &sink_spec))
-            .await
-            .unwrap();
-
-        assert!(
-            wait_for_file_contains(&sink_path, r#""text":"tick""#, StdDuration::from_secs(5)).await,
-            "websocket sink did not record plain text frame"
-        );
-        assert!(
-            wait_for_file_contains(&sink_path, r#""base64":"AQID""#, StdDuration::from_secs(5))
-                .await,
-            "websocket sink did not record binary frame"
-        );
-
-        runtime.subscribe_stop(&response.job_id).await.unwrap();
-        server_task.abort();
-    }
-
-    #[tokio::test]
-    async fn memory_sink_subscription_events_stream_without_user_file() {
-        let temp = tempdir().unwrap();
-        let (endpoint, _connects, server_task) =
-            start_test_websocket_server(vec![TestWsConnectionPlan {
-                frames: vec![TestWsFrame::Text(r#"{"value":7}"#)],
-                hold_open_after_send: true,
-            }])
-            .await;
-
-        let runtime = test_runtime_with_store(&temp);
-        let response = runtime
-            .subscribe_start(subscription_request(&endpoint, "memory:"))
-            .await
-            .unwrap();
-
-        let events = runtime
-            .subscribe_events(&SubscriptionEventsRequest {
-                job_id: response.job_id.clone(),
-                after_seq: 0,
-                limit: 10,
-                wait_ms: 5_000,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(events.job_id, response.job_id);
-        assert!(!events.events.is_empty(), "expected subscription events");
-        assert!(events.events.iter().any(|event| event.event_kind == "open"));
-        assert!(
-            events.events.iter().any(|event| event
-                .data
-                .as_ref()
-                .and_then(|value| value.get("value"))
-                == Some(&json!(7))),
-            "expected streamed websocket payload"
-        );
-
-        runtime.subscribe_stop(&response.job_id).await.unwrap();
-        server_task.abort();
-    }
-
-    #[tokio::test]
-    async fn stopped_subscription_status_and_tail_events_remain_temporarily_available() {
-        let temp = tempdir().unwrap();
-        let sink_path = temp.path().join("stopped-tail-events.ndjson");
-        let sink_spec = format!("file:{}", sink_path.display());
-        let (endpoint, _connects, server_task) =
-            start_test_websocket_server(vec![TestWsConnectionPlan {
-                frames: vec![TestWsFrame::Text(r#"{"value":9}"#)],
-                hold_open_after_send: true,
-            }])
-            .await;
-
-        let runtime = test_runtime_with_store(&temp);
-        let response = runtime
-            .subscribe_start(subscription_request(&endpoint, &sink_spec))
-            .await
-            .unwrap();
-
-        assert!(
-            wait_for_file_contains(&sink_path, r#""value":9"#, StdDuration::from_secs(5)).await,
-            "expected streamed websocket payload before stop"
-        );
-
-        let snapshot = runtime
-            .subscribe_events(&SubscriptionEventsRequest {
-                job_id: response.job_id.clone(),
-                after_seq: 0,
-                limit: 100,
-                wait_ms: 0,
-            })
-            .await
-            .unwrap();
-        let after_seq = snapshot.next_after_seq;
-
-        runtime.subscribe_stop(&response.job_id).await.unwrap();
-
-        let status = runtime.subscribe_status(&response.job_id).await.unwrap();
-        assert_eq!(status.status, "stopped");
-
-        let mut saw_closed = false;
-        for _ in 0..10 {
-            let tail = runtime
-                .subscribe_events(&SubscriptionEventsRequest {
-                    job_id: response.job_id.clone(),
-                    after_seq,
-                    limit: 10,
-                    wait_ms: 100,
-                })
-                .await
-                .unwrap();
-            assert_eq!(tail.status, "stopped");
-            if tail.events.iter().any(|event| {
-                event.event_kind == "closed"
-                    && event.meta.as_ref().and_then(|meta| meta.get("reason"))
-                        == Some(&json!("stopped"))
-            }) {
-                saw_closed = true;
-                break;
-            }
-        }
-        assert!(saw_closed, "expected closed event after stop");
-
-        server_task.abort();
     }
 
     #[tokio::test]
@@ -9781,7 +8371,7 @@ mod tests {
             ensured.stream_id,
             managed_stream_id("test", "websocket:demo")
         );
-        assert!(runtime.subscribe_list().await.is_empty());
+        assert!(!temp.path().join("subscriptions.json").exists());
 
         let mut seen = None;
         for _ in 0..30 {
@@ -9993,7 +8583,14 @@ mod tests {
         assert_eq!(sources[0].source_key, "alpha");
         assert_eq!(sources[1].source_key, "beta");
 
-        let status = runtime.status().await;
+        let mut status = runtime.status().await;
+        for _ in 0..20 {
+            if status.managed_sources_running == 2 {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(100)).await;
+            status = runtime.status().await;
+        }
         assert_eq!(status.managed_sources, 2);
         assert_eq!(status.managed_sources_running, 2);
         assert_eq!(status.managed_streams, 2);
@@ -10013,6 +8610,49 @@ mod tests {
 
         server_task_one.abort();
         server_task_two.abort();
+    }
+
+    #[tokio::test]
+    async fn resume_managed_sources_does_not_create_duplicate_runners_or_legacy_store() {
+        let temp = tempdir().unwrap();
+        let (endpoint, _connects, server_task) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":"resume"}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+
+        let runtime = test_runtime_with_store(&temp);
+        runtime
+            .source_ensure(ManagedSourceEnsureRequest {
+                namespace: "team".to_string(),
+                source_key: "resume-check".to_string(),
+                spec: managed_source_spec(&endpoint),
+            })
+            .await
+            .unwrap();
+
+        for _ in 0..20 {
+            if runtime.managed_sources.entries.lock().await.len() == 1 {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(50)).await;
+        }
+        assert_eq!(runtime.managed_sources.entries.lock().await.len(), 1);
+
+        runtime.resume_managed_sources().await.unwrap();
+        assert_eq!(runtime.managed_sources.entries.lock().await.len(), 1);
+        assert!(!temp.path().join("subscriptions.json").exists());
+
+        runtime
+            .source_stop(&ManagedSourceStatusRequest {
+                namespace: "team".to_string(),
+                source_key: "resume-check".to_string(),
+            })
+            .await
+            .unwrap();
+
+        server_task.abort();
     }
 }
 

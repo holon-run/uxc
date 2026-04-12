@@ -8,11 +8,14 @@ UXC exposes a stable local daemon control plane over a Unix socket using
 - `daemon.status`
 - `daemon.sessions`
 - `runtime.invoke`
-- `subscription.start`
-- `subscription.list`
-- `subscription.status`
-- `subscription.stop`
-- `subscription.events`
+- `source.ensure`
+- `source.status`
+- `source.list`
+- `source.stop`
+- `source.delete`
+- `stream.read`
+- `stream.info`
+- `stream.trim`
 
 ## Transport
 
@@ -29,19 +32,17 @@ Content-Length: <bytes>\r\n
 <json body>
 ```
 
-## Subscription Events
+## Managed Source Reads
 
-`subscription.events` reads event batches for a running or recently-stopped
-subscription job.
+`stream.read` reads event batches for a managed source stream.
 
 Typical request shape:
 
 ```json
 {
-  "job_id": "sub_1",
-  "after_seq": 0,
-  "limit": 100,
-  "wait_ms": 15000
+  "stream_id": "stream_abc123",
+  "after_offset": 0,
+  "limit": 100
 }
 ```
 
