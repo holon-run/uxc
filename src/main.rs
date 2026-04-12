@@ -367,6 +367,8 @@ enum SubscribeCommands {
 
 #[derive(Subcommand)]
 enum SourceCommands {
+    /// List managed sources
+    List,
     /// Ensure a managed source exists and is running
     Ensure {
         #[arg(value_name = "NAMESPACE")]
@@ -1115,6 +1117,11 @@ struct SubscribeListData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct SourceListData {
+    sources: Vec<daemon::ManagedSourceListEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct LinkCreateData {
     name: String,
     host: String,
@@ -1669,6 +1676,7 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             SubscribeCommands::Stop { .. } => Some(vec!["subscribe", "stop"]),
         },
         Some(Commands::Source { source_command }) => match source_command {
+            SourceCommands::List => Some(vec!["source", "list"]),
             SourceCommands::Ensure { .. } => Some(vec!["source", "ensure"]),
             SourceCommands::Status { .. } => Some(vec!["source", "status"]),
             SourceCommands::Stop { .. } => Some(vec!["source", "stop"]),
@@ -2332,8 +2340,9 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["source"] => HelpData {
             path: "uxc source".to_string(),
             about: "Manage daemon-backed source streams".to_string(),
-            usage: "uxc source <ensure|status|stop|delete> ...".to_string(),
+            usage: "uxc source <list|ensure|status|stop|delete> ...".to_string(),
             commands: commands(&[
+                ("list", "List managed sources"),
                 ("ensure", "Ensure a managed source exists and is running"),
                 ("status", "Show a managed source"),
                 ("stop", "Stop a managed source"),
@@ -2345,11 +2354,23 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "Managed source streams are raw-oriented in v1: stream records persist only payload rows, not lifecycle envelopes.".to_string(),
             ],
             examples: vec![
+                "uxc source list".to_string(),
                 "uxc source ensure agentinbox github_repo:holon-run/uxc https://api.github.com get:/repos/{owner}/{repo}/events owner=holon-run repo=uxc --mode poll --poll-config '{\"interval_secs\":30,\"extract_items_pointer\":\"\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}'".to_string(),
                 "uxc source status agentinbox github_repo:holon-run/uxc".to_string(),
                 "uxc source stop agentinbox github_repo:holon-run/uxc".to_string(),
                 "uxc source delete agentinbox github_repo:holon-run/uxc".to_string(),
             ],
+        },
+        ["source", "list"] => HelpData {
+            path: "uxc source list".to_string(),
+            about: "List managed sources".to_string(),
+            usage: "uxc source list".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Shows the current managed source bindings so callers can discover namespace/source_key identities before inspecting a single source.".to_string(),
+                "Use `uxc source status <namespace> <source_key>` for detailed single-source state, and `uxc daemon status` for aggregate daemon-wide counts.".to_string(),
+            ],
+            examples: vec!["uxc source list".to_string()],
         },
         ["source", "ensure"] => HelpData {
             path: "uxc source ensure".to_string(),
@@ -5392,6 +5413,9 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
                     "socket": daemon::socket_path().display().to_string(),
                     "client_version": env!("CARGO_PKG_VERSION"),
                     "version_mismatch": false,
+                    "managed_sources": 0,
+                    "managed_sources_running": 0,
+                    "managed_streams": 0,
                     "error": {
                         "code": "DAEMON_UNREACHABLE",
                         "message": err.to_string()
@@ -6140,6 +6164,12 @@ async fn handle_source_command(command: &SourceCommands, cli: &Cli) -> Result<Ou
     let daemon_restarted_for_version_mismatch = Some(daemon_ensure.restarted_for_version_mismatch);
 
     let envelope = match command {
+        SourceCommands::List => {
+            let data = serde_json::to_value(SourceListData {
+                sources: daemon::source_list_client().await?,
+            })?;
+            OutputEnvelope::success("source_list", "cli", "uxc", None, data, None)
+        }
         SourceCommands::Ensure {
             namespace,
             source_key,

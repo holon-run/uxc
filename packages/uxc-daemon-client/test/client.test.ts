@@ -303,6 +303,16 @@ describe("UxcDaemonClient", () => {
       expect(status.source_key).toBe(sourceKey);
       expect(status.stream_id).toBe(ensured.stream_id);
 
+      const listed = await client.sourceList();
+      expect(
+        listed.some(
+          (entry) =>
+            entry.namespace === namespace &&
+            entry.source_key === sourceKey &&
+            entry.stream_id === ensured.stream_id,
+        ),
+      ).toBe(true);
+
       const initialRead = await waitForManagedStreamEvent(client, ensured.stream_id);
       expect(initialRead.events[0]?.raw_payload).toEqual({ value: 42 });
 

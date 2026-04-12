@@ -35,6 +35,9 @@ fn daemon_start_status_stop_lifecycle() {
     assert_eq!(json["data"]["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(json["data"]["client_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(json["data"]["version_mismatch"], false);
+    assert!(json["data"]["managed_sources"].is_number());
+    assert!(json["data"]["managed_sources_running"].is_number());
+    assert!(json["data"]["managed_streams"].is_number());
 
     let stop = uxc_command()
         .arg("daemon")
@@ -54,6 +57,9 @@ fn daemon_start_status_stop_lifecycle() {
         serde_json::from_slice(&status_after_stop.stdout).expect("valid json");
     assert_eq!(json_after_stop["ok"], true);
     assert_eq!(json_after_stop["data"]["running"], false);
+    assert_eq!(json_after_stop["data"]["managed_sources"], 0);
+    assert_eq!(json_after_stop["data"]["managed_sources_running"], 0);
+    assert_eq!(json_after_stop["data"]["managed_streams"], 0);
     assert!(json_after_stop["data"]["error"]["message"]
         .as_str()
         .is_some_and(|v| !v.is_empty()));

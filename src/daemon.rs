@@ -14,8 +14,8 @@ use crate::error::{
     StructuredErrorPayload, UxcError,
 };
 use crate::managed_source_streams::{
-    ManagedSourceRecord, ManagedSourceStore, SourceRuntimeUpdate, StreamEventRecord,
-    StreamInfoRecord,
+    ManagedSourceListRecord, ManagedSourceRecord, ManagedSourceStore, SourceRuntimeUpdate,
+    StreamEventRecord, StreamInfoRecord,
 };
 use crate::subscription_discord::{
     derive_gateway_bot_endpoint, parse_gateway_bot_response, prepare_gateway_websocket_url,
@@ -384,6 +384,17 @@ pub struct ManagedSourceView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceListEntry {
+    pub namespace: String,
+    pub source_key: String,
+    pub status: String,
+    pub run_id: String,
+    pub stream_id: String,
+    pub updated_at_unix: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedSourceStopResponse {
     pub namespace: String,
     pub source_key: String,
@@ -518,6 +529,12 @@ pub struct DaemonStatus {
     pub mcp_stdio_sessions: usize,
     pub mcp_http_sessions: usize,
     pub mcp_reuse_hits: u64,
+    #[serde(default)]
+    pub managed_sources: usize,
+    #[serde(default)]
+    pub managed_sources_running: usize,
+    #[serde(default)]
+    pub managed_streams: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_file: Option<String>,
 }
@@ -790,6 +807,7 @@ struct SubscriptionManager {
     terminal_jobs: Arc<Mutex<HashMap<String, TerminalSubscriptionEntry>>>,
     next_id: Arc<Mutex<u64>>,
     store_path: PathBuf,
+    memory_sink_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -2119,14 +2137,24 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
 
 impl SubscriptionManager {
     fn new(store_path: PathBuf) -> Result<Self> {
+        let memory_sink_dir = store_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(daemon_dir)
+            .join("subscription-events");
         let manager = Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             terminal_jobs: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(0)),
             store_path,
+            memory_sink_dir,
         };
         manager.load_persisted_records()?;
         Ok(manager)
+    }
+
+    fn internal_memory_sink_path(&self, job_id: &str) -> PathBuf {
+        self.memory_sink_dir.join(format!("{}.ndjson", job_id))
     }
 
     fn load_persisted_records(&self) -> Result<()> {
@@ -2556,8 +2584,22 @@ impl SubscriptionManager {
         };
         let sink_path = match prepared.sink {
             PreparedSubscriptionSink::File(path) => path,
-            PreparedSubscriptionSink::Memory => internal_memory_sink_path(&job_id),
+            PreparedSubscriptionSink::Memory => self.internal_memory_sink_path(&job_id),
         };
+        if sink_is_memory(&request.sink) {
+            match fs::remove_file(&sink_path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "Failed to reset in-memory subscription sink {}",
+                            sink_path.display()
+                        )
+                    });
+                }
+            }
+        }
         let now = now_unix_secs();
         let view = Arc::new(Mutex::new(SubscriptionJobView {
             job_id: job_id.clone(),
@@ -2895,6 +2937,20 @@ impl ManagedSourceManager {
                 ))
             })?;
         Ok(view_from_record(&record))
+    }
+
+    async fn list(&self) -> Result<Vec<ManagedSourceListEntry>> {
+        let records = self.store.load_source_list_records().await?;
+        Ok(records.iter().map(list_entry_from_list_record).collect())
+    }
+
+    async fn summary(&self) -> Result<(usize, usize, usize)> {
+        let summary = self.store.summary().await?;
+        Ok((
+            summary.source_count,
+            summary.running_source_count,
+            summary.stream_count,
+        ))
     }
 
     async fn stop(
@@ -3382,6 +3438,18 @@ fn view_from_record(record: &ManagedSourceRecord) -> ManagedSourceView {
     }
 }
 
+fn list_entry_from_list_record(record: &ManagedSourceListRecord) -> ManagedSourceListEntry {
+    ManagedSourceListEntry {
+        namespace: record.namespace.clone(),
+        source_key: record.source_key.clone(),
+        status: record.status.clone(),
+        run_id: record.run_id.clone(),
+        stream_id: record.stream_id.clone(),
+        updated_at_unix: record.updated_at_unix,
+        last_error: record.last_error.clone(),
+    }
+}
+
 fn stream_event_view(record: StreamEventRecord) -> ManagedStreamEvent {
     ManagedStreamEvent {
         stream_id: record.stream_id,
@@ -3839,6 +3907,17 @@ impl DaemonRuntime {
     pub async fn status(&self) -> DaemonStatus {
         let state = self.state.lock().await;
         let (stdio_sessions, http_sessions, reuse_hits) = self.mcp.status_counts().await;
+        let (managed_sources, managed_sources_running, managed_streams) =
+            match self.managed_sources.summary().await {
+                Ok(summary) => summary,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "Failed to summarize managed sources for daemon status"
+                    );
+                    (0, 0, 0)
+                }
+            };
         let log_file: Option<String> = self
             .logger
             .as_ref()
@@ -3853,12 +3932,19 @@ impl DaemonRuntime {
             mcp_stdio_sessions: stdio_sessions,
             mcp_http_sessions: http_sessions,
             mcp_reuse_hits: reuse_hits,
+            managed_sources,
+            managed_sources_running,
+            managed_streams,
             log_file,
         }
     }
 
     pub async fn session_views(&self) -> Vec<DaemonSessionView> {
         self.mcp.session_views().await
+    }
+
+    pub async fn source_list(&self) -> Result<Vec<ManagedSourceListEntry>> {
+        self.managed_sources.list().await
     }
 
     pub async fn subscribe_start(
@@ -4210,12 +4296,6 @@ fn parse_file_sink(spec: &str) -> Result<PathBuf> {
     let path = PathBuf::from(path);
     validate_subscription_sink_path(&path)?;
     Ok(path)
-}
-
-fn internal_memory_sink_path(job_id: &str) -> PathBuf {
-    daemon_dir()
-        .join("subscription-events")
-        .join(format!("{}.ndjson", job_id))
 }
 
 fn sink_is_memory(spec: &str) -> bool {
@@ -6453,6 +6533,17 @@ pub async fn source_status_client(
 }
 
 #[cfg(unix)]
+pub async fn source_list_client() -> Result<Vec<ManagedSourceListEntry>> {
+    let value = client_call("source.list", None).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn source_list_client() -> Result<Vec<ManagedSourceListEntry>> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
 pub async fn source_stop_client(
     request: &ManagedSourceStatusRequest,
 ) -> Result<ManagedSourceStopResponse> {
@@ -7090,6 +7181,20 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 },
             }
         }
+        "source.list" => match runtime.source_list().await {
+            Ok(result) => JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: req.id,
+                result: Some(serde_json::to_value(result)?),
+                error: None,
+            },
+            Err(err) => JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: req.id,
+                result: None,
+                error: Some(jsonrpc_error_from_anyhow(&err)),
+            },
+        },
         "source.stop" => {
             let Some(params) = req.params else {
                 let resp = JsonRpcResponse {
@@ -9655,6 +9760,68 @@ mod tests {
             .any(|event| event.raw_payload == json!({"value":"persisted"})));
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_source_list_and_daemon_status_expose_overview_counts() {
+        let temp = tempdir().unwrap();
+        let (endpoint_one, _connects_one, server_task_one) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":"one"}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+        let (endpoint_two, _connects_two, server_task_two) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":"two"}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+
+        let runtime = test_runtime_with_store(&temp);
+        runtime
+            .source_ensure(ManagedSourceEnsureRequest {
+                namespace: "team".to_string(),
+                source_key: "alpha".to_string(),
+                spec: managed_source_spec(&endpoint_one),
+            })
+            .await
+            .unwrap();
+        runtime
+            .source_ensure(ManagedSourceEnsureRequest {
+                namespace: "team".to_string(),
+                source_key: "beta".to_string(),
+                spec: managed_source_spec(&endpoint_two),
+            })
+            .await
+            .unwrap();
+
+        let sources = runtime.source_list().await.unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].namespace, "team");
+        assert_eq!(sources[0].source_key, "alpha");
+        assert_eq!(sources[1].source_key, "beta");
+
+        let status = runtime.status().await;
+        assert_eq!(status.managed_sources, 2);
+        assert_eq!(status.managed_sources_running, 2);
+        assert_eq!(status.managed_streams, 2);
+
+        runtime
+            .source_stop(&ManagedSourceStatusRequest {
+                namespace: "team".to_string(),
+                source_key: "beta".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let status_after_stop = runtime.status().await;
+        assert_eq!(status_after_stop.managed_sources, 2);
+        assert_eq!(status_after_stop.managed_sources_running, 1);
+        assert_eq!(status_after_stop.managed_streams, 2);
+
+        server_task_one.abort();
+        server_task_two.abort();
     }
 }
 
