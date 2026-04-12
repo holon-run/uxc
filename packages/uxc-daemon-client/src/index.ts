@@ -163,6 +163,16 @@ export interface ManagedSourceView {
   last_error?: string | null;
 }
 
+export interface ManagedSourceListEntry {
+  namespace: string;
+  source_key: string;
+  status: string;
+  run_id: string;
+  stream_id: string;
+  updated_at_unix: number;
+  last_error?: string | null;
+}
+
 export interface ManagedSourceStopResponse {
   namespace: string;
   source_key: string;
@@ -239,6 +249,9 @@ export interface DaemonStatus {
   mcp_stdio_sessions: number;
   mcp_http_sessions: number;
   mcp_reuse_hits: number;
+  managed_sources: number;
+  managed_sources_running: number;
+  managed_streams: number;
   log_file?: string | null;
 }
 
@@ -476,6 +489,10 @@ export class UxcDaemonClient {
       namespace,
       source_key: sourceKey,
     });
+  }
+
+  async sourceList(): Promise<ManagedSourceListEntry[]> {
+    return this.request("source.list");
   }
 
   async sourceStop(namespace: string, sourceKey: string): Promise<ManagedSourceStopResponse> {

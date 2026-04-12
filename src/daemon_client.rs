@@ -1,12 +1,12 @@
 use crate::auth::injected_env::InjectEnvSpec;
 use crate::daemon::{
     self, DaemonSessionView, DaemonStatus, ManagedSourceEnsureRequest, ManagedSourceEnsureResponse,
-    ManagedSourceSpec, ManagedSourceStatusRequest, ManagedSourceStopResponse, ManagedSourceView,
-    ManagedStreamInfo, ManagedStreamReadRequest, ManagedStreamReadResponse,
-    ManagedStreamTrimRequest, ManagedStreamTrimResponse, RuntimeAction, RuntimeInvokeOptions,
-    RuntimeInvokeRequest, RuntimeInvokeResponse, SubscribeStartRequest, SubscribeStartResponse,
-    SubscribeStopResponse, SubscriptionEventsRequest, SubscriptionEventsResponse,
-    SubscriptionJobView, SubscriptionMode, SubscriptionTransportHint,
+    ManagedSourceListEntry, ManagedSourceSpec, ManagedSourceStatusRequest,
+    ManagedSourceStopResponse, ManagedSourceView, ManagedStreamInfo, ManagedStreamReadRequest,
+    ManagedStreamReadResponse, ManagedStreamTrimRequest, ManagedStreamTrimResponse, RuntimeAction,
+    RuntimeInvokeOptions, RuntimeInvokeRequest, RuntimeInvokeResponse, SubscribeStartRequest,
+    SubscribeStartResponse, SubscribeStopResponse, SubscriptionEventsRequest,
+    SubscriptionEventsResponse, SubscriptionJobView, SubscriptionMode, SubscriptionTransportHint,
 };
 use anyhow::Result;
 use serde_json::Value;
@@ -183,6 +183,10 @@ impl DaemonClient {
             source_key: source_key.into(),
         })
         .await
+    }
+
+    pub async fn source_list(&self) -> Result<Vec<ManagedSourceListEntry>> {
+        daemon::source_list_client().await
     }
 
     pub async fn source_stop(

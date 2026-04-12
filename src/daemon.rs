@@ -384,6 +384,17 @@ pub struct ManagedSourceView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceListEntry {
+    pub namespace: String,
+    pub source_key: String,
+    pub status: String,
+    pub run_id: String,
+    pub stream_id: String,
+    pub updated_at_unix: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedSourceStopResponse {
     pub namespace: String,
     pub source_key: String,
@@ -518,6 +529,9 @@ pub struct DaemonStatus {
     pub mcp_stdio_sessions: usize,
     pub mcp_http_sessions: usize,
     pub mcp_reuse_hits: u64,
+    pub managed_sources: usize,
+    pub managed_sources_running: usize,
+    pub managed_streams: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_file: Option<String>,
 }
@@ -2897,6 +2911,20 @@ impl ManagedSourceManager {
         Ok(view_from_record(&record))
     }
 
+    async fn list(&self) -> Result<Vec<ManagedSourceListEntry>> {
+        let records = self.store.load_sources().await?;
+        Ok(records.iter().map(list_entry_from_record).collect())
+    }
+
+    async fn summary(&self) -> Result<(usize, usize, usize)> {
+        let summary = self.store.summary().await?;
+        Ok((
+            summary.source_count,
+            summary.running_source_count,
+            summary.stream_count,
+        ))
+    }
+
     async fn stop(
         &self,
         runtime: &DaemonRuntime,
@@ -3382,6 +3410,18 @@ fn view_from_record(record: &ManagedSourceRecord) -> ManagedSourceView {
     }
 }
 
+fn list_entry_from_record(record: &ManagedSourceRecord) -> ManagedSourceListEntry {
+    ManagedSourceListEntry {
+        namespace: record.namespace.clone(),
+        source_key: record.source_key.clone(),
+        status: record.status.clone(),
+        run_id: record.run_id.clone(),
+        stream_id: record.stream_id.clone(),
+        updated_at_unix: record.updated_at_unix,
+        last_error: record.last_error.clone(),
+    }
+}
+
 fn stream_event_view(record: StreamEventRecord) -> ManagedStreamEvent {
     ManagedStreamEvent {
         stream_id: record.stream_id,
@@ -3839,6 +3879,8 @@ impl DaemonRuntime {
     pub async fn status(&self) -> DaemonStatus {
         let state = self.state.lock().await;
         let (stdio_sessions, http_sessions, reuse_hits) = self.mcp.status_counts().await;
+        let (managed_sources, managed_sources_running, managed_streams) =
+            self.managed_sources.summary().await.unwrap_or((0, 0, 0));
         let log_file: Option<String> = self
             .logger
             .as_ref()
@@ -3853,12 +3895,19 @@ impl DaemonRuntime {
             mcp_stdio_sessions: stdio_sessions,
             mcp_http_sessions: http_sessions,
             mcp_reuse_hits: reuse_hits,
+            managed_sources,
+            managed_sources_running,
+            managed_streams,
             log_file,
         }
     }
 
     pub async fn session_views(&self) -> Vec<DaemonSessionView> {
         self.mcp.session_views().await
+    }
+
+    pub async fn source_list(&self) -> Result<Vec<ManagedSourceListEntry>> {
+        self.managed_sources.list().await
     }
 
     pub async fn subscribe_start(
@@ -6453,6 +6502,17 @@ pub async fn source_status_client(
 }
 
 #[cfg(unix)]
+pub async fn source_list_client() -> Result<Vec<ManagedSourceListEntry>> {
+    let value = client_call("source.list", None).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn source_list_client() -> Result<Vec<ManagedSourceListEntry>> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
 pub async fn source_stop_client(
     request: &ManagedSourceStatusRequest,
 ) -> Result<ManagedSourceStopResponse> {
@@ -7090,6 +7150,20 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 },
             }
         }
+        "source.list" => match runtime.source_list().await {
+            Ok(result) => JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: req.id,
+                result: Some(serde_json::to_value(result)?),
+                error: None,
+            },
+            Err(err) => JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: req.id,
+                result: None,
+                error: Some(jsonrpc_error_from_anyhow(&err)),
+            },
+        },
         "source.stop" => {
             let Some(params) = req.params else {
                 let resp = JsonRpcResponse {
@@ -9655,6 +9729,68 @@ mod tests {
             .any(|event| event.raw_payload == json!({"value":"persisted"})));
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_source_list_and_daemon_status_expose_overview_counts() {
+        let temp = tempdir().unwrap();
+        let (endpoint_one, _connects_one, server_task_one) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":"one"}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+        let (endpoint_two, _connects_two, server_task_two) =
+            start_test_websocket_server(vec![TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":"two"}"#)],
+                hold_open_after_send: true,
+            }])
+            .await;
+
+        let runtime = test_runtime_with_store(&temp);
+        runtime
+            .source_ensure(ManagedSourceEnsureRequest {
+                namespace: "team".to_string(),
+                source_key: "alpha".to_string(),
+                spec: managed_source_spec(&endpoint_one),
+            })
+            .await
+            .unwrap();
+        runtime
+            .source_ensure(ManagedSourceEnsureRequest {
+                namespace: "team".to_string(),
+                source_key: "beta".to_string(),
+                spec: managed_source_spec(&endpoint_two),
+            })
+            .await
+            .unwrap();
+
+        let sources = runtime.source_list().await.unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].namespace, "team");
+        assert_eq!(sources[0].source_key, "alpha");
+        assert_eq!(sources[1].source_key, "beta");
+
+        let status = runtime.status().await;
+        assert_eq!(status.managed_sources, 2);
+        assert_eq!(status.managed_sources_running, 2);
+        assert_eq!(status.managed_streams, 2);
+
+        runtime
+            .source_stop(&ManagedSourceStatusRequest {
+                namespace: "team".to_string(),
+                source_key: "beta".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let status_after_stop = runtime.status().await;
+        assert_eq!(status_after_stop.managed_sources, 2);
+        assert_eq!(status_after_stop.managed_sources_running, 1);
+        assert_eq!(status_after_stop.managed_streams, 2);
+
+        server_task_one.abort();
+        server_task_two.abort();
     }
 }
 

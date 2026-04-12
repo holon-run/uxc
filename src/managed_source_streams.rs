@@ -66,6 +66,13 @@ pub struct StreamInfoRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct ManagedSourceStoreSummary {
+    pub source_count: usize,
+    pub running_source_count: usize,
+    pub stream_count: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct SourceRuntimeUpdate {
     pub status: String,
     pub updated_at_unix: u64,
@@ -181,6 +188,29 @@ impl ManagedSourceStore {
                 out.push(row?);
             }
             Ok(out)
+        })
+        .await?
+    }
+
+    pub async fn summary(&self) -> Result<ManagedSourceStoreSummary> {
+        let _guard = self.gate.lock().await;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            let source_count: usize =
+                conn.query_row("select count(*) from managed_sources", [], |row| row.get(0))?;
+            let running_source_count: usize = conn.query_row(
+                "select count(*) from managed_sources where status = 'running'",
+                [],
+                |row| row.get(0),
+            )?;
+            let stream_count: usize =
+                conn.query_row("select count(*) from event_streams", [], |row| row.get(0))?;
+            Ok(ManagedSourceStoreSummary {
+                source_count,
+                running_source_count,
+                stream_count,
+            })
         })
         .await?
     }

@@ -838,7 +838,25 @@ fn source_help_flag_outputs_subcommand_help_json() {
     assert!(json["data"]["usage"]
         .as_str()
         .unwrap_or_default()
-        .contains("uxc source <ensure|status|stop|delete>"));
+        .contains("uxc source <list|ensure|status|stop|delete>"));
+}
+
+#[test]
+#[serial]
+fn source_list_help_flag_outputs_subcommand_help_json() {
+    let output = uxc_command()
+        .arg("source")
+        .arg("list")
+        .arg("--help")
+        .output()
+        .expect("failed to run uxc source list --help");
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc source list");
+    assert_eq!(json["data"]["usage"], "uxc source list");
 }
 
 #[test]
