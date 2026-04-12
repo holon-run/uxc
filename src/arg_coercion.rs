@@ -17,6 +17,19 @@ pub async fn prepare_execute_args(
     operation_id: &str,
     raw_args: HashMap<String, Value>,
 ) -> Result<HashMap<String, Value>> {
+    prepare_execute_args_with_adapter(adapter, endpoint, operation_id, raw_args).await
+}
+
+async fn prepare_execute_args_with_adapter<A: Adapter + Sync>(
+    adapter: &A,
+    endpoint: &str,
+    operation_id: &str,
+    raw_args: HashMap<String, Value>,
+) -> Result<HashMap<String, Value>> {
+    if raw_args.is_empty() {
+        return Ok(raw_args);
+    }
+
     let detail = match adapter.describe_operation(endpoint, operation_id).await {
         Ok(detail) => detail,
         Err(_) => return Ok(raw_args),
@@ -598,6 +611,12 @@ fn render_value(value: &Value) -> String {
 mod tests {
     use super::*;
     use crate::adapters::Parameter;
+    use crate::adapters::{Adapter, ExecutionResult};
+    use async_trait::async_trait;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     fn graphql_detail() -> OperationDetail {
         OperationDetail {
@@ -717,5 +736,76 @@ mod tests {
 
         let schema = normalize_openapi_schema(&detail).unwrap();
         assert_eq!(schema.root["properties"]["limit"]["type"], "integer");
+    }
+
+    struct StubAdapter {
+        describe_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Adapter for StubAdapter {
+        fn protocol_type(&self) -> ProtocolType {
+            ProtocolType::Mcp
+        }
+
+        async fn can_handle(&self, _url: &str) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn fetch_schema(&self, _url: &str) -> Result<Value> {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn list_operations(&self, _url: &str) -> Result<Vec<crate::adapters::Operation>> {
+            Ok(Vec::new())
+        }
+
+        async fn describe_operation(
+            &self,
+            _url: &str,
+            _operation: &str,
+        ) -> Result<OperationDetail> {
+            self.describe_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(OperationDetail {
+                operation_id: "noop".to_string(),
+                display_name: "noop".to_string(),
+                description: None,
+                parameters: Vec::new(),
+                return_type: None,
+                input_schema: None,
+            })
+        }
+
+        async fn execute(
+            &self,
+            _url: &str,
+            _operation: &str,
+            _args: HashMap<String, Value>,
+        ) -> Result<ExecutionResult> {
+            Ok(ExecutionResult {
+                data: Value::Null,
+                metadata: crate::adapters::ExecutionMetadata {
+                    duration_ms: 0,
+                    operation: "noop".to_string(),
+                    response_status_code: None,
+                    response_headers: HashMap::new(),
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_args_skip_describe_operation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stub = StubAdapter {
+            describe_calls: calls.clone(),
+        };
+
+        let result = prepare_execute_args_with_adapter(&stub, "ignored", "noop", HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(result.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }
