@@ -255,6 +255,12 @@ export interface DaemonStatus {
   log_file?: string | null;
 }
 
+export interface DaemonSessionKillResponse {
+  session_key: string;
+  child_pid?: number | null;
+  killed: boolean;
+}
+
 export interface SubscriptionEventsResponse {
   job_id: string;
   status: string;
@@ -360,6 +366,10 @@ export class UxcDaemonClient {
 
   async daemonSessions(): Promise<unknown[]> {
     return this.request("daemon.sessions");
+  }
+
+  async daemonSessionKill(sessionKey: string): Promise<DaemonSessionKillResponse> {
+    return this.request("daemon.session.kill", { session_key: sessionKey });
   }
 
   async call(args: {

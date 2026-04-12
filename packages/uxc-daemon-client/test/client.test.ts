@@ -50,6 +50,35 @@ describe("UxcDaemonClient", () => {
     expect(status.socket).toContain("uxc.sock");
   });
 
+  test("daemonSessionKill sends daemon.session.kill with session key", async () => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    const calls: Array<{ method: string; params: unknown }> = [];
+    (stub as unknown as { request: (method: string, params?: unknown) => Promise<unknown> }).request = async (
+      method,
+      params,
+    ) => {
+      calls.push({ method, params });
+      return {
+        session_key: "stdio:0123456789abcdef",
+        child_pid: 4242,
+        killed: true,
+      };
+    };
+
+    const response = await stub.daemonSessionKill("stdio:0123456789abcdef");
+    expect(response).toEqual({
+      session_key: "stdio:0123456789abcdef",
+      child_pid: 4242,
+      killed: true,
+    });
+    expect(calls).toEqual([
+      {
+        method: "daemon.session.kill",
+        params: { session_key: "stdio:0123456789abcdef" },
+      },
+    ]);
+  });
+
   test("call executes OpenAPI operations without CLI envelope parsing", async () => {
     const server = createOpenApiServer();
     await server.start();

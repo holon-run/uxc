@@ -1,12 +1,13 @@
 use crate::auth::injected_env::InjectEnvSpec;
 use crate::daemon::{
-    self, DaemonSessionView, DaemonStatus, ManagedSourceEnsureRequest, ManagedSourceEnsureResponse,
-    ManagedSourceListEntry, ManagedSourceSpec, ManagedSourceStatusRequest,
-    ManagedSourceStopResponse, ManagedSourceView, ManagedStreamInfo, ManagedStreamReadRequest,
-    ManagedStreamReadResponse, ManagedStreamTrimRequest, ManagedStreamTrimResponse, RuntimeAction,
-    RuntimeInvokeOptions, RuntimeInvokeRequest, RuntimeInvokeResponse, SubscribeStartRequest,
-    SubscribeStartResponse, SubscribeStopResponse, SubscriptionEventsRequest,
-    SubscriptionEventsResponse, SubscriptionJobView, SubscriptionMode, SubscriptionTransportHint,
+    self, DaemonSessionKillRequest, DaemonSessionKillResponse, DaemonSessionView, DaemonStatus,
+    ManagedSourceEnsureRequest, ManagedSourceEnsureResponse, ManagedSourceListEntry,
+    ManagedSourceSpec, ManagedSourceStatusRequest, ManagedSourceStopResponse, ManagedSourceView,
+    ManagedStreamInfo, ManagedStreamReadRequest, ManagedStreamReadResponse,
+    ManagedStreamTrimRequest, ManagedStreamTrimResponse, RuntimeAction, RuntimeInvokeOptions,
+    RuntimeInvokeRequest, RuntimeInvokeResponse, SubscribeStartRequest, SubscribeStartResponse,
+    SubscribeStopResponse, SubscriptionEventsRequest, SubscriptionEventsResponse,
+    SubscriptionJobView, SubscriptionMode, SubscriptionTransportHint,
 };
 use anyhow::Result;
 use serde_json::Value;
@@ -87,6 +88,16 @@ impl DaemonClient {
 
     pub async fn daemon_sessions(&self) -> Result<Vec<DaemonSessionView>> {
         daemon::daemon_sessions_client().await
+    }
+
+    pub async fn daemon_session_kill(
+        &self,
+        session_key: impl Into<String>,
+    ) -> Result<DaemonSessionKillResponse> {
+        daemon::daemon_session_kill_client(&DaemonSessionKillRequest {
+            session_key: session_key.into(),
+        })
+        .await
     }
 
     pub async fn call(

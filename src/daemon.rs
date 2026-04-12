@@ -591,6 +591,18 @@ pub struct DaemonSessionView {
     pub recent_stderr: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonSessionKillRequest {
+    pub session_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonSessionKillResponse {
+    pub session_key: String,
+    pub child_pid: Option<u32>,
+    pub killed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LifecycleContractView {
     pub reap_policy: adapters::mcp::LifecycleReapPolicy,
@@ -2058,6 +2070,95 @@ impl McpSessionManager {
             .collect::<Vec<_>>();
         views.sort_by(|a, b| a.session_key.cmp(&b.session_key));
         views
+    }
+
+    async fn resolve_stdio_session_key(&self, requested_session_key: &str) -> Result<String> {
+        let map = self.stdio.lock().await;
+        let matches = map
+            .keys()
+            .filter(|session_key| {
+                session_key.as_str() == requested_session_key
+                    || display_session_key(session_key) == requested_session_key
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        drop(map);
+
+        match matches.as_slice() {
+            [session_key] => Ok(session_key.clone()),
+            [] => Err(UxcError::OperationNotFound(format!(
+                "daemon session not found: {}",
+                requested_session_key
+            ))
+            .into()),
+            _ => Err(UxcError::InvalidArguments(format!(
+                "daemon session identifier is ambiguous: {}",
+                requested_session_key
+            ))
+            .into()),
+        }
+    }
+
+    async fn kill_stdio_session(
+        &self,
+        requested_session_key: &str,
+    ) -> Result<DaemonSessionKillResponse> {
+        let session_key = self
+            .resolve_stdio_session_key(requested_session_key)
+            .await?;
+        let session = {
+            let mut map = self.stdio.lock().await;
+            map.remove(&session_key)
+        }
+        .ok_or_else(|| {
+            UxcError::OperationNotFound(format!(
+                "daemon session not found: {}",
+                requested_session_key
+            ))
+        })?;
+
+        let mut guard = session.lock().await;
+        let child_pid = guard.child_pid;
+        let recent_stderr = redact_recent_stderr(guard.client.recent_stderr_lines(5).await);
+        let kill_result = guard
+            .client
+            .kill_and_wait(Duration::from_secs(MCP_STDIO_EXIT_TIMEOUT_SECS))
+            .await;
+        drop(guard);
+
+        self.cleanup_stdio_exclusive_for_session_key(&session_key)
+            .await;
+
+        match kill_result {
+            Ok(()) => {
+                self.remove_stdio_snapshot(&session_key, "explicit_killed", None)
+                    .await;
+                Ok(DaemonSessionKillResponse {
+                    session_key: display_session_key(&session_key),
+                    child_pid,
+                    killed: true,
+                })
+            }
+            Err(err) => {
+                let error_message = format!("failed to kill daemon session: {}", err);
+                self.upsert_stdio_snapshot(&session_key, |snapshot| {
+                    snapshot.reuse_eligible = false;
+                    snapshot.last_error_summary = Some(error_message.clone());
+                    snapshot.recent_stderr = recent_stderr.clone();
+                })
+                .await;
+                self.remove_stdio_snapshot(
+                    &session_key,
+                    "explicit_kill_failed",
+                    Some(error_message.clone()),
+                )
+                .await;
+                Err(err.context(format!(
+                    "Failed to kill daemon session {}",
+                    display_session_key(&session_key)
+                )))
+            }
+        }
     }
 }
 
@@ -3941,6 +4042,13 @@ impl DaemonRuntime {
 
     pub async fn session_views(&self) -> Vec<DaemonSessionView> {
         self.mcp.session_views().await
+    }
+
+    pub async fn session_kill(
+        &self,
+        request: &DaemonSessionKillRequest,
+    ) -> Result<DaemonSessionKillResponse> {
+        self.mcp.kill_stdio_session(&request.session_key).await
     }
 
     pub async fn source_list(&self) -> Result<Vec<ManagedSourceListEntry>> {
@@ -6410,6 +6518,21 @@ pub async fn daemon_sessions_client() -> Result<Vec<DaemonSessionView>> {
 }
 
 #[cfg(unix)]
+pub async fn daemon_session_kill_client(
+    request: &DaemonSessionKillRequest,
+) -> Result<DaemonSessionKillResponse> {
+    let value = client_call("daemon.session.kill", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn daemon_session_kill_client(
+    _request: &DaemonSessionKillRequest,
+) -> Result<DaemonSessionKillResponse> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
 pub async fn daemon_stop_client() -> Result<()> {
     let _ = client_call("daemon.shutdown", None).await?;
     Ok(())
@@ -6858,6 +6981,46 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 jsonrpc: JSONRPC_VERSION.to_string(),
                 id: req.id,
                 result: Some(serde_json::to_value(sessions)?),
+                error: None,
+            }
+        }
+        "daemon.session.kill" => {
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                        data: None,
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let request: DaemonSessionKillRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                            data: None,
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
+            let killed = runtime.session_kill(&request).await?;
+            JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: req.id,
+                result: Some(serde_json::to_value(killed)?),
                 error: None,
             }
         }
@@ -7440,6 +7603,12 @@ pub async fn daemon_status_local() -> Result<DaemonStatus> {
 
 pub async fn daemon_sessions_local() -> Result<Vec<DaemonSessionView>> {
     daemon_sessions_client().await
+}
+
+pub async fn daemon_session_kill_local(
+    request: &DaemonSessionKillRequest,
+) -> Result<DaemonSessionKillResponse> {
+    daemon_session_kill_client(request).await
 }
 
 pub async fn daemon_start_local() -> Result<EnsureDaemonOutcome> {

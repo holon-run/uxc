@@ -78,6 +78,29 @@ fn global_help_flag_works() {
 
 #[test]
 #[serial]
+fn daemon_session_kill_help_outputs_json() {
+    let output = uxc_command()
+        .arg("daemon")
+        .arg("session")
+        .arg("kill")
+        .arg("-h")
+        .output()
+        .expect("failed to run uxc daemon session kill -h");
+
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc daemon session kill");
+    assert_eq!(
+        json["data"]["usage"],
+        "uxc daemon session kill <SESSION_KEY>"
+    );
+}
+
+#[test]
+#[serial]
 fn help_subcommand_defaults_to_json() {
     let output = uxc_command()
         .arg("help")
