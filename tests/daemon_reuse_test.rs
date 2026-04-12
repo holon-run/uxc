@@ -206,6 +206,124 @@ fn daemon_sessions_lists_live_stdio_session_diagnostics() {
 
 #[test]
 #[serial]
+fn daemon_session_kill_removes_live_stdio_session_from_reuse_pool() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let bin = test_server_binary("mcp-stdio");
+    let endpoint = format!("{} ok", bin.display());
+
+    let start = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let first = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"seed"}"#)
+        .output()
+        .expect("first call should run");
+    assert!(first.status.success());
+
+    let sessions = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("sessions")
+        .output()
+        .expect("daemon sessions should run");
+    assert!(sessions.status.success());
+    let sessions_json: serde_json::Value =
+        serde_json::from_slice(&sessions.stdout).expect("valid daemon sessions json");
+    let entries = sessions_json["data"]
+        .as_array()
+        .expect("session list should be an array");
+    assert_eq!(entries.len(), 1, "expected one stdio session");
+    let session_key = entries[0]["session_key"]
+        .as_str()
+        .expect("session_key should be present")
+        .to_string();
+    let first_pid = entries[0]["child_pid"]
+        .as_u64()
+        .expect("child pid should be present");
+
+    let kill = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("session")
+        .arg("kill")
+        .arg(&session_key)
+        .output()
+        .expect("daemon session kill should run");
+    assert!(
+        kill.status.success(),
+        "kill should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&kill.stdout),
+        String::from_utf8_lossy(&kill.stderr)
+    );
+    let kill_json: serde_json::Value =
+        serde_json::from_slice(&kill.stdout).expect("valid daemon session kill json");
+    assert_eq!(kill_json["ok"], true);
+    assert_eq!(kill_json["kind"], "daemon_session_kill_result");
+    assert_eq!(kill_json["data"]["session_key"], session_key);
+    assert_eq!(kill_json["data"]["killed"], true);
+    assert_eq!(
+        kill_json["data"]["child_pid"]
+            .as_u64()
+            .expect("child pid should be returned"),
+        first_pid
+    );
+
+    let sessions_after_kill = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("sessions")
+        .output()
+        .expect("daemon sessions after kill should run");
+    assert!(sessions_after_kill.status.success());
+    let sessions_after_kill_json: serde_json::Value =
+        serde_json::from_slice(&sessions_after_kill.stdout).expect("valid daemon sessions json");
+    let entries_after_kill = sessions_after_kill_json["data"]
+        .as_array()
+        .expect("session list should be an array");
+    assert!(
+        entries_after_kill.is_empty(),
+        "expected killed session to be removed from daemon sessions"
+    );
+
+    let second = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"after-kill"}"#)
+        .output()
+        .expect("second call should run");
+    assert!(second.status.success());
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second stdout should be valid JSON");
+    assert_ne!(second_json["meta"]["daemon_session_reused"], true);
+
+    let sessions_after_restart = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("sessions")
+        .output()
+        .expect("daemon sessions after restart should run");
+    assert!(sessions_after_restart.status.success());
+    let sessions_after_restart_json: serde_json::Value =
+        serde_json::from_slice(&sessions_after_restart.stdout).expect("valid daemon sessions json");
+    let recreated_pid = sessions_after_restart_json["data"][0]["child_pid"]
+        .as_u64()
+        .expect("child pid should be present");
+    assert_ne!(
+        recreated_pid, first_pid,
+        "expected a fresh MCP child process"
+    );
+
+    daemon_stop_best_effort_with_home(temp_home.path());
+}
+
+#[test]
+#[serial]
 fn daemon_sessions_surface_link_source_metadata() {
     daemon_stop_best_effort();
 

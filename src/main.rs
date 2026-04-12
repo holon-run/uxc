@@ -286,11 +286,26 @@ enum DaemonCommands {
     Status,
     /// List MCP daemon sessions
     Sessions,
+    /// Manage one daemon-backed MCP session
+    Session {
+        #[command(subcommand)]
+        session_command: DaemonSessionCommands,
+    },
     /// Restart daemon process (stop if running, then start)
     Restart,
     /// Internal daemon server entrypoint
     #[command(name = "_serve", hide = true)]
     Serve,
+}
+
+#[derive(Subcommand)]
+enum DaemonSessionCommands {
+    /// Kill one daemon-backed MCP session by session key
+    Kill {
+        /// Session key from `uxc daemon sessions`
+        #[arg(value_name = "SESSION_KEY")]
+        session_key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1544,8 +1559,19 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
         }
         "daemon" => {
             if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
-                if matches!(level1, "start" | "stop" | "status" | "restart" | "_serve") {
-                    path.push(level1.to_string());
+                match level1 {
+                    "start" | "stop" | "status" | "sessions" | "restart" | "_serve" => {
+                        path.push(level1.to_string());
+                    }
+                    "session" => {
+                        path.push("session".to_string());
+                        if let Some(level2) = tokens.get(idx + 1).map(|s| s.as_str()) {
+                            if matches!(level2, "kill") {
+                                path.push(level2.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1666,6 +1692,9 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             DaemonCommands::Stop => Some(vec!["daemon", "stop"]),
             DaemonCommands::Status => Some(vec!["daemon", "status"]),
             DaemonCommands::Sessions => Some(vec!["daemon", "sessions"]),
+            DaemonCommands::Session { session_command } => match session_command {
+                DaemonSessionCommands::Kill { .. } => Some(vec!["daemon", "session", "kill"]),
+            },
             DaemonCommands::Restart => Some(vec!["daemon", "restart"]),
             DaemonCommands::Serve => Some(vec!["daemon", "_serve"]),
         },
@@ -2176,12 +2205,13 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["daemon"] => HelpData {
             path: "uxc daemon".to_string(),
             about: "Manage local runtime daemon".to_string(),
-            usage: "uxc daemon <start|stop|status|sessions|restart>".to_string(),
+            usage: "uxc daemon <start|stop|status|sessions|session|restart>".to_string(),
             commands: commands(&[
                 ("start", "Start daemon process"),
                 ("stop", "Stop daemon process"),
                 ("status", "Show daemon status"),
                 ("sessions", "List daemon MCP sessions"),
+                ("session", "Manage one daemon-backed MCP session"),
                 ("restart", "Restart daemon process"),
             ]),
             notes: vec![
@@ -2193,6 +2223,20 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "uxc daemon start".to_string(),
                 "uxc daemon stop".to_string(),
                 "uxc daemon restart".to_string(),
+            ],
+        },
+        ["daemon", "session"] => HelpData {
+            path: "uxc daemon session".to_string(),
+            about: "Manage one daemon-backed MCP session".to_string(),
+            usage: "uxc daemon session <kill> ...".to_string(),
+            commands: commands(&[("kill", "Kill one daemon-backed MCP session by session key")]),
+            notes: vec![
+                "Use `uxc daemon sessions` to discover session keys before killing a session."
+                    .to_string(),
+            ],
+            examples: vec![
+                "uxc daemon sessions".to_string(),
+                "uxc daemon session kill stdio:0123456789abcdef".to_string(),
             ],
         },
         ["daemon", "start"] => HelpData {
@@ -2229,6 +2273,20 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                     .to_string(),
             ],
             examples: vec!["uxc daemon sessions".to_string()],
+        },
+        ["daemon", "session", "kill"] => HelpData {
+            path: "uxc daemon session kill".to_string(),
+            about: "Kill one daemon-backed MCP session by session key".to_string(),
+            usage: "uxc daemon session kill <SESSION_KEY>".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Session keys come from `uxc daemon sessions`; the daemon kills the backing MCP child and removes the session from reuse."
+                    .to_string(),
+            ],
+            examples: vec![
+                "uxc daemon sessions".to_string(),
+                "uxc daemon session kill stdio:0123456789abcdef".to_string(),
+            ],
         },
         ["daemon", "restart"] => HelpData {
             path: "uxc daemon restart".to_string(),
@@ -5442,6 +5500,23 @@ async fn handle_daemon_command(command: &DaemonCommands) -> Result<OutputEnvelop
                 None,
             ))
         }
+        DaemonCommands::Session { session_command } => match session_command {
+            DaemonSessionCommands::Kill { session_key } => {
+                let response =
+                    daemon::daemon_session_kill_local(&daemon::DaemonSessionKillRequest {
+                        session_key: session_key.clone(),
+                    })
+                    .await?;
+                Ok(OutputEnvelope::success(
+                    "daemon_session_kill_result",
+                    "cli",
+                    "uxc",
+                    None,
+                    serde_json::to_value(response)?,
+                    None,
+                ))
+            }
+        },
         DaemonCommands::Restart => {
             let stopped = daemon::daemon_stop_local().await?;
             let outcome = daemon::daemon_start_local().await?;
