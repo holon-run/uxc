@@ -42,6 +42,7 @@ use crate::subscription_websocket::{
     self, RawFrameHandler, WebSocketRunError, WebSocketRuntimeConfig, WebSocketRuntimeObserver,
 };
 use anyhow::{anyhow, bail, Context, Result};
+use fs2::FileExt;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -49,7 +50,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream as StdUnixStream;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
@@ -70,6 +73,7 @@ const START_POLL_INTERVAL_MS: u64 = 100;
 const STOP_POLL_TRIES: usize = 50;
 const STOP_POLL_INTERVAL_MS: u64 = 100;
 const START_LOCK_STALE_SECS: u64 = 30;
+const DAEMON_OWNER_TERM_SIGNAL: i32 = 15;
 const STDIO_INIT_LOCK_STALE_SECS: u64 = 30;
 const MCP_IDLE_TTL_SECS: u64 = 600;
 const MCP_IDLE_CLEANUP_INTERVAL_MS: u64 = 500;
@@ -110,6 +114,7 @@ const ERR_RUNTIME_GENERIC: i32 = -32030;
 #[cfg(unix)]
 unsafe extern "C" {
     fn setsid() -> std::ffi::c_int;
+    fn kill(pid: i32, sig: i32) -> std::ffi::c_int;
 }
 
 pub fn daemon_supported() -> bool {
@@ -537,6 +542,52 @@ pub struct DaemonStatus {
     pub managed_streams: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_lock_held: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_pid_alive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_socket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_started_at_unix: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_exists: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DaemonOwnerMetadata {
+    pid: u32,
+    version: String,
+    socket: String,
+    started_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DaemonLocalDiagnostics {
+    pub socket: String,
+    pub socket_exists: bool,
+    pub owner_lock_held: bool,
+    pub owner_pid: Option<u32>,
+    pub owner_pid_alive: bool,
+    pub owner_version: Option<String>,
+    pub owner_socket: Option<String>,
+    pub owner_started_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonDoctorResponse {
+    pub status: String,
+    pub repaired: bool,
+    pub socket_removed: bool,
+    pub owner_metadata_cleared: bool,
+    pub socket: String,
+    pub diagnostics: DaemonLocalDiagnostics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4060,6 +4111,13 @@ impl DaemonRuntime {
             managed_sources_running,
             managed_streams,
             log_file,
+            owner_lock_held: Some(true),
+            owner_pid: Some(std::process::id()),
+            owner_pid_alive: Some(true),
+            owner_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            owner_socket: Some(socket_path().display().to_string()),
+            owner_started_at_unix: Some(state.started_at_unix),
+            socket_exists: Some(socket_path().exists()),
         }
     }
 
@@ -6770,6 +6828,30 @@ async fn start_daemon_process() -> Result<()> {
     let start_lock = try_acquire_start_lock(&lock_path)?;
     let got_lock = start_lock.is_some();
 
+    let diagnostics = inspect_daemon_local_diagnostics()?;
+    if diagnostics.owner_lock_held {
+        let code = if diagnostics.owner_pid_alive {
+            "DAEMON_OWNER_UNREACHABLE"
+        } else {
+            "DAEMON_OWNER_HELD"
+        };
+        let message = if diagnostics.owner_pid_alive {
+            format!(
+                "A live daemon owner already exists (pid={}) but is unreachable. Refusing to start a second daemon. Run `uxc daemon doctor`.",
+                diagnostics
+                    .owner_pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
+        } else {
+            "A daemon owner lock is still held. Refusing to start a second daemon. Run `uxc daemon doctor`."
+                .to_string()
+        };
+        return Err(
+            StructuredError::new(code, message, Some(serde_json::to_value(&diagnostics)?)).into(),
+        );
+    }
+
     if got_lock {
         let current_exe = std::env::current_exe().context("Cannot resolve current executable")?;
         let mut child_cmd = std::process::Command::new(current_exe);
@@ -6807,7 +6889,17 @@ async fn start_daemon_process() -> Result<()> {
         }
     }
 
+    let diagnostics = inspect_daemon_local_diagnostics()?;
     drop(start_lock);
+    if diagnostics.owner_lock_held {
+        return Err(StructuredError::new(
+            "DAEMON_OWNER_UNREACHABLE",
+            "Daemon owner exists but did not become reachable in time. Run `uxc daemon doctor`."
+                .to_string(),
+            Some(serde_json::to_value(diagnostics)?),
+        )
+        .into());
+    }
     bail!("Daemon failed to start. Run `uxc daemon status` for diagnostics.")
 }
 
@@ -6880,6 +6972,15 @@ pub async fn run_daemon_server() -> Result<()> {
     let dir = daemon_dir();
     ensure_private_dir(&dir)?;
     let socket = socket_path();
+    let mut owner_lock = DaemonOwnerLockGuard::acquire(
+        &daemon_lock_path(),
+        &DaemonOwnerMetadata {
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            socket: socket.display().to_string(),
+            started_at_unix: now_unix_secs(),
+        },
+    )?;
     if socket.exists() {
         let _ = fs::remove_file(&socket);
     }
@@ -6935,6 +7036,7 @@ pub async fn run_daemon_server() -> Result<()> {
         .log(DaemonLogEntry::new(DaemonEventType::DaemonStop))
         .await;
 
+    owner_lock.clear_metadata();
     let _ = fs::remove_file(&socket);
     Ok(())
 }
@@ -7643,13 +7745,65 @@ pub async fn daemon_session_kill_local(
     daemon_session_kill_client(request).await
 }
 
+pub fn daemon_doctor_local_result() -> Result<DaemonDoctorResponse> {
+    daemon_doctor_local()
+}
+
 pub async fn daemon_start_local() -> Result<EnsureDaemonOutcome> {
     ensure_compatible_daemon_running().await
 }
 
 pub async fn daemon_stop_local() -> Result<bool> {
     if daemon_status_client().await.is_err() {
-        return Ok(false);
+        let diagnostics = inspect_daemon_local_diagnostics()?;
+        if !diagnostics.owner_lock_held {
+            return Ok(false);
+        }
+
+        let pid = diagnostics.owner_pid.ok_or_else(|| {
+            StructuredError::new(
+                "DAEMON_OWNER_METADATA_MISSING",
+                "Daemon owner lock is held but owner pid metadata is missing. Run `uxc daemon doctor`."
+                    .to_string(),
+                Some(serde_json::to_value(&diagnostics).unwrap_or(Value::Null)),
+            )
+        })?;
+
+        if !diagnostics.owner_pid_alive {
+            return Err(StructuredError::new(
+                "DAEMON_OWNER_STALE",
+                "Daemon owner metadata is stale. Run `uxc daemon doctor`.".to_string(),
+                Some(serde_json::to_value(&diagnostics)?),
+            )
+            .into());
+        }
+
+        // SAFETY: kill with SIGTERM targets the owner pid discovered from local metadata.
+        if unsafe { kill(pid as i32, DAEMON_OWNER_TERM_SIGNAL) } == -1 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+
+        for _ in 0..STOP_POLL_TRIES {
+            tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
+            let diagnostics = inspect_daemon_local_diagnostics()?;
+            if !diagnostics.owner_lock_held {
+                let _ = clear_daemon_owner_metadata_path(&daemon_lock_path());
+                if socket_path().exists() {
+                    let _ = fs::remove_file(socket_path());
+                }
+                return Ok(true);
+            }
+        }
+
+        return Err(StructuredError::new(
+            "DAEMON_STOP_TIMEOUT",
+            format!(
+                "Daemon owner pid {} did not stop in time. Run `uxc daemon doctor`.",
+                pid
+            ),
+            Some(serde_json::to_value(diagnostics)?),
+        )
+        .into());
     }
     daemon_stop_client().await?;
     for _ in 0..STOP_POLL_TRIES {
@@ -7835,6 +7989,10 @@ fn daemon_dir() -> PathBuf {
 
 pub fn socket_path() -> PathBuf {
     daemon_dir().join("uxc.sock")
+}
+
+fn daemon_lock_path() -> PathBuf {
+    daemon_dir().join("daemon.lock")
 }
 
 fn subscription_store_path() -> PathBuf {
@@ -10104,6 +10262,53 @@ impl Drop for StartLockGuard {
     }
 }
 
+struct DaemonOwnerLockGuard {
+    file: fs::File,
+    path: PathBuf,
+}
+
+impl DaemonOwnerLockGuard {
+    fn acquire(path: &Path, metadata: &DaemonOwnerMetadata) -> Result<Self> {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .with_context(|| format!("Failed to open daemon owner lock {}", path.display()))?;
+
+        file.try_lock_exclusive().map_err(|_| {
+            StructuredError::new(
+                "DAEMON_OWNER_HELD",
+                format!(
+                    "Another daemon owner already holds {}. Run `uxc daemon doctor` for diagnostics.",
+                    path.display()
+                ),
+                Some(json!({
+                    "lock_path": path.display().to_string(),
+                })),
+            )
+        })?;
+
+        write_daemon_owner_metadata(&mut file, metadata)?;
+        Ok(Self {
+            file,
+            path: path.to_path_buf(),
+        })
+    }
+
+    fn clear_metadata(&mut self) {
+        let _ = clear_daemon_owner_metadata_file(&mut self.file);
+    }
+}
+
+impl Drop for DaemonOwnerLockGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+        let _ = &self.path;
+    }
+}
+
 fn try_acquire_start_lock(path: &Path) -> Result<Option<StartLockGuard>> {
     match fs::OpenOptions::new()
         .create_new(true)
@@ -10137,6 +10342,279 @@ fn lock_is_stale(path: &Path, max_age: Duration) -> Result<bool> {
         .duration_since(modified)
         .unwrap_or_default();
     Ok(age > max_age)
+}
+
+fn write_daemon_owner_metadata(file: &mut fs::File, metadata: &DaemonOwnerMetadata) -> Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.write_all(&serde_json::to_vec(metadata)?)?;
+    file.flush()?;
+    Ok(())
+}
+
+fn clear_daemon_owner_metadata_file(file: &mut fs::File) -> Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.flush()?;
+    Ok(())
+}
+
+fn clear_daemon_owner_metadata_path(path: &Path) -> Result<()> {
+    let mut file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    clear_daemon_owner_metadata_file(&mut file)
+}
+
+fn read_daemon_owner_metadata(path: &Path) -> Result<Option<DaemonOwnerMetadata>> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    if contents.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_slice(&contents)?))
+}
+
+fn daemon_lock_is_held(path: &Path) -> Result<bool> {
+    let file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            file.unlock()?;
+            Ok(false)
+        }
+        Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(true),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: kill(pid, 0) is a pure liveness probe.
+    let rc = unsafe { kill(pid as i32, 0) };
+    if rc == 0 {
+        return true;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(1) => true,  // EPERM
+        Some(3) => false, // ESRCH
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    false
+}
+
+fn inspect_daemon_local_diagnostics() -> Result<DaemonLocalDiagnostics> {
+    let lock_path = daemon_lock_path();
+    let socket = socket_path();
+    let metadata = read_daemon_owner_metadata(&lock_path)?;
+    let owner_lock_held = daemon_lock_is_held(&lock_path)?;
+    let owner_pid = metadata.as_ref().map(|m| m.pid);
+    let owner_pid_alive = owner_pid.map(is_process_alive).unwrap_or(false);
+
+    Ok(DaemonLocalDiagnostics {
+        socket: socket.display().to_string(),
+        socket_exists: socket.exists(),
+        owner_lock_held,
+        owner_pid,
+        owner_pid_alive,
+        owner_version: metadata.as_ref().map(|m| m.version.clone()),
+        owner_socket: metadata.as_ref().map(|m| m.socket.clone()),
+        owner_started_at_unix: metadata.as_ref().map(|m| m.started_at_unix),
+    })
+}
+
+pub fn daemon_status_from_diagnostics(diagnostics: &DaemonLocalDiagnostics) -> DaemonStatus {
+    DaemonStatus {
+        running: false,
+        pid: None,
+        socket: diagnostics.socket.clone(),
+        version: None,
+        started_at_unix: None,
+        request_count: 0,
+        mcp_stdio_sessions: 0,
+        mcp_http_sessions: 0,
+        mcp_reuse_hits: 0,
+        managed_sources: 0,
+        managed_sources_running: 0,
+        managed_streams: 0,
+        log_file: None,
+        owner_lock_held: Some(diagnostics.owner_lock_held),
+        owner_pid: diagnostics.owner_pid,
+        owner_pid_alive: Some(diagnostics.owner_pid_alive),
+        owner_version: diagnostics.owner_version.clone(),
+        owner_socket: diagnostics.owner_socket.clone(),
+        owner_started_at_unix: diagnostics.owner_started_at_unix,
+        socket_exists: Some(diagnostics.socket_exists),
+    }
+}
+
+fn doctor_message_for_diagnostics(diagnostics: &DaemonLocalDiagnostics, status: &str) -> String {
+    match status {
+        "healthy" => "Daemon is healthy.".to_string(),
+        "owner_unreachable" => format!(
+            "Live daemon owner exists (pid={}) but the daemon socket is unreachable. Refusing repair; run `uxc daemon stop` or inspect the owner process.",
+            diagnostics
+                .owner_pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+        "repaired" => "Removed stale daemon artifacts.".to_string(),
+        _ => "No live daemon owner found.".to_string(),
+    }
+}
+
+pub fn daemon_local_diagnostics() -> Result<DaemonLocalDiagnostics> {
+    inspect_daemon_local_diagnostics()
+}
+
+pub fn daemon_doctor_local() -> Result<DaemonDoctorResponse> {
+    if daemon_status_client_blocking().is_ok() {
+        let diagnostics = inspect_daemon_local_diagnostics()?;
+        return Ok(DaemonDoctorResponse {
+            status: "healthy".to_string(),
+            repaired: false,
+            socket_removed: false,
+            owner_metadata_cleared: false,
+            socket: diagnostics.socket.clone(),
+            diagnostics: diagnostics.clone(),
+            message: Some(doctor_message_for_diagnostics(&diagnostics, "healthy")),
+        });
+    }
+
+    let diagnostics = inspect_daemon_local_diagnostics()?;
+    if diagnostics.owner_lock_held && diagnostics.owner_pid_alive {
+        return Ok(DaemonDoctorResponse {
+            status: "owner_unreachable".to_string(),
+            repaired: false,
+            socket_removed: false,
+            owner_metadata_cleared: false,
+            socket: diagnostics.socket.clone(),
+            diagnostics: diagnostics.clone(),
+            message: Some(doctor_message_for_diagnostics(
+                &diagnostics,
+                "owner_unreachable",
+            )),
+        });
+    }
+
+    let mut repaired = false;
+    let mut socket_removed = false;
+    let mut owner_metadata_cleared = false;
+    let socket = socket_path();
+    if socket.exists() {
+        fs::remove_file(&socket).with_context(|| {
+            format!("Failed to remove stale daemon socket {}", socket.display())
+        })?;
+        repaired = true;
+        socket_removed = true;
+    }
+
+    let lock_path = daemon_lock_path();
+    if lock_path.exists() {
+        fs::remove_file(&lock_path).with_context(|| {
+            format!(
+                "Failed to remove stale daemon owner metadata {}",
+                lock_path.display()
+            )
+        })?;
+        repaired = true;
+        owner_metadata_cleared = true;
+    }
+
+    let diagnostics = inspect_daemon_local_diagnostics()?;
+    let status = if repaired { "repaired" } else { "clean" }.to_string();
+    Ok(DaemonDoctorResponse {
+        status: status.clone(),
+        repaired,
+        socket_removed,
+        owner_metadata_cleared,
+        socket: diagnostics.socket.clone(),
+        diagnostics: diagnostics.clone(),
+        message: Some(doctor_message_for_diagnostics(&diagnostics, &status)),
+    })
+}
+
+#[cfg(unix)]
+fn daemon_status_client_blocking() -> Result<DaemonStatus> {
+    let socket = socket_path();
+    let mut stream = StdUnixStream::connect(&socket)
+        .with_context(|| format!("Failed to connect daemon socket {}", socket.display()))?;
+    stream.set_read_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))?;
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 1,
+        "method": "daemon.status",
+        "params": Value::Null,
+    });
+    write_frame_blocking(&mut stream, &request)?;
+    let resp_val = read_frame_blocking(&mut stream)?;
+    let resp: JsonRpcResponse = serde_json::from_value(resp_val)?;
+    if let Some(err) = resp.error {
+        bail!("{}", err.message);
+    }
+    Ok(serde_json::from_value(resp.result.unwrap_or(Value::Null))?)
+}
+
+#[cfg(not(unix))]
+fn daemon_status_client_blocking() -> Result<DaemonStatus> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+fn write_frame_blocking(stream: &mut StdUnixStream, value: &Value) -> Result<()> {
+    let body = serde_json::to_vec(value)?;
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    stream.write_all(header.as_bytes())?;
+    stream.write_all(&body)?;
+    stream.flush()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_frame_blocking(stream: &mut StdUnixStream) -> Result<Value> {
+    use std::io::Read;
+
+    let mut header = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        let n = stream.read(&mut byte)?;
+        if n == 0 {
+            bail!("EOF while reading frame header");
+        }
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    let header_str = String::from_utf8(header)?;
+    let mut content_len = None;
+    for line in header_str.split("\r\n") {
+        if let Some(rest) = line.trim().strip_prefix("Content-Length:") {
+            content_len = Some(rest.trim().parse::<usize>()?);
+        }
+    }
+    let len = content_len.ok_or_else(|| anyhow!("Missing Content-Length header"))?;
+    let mut body = vec![0_u8; len];
+    stream.read_exact(&mut body)?;
+    Ok(serde_json::from_slice(&body)?)
 }
 
 fn ensure_private_dir(path: &Path) -> Result<()> {

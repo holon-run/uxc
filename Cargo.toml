@@ -57,6 +57,7 @@ axum = { version = "0.7", optional = true, features = ["ws"] }
 # Error Handling
 anyhow = "1.0"
 thiserror = "1.0"
+fs2 = "0.4"
 
 # Logging
 tracing = "0.1"
