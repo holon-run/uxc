@@ -722,6 +722,7 @@ struct McpStdioSession {
     link_skill_path: Option<String>,
     endpoint: String,
     daemon_exclusive: Vec<String>,
+    reuse_eligible: bool,
     lifecycle_contract: Option<LifecycleContractView>,
     lifecycle_contract_fetch_state: LifecycleContractFetchState,
     last_lifecycle_update_at_unix: Option<u64>,
@@ -1583,6 +1584,7 @@ impl McpSessionManager {
             link_skill_path: metadata.link_skill_path.map(str::to_string),
             endpoint: metadata.endpoint.to_string(),
             daemon_exclusive: exclusive_keys.clone(),
+            reuse_eligible: true,
             lifecycle_contract: lifecycle_contract.clone(),
             lifecycle_contract_fetch_state,
             last_lifecycle_update_at_unix: None,
@@ -1650,6 +1652,14 @@ impl McpSessionManager {
         exclusive_keys: &[String],
     ) -> Result<Option<(Arc<Mutex<McpStdioSession>>, bool)>> {
         let mut guard = session.lock().await;
+        if !guard.reuse_eligible {
+            let display_key = display_session_key(session_key);
+            return Err(UxcError::InvalidArguments(format!(
+                "Daemon-backed MCP session {} is unavailable after a failed explicit kill; retry `uxc daemon session kill {}` or run `uxc daemon stop`.",
+                display_key, display_key
+            ))
+            .into());
+        }
         let child_exited = guard.client.child_has_exited().unwrap_or(false);
         if child_exited {
             let recent_stderr = redact_recent_stderr(guard.client.recent_stderr_lines(5).await);
@@ -1688,6 +1698,7 @@ impl McpSessionManager {
         let idle_ttl_secs = guard.idle_ttl_secs;
         let last_used_at_unix = guard.last_used_at_unix;
         let daemon_exclusive = guard.daemon_exclusive.clone();
+        let reuse_eligible = guard.reuse_eligible;
         let lifecycle_contract = guard.lifecycle_contract.clone();
         let lifecycle_contract_fetch_state = guard.lifecycle_contract_fetch_state;
         let last_lifecycle_update_at_unix = guard.last_lifecycle_update_at_unix;
@@ -1703,6 +1714,7 @@ impl McpSessionManager {
             snapshot.idle_ttl_secs = idle_ttl_secs;
             snapshot.last_used_at_unix = last_used_at_unix;
             snapshot.daemon_exclusive = daemon_exclusive;
+            snapshot.reuse_eligible = reuse_eligible;
             snapshot.lifecycle_contract = lifecycle_contract;
             snapshot.lifecycle_contract_fetch_state = lifecycle_contract_fetch_state;
             snapshot.last_lifecycle_update_at_unix = last_lifecycle_update_at_unix;
@@ -2055,6 +2067,7 @@ impl McpSessionManager {
                     snapshot.last_lifecycle_update_at_unix = guard.last_lifecycle_update_at_unix;
                     snapshot.last_lifecycle_snapshot = guard.last_lifecycle_snapshot.clone();
                     snapshot.recent_stderr = recent_stderr;
+                    snapshot.reuse_eligible = guard.reuse_eligible;
                     if child_exited {
                         snapshot.reuse_eligible = false;
                     }
@@ -2107,8 +2120,8 @@ impl McpSessionManager {
             .resolve_stdio_session_key(requested_session_key)
             .await?;
         let session = {
-            let mut map = self.stdio.lock().await;
-            map.remove(&session_key)
+            let map = self.stdio.lock().await;
+            map.get(&session_key).cloned()
         }
         .ok_or_else(|| {
             UxcError::OperationNotFound(format!(
@@ -2119,18 +2132,26 @@ impl McpSessionManager {
 
         let mut guard = session.lock().await;
         let child_pid = guard.child_pid;
+        guard.reuse_eligible = false;
         let recent_stderr = redact_recent_stderr(guard.client.recent_stderr_lines(5).await);
+        self.upsert_stdio_snapshot(&session_key, |snapshot| {
+            snapshot.reuse_eligible = false;
+        })
+        .await;
         let kill_result = guard
             .client
             .kill_and_wait(Duration::from_secs(MCP_STDIO_EXIT_TIMEOUT_SECS))
             .await;
         drop(guard);
 
-        self.cleanup_stdio_exclusive_for_session_key(&session_key)
-            .await;
-
         match kill_result {
             Ok(()) => {
+                {
+                    let mut map = self.stdio.lock().await;
+                    map.remove(&session_key);
+                }
+                self.cleanup_stdio_exclusive_for_session_key(&session_key)
+                    .await;
                 self.remove_stdio_snapshot(&session_key, "explicit_killed", None)
                     .await;
                 Ok(DaemonSessionKillResponse {
@@ -2146,12 +2167,6 @@ impl McpSessionManager {
                     snapshot.last_error_summary = Some(error_message.clone());
                     snapshot.recent_stderr = recent_stderr.clone();
                 })
-                .await;
-                self.remove_stdio_snapshot(
-                    &session_key,
-                    "explicit_kill_failed",
-                    Some(error_message.clone()),
-                )
                 .await;
                 Err(err.context(format!(
                     "Failed to kill daemon session {}",
@@ -7016,12 +7031,19 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     return Ok(());
                 }
             };
-            let killed = runtime.session_kill(&request).await?;
-            JsonRpcResponse {
-                jsonrpc: JSONRPC_VERSION.to_string(),
-                id: req.id,
-                result: Some(serde_json::to_value(killed)?),
-                error: None,
+            match runtime.session_kill(&request).await {
+                Ok(killed) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(killed)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
             }
         }
         "daemon.shutdown" => {
