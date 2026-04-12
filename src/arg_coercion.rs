@@ -43,6 +43,10 @@ async fn prepare_execute_args_with_adapter<A: Adapter + Sync>(
     operation_id: &str,
     raw_args: HashMap<String, Value>,
 ) -> Result<HashMap<String, Value>> {
+    if raw_args.is_empty() {
+        return Ok(raw_args);
+    }
+
     let detail = match adapter.describe_operation(endpoint, operation_id).await {
         Ok(detail) => detail,
         Err(_) => return Ok(raw_args),
