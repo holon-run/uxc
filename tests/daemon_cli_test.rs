@@ -425,6 +425,7 @@ fn daemon_start_fails_closed_when_owner_lock_is_held() {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)
         .expect("daemon lock should open");
     lock_file
@@ -468,6 +469,7 @@ fn daemon_status_surfaces_owner_diagnostics_when_owner_is_unreachable() {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)
         .expect("daemon lock should open");
     lock_file
