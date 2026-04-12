@@ -1849,31 +1849,8 @@ impl McpSessionManager {
                     }
                     let key = conflicting.unwrap_or_else(|| "<unknown>".to_string());
 
-                    // session_key format: "stdio:{endpoint}:{auth_fingerprint}[:{env_fingerprint}]"
-                    // endpoint can contain ":", so parse from the last ":".
-                    // With env fingerprint, we need to handle: "stdio:endpoint:auth_fp:env_fp"
-                    // Without env fingerprint: "stdio:endpoint:auth_fp"
-                    // Split from the end twice to handle both cases.
-                    let (owner_endpoint, owner_auth_fp, owner_env_fp) = match owner_session_key
-                        .strip_prefix("stdio:")
-                    {
-                        Some(rest) => {
-                            // Try splitting twice for env fingerprint format
-                            if let Some((before_env, _env_fp)) = rest.rsplit_once(':') {
-                                if let Some((before_auth, auth_fp)) = before_env.rsplit_once(':') {
-                                    // Has both auth and env fingerprints
-                                    (Some(before_auth), Some(auth_fp), Some(_env_fp))
-                                } else {
-                                    // Only has auth fingerprint, env_fp was actually endpoint
-                                    (Some(before_env), Some(_env_fp), None)
-                                }
-                            } else {
-                                // No fingerprint at all
-                                (Some(rest), None, None)
-                            }
-                        }
-                        None => (None, None, None),
-                    };
+                    let (owner_endpoint, owner_auth_fp, owner_env_fp, _owner_cwd) =
+                        parse_stdio_session_key(&owner_session_key);
                     let owner_endpoint = owner_endpoint
                         .map(redact_endpoint)
                         .map(|s| redact_sensitive(&s));
@@ -7675,6 +7652,24 @@ fn stdio_session_key(
     ))
 }
 
+fn parse_stdio_session_key(
+    session_key: &str,
+) -> (Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
+    let Some(rest) = session_key.strip_prefix("stdio:") else {
+        return (None, None, None, None);
+    };
+    let Some((before_cwd, cwd)) = rest.rsplit_once(':') else {
+        return (Some(rest), None, None, None);
+    };
+    let Some((before_env, env_fp)) = before_cwd.rsplit_once(':') else {
+        return (Some(before_cwd), Some(cwd), None, None);
+    };
+    let Some((endpoint, auth_fp)) = before_env.rsplit_once(':') else {
+        return (Some(before_env), Some(env_fp), Some(cwd), None);
+    };
+    (Some(endpoint), Some(auth_fp), Some(env_fp), Some(cwd))
+}
+
 fn http_session_lookup_key(endpoint: &str, profile: Option<&Profile>) -> String {
     format!("http_lookup:{}:{}", endpoint, auth_fingerprint(profile))
 }
@@ -7693,15 +7688,18 @@ fn build_stdio_spawn_options(
     options: &RuntimeInvokeOptions,
     profile: Option<&Profile>,
 ) -> Result<Option<adapters::mcp::StdioSpawnOptions>> {
+    if !adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
+        if options.inject_env.is_empty() {
+            return Ok(None);
+        }
+        return Err(UxcError::InvalidArguments(
+            "--inject-env is only supported for stdio endpoints".to_string(),
+        )
+        .into());
+    }
     let cwd = options.cwd.as_deref().map(PathBuf::from);
     if options.inject_env.is_empty() && cwd.is_none() {
         return Ok(None);
-    }
-    if !adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
-        return Err(UxcError::InvalidArguments(
-            "--inject-env and request cwd are only supported for stdio endpoints".to_string(),
-        )
-        .into());
     }
     let env_overrides = if options.inject_env.is_empty() {
         Vec::new()
@@ -8730,6 +8728,70 @@ mod tests {
         assert!(display.starts_with("stdio:"));
         assert!(!display.contains("example.com"));
         assert!(!display.contains("secret"));
+    }
+
+    #[test]
+    fn parse_stdio_session_key_supports_cwd_segment() {
+        let (endpoint, auth_fp, env_fp, cwd) =
+            parse_stdio_session_key("stdio:./mcp-stdio-rel ok:auth123:env456:/tmp/workdir");
+        assert_eq!(endpoint, Some("./mcp-stdio-rel ok"));
+        assert_eq!(auth_fp, Some("auth123"));
+        assert_eq!(env_fp, Some("env456"));
+        assert_eq!(cwd, Some("/tmp/workdir"));
+    }
+
+    #[test]
+    fn build_stdio_spawn_options_ignores_cwd_for_non_stdio_endpoints() {
+        let options = RuntimeInvokeOptions {
+            auth: None,
+            inject_env: Vec::new(),
+            no_cache: false,
+            cache_ttl: None,
+            timeout_ms: None,
+            refresh_schema: false,
+            schema_url: None,
+            link_name: None,
+            link_skill: None,
+            link_skill_doc: None,
+            link_skill_path: None,
+            schema_mapping_file: None,
+            daemon_exclusive: Vec::new(),
+            daemon_idle_ttl: None,
+            request_headers: HashMap::new(),
+            cwd: Some("/tmp/workdir".to_string()),
+        };
+
+        let options = build_stdio_spawn_options("https://api.example.com", &options, None)
+            .expect("non-stdio requests should ignore cwd");
+        assert!(options.is_none());
+    }
+
+    #[test]
+    fn build_stdio_spawn_options_still_rejects_inject_env_for_non_stdio_endpoints() {
+        let options = RuntimeInvokeOptions {
+            auth: None,
+            inject_env: vec![InjectEnvSpec::parse("TOKEN={{secret}}").expect("valid inject env")],
+            no_cache: false,
+            cache_ttl: None,
+            timeout_ms: None,
+            refresh_schema: false,
+            schema_url: None,
+            link_name: None,
+            link_skill: None,
+            link_skill_doc: None,
+            link_skill_path: None,
+            schema_mapping_file: None,
+            daemon_exclusive: Vec::new(),
+            daemon_idle_ttl: None,
+            request_headers: HashMap::new(),
+            cwd: Some("/tmp/workdir".to_string()),
+        };
+
+        let err = build_stdio_spawn_options("https://api.example.com", &options, None)
+            .expect_err("inject-env should still be rejected for non-stdio endpoints");
+        assert!(err
+            .to_string()
+            .contains("--inject-env is only supported for stdio endpoints"));
     }
 
     #[test]
