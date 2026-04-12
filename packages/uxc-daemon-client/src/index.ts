@@ -257,7 +257,7 @@ export interface DaemonStatus {
 
 export interface DaemonSessionKillResponse {
   session_key: string;
-  child_pid?: number | null;
+  child_pid: number | null;
   killed: boolean;
 }
 
