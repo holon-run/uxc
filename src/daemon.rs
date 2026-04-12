@@ -529,8 +529,11 @@ pub struct DaemonStatus {
     pub mcp_stdio_sessions: usize,
     pub mcp_http_sessions: usize,
     pub mcp_reuse_hits: u64,
+    #[serde(default)]
     pub managed_sources: usize,
+    #[serde(default)]
     pub managed_sources_running: usize,
+    #[serde(default)]
     pub managed_streams: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_file: Option<String>,
