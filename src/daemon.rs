@@ -804,6 +804,7 @@ struct SubscriptionManager {
     terminal_jobs: Arc<Mutex<HashMap<String, TerminalSubscriptionEntry>>>,
     next_id: Arc<Mutex<u64>>,
     store_path: PathBuf,
+    memory_sink_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -2133,14 +2134,24 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
 
 impl SubscriptionManager {
     fn new(store_path: PathBuf) -> Result<Self> {
+        let memory_sink_dir = store_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(daemon_dir)
+            .join("subscription-events");
         let manager = Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             terminal_jobs: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(0)),
             store_path,
+            memory_sink_dir,
         };
         manager.load_persisted_records()?;
         Ok(manager)
+    }
+
+    fn internal_memory_sink_path(&self, job_id: &str) -> PathBuf {
+        self.memory_sink_dir.join(format!("{}.ndjson", job_id))
     }
 
     fn load_persisted_records(&self) -> Result<()> {
@@ -2570,8 +2581,22 @@ impl SubscriptionManager {
         };
         let sink_path = match prepared.sink {
             PreparedSubscriptionSink::File(path) => path,
-            PreparedSubscriptionSink::Memory => internal_memory_sink_path(&job_id),
+            PreparedSubscriptionSink::Memory => self.internal_memory_sink_path(&job_id),
         };
+        if sink_is_memory(&request.sink) {
+            match fs::remove_file(&sink_path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "Failed to reset in-memory subscription sink {}",
+                            sink_path.display()
+                        )
+                    });
+                }
+            }
+        }
         let now = now_unix_secs();
         let view = Arc::new(Mutex::new(SubscriptionJobView {
             job_id: job_id.clone(),
@@ -4268,12 +4293,6 @@ fn parse_file_sink(spec: &str) -> Result<PathBuf> {
     let path = PathBuf::from(path);
     validate_subscription_sink_path(&path)?;
     Ok(path)
-}
-
-fn internal_memory_sink_path(job_id: &str) -> PathBuf {
-    daemon_dir()
-        .join("subscription-events")
-        .join(format!("{}.ndjson", job_id))
 }
 
 fn sink_is_memory(spec: &str) -> bool {
