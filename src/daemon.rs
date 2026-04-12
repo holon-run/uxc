@@ -2,7 +2,7 @@ use crate::adapters::mcp::types::{JsonRpcNotification, ResourceContents};
 use crate::adapters::{
     self, Adapter, AdapterEnum, DetectionOptions, Operation, ProtocolDetector, ProtocolType,
 };
-use crate::arg_coercion::prepare_execute_args;
+use crate::arg_coercion::{prepare_execute_args, prepare_execute_args_from_detail};
 use crate::auth::injected_env::{fingerprint_injected_env, render_injected_env, InjectEnvSpec};
 use crate::auth::{self, Profile};
 use crate::cache::{self, Cache, CacheConfig};
@@ -42,6 +42,7 @@ use crate::subscription_websocket::{
     self, RawFrameHandler, WebSocketRunError, WebSocketRuntimeConfig, WebSocketRuntimeObserver,
 };
 use anyhow::{anyhow, bail, Context, Result};
+use fs2::FileExt;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -49,7 +50,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream as StdUnixStream;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -70,6 +73,7 @@ const START_POLL_INTERVAL_MS: u64 = 100;
 const STOP_POLL_TRIES: usize = 50;
 const STOP_POLL_INTERVAL_MS: u64 = 100;
 const START_LOCK_STALE_SECS: u64 = 30;
+const DAEMON_OWNER_TERM_SIGNAL: i32 = 15;
 const STDIO_INIT_LOCK_STALE_SECS: u64 = 30;
 const MCP_IDLE_TTL_SECS: u64 = 600;
 const MCP_IDLE_CLEANUP_INTERVAL_MS: u64 = 500;
@@ -83,7 +87,6 @@ const SUBSCRIPTION_HTTP_TIMEOUT_SECS: u64 = 300;
 const SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
 const SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS: u64 = 30;
 const SUBSCRIPTION_MAX_BUFFER_BYTES: usize = 1024 * 1024;
-const SUBSCRIPTION_EVENT_HISTORY_LIMIT: usize = 1024;
 const SUBSCRIPTION_EVENTS_MAX_LIMIT: usize = 500;
 const MANAGED_STREAM_EVENTS_DEFAULT_LIMIT: usize = 100;
 const MANAGED_STREAM_EVENTS_MAX_LIMIT: usize = 500;
@@ -104,6 +107,7 @@ const ERR_RUNTIME_GENERIC: i32 = -32030;
 #[cfg(unix)]
 unsafe extern "C" {
     fn setsid() -> std::ffi::c_int;
+    fn kill(pid: i32, sig: i32) -> std::ffi::c_int;
 }
 
 pub fn daemon_supported() -> bool {
@@ -490,6 +494,52 @@ pub struct DaemonStatus {
     pub managed_streams: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_lock_held: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_pid_alive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_socket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_started_at_unix: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_exists: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DaemonOwnerMetadata {
+    pid: u32,
+    version: String,
+    socket: String,
+    started_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DaemonLocalDiagnostics {
+    pub socket: String,
+    pub socket_exists: bool,
+    pub owner_lock_held: bool,
+    pub owner_pid: Option<u32>,
+    pub owner_pid_alive: bool,
+    pub owner_version: Option<String>,
+    pub owner_socket: Option<String>,
+    pub owner_started_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonDoctorResponse {
+    pub status: String,
+    pub repaired: bool,
+    pub socket_removed: bool,
+    pub owner_metadata_cleared: bool,
+    pub socket: String,
+    pub diagnostics: DaemonLocalDiagnostics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2405,7 +2455,8 @@ impl ManagedSourceManager {
         record.stopped_at_unix = None;
         record.last_error = None;
         self.store.upsert_source(&record, true).await?;
-        self.ensure_runner_for_record(runtime, record.clone(), spec).await?;
+        self.ensure_runner_for_record(runtime, record.clone(), spec)
+            .await?;
         Ok(record)
     }
 
@@ -2456,8 +2507,11 @@ impl ManagedSourceManager {
         mut stop_rx: watch::Receiver<bool>,
     ) {
         let sink_path = runtime.managed_source_sink_path(&record.run_id);
+        let cursor_path = runtime.managed_source_cursor_path(&record.run_id);
         let request = managed_source_subscription_request(&record, &spec, &sink_path);
-        let runtime_view = Arc::new(Mutex::new(subscription_view_for_managed_source(&record, &request)));
+        let runtime_view = Arc::new(Mutex::new(subscription_view_for_managed_source(
+            &record, &request,
+        )));
         let runner_task = spawn_source_runtime_task(
             runtime.clone(),
             &record.run_id,
@@ -2468,43 +2522,66 @@ impl ManagedSourceManager {
             runtime.managed_source_checkpoint_path(&record.run_id),
         );
 
-        let mut after_seq = 0_u64;
-        loop {
-            let batch = match load_subscription_events(
-                &sink_path,
-                after_seq,
-                SUBSCRIPTION_EVENTS_MAX_LIMIT,
-                true,
-            )
-            .await
-            {
-                Ok(batch) => batch,
-                Err(err) => {
-                    let _ = self
-                        .store
-                        .clear_source_job(
-                            &entry.namespace,
-                            &entry.source_key,
-                            "failed",
-                            now_unix_secs(),
-                            Some(now_unix_secs()),
-                            Some(err.to_string()),
-                        )
-                        .await;
-                    let mut state = entry.state.lock().await;
-                    state.status = "failed".to_string();
-                    state.updated_at_unix = now_unix_secs();
-                    state.stopped_at_unix = Some(now_unix_secs());
-                    state.last_error = Some(err.to_string());
-                    break;
-                }
-            };
+        let mut cursor = match load_managed_source_cursor(&cursor_path).await {
+            Ok(cursor) => cursor,
+            Err(err) => {
+                let now = now_unix_secs();
+                let _ = self
+                    .store
+                    .clear_source_job(
+                        &entry.namespace,
+                        &entry.source_key,
+                        "failed",
+                        now,
+                        Some(now),
+                        Some(err.to_string()),
+                    )
+                    .await;
+                let mut state = entry.state.lock().await;
+                state.status = "failed".to_string();
+                state.updated_at_unix = now;
+                state.stopped_at_unix = Some(now);
+                state.last_error = Some(err.to_string());
+                let _ = entry.stop_tx.lock().await.send(true);
+                let _ = runner_task.await;
+                self.entries.lock().await.remove(&identity_key);
+                return;
+            }
+        };
+        'managed_source: loop {
+            let batch =
+                match load_subscription_events(&sink_path, &cursor, SUBSCRIPTION_EVENTS_MAX_LIMIT)
+                    .await
+                {
+                    Ok(batch) => batch,
+                    Err(err) => {
+                        let now = now_unix_secs();
+                        let _ = self
+                            .store
+                            .clear_source_job(
+                                &entry.namespace,
+                                &entry.source_key,
+                                "failed",
+                                now,
+                                Some(now),
+                                Some(err.to_string()),
+                            )
+                            .await;
+                        let mut state = entry.state.lock().await;
+                        state.status = "failed".to_string();
+                        state.updated_at_unix = now;
+                        state.stopped_at_unix = Some(now);
+                        state.last_error = Some(err.to_string());
+                        let _ = entry.stop_tx.lock().await.send(true);
+                        break 'managed_source;
+                    }
+                };
 
             for event in &batch.events {
                 if matches!(event.event_kind.as_str(), "data" | "snapshot") {
                     let payload = event.data.as_ref().or(event.meta.as_ref());
                     if let Some(payload) = payload {
-                    if let Err(err) = self
+                        if let Err(err) = self
                             .store
                             .append_event(&entry.stream_id, event.timestamp_unix, payload)
                             .await
@@ -2533,22 +2610,50 @@ impl ManagedSourceManager {
                                     Some(err.to_string()),
                                 )
                                 .await;
-                            break;
+                            let _ = entry.stop_tx.lock().await.send(true);
+                            break 'managed_source;
                         }
                     }
                 }
             }
-            if batch.next_after_seq > after_seq {
-                after_seq = batch.next_after_seq;
+            if batch.next_after_seq > cursor.after_seq
+                || batch.next_offset_bytes > cursor.offset_bytes
+            {
+                cursor.after_seq = batch.next_after_seq;
+                cursor.offset_bytes = batch.next_offset_bytes;
+                if let Err(err) = store_managed_source_cursor(&cursor_path, &cursor).await {
+                    tracing::warn!(
+                        "failed to persist managed source cursor for {}/{}: {}",
+                        entry.namespace,
+                        entry.source_key,
+                        err
+                    );
+                    let now = now_unix_secs();
+                    let mut state = entry.state.lock().await;
+                    state.status = "failed".to_string();
+                    state.updated_at_unix = now;
+                    state.stopped_at_unix = Some(now);
+                    state.last_error = Some(err.to_string());
+                    drop(state);
+                    let _ = self
+                        .store
+                        .clear_source_job(
+                            &entry.namespace,
+                            &entry.source_key,
+                            "failed",
+                            now,
+                            Some(now),
+                            Some(err.to_string()),
+                        )
+                        .await;
+                    let _ = entry.stop_tx.lock().await.send(true);
+                    break 'managed_source;
+                }
             }
             let fallback_status = runtime_view.lock().await.status.clone();
-            if let Err(err) = sync_managed_source_state(
-                &self.store,
-                &entry,
-                &runtime_view,
-                &fallback_status,
-            )
-            .await
+            if let Err(err) =
+                sync_managed_source_state(&self.store, &entry, &runtime_view, &fallback_status)
+                    .await
             {
                 tracing::warn!(
                     "failed to persist managed source runtime update for {}/{}: {}",
@@ -2562,12 +2667,14 @@ impl ManagedSourceManager {
                 state.updated_at_unix = now;
                 state.stopped_at_unix = Some(now);
                 state.last_error = Some(err.to_string());
-                break;
+                let _ = entry.stop_tx.lock().await.send(true);
+                break 'managed_source;
             }
 
             let snapshot = runtime_view.lock().await.clone();
-            let should_exit =
-                snapshot.status != "running" && batch.events.is_empty() && runner_task.is_finished();
+            let should_exit = snapshot.status != "running"
+                && batch.events.is_empty()
+                && runner_task.is_finished();
             if should_exit {
                 break;
             }
@@ -2576,13 +2683,9 @@ impl ManagedSourceManager {
                 && runner_task.is_finished()
             {
                 let snapshot = runtime_view.lock().await.clone();
-                let _ = sync_managed_source_state(
-                    &self.store,
-                    &entry,
-                    &runtime_view,
-                    &snapshot.status,
-                )
-                .await;
+                let _ =
+                    sync_managed_source_state(&self.store, &entry, &runtime_view, &snapshot.status)
+                        .await;
                 break;
             }
         }
@@ -2628,6 +2731,9 @@ impl ManagedSourceManager {
             )
             .await?;
         let _ = tokio::fs::remove_file(runtime.managed_source_sink_path(&stored.run_id)).await;
+        let _ =
+            tokio::fs::remove_file(runtime.managed_source_checkpoint_path(&stored.run_id)).await;
+        let _ = tokio::fs::remove_file(runtime.managed_source_cursor_path(&stored.run_id)).await;
         Ok(())
     }
 }
@@ -2660,6 +2766,12 @@ fn managed_source_checkpoint_path(base_dir: &Path, run_id: &str) -> PathBuf {
     base_dir
         .join("managed-source-checkpoints")
         .join(format!("{run_id}.checkpoint.json"))
+}
+
+fn managed_source_cursor_path(base_dir: &Path, run_id: &str) -> PathBuf {
+    base_dir
+        .join("managed-source-cursors")
+        .join(format!("{run_id}.cursor.json"))
 }
 
 fn managed_stream_id(namespace: &str, source_key: &str) -> String {
@@ -2738,8 +2850,9 @@ fn subscription_view_for_managed_source(
     request: &SubscribeStartRequest,
 ) -> SubscriptionJobView {
     let protocol = match request.mode {
-        SubscriptionMode::Stream => resolve_stream_subscription_protocol(request)
-            .unwrap_or_else(|_| "stream".to_string()),
+        SubscriptionMode::Stream => {
+            resolve_stream_subscription_protocol(request).unwrap_or_else(|_| "stream".to_string())
+        }
         SubscriptionMode::Poll => "poll".to_string(),
     };
     SubscriptionJobView {
@@ -2769,6 +2882,7 @@ fn subscription_view_for_managed_source(
 async fn reset_managed_source_runtime_files(runtime: &DaemonRuntime, run_id: &str) -> Result<()> {
     let _ = tokio::fs::remove_file(runtime.managed_source_sink_path(run_id)).await;
     let _ = tokio::fs::remove_file(runtime.managed_source_checkpoint_path(run_id)).await;
+    let _ = tokio::fs::remove_file(runtime.managed_source_cursor_path(run_id)).await;
     Ok(())
 }
 
@@ -2841,18 +2955,19 @@ async fn sync_managed_source_state(
     } else {
         snapshot.stopped_at_unix.or(Some(now))
     };
-    store.update_source_runtime(
-        &entry.namespace,
-        &entry.source_key,
-        SourceRuntimeUpdate {
-            status: status.clone(),
-            updated_at_unix: now,
-            started_at_unix: snapshot.started_at_unix,
-            stopped_at_unix,
-            last_error: snapshot.last_error.clone(),
-        },
-    )
-    .await?;
+    store
+        .update_source_runtime(
+            &entry.namespace,
+            &entry.source_key,
+            SourceRuntimeUpdate {
+                status: status.clone(),
+                updated_at_unix: now,
+                started_at_unix: snapshot.started_at_unix,
+                stopped_at_unix,
+                last_error: snapshot.last_error.clone(),
+            },
+        )
+        .await?;
     let mut state = entry.state.lock().await;
     state.status = status;
     state.updated_at_unix = now;
@@ -3181,7 +3296,11 @@ impl DaemonRuntime {
             Value,
             Option<adapters::ExecutionMetadata>,
         )> = if protocol == "mcp" && matches!(request.action, RuntimeAction::Execute) {
-            let prepared_args = prepare_runtime_execute_args(&resolved.adapter, &request).await?;
+            let prepared_args = if adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+                request.args.clone().unwrap_or_default()
+            } else {
+                prepare_runtime_execute_args(&resolved.adapter, &request).await?
+            };
             // Clone the pre-computed stdio_spawn_options to avoid duplicate secret resolution
             let stdio_options = stdio_spawn_options.clone();
             let (kind, operation, data, reused) = self
@@ -3272,7 +3391,11 @@ impl DaemonRuntime {
                             && matches!(request.action, RuntimeAction::Execute)
                         {
                             let prepared_args =
-                                prepare_runtime_execute_args(&adapter, &request).await?;
+                                if adapters::mcp::McpAdapter::is_stdio_command(&request.endpoint) {
+                                    request.args.clone().unwrap_or_default()
+                                } else {
+                                    prepare_runtime_execute_args(&adapter, &request).await?
+                                };
                             // For cache fallback, recompute stdio_spawn_options since we don't have
                             // the original detection_options available
                             let (kind, operation, data, reused) = self
@@ -3370,6 +3493,13 @@ impl DaemonRuntime {
             managed_sources_running,
             managed_streams,
             log_file,
+            owner_lock_held: Some(true),
+            owner_pid: Some(std::process::id()),
+            owner_pid_alive: Some(true),
+            owner_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            owner_socket: Some(socket_path().display().to_string()),
+            owner_started_at_unix: Some(state.started_at_unix),
+            socket_exists: Some(socket_path().exists()),
         }
     }
 
@@ -3446,6 +3576,10 @@ impl DaemonRuntime {
 
     fn managed_source_checkpoint_path(&self, run_id: &str) -> PathBuf {
         managed_source_checkpoint_path(&self.managed_source_base_dir, run_id)
+    }
+
+    fn managed_source_cursor_path(&self, run_id: &str) -> PathBuf {
+        managed_source_cursor_path(&self.managed_source_base_dir, run_id)
     }
     pub async fn request_stop(&self) {
         let mut stop = self.should_stop.write().await;
@@ -3525,7 +3659,7 @@ impl DaemonRuntime {
     async fn invoke_mcp_execute(
         &self,
         request: &RuntimeInvokeRequest,
-        args: HashMap<String, Value>,
+        raw_args: HashMap<String, Value>,
         auth_profile: Option<Profile>,
         precomputed_stdio_spawn_options: Option<adapters::mcp::StdioSpawnOptions>,
         cache: Arc<dyn Cache>,
@@ -3535,7 +3669,6 @@ impl DaemonRuntime {
             .operation_id
             .as_ref()
             .ok_or_else(|| anyhow!("operation_id is required"))?;
-        let arguments = Some(Value::Object(args.into_iter().collect()));
 
         if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
             let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;
@@ -3577,15 +3710,17 @@ impl DaemonRuntime {
             let mut guard = session.lock().await;
             guard.last_used = Instant::now();
             guard.last_used_at_unix = now_unix_secs();
+            let timeout = request_timeout_duration(request.options.timeout_ms).unwrap_or_else(
+                adapters::mcp::transport::McpStdioTransport::default_request_timeout,
+            );
+            let args = prepare_live_stdio_mcp_execute_args(
+                &mut guard, endpoint, &cache, op, raw_args, timeout,
+            )
+            .await?;
+            let arguments = Some(Value::Object(args.into_iter().collect()));
             let result = guard
                 .client
-                .call_tool_with_timeout(
-                    op,
-                    arguments,
-                    request_timeout_duration(request.options.timeout_ms).unwrap_or_else(
-                        adapters::mcp::transport::McpStdioTransport::default_request_timeout,
-                    ),
-                )
+                .call_tool_with_timeout(op, arguments, timeout)
                 .await;
             let _ = guard
                 .mark_tools_dirty_from_notifications(endpoint, &cache)
@@ -3638,6 +3773,7 @@ impl DaemonRuntime {
                     .await?
             };
             session.mark_used().await;
+            let arguments = Some(Value::Object(raw_args.into_iter().collect()));
             let result = session.transport.call_tool(op, arguments).await?;
             let _ = session.collect_pending_notifications().await;
             Ok((
@@ -3696,29 +3832,48 @@ async fn open_subscription_sink(path: &Path) -> Result<tokio::fs::File> {
         .with_context(|| format!("Failed to open sink file {}", path.display()))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ManagedSourceCursor {
+    after_seq: u64,
+    offset_bytes: u64,
+}
+
 struct LoadedSubscriptionEvents {
     events: Vec<SubscriptionEventEnvelope>,
     next_after_seq: u64,
+    next_offset_bytes: u64,
 }
 
 async fn load_subscription_events(
     path: &Path,
-    after_seq: u64,
+    cursor: &ManagedSourceCursor,
     limit: usize,
-    retain_all: bool,
 ) -> Result<LoadedSubscriptionEvents> {
-    let raw = match tokio::fs::read_to_string(path).await {
+    let raw = match tokio::fs::read(path).await {
         Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+        Err(err) if err.kind() == ErrorKind::NotFound => Vec::new(),
         Err(err) => {
             return Err(err)
                 .with_context(|| format!("Failed to read subscription sink {}", path.display()))
         }
     };
+    let file_len = raw.len() as u64;
+    let (start_offset, after_seq) = if cursor.offset_bytes > file_len {
+        (0_usize, 0_u64)
+    } else {
+        (cursor.offset_bytes as usize, cursor.after_seq)
+    };
+    let raw = std::str::from_utf8(&raw[start_offset..])
+        .with_context(|| format!("Invalid utf-8 in subscription sink {}", path.display()))?;
     let mut events = Vec::new();
-    for (index, line) in raw.lines().enumerate() {
+    let mut next_after_seq = after_seq;
+    let mut next_offset_bytes = start_offset as u64;
+    let mut earliest_new_seq: Option<u64> = None;
+    for (index, line) in raw.split_inclusive('\n').enumerate() {
         let trimmed = line.trim();
+        let line_end_offset = next_offset_bytes.saturating_add(line.len() as u64);
         if trimmed.is_empty() {
+            next_offset_bytes = line_end_offset;
             continue;
         }
         let event =
@@ -3729,39 +3884,56 @@ async fn load_subscription_events(
                     index + 1
                 )
             })?;
+        if event.seq > after_seq && earliest_new_seq.is_none() {
+            earliest_new_seq = Some(event.seq);
+        }
+        if event.seq <= after_seq {
+            next_offset_bytes = line_end_offset;
+            continue;
+        }
+        if events.len() >= limit {
+            break;
+        }
+        next_after_seq = event.seq;
+        next_offset_bytes = line_end_offset;
         events.push(event);
     }
 
-    let retained = if retain_all {
-        events.as_slice()
-    } else {
-        let retained_start = events
-            .len()
-            .saturating_sub(SUBSCRIPTION_EVENT_HISTORY_LIMIT);
-        &events[retained_start..]
-    };
-    if let Some(first) = retained.first() {
-        if after_seq > 0 && after_seq < first.seq.saturating_sub(1) {
+    if let Some(first_seq) = earliest_new_seq {
+        if after_seq > 0 && after_seq < first_seq.saturating_sub(1) {
             return Err(UxcError::InvalidArguments(format!(
-                "subscription cursor expired for job {}: earliest available seq is {}",
-                first.job_id, first.seq
+                "subscription cursor expired for sink {}: earliest available seq is {}",
+                path.display(),
+                first_seq
             ))
             .into());
         }
     }
 
-    let filtered = retained
-        .iter()
-        .filter(|event| event.seq > after_seq)
-        .cloned()
-        .collect::<Vec<_>>();
-    let limited = filtered.into_iter().take(limit).collect::<Vec<_>>();
-    let next_after_seq = limited.last().map(|event| event.seq).unwrap_or(after_seq);
-
     Ok(LoadedSubscriptionEvents {
-        events: limited,
+        events,
         next_after_seq,
+        next_offset_bytes,
     })
+}
+
+async fn load_managed_source_cursor(path: &Path) -> Result<ManagedSourceCursor> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(ManagedSourceCursor::default()),
+        Err(err) => Err(err)
+            .with_context(|| format!("Failed to read managed source cursor {}", path.display())),
+    }
+}
+
+async fn store_managed_source_cursor(path: &Path, cursor: &ManagedSourceCursor) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, serde_json::to_vec(cursor)?)
+        .await
+        .with_context(|| format!("Failed to write managed source cursor {}", path.display()))?;
+    Ok(())
 }
 
 async fn update_subscription_view(
@@ -5907,6 +6079,30 @@ async fn start_daemon_process() -> Result<()> {
     let start_lock = try_acquire_start_lock(&lock_path)?;
     let got_lock = start_lock.is_some();
 
+    let diagnostics = inspect_daemon_local_diagnostics()?;
+    if diagnostics.owner_lock_held {
+        let code = if diagnostics.owner_pid_alive {
+            "DAEMON_OWNER_UNREACHABLE"
+        } else {
+            "DAEMON_OWNER_HELD"
+        };
+        let message = if diagnostics.owner_pid_alive {
+            format!(
+                "A live daemon owner already exists (pid={}) but is unreachable. Refusing to start a second daemon. Run `uxc daemon doctor`.",
+                diagnostics
+                    .owner_pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
+        } else {
+            "A daemon owner lock is still held. Refusing to start a second daemon. Run `uxc daemon doctor`."
+                .to_string()
+        };
+        return Err(
+            StructuredError::new(code, message, Some(serde_json::to_value(&diagnostics)?)).into(),
+        );
+    }
+
     if got_lock {
         let current_exe = std::env::current_exe().context("Cannot resolve current executable")?;
         let mut child_cmd = std::process::Command::new(current_exe);
@@ -5944,7 +6140,17 @@ async fn start_daemon_process() -> Result<()> {
         }
     }
 
+    let diagnostics = inspect_daemon_local_diagnostics()?;
     drop(start_lock);
+    if diagnostics.owner_lock_held {
+        return Err(StructuredError::new(
+            "DAEMON_OWNER_UNREACHABLE",
+            "Daemon owner exists but did not become reachable in time. Run `uxc daemon doctor`."
+                .to_string(),
+            Some(serde_json::to_value(diagnostics)?),
+        )
+        .into());
+    }
     bail!("Daemon failed to start. Run `uxc daemon status` for diagnostics.")
 }
 
@@ -6017,6 +6223,15 @@ pub async fn run_daemon_server() -> Result<()> {
     let dir = daemon_dir();
     ensure_private_dir(&dir)?;
     let socket = socket_path();
+    let mut owner_lock = DaemonOwnerLockGuard::acquire(
+        &daemon_lock_path(),
+        &DaemonOwnerMetadata {
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            socket: socket.display().to_string(),
+            started_at_unix: now_unix_secs(),
+        },
+    )?;
     if socket.exists() {
         let _ = fs::remove_file(&socket);
     }
@@ -6069,6 +6284,7 @@ pub async fn run_daemon_server() -> Result<()> {
         .log(DaemonLogEntry::new(DaemonEventType::DaemonStop))
         .await;
 
+    owner_lock.clear_metadata();
     let _ = fs::remove_file(&socket);
     Ok(())
 }
@@ -6607,13 +6823,83 @@ pub async fn daemon_session_kill_local(
     daemon_session_kill_client(request).await
 }
 
+pub async fn daemon_doctor_local_result() -> Result<DaemonDoctorResponse> {
+    tokio::task::spawn_blocking(daemon_doctor_local_blocking)
+        .await
+        .map_err(|err| anyhow!("daemon doctor task failed: {err}"))?
+}
+
 pub async fn daemon_start_local() -> Result<EnsureDaemonOutcome> {
     ensure_compatible_daemon_running().await
 }
 
 pub async fn daemon_stop_local() -> Result<bool> {
     if daemon_status_client().await.is_err() {
-        return Ok(false);
+        let diagnostics = inspect_daemon_local_diagnostics()?;
+        if !diagnostics.owner_lock_held {
+            return Ok(false);
+        }
+
+        let pid = diagnostics.owner_pid.ok_or_else(|| {
+            StructuredError::new(
+                "DAEMON_OWNER_METADATA_MISSING",
+                "Daemon owner lock is held but owner pid metadata is missing. Run `uxc daemon doctor`."
+                    .to_string(),
+                Some(serde_json::to_value(&diagnostics).unwrap_or(Value::Null)),
+            )
+        })?;
+
+        if !diagnostics.owner_pid_alive {
+            return Err(StructuredError::new(
+                "DAEMON_OWNER_STALE",
+                "Daemon owner metadata is stale. Run `uxc daemon doctor`.".to_string(),
+                Some(serde_json::to_value(&diagnostics)?),
+            )
+            .into());
+        }
+
+        #[cfg(unix)]
+        {
+            // SAFETY: kill with SIGTERM targets the owner pid discovered from local metadata.
+            if unsafe { kill(pid as i32, DAEMON_OWNER_TERM_SIGNAL) } == -1 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+
+            for _ in 0..STOP_POLL_TRIES {
+                tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
+                let diagnostics = inspect_daemon_local_diagnostics()?;
+                if !diagnostics.owner_lock_held {
+                    let _ = clear_daemon_owner_metadata_path(&daemon_lock_path());
+                    if socket_path().exists() {
+                        let _ = fs::remove_file(socket_path());
+                    }
+                    return Ok(true);
+                }
+            }
+
+            return Err(StructuredError::new(
+                "DAEMON_STOP_TIMEOUT",
+                format!(
+                    "Daemon owner pid {} did not stop in time. Run `uxc daemon doctor`.",
+                    pid
+                ),
+                Some(serde_json::to_value(diagnostics)?),
+            )
+            .into());
+        }
+
+        #[cfg(not(unix))]
+        {
+            return Err(StructuredError::new(
+                "DAEMON_STOP_UNSUPPORTED_PLATFORM",
+                format!(
+                    "Daemon owner pid {} cannot be stopped via Unix signals on this platform.",
+                    pid
+                ),
+                Some(serde_json::to_value(&diagnostics)?),
+            )
+            .into());
+        }
     }
     daemon_stop_client().await?;
     for _ in 0..STOP_POLL_TRIES {
@@ -6801,6 +7087,9 @@ pub fn socket_path() -> PathBuf {
     daemon_dir().join("uxc.sock")
 }
 
+fn daemon_lock_path() -> PathBuf {
+    daemon_dir().join("daemon.lock")
+}
 fn best_effort_user_label() -> String {
     let raw = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
@@ -7704,6 +7993,54 @@ fn operation_detail_from_mcp_tool(tool: &adapters::mcp::types::Tool) -> adapters
     }
 }
 
+async fn prepare_live_stdio_mcp_execute_args(
+    session: &mut McpStdioSession,
+    endpoint: &str,
+    cache: &Arc<dyn Cache>,
+    operation_id: &str,
+    raw_args: HashMap<String, Value>,
+    timeout: Duration,
+) -> Result<HashMap<String, Value>> {
+    if raw_args.is_empty() {
+        return Ok(raw_args);
+    }
+
+    let _ = session
+        .mark_tools_dirty_from_notifications(endpoint, cache)
+        .await;
+    let tools = match session
+        .refresh_tools_if_needed(endpoint, cache, timeout)
+        .await
+    {
+        Ok(tools) => tools,
+        Err(err) => {
+            tracing::debug!(
+                endpoint = %endpoint,
+                operation_id = %operation_id,
+                error = %err,
+                "Failed to refresh live MCP stdio tool catalog for arg coercion; using raw args"
+            );
+            return Ok(raw_args);
+        }
+    };
+
+    let Some(tool) = tools.iter().find(|tool| tool.name == *operation_id) else {
+        tracing::debug!(
+            endpoint = %endpoint,
+            operation_id = %operation_id,
+            "Live MCP stdio tool catalog did not contain requested operation; using raw args"
+        );
+        return Ok(raw_args);
+    };
+
+    prepare_execute_args_from_detail(
+        ProtocolType::Mcp,
+        operation_id,
+        &operation_detail_from_mcp_tool(tool),
+        raw_args,
+    )
+}
+
 fn to_operation_summary(protocol: &str, op: &Operation) -> OperationSummary {
     let required = op
         .parameters
@@ -8125,6 +8462,46 @@ mod tests {
     fn parse_file_sink_rejects_absolute_path_with_parent_component() {
         let err = parse_file_sink("file:/tmp/../events.ndjson").unwrap_err();
         assert!(err.to_string().contains("cannot contain '..'"));
+    }
+
+    #[tokio::test]
+    async fn load_subscription_events_uses_cursor_offset_without_replaying_history() {
+        let temp = tempdir().unwrap();
+        let sink = temp.path().join("events.ndjson");
+        fs::write(
+            &sink,
+            concat!(
+                "{\"version\":\"v1\",\"job_id\":\"job\",\"seq\":1,\"timestamp_unix\":1,\"protocol\":\"poll\",\"source_kind\":\"poll\",\"event_kind\":\"data\",\"data\":{\"value\":1},\"meta\":null}\n",
+                "{\"version\":\"v1\",\"job_id\":\"job\",\"seq\":2,\"timestamp_unix\":2,\"protocol\":\"poll\",\"source_kind\":\"poll\",\"event_kind\":\"data\",\"data\":{\"value\":2},\"meta\":null}\n"
+            ),
+        )
+        .unwrap();
+
+        let first = load_subscription_events(&sink, &ManagedSourceCursor::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(first.events.len(), 2);
+        assert_eq!(first.next_after_seq, 2);
+
+        let cursor = ManagedSourceCursor {
+            after_seq: first.next_after_seq,
+            offset_bytes: first.next_offset_bytes,
+        };
+        let second = load_subscription_events(&sink, &cursor, 10).await.unwrap();
+        assert!(second.events.is_empty());
+
+        fs::write(
+            &sink,
+            concat!(
+                "{\"version\":\"v1\",\"job_id\":\"job\",\"seq\":1,\"timestamp_unix\":1,\"protocol\":\"poll\",\"source_kind\":\"poll\",\"event_kind\":\"data\",\"data\":{\"value\":1},\"meta\":null}\n",
+                "{\"version\":\"v1\",\"job_id\":\"job\",\"seq\":2,\"timestamp_unix\":2,\"protocol\":\"poll\",\"source_kind\":\"poll\",\"event_kind\":\"data\",\"data\":{\"value\":2},\"meta\":null}\n",
+                "{\"version\":\"v1\",\"job_id\":\"job\",\"seq\":3,\"timestamp_unix\":3,\"protocol\":\"poll\",\"source_kind\":\"poll\",\"event_kind\":\"data\",\"data\":{\"value\":3},\"meta\":null}\n"
+            ),
+        )
+        .unwrap();
+        let third = load_subscription_events(&sink, &cursor, 10).await.unwrap();
+        assert_eq!(third.events.len(), 1);
+        assert_eq!(third.events[0].data.as_ref().unwrap()["value"], 3);
     }
 
     #[test]
@@ -8686,6 +9063,57 @@ impl Drop for StartLockGuard {
     }
 }
 
+struct DaemonOwnerLockGuard {
+    file: fs::File,
+}
+
+impl DaemonOwnerLockGuard {
+    fn acquire(path: &Path, metadata: &DaemonOwnerMetadata) -> Result<Self> {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .with_context(|| format!("Failed to open daemon owner lock {}", path.display()))?;
+
+        match file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                return Err(StructuredError::new(
+                    "DAEMON_OWNER_HELD",
+                    format!(
+                        "Another daemon owner already holds {}. Run `uxc daemon doctor` for diagnostics.",
+                        path.display()
+                    ),
+                    Some(json!({
+                        "lock_path": path.display().to_string(),
+                    })),
+                )
+                .into());
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("Failed to lock daemon owner lock {}", path.display())
+                });
+            }
+        }
+
+        write_daemon_owner_metadata(&mut file, metadata)?;
+        Ok(Self { file })
+    }
+
+    fn clear_metadata(&mut self) {
+        let _ = clear_daemon_owner_metadata_file(&mut self.file);
+    }
+}
+
+impl Drop for DaemonOwnerLockGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 fn try_acquire_start_lock(path: &Path) -> Result<Option<StartLockGuard>> {
     match fs::OpenOptions::new()
         .create_new(true)
@@ -8719,6 +9147,282 @@ fn lock_is_stale(path: &Path, max_age: Duration) -> Result<bool> {
         .duration_since(modified)
         .unwrap_or_default();
     Ok(age > max_age)
+}
+
+fn write_daemon_owner_metadata(file: &mut fs::File, metadata: &DaemonOwnerMetadata) -> Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.write_all(&serde_json::to_vec(metadata)?)?;
+    file.flush()?;
+    Ok(())
+}
+
+fn clear_daemon_owner_metadata_file(file: &mut fs::File) -> Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    file.set_len(0)?;
+    file.flush()?;
+    Ok(())
+}
+
+fn clear_daemon_owner_metadata_path(path: &Path) -> Result<()> {
+    let mut file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    clear_daemon_owner_metadata_file(&mut file)
+}
+
+fn read_daemon_owner_metadata(path: &Path) -> Result<Option<DaemonOwnerMetadata>> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    if contents.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_slice(&contents)?))
+}
+
+fn daemon_lock_is_held(path: &Path) -> Result<bool> {
+    let file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            file.unlock()?;
+            Ok(false)
+        }
+        Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(true),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: kill(pid, 0) is a pure liveness probe.
+    let rc = unsafe { kill(pid as i32, 0) };
+    if rc == 0 {
+        return true;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(1) => true,  // EPERM
+        Some(3) => false, // ESRCH
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    false
+}
+
+fn inspect_daemon_local_diagnostics() -> Result<DaemonLocalDiagnostics> {
+    let lock_path = daemon_lock_path();
+    let socket = socket_path();
+    let metadata = read_daemon_owner_metadata(&lock_path)?;
+    let owner_lock_held = daemon_lock_is_held(&lock_path)?;
+    let owner_pid = metadata.as_ref().map(|m| m.pid);
+    let owner_pid_alive = owner_pid.map(is_process_alive).unwrap_or(false);
+
+    Ok(DaemonLocalDiagnostics {
+        socket: socket.display().to_string(),
+        socket_exists: socket.exists(),
+        owner_lock_held,
+        owner_pid,
+        owner_pid_alive,
+        owner_version: metadata.as_ref().map(|m| m.version.clone()),
+        owner_socket: metadata.as_ref().map(|m| m.socket.clone()),
+        owner_started_at_unix: metadata.as_ref().map(|m| m.started_at_unix),
+    })
+}
+
+pub fn daemon_status_from_diagnostics(diagnostics: &DaemonLocalDiagnostics) -> DaemonStatus {
+    DaemonStatus {
+        running: false,
+        pid: None,
+        socket: diagnostics.socket.clone(),
+        version: None,
+        started_at_unix: None,
+        request_count: 0,
+        mcp_stdio_sessions: 0,
+        mcp_http_sessions: 0,
+        mcp_reuse_hits: 0,
+        managed_sources: 0,
+        managed_sources_running: 0,
+        managed_streams: 0,
+        log_file: None,
+        owner_lock_held: Some(diagnostics.owner_lock_held),
+        owner_pid: diagnostics.owner_pid,
+        owner_pid_alive: Some(diagnostics.owner_pid_alive),
+        owner_version: diagnostics.owner_version.clone(),
+        owner_socket: diagnostics.owner_socket.clone(),
+        owner_started_at_unix: diagnostics.owner_started_at_unix,
+        socket_exists: Some(diagnostics.socket_exists),
+    }
+}
+
+fn doctor_message_for_diagnostics(diagnostics: &DaemonLocalDiagnostics, status: &str) -> String {
+    match status {
+        "healthy" => "Daemon is healthy.".to_string(),
+        "owner_unreachable" => format!(
+            "Live daemon owner exists (pid={}) but the daemon socket is unreachable. Refusing repair; run `uxc daemon stop` or inspect the owner process.",
+            diagnostics
+                .owner_pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+        "owner_held" => "Daemon owner lock is still held but owner metadata is stale or incomplete. Refusing repair; wait for the owner to exit or inspect the lock holder.".to_string(),
+        "repaired" => "Removed stale daemon artifacts.".to_string(),
+        _ => "No live daemon owner found.".to_string(),
+    }
+}
+
+pub fn daemon_local_diagnostics() -> Result<DaemonLocalDiagnostics> {
+    inspect_daemon_local_diagnostics()
+}
+
+fn daemon_doctor_local_blocking() -> Result<DaemonDoctorResponse> {
+    if daemon_status_client_blocking().is_ok() {
+        let diagnostics = inspect_daemon_local_diagnostics()?;
+        return Ok(DaemonDoctorResponse {
+            status: "healthy".to_string(),
+            repaired: false,
+            socket_removed: false,
+            owner_metadata_cleared: false,
+            socket: diagnostics.socket.clone(),
+            diagnostics: diagnostics.clone(),
+            message: Some(doctor_message_for_diagnostics(&diagnostics, "healthy")),
+        });
+    }
+
+    let diagnostics = inspect_daemon_local_diagnostics()?;
+    if diagnostics.owner_lock_held {
+        let status = if diagnostics.owner_pid_alive {
+            "owner_unreachable"
+        } else {
+            "owner_held"
+        };
+        return Ok(DaemonDoctorResponse {
+            status: status.to_string(),
+            repaired: false,
+            socket_removed: false,
+            owner_metadata_cleared: false,
+            socket: diagnostics.socket.clone(),
+            diagnostics: diagnostics.clone(),
+            message: Some(doctor_message_for_diagnostics(&diagnostics, status)),
+        });
+    }
+
+    let mut repaired = false;
+    let mut socket_removed = false;
+    let mut owner_metadata_cleared = false;
+    let socket = socket_path();
+    if socket.exists() {
+        fs::remove_file(&socket).with_context(|| {
+            format!("Failed to remove stale daemon socket {}", socket.display())
+        })?;
+        repaired = true;
+        socket_removed = true;
+    }
+
+    let lock_path = daemon_lock_path();
+    if lock_path.exists() {
+        fs::remove_file(&lock_path).with_context(|| {
+            format!(
+                "Failed to remove stale daemon owner metadata {}",
+                lock_path.display()
+            )
+        })?;
+        repaired = true;
+        owner_metadata_cleared = true;
+    }
+
+    let diagnostics = inspect_daemon_local_diagnostics()?;
+    let status = if repaired { "repaired" } else { "clean" }.to_string();
+    Ok(DaemonDoctorResponse {
+        status: status.clone(),
+        repaired,
+        socket_removed,
+        owner_metadata_cleared,
+        socket: diagnostics.socket.clone(),
+        diagnostics: diagnostics.clone(),
+        message: Some(doctor_message_for_diagnostics(&diagnostics, &status)),
+    })
+}
+
+#[cfg(unix)]
+fn daemon_status_client_blocking() -> Result<DaemonStatus> {
+    let socket = socket_path();
+    let mut stream = StdUnixStream::connect(&socket)
+        .with_context(|| format!("Failed to connect daemon socket {}", socket.display()))?;
+    stream.set_read_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(CONNECT_TIMEOUT_SECS)))?;
+    let request = json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": 1,
+        "method": "daemon.status",
+        "params": Value::Null,
+    });
+    write_frame_blocking(&mut stream, &request)?;
+    let resp_val = read_frame_blocking(&mut stream)?;
+    let resp: JsonRpcResponse = serde_json::from_value(resp_val)?;
+    if let Some(err) = resp.error {
+        bail!("{}", err.message);
+    }
+    Ok(serde_json::from_value(resp.result.unwrap_or(Value::Null))?)
+}
+
+#[cfg(not(unix))]
+fn daemon_status_client_blocking() -> Result<DaemonStatus> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
+fn write_frame_blocking(stream: &mut StdUnixStream, value: &Value) -> Result<()> {
+    let body = serde_json::to_vec(value)?;
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    stream.write_all(header.as_bytes())?;
+    stream.write_all(&body)?;
+    stream.flush()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_frame_blocking(stream: &mut StdUnixStream) -> Result<Value> {
+    use std::io::Read;
+
+    let mut header = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        let n = stream.read(&mut byte)?;
+        if n == 0 {
+            bail!("EOF while reading frame header");
+        }
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    let header_str = String::from_utf8(header)?;
+    let mut content_len = None;
+    for line in header_str.split("\r\n") {
+        if let Some(rest) = line.trim().strip_prefix("Content-Length:") {
+            content_len = Some(rest.trim().parse::<usize>()?);
+        }
+    }
+    let len = content_len.ok_or_else(|| anyhow!("Missing Content-Length header"))?;
+    let mut body = vec![0_u8; len];
+    stream.read_exact(&mut body)?;
+    Ok(serde_json::from_slice(&body)?)
 }
 
 fn ensure_private_dir(path: &Path) -> Result<()> {

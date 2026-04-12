@@ -1,28 +1,92 @@
+mod common;
+
 use assert_cmd::Command;
+use fs2::FileExt;
 use serial_test::serial;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command as StdCommand, Stdio};
+use std::time::{Duration, Instant};
+
+use common::{uxc_binary, uxc_command_with_home};
 
 #[allow(deprecated)]
 fn uxc_command() -> Command {
     Command::cargo_bin("uxc").expect("uxc binary should build")
 }
 
-fn daemon_stop_best_effort() {
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+fn daemon_stop_best_effort_with_home(home: &Path) {
+    let _ = uxc_command_with_home(home)
+        .arg("daemon")
+        .arg("stop")
+        .output();
+}
+
+fn daemon_runtime_dir(home: &Path) -> PathBuf {
+    home.join("runtime").join("uxc")
+}
+
+fn daemon_socket_path(home: &Path) -> PathBuf {
+    daemon_runtime_dir(home).join("uxc.sock")
+}
+
+fn daemon_lock_path(home: &Path) -> PathBuf {
+    daemon_runtime_dir(home).join("daemon.lock")
+}
+
+fn spawn_daemon_serve(home: &Path) -> Child {
+    let runtime_dir = home.join("runtime");
+    fs::create_dir_all(&runtime_dir).expect("runtime dir should exist");
+    StdCommand::new(uxc_binary())
+        .arg("daemon")
+        .arg("_serve")
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("daemon _serve should spawn")
+}
+
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("path did not appear: {}", path.display());
+}
+
+fn wait_for_exit(child: &mut Child) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if child.try_wait().expect("try_wait should succeed").is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("child did not exit in time");
 }
 
 #[test]
 #[serial]
 fn daemon_start_status_stop_lifecycle() {
-    daemon_stop_best_effort();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
         .expect("daemon start should run");
     assert!(start.status.success());
 
-    let status = uxc_command()
+    let status = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("status")
         .output()
@@ -39,7 +103,7 @@ fn daemon_start_status_stop_lifecycle() {
     assert!(json["data"]["managed_sources_running"].is_number());
     assert!(json["data"]["managed_streams"].is_number());
 
-    let stop = uxc_command()
+    let stop = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("stop")
         .output()
@@ -47,7 +111,7 @@ fn daemon_start_status_stop_lifecycle() {
     assert!(stop.status.success());
 
     // Stop path should wait for daemon to become unreachable.
-    let status_after_stop = uxc_command()
+    let status_after_stop = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("status")
         .output()
@@ -68,7 +132,8 @@ fn daemon_start_status_stop_lifecycle() {
 #[test]
 #[serial]
 fn endpoint_host_help_autostarts_daemon_and_sets_meta() {
-    daemon_stop_best_effort();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
     let mut server = mockito::Server::new();
     let _schema = server
@@ -84,7 +149,7 @@ fn endpoint_host_help_autostarts_daemon_and_sets_meta() {
         )
         .create();
 
-    let output = uxc_command()
+    let output = uxc_command_with_home(temp_home.path())
         .arg(server.url())
         .arg("--no-cache")
         .arg("-h")
@@ -98,15 +163,16 @@ fn endpoint_host_help_autostarts_daemon_and_sets_meta() {
     assert_eq!(json["meta"]["daemon_autostarted"], true);
     assert_eq!(json["meta"]["daemon_restarted_for_version_mismatch"], false);
 
-    daemon_stop_best_effort();
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]
 #[serial]
 fn daemon_start_reports_started_now_and_already_running() {
-    daemon_stop_best_effort();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
-    let first = uxc_command()
+    let first = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
@@ -120,7 +186,7 @@ fn daemon_start_reports_started_now_and_already_running() {
     assert_eq!(first_json["data"]["restarted_for_version_mismatch"], false);
     assert_eq!(first_json["data"]["version"], env!("CARGO_PKG_VERSION"));
 
-    let second = uxc_command()
+    let second = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
@@ -135,16 +201,17 @@ fn daemon_start_reports_started_now_and_already_running() {
     assert_eq!(second_json["data"]["restarted_for_version_mismatch"], false);
     assert_eq!(second_json["data"]["version"], env!("CARGO_PKG_VERSION"));
 
-    daemon_stop_best_effort();
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]
 #[serial]
 fn daemon_restart_when_running() {
-    daemon_stop_best_effort();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
     // Start daemon first
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
@@ -152,7 +219,7 @@ fn daemon_restart_when_running() {
     assert!(start.status.success());
 
     // Restart should stop and start
-    let restart = uxc_command()
+    let restart = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("restart")
         .output()
@@ -167,7 +234,7 @@ fn daemon_restart_when_running() {
     assert!(restart_json["data"]["socket"].as_str().is_some());
 
     // Verify daemon is running after restart
-    let status = uxc_command()
+    let status = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("status")
         .output()
@@ -177,16 +244,17 @@ fn daemon_restart_when_running() {
         serde_json::from_slice(&status.stdout).expect("valid json");
     assert_eq!(status_json["data"]["running"], true);
 
-    daemon_stop_best_effort();
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]
 #[serial]
 fn daemon_restart_when_not_running() {
-    daemon_stop_best_effort();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
     // Restart when daemon is not running should just start it
-    let restart = uxc_command()
+    let restart = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("restart")
         .output()
@@ -201,7 +269,7 @@ fn daemon_restart_when_not_running() {
     assert!(restart_json["data"]["socket"].as_str().is_some());
 
     // Verify daemon is running after restart
-    let status = uxc_command()
+    let status = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("status")
         .output()
@@ -211,7 +279,7 @@ fn daemon_restart_when_not_running() {
         serde_json::from_slice(&status.stdout).expect("valid json");
     assert_eq!(status_json["data"]["running"], true);
 
-    daemon_stop_best_effort();
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]
@@ -240,10 +308,11 @@ fn daemon_restart_help_shows_restart_subcommand_help() {
 #[test]
 #[serial]
 fn daemon_restart_text_output_renders_correctly() {
-    daemon_stop_best_effort();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
     // Test restart when daemon is not running
-    let restart = uxc_command()
+    let restart = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("restart")
         .arg("--text")
@@ -256,5 +325,222 @@ fn daemon_restart_text_output_renders_correctly() {
     assert!(stdout.contains("Daemon started."));
     assert!(stdout.contains("Socket:"));
 
-    daemon_stop_best_effort();
+    daemon_stop_best_effort_with_home(temp_home.path());
+}
+
+#[test]
+#[serial]
+fn daemon_doctor_repairs_stale_socket_and_owner_metadata() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let daemon_dir = daemon_runtime_dir(temp_home.path());
+    fs::create_dir_all(&daemon_dir).expect("daemon dir should exist");
+    fs::write(daemon_socket_path(temp_home.path()), b"stale").expect("stale socket marker");
+    fs::write(
+        daemon_lock_path(temp_home.path()),
+        r#"{"pid":999999,"version":"0.0.0","socket":"/tmp/old.sock","started_at_unix":1}"#,
+    )
+    .expect("stale owner metadata");
+
+    let output = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("doctor")
+        .output()
+        .expect("daemon doctor should run");
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "daemon_doctor_result");
+    assert_eq!(json["data"]["status"], "repaired");
+    assert_eq!(json["data"]["repaired"], true);
+    assert_eq!(json["data"]["socket_removed"], true);
+    assert_eq!(json["data"]["owner_metadata_cleared"], true);
+    assert!(!daemon_socket_path(temp_home.path()).exists());
+    assert!(!daemon_lock_path(temp_home.path()).exists());
+}
+
+#[test]
+#[serial]
+fn daemon_doctor_refuses_repair_when_owner_lock_is_held() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let daemon_dir = daemon_runtime_dir(temp_home.path());
+    fs::create_dir_all(&daemon_dir).expect("daemon dir should exist");
+    fs::write(daemon_socket_path(temp_home.path()), b"stale").expect("stale socket marker");
+
+    let mut lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(daemon_lock_path(temp_home.path()))
+        .expect("daemon lock should open");
+    lock_file
+        .try_lock_exclusive()
+        .expect("daemon lock should be acquirable");
+    writeln!(
+        lock_file,
+        "{}",
+        serde_json::json!({
+            "pid": 999999_u32,
+            "version": "0.0.0",
+            "socket": daemon_socket_path(temp_home.path()).display().to_string(),
+            "started_at_unix": 1_u64,
+        })
+    )
+    .expect("owner metadata should write");
+    lock_file.flush().expect("owner metadata should flush");
+
+    let output = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("doctor")
+        .output()
+        .expect("daemon doctor should run");
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "daemon_doctor_result");
+    assert_eq!(json["data"]["status"], "owner_held");
+    assert_eq!(json["data"]["repaired"], false);
+    assert_eq!(json["data"]["socket_removed"], false);
+    assert_eq!(json["data"]["owner_metadata_cleared"], false);
+    assert!(daemon_socket_path(temp_home.path()).exists());
+    assert!(daemon_lock_path(temp_home.path()).exists());
+}
+
+#[test]
+#[serial]
+fn daemon_start_fails_closed_when_owner_lock_is_held() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let daemon_dir = daemon_runtime_dir(temp_home.path());
+    fs::create_dir_all(&daemon_dir).expect("daemon dir should exist");
+    let lock_path = daemon_lock_path(temp_home.path());
+    let mut lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("daemon lock should open");
+    lock_file
+        .try_lock_exclusive()
+        .expect("test process should hold daemon owner lock");
+    writeln!(
+        lock_file,
+        "{{\"pid\":{},\"version\":\"{}\",\"socket\":\"{}\",\"started_at_unix\":1}}",
+        std::process::id(),
+        env!("CARGO_PKG_VERSION"),
+        daemon_socket_path(temp_home.path()).display()
+    )
+    .expect("owner metadata should write");
+    lock_file.flush().expect("owner metadata should flush");
+
+    let output = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(!output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "DAEMON_OWNER_UNREACHABLE");
+    assert!(json["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Refusing to start a second daemon")));
+}
+
+#[test]
+#[serial]
+fn daemon_status_surfaces_owner_diagnostics_when_owner_is_unreachable() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let daemon_dir = daemon_runtime_dir(temp_home.path());
+    fs::create_dir_all(&daemon_dir).expect("daemon dir should exist");
+    let lock_path = daemon_lock_path(temp_home.path());
+    let mut lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("daemon lock should open");
+    lock_file
+        .try_lock_exclusive()
+        .expect("test process should hold daemon owner lock");
+    writeln!(
+        lock_file,
+        "{{\"pid\":{},\"version\":\"{}\",\"socket\":\"{}\",\"started_at_unix\":1}}",
+        std::process::id(),
+        env!("CARGO_PKG_VERSION"),
+        daemon_socket_path(temp_home.path()).display()
+    )
+    .expect("owner metadata should write");
+    lock_file.flush().expect("owner metadata should flush");
+
+    let output = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("status")
+        .output()
+        .expect("daemon status should run");
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["running"], false);
+    assert_eq!(json["data"]["owner_lock_held"], true);
+    assert_eq!(json["data"]["owner_pid"], std::process::id());
+    assert_eq!(json["data"]["owner_pid_alive"], true);
+    assert_eq!(json["data"]["error"]["code"], "DAEMON_OWNER_UNREACHABLE");
+}
+
+#[test]
+#[serial]
+fn daemon_stop_falls_back_to_owner_pid_when_socket_is_missing() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let mut child = spawn_daemon_serve(temp_home.path());
+    wait_for_path(&daemon_socket_path(temp_home.path()));
+    fs::remove_file(daemon_socket_path(temp_home.path())).expect("socket path should be removed");
+
+    let output = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output()
+        .expect("daemon stop should run");
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["stopped"], true);
+
+    wait_for_exit(&mut child);
+    assert!(!daemon_socket_path(temp_home.path()).exists());
+
+    let status_output = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("status")
+        .output()
+        .expect("daemon status should run");
+    assert!(status_output.status.success());
+
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status_output.stdout).expect("valid status json");
+    assert_eq!(status_json["ok"], true);
+    assert_eq!(status_json["data"]["running"], false);
+    assert_eq!(status_json["data"]["owner_lock_held"], false);
+
+    if daemon_lock_path(temp_home.path()).exists() {
+        let lock_contents = fs::read_to_string(daemon_lock_path(temp_home.path()))
+            .expect("lock should be readable");
+        assert!(lock_contents.trim().is_empty());
+    }
 }

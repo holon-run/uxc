@@ -848,19 +848,20 @@ fn daemon_status_not_blocked_by_stuck_mcp_invoke() {
 #[test]
 #[serial]
 fn mcp_stdio_execute_does_not_relist_tools_on_reused_session() {
-    daemon_stop_best_effort();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} tools_list_fail_after_first", bin.display());
 
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
         .expect("daemon start should run");
     assert!(start.status.success());
 
-    let first = uxc_command()
+    let first = uxc_command_with_home(temp_home.path())
         .arg(&endpoint)
         .arg("echo")
         .arg("--input-json")
@@ -874,7 +875,7 @@ fn mcp_stdio_execute_does_not_relist_tools_on_reused_session() {
         String::from_utf8_lossy(&first.stderr)
     );
 
-    let second = uxc_command()
+    let second = uxc_command_with_home(temp_home.path())
         .arg(&endpoint)
         .arg("echo")
         .arg("--input-json")
@@ -894,7 +895,376 @@ fn mcp_stdio_execute_does_not_relist_tools_on_reused_session() {
     assert_eq!(json["data"]["content"][0]["text"], "second");
     assert_eq!(json["meta"]["daemon_session_reused"], true);
 
-    daemon_stop_best_effort();
+    daemon_stop_best_effort_with_home(temp_home.path());
+}
+
+#[test]
+#[serial]
+fn mcp_stdio_execute_uses_live_session_tool_catalog_for_arg_coercion() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let scripts_dir = temp_home.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("scripts dir should exist");
+    let log_path = temp_home.path().join("mcp-live-session.log");
+    let script_path = scripts_dir.join("mcp_live_schema.py");
+
+    write_executable_script(
+        &script_path,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+log_path = Path(sys.argv[1])
+with log_path.open("a", encoding="utf-8") as f:
+    f.write("start\n")
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    req_id = req.get("id")
+    if method == "initialize":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "live-schema", "version": "1.0.0"}
+            }
+        }), flush=True)
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "tools": [{
+                    "name": "measure",
+                    "description": "Require integer count",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"count": {"type": "integer"}},
+                        "required": ["count"]
+                    }
+                }]
+            }
+        }), flush=True)
+    elif method == "tools/call":
+        args = req.get("params", {}).get("arguments") or {}
+        count = args.get("count")
+        if not isinstance(count, int):
+            print(json.dumps({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": "count must be integer"}
+            }), flush=True)
+            continue
+        starts = log_path.read_text(encoding="utf-8").count("start\n")
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "content": [{"type": "text", "text": f"count={count};starts={starts}"}],
+                "structuredContent": {"count": count, "starts": starts}
+            }
+        }), flush=True)
+    else:
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32601, "message": "Method not found"}
+        }), flush=True)
+"#,
+    );
+
+    let endpoint = format!("{} {}", script_path.display(), log_path.display());
+
+    let start = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let cold = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("measure")
+        .arg("--input-json")
+        .arg(r#"{"count":"7"}"#)
+        .output()
+        .expect("cold call should run");
+    assert!(
+        cold.status.success(),
+        "cold call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&cold.stdout),
+        String::from_utf8_lossy(&cold.stderr)
+    );
+    let cold_json: serde_json::Value =
+        serde_json::from_slice(&cold.stdout).expect("cold stdout should be valid JSON");
+    assert_eq!(cold_json["ok"], true);
+    assert_eq!(cold_json["data"]["structuredContent"]["count"], 7);
+    assert_eq!(cold_json["data"]["structuredContent"]["starts"], 1);
+
+    let warm = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("measure")
+        .arg("--input-json")
+        .arg(r#"{"count":"9"}"#)
+        .output()
+        .expect("warm call should run");
+    assert!(
+        warm.status.success(),
+        "warm call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&warm.stdout),
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    let warm_json: serde_json::Value =
+        serde_json::from_slice(&warm.stdout).expect("warm stdout should be valid JSON");
+    assert_eq!(warm_json["ok"], true);
+    assert_eq!(warm_json["data"]["structuredContent"]["count"], 9);
+    assert_eq!(warm_json["data"]["structuredContent"]["starts"], 1);
+    assert_eq!(warm_json["meta"]["daemon_session_reused"], true);
+
+    daemon_stop_best_effort_with_home(temp_home.path());
+}
+
+#[test]
+#[serial]
+fn mcp_stdio_execute_refreshes_live_tool_catalog_after_tools_list_changed() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let scripts_dir = temp_home.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("scripts dir should exist");
+    let script_path = scripts_dir.join("mcp_dynamic_schema.py");
+
+    write_executable_script(
+        &script_path,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+
+dynamic = False
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    req_id = req.get("id")
+    if method == "initialize":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {"listChanged": True}},
+                "serverInfo": {"name": "dynamic-schema", "version": "1.0.0"}
+            }
+        }), flush=True)
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        tools = [{
+            "name": "navigate",
+            "description": "Switch toolset",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }
+        }]
+        if dynamic:
+            tools.append({
+                "name": "render",
+                "description": "Require integer frames",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"frames": {"type": "integer"}},
+                    "required": ["frames"]
+                }
+            })
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"tools": tools}
+        }), flush=True)
+    elif method == "tools/call":
+        name = req.get("params", {}).get("name")
+        args = req.get("params", {}).get("arguments") or {}
+        if name == "navigate":
+            dynamic = True
+            print(json.dumps({
+                "jsonrpc": "2.0",
+                "method": "notifications/tools/list_changed"
+            }), flush=True)
+            print(json.dumps({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"content": [{"type": "text", "text": "navigated"}]}
+            }), flush=True)
+        elif name == "render":
+            frames = args.get("frames")
+            if not isinstance(frames, int):
+                print(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32602, "message": "frames must be integer"}
+                }), flush=True)
+            else:
+                print(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [{"type": "text", "text": f"frames={frames}"}],
+                        "structuredContent": {"frames": frames}
+                    }
+                }), flush=True)
+        else:
+            print(json.dumps({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32601, "message": "tool not found"}
+            }), flush=True)
+    else:
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32601, "message": "Method not found"}
+        }), flush=True)
+"#,
+    );
+
+    let endpoint = script_path.display().to_string();
+
+    let start = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let navigate = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("navigate")
+        .arg("--input-json")
+        .arg(r#"{"path":"/next"}"#)
+        .output()
+        .expect("navigate call should run");
+    assert!(
+        navigate.status.success(),
+        "navigate call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&navigate.stdout),
+        String::from_utf8_lossy(&navigate.stderr)
+    );
+
+    let render = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("render")
+        .arg("--input-json")
+        .arg(r#"{"frames":"12"}"#)
+        .output()
+        .expect("render call should run");
+    assert!(
+        render.status.success(),
+        "render call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&render.stdout),
+        String::from_utf8_lossy(&render.stderr)
+    );
+    let render_json: serde_json::Value =
+        serde_json::from_slice(&render.stdout).expect("render stdout should be valid JSON");
+    assert_eq!(render_json["ok"], true);
+    assert_eq!(render_json["data"]["structuredContent"]["frames"], 12);
+    assert_eq!(render_json["meta"]["daemon_session_reused"], true);
+
+    daemon_stop_best_effort_with_home(temp_home.path());
+}
+
+#[test]
+#[serial]
+fn mcp_stdio_execute_falls_back_to_raw_args_when_live_tool_catalog_is_unavailable() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let scripts_dir = temp_home.path().join("scripts");
+    fs::create_dir_all(&scripts_dir).expect("scripts dir should exist");
+    let script_path = scripts_dir.join("mcp_no_tools_list.py");
+
+    write_executable_script(
+        &script_path,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get("method")
+    req_id = req.get("id")
+    if method == "initialize":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "no-tools-list", "version": "1.0.0"}
+            }
+        }), flush=True)
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32601, "message": "Method not found"}
+        }), flush=True)
+    elif method == "tools/call":
+        args = req.get("params", {}).get("arguments") or {}
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "content": [{"type": "text", "text": args.get("message", "")}],
+                "structuredContent": {"message": args.get("message", "")}
+            }
+        }), flush=True)
+    else:
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32601, "message": "Method not found"}
+        }), flush=True)
+"#,
+    );
+
+    let endpoint = script_path.display().to_string();
+
+    let start = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let call = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"fallback-ok"}"#)
+        .output()
+        .expect("call should run");
+    assert!(
+        call.status.success(),
+        "call should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&call.stdout),
+        String::from_utf8_lossy(&call.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&call.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["structuredContent"]["message"], "fallback-ok");
+
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]
