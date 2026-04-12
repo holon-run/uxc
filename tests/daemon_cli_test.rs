@@ -363,6 +363,57 @@ fn daemon_doctor_repairs_stale_socket_and_owner_metadata() {
 
 #[test]
 #[serial]
+fn daemon_doctor_refuses_repair_when_owner_lock_is_held() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let daemon_dir = daemon_runtime_dir(temp_home.path());
+    fs::create_dir_all(&daemon_dir).expect("daemon dir should exist");
+    fs::write(daemon_socket_path(temp_home.path()), b"stale").expect("stale socket marker");
+
+    let mut lock_file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(daemon_lock_path(temp_home.path()))
+        .expect("daemon lock should open");
+    lock_file
+        .try_lock_exclusive()
+        .expect("daemon lock should be acquirable");
+    writeln!(
+        lock_file,
+        "{}",
+        serde_json::json!({
+            "pid": 999999_u32,
+            "version": "0.0.0",
+            "socket": daemon_socket_path(temp_home.path()).display().to_string(),
+            "started_at_unix": 1_u64,
+        })
+    )
+    .expect("owner metadata should write");
+    lock_file.flush().expect("owner metadata should flush");
+
+    let output = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("doctor")
+        .output()
+        .expect("daemon doctor should run");
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "daemon_doctor_result");
+    assert_eq!(json["data"]["status"], "owner_held");
+    assert_eq!(json["data"]["repaired"], false);
+    assert_eq!(json["data"]["socket_removed"], false);
+    assert_eq!(json["data"]["owner_metadata_cleared"], false);
+    assert!(daemon_socket_path(temp_home.path()).exists());
+    assert!(daemon_lock_path(temp_home.path()).exists());
+}
+
+#[test]
+#[serial]
 fn daemon_start_fails_closed_when_owner_lock_is_held() {
     let temp_home = tempfile::tempdir().expect("temp home should be created");
     daemon_stop_best_effort_with_home(temp_home.path());

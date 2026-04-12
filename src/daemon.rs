@@ -7745,8 +7745,10 @@ pub async fn daemon_session_kill_local(
     daemon_session_kill_client(request).await
 }
 
-pub fn daemon_doctor_local_result() -> Result<DaemonDoctorResponse> {
-    daemon_doctor_local()
+pub async fn daemon_doctor_local_result() -> Result<DaemonDoctorResponse> {
+    tokio::task::spawn_blocking(daemon_doctor_local_blocking)
+        .await
+        .map_err(|err| anyhow!("daemon doctor task failed: {err}"))?
 }
 
 pub async fn daemon_start_local() -> Result<EnsureDaemonOutcome> {
@@ -7778,32 +7780,48 @@ pub async fn daemon_stop_local() -> Result<bool> {
             .into());
         }
 
-        // SAFETY: kill with SIGTERM targets the owner pid discovered from local metadata.
-        if unsafe { kill(pid as i32, DAEMON_OWNER_TERM_SIGNAL) } == -1 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-
-        for _ in 0..STOP_POLL_TRIES {
-            tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
-            let diagnostics = inspect_daemon_local_diagnostics()?;
-            if !diagnostics.owner_lock_held {
-                let _ = clear_daemon_owner_metadata_path(&daemon_lock_path());
-                if socket_path().exists() {
-                    let _ = fs::remove_file(socket_path());
-                }
-                return Ok(true);
+        #[cfg(unix)]
+        {
+            // SAFETY: kill with SIGTERM targets the owner pid discovered from local metadata.
+            if unsafe { kill(pid as i32, DAEMON_OWNER_TERM_SIGNAL) } == -1 {
+                return Err(std::io::Error::last_os_error().into());
             }
+
+            for _ in 0..STOP_POLL_TRIES {
+                tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
+                let diagnostics = inspect_daemon_local_diagnostics()?;
+                if !diagnostics.owner_lock_held {
+                    let _ = clear_daemon_owner_metadata_path(&daemon_lock_path());
+                    if socket_path().exists() {
+                        let _ = fs::remove_file(socket_path());
+                    }
+                    return Ok(true);
+                }
+            }
+
+            return Err(StructuredError::new(
+                "DAEMON_STOP_TIMEOUT",
+                format!(
+                    "Daemon owner pid {} did not stop in time. Run `uxc daemon doctor`.",
+                    pid
+                ),
+                Some(serde_json::to_value(diagnostics)?),
+            )
+            .into());
         }
 
-        return Err(StructuredError::new(
-            "DAEMON_STOP_TIMEOUT",
-            format!(
-                "Daemon owner pid {} did not stop in time. Run `uxc daemon doctor`.",
-                pid
-            ),
-            Some(serde_json::to_value(diagnostics)?),
-        )
-        .into());
+        #[cfg(not(unix))]
+        {
+            return Err(StructuredError::new(
+                "DAEMON_STOP_UNSUPPORTED_PLATFORM",
+                format!(
+                    "Daemon owner pid {} cannot be stopped via Unix signals on this platform.",
+                    pid
+                ),
+                Some(serde_json::to_value(&diagnostics)?),
+            )
+            .into());
+        }
     }
     daemon_stop_client().await?;
     for _ in 0..STOP_POLL_TRIES {
@@ -10264,7 +10282,6 @@ impl Drop for StartLockGuard {
 
 struct DaemonOwnerLockGuard {
     file: fs::File,
-    path: PathBuf,
 }
 
 impl DaemonOwnerLockGuard {
@@ -10277,24 +10294,29 @@ impl DaemonOwnerLockGuard {
             .open(path)
             .with_context(|| format!("Failed to open daemon owner lock {}", path.display()))?;
 
-        file.try_lock_exclusive().map_err(|_| {
-            StructuredError::new(
-                "DAEMON_OWNER_HELD",
-                format!(
-                    "Another daemon owner already holds {}. Run `uxc daemon doctor` for diagnostics.",
-                    path.display()
-                ),
-                Some(json!({
-                    "lock_path": path.display().to_string(),
-                })),
-            )
-        })?;
+        match file.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                return Err(StructuredError::new(
+                    "DAEMON_OWNER_HELD",
+                    format!(
+                        "Another daemon owner already holds {}. Run `uxc daemon doctor` for diagnostics.",
+                        path.display()
+                    ),
+                    Some(json!({
+                        "lock_path": path.display().to_string(),
+                    })),
+                )
+                .into());
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("Failed to lock daemon owner lock {}", path.display()));
+            }
+        }
 
         write_daemon_owner_metadata(&mut file, metadata)?;
-        Ok(Self {
-            file,
-            path: path.to_path_buf(),
-        })
+        Ok(Self { file })
     }
 
     fn clear_metadata(&mut self) {
@@ -10305,7 +10327,6 @@ impl DaemonOwnerLockGuard {
 impl Drop for DaemonOwnerLockGuard {
     fn drop(&mut self) {
         let _ = self.file.unlock();
-        let _ = &self.path;
     }
 }
 
@@ -10474,6 +10495,7 @@ fn doctor_message_for_diagnostics(diagnostics: &DaemonLocalDiagnostics, status: 
                 .map(|pid| pid.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         ),
+        "owner_held" => "Daemon owner lock is still held but owner metadata is stale or incomplete. Refusing repair; wait for the owner to exit or inspect the lock holder.".to_string(),
         "repaired" => "Removed stale daemon artifacts.".to_string(),
         _ => "No live daemon owner found.".to_string(),
     }
@@ -10483,7 +10505,7 @@ pub fn daemon_local_diagnostics() -> Result<DaemonLocalDiagnostics> {
     inspect_daemon_local_diagnostics()
 }
 
-pub fn daemon_doctor_local() -> Result<DaemonDoctorResponse> {
+fn daemon_doctor_local_blocking() -> Result<DaemonDoctorResponse> {
     if daemon_status_client_blocking().is_ok() {
         let diagnostics = inspect_daemon_local_diagnostics()?;
         return Ok(DaemonDoctorResponse {
@@ -10498,18 +10520,20 @@ pub fn daemon_doctor_local() -> Result<DaemonDoctorResponse> {
     }
 
     let diagnostics = inspect_daemon_local_diagnostics()?;
-    if diagnostics.owner_lock_held && diagnostics.owner_pid_alive {
+    if diagnostics.owner_lock_held {
+        let status = if diagnostics.owner_pid_alive {
+            "owner_unreachable"
+        } else {
+            "owner_held"
+        };
         return Ok(DaemonDoctorResponse {
-            status: "owner_unreachable".to_string(),
+            status: status.to_string(),
             repaired: false,
             socket_removed: false,
             owner_metadata_cleared: false,
             socket: diagnostics.socket.clone(),
             diagnostics: diagnostics.clone(),
-            message: Some(doctor_message_for_diagnostics(
-                &diagnostics,
-                "owner_unreachable",
-            )),
+            message: Some(doctor_message_for_diagnostics(&diagnostics, status)),
         });
     }
 
