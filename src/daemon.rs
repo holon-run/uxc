@@ -824,6 +824,14 @@ struct ManagedSourceEntry {
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedSourceRuntimeStateSnapshot {
+    status: String,
+    started_at_unix: Option<u64>,
+    stopped_at_unix: Option<u64>,
+    last_error: Option<String>,
+}
+
 impl McpStdioSession {
     fn apply_lifecycle_notification(&mut self, notification: &JsonRpcNotification) -> Result<bool> {
         if notification.method != "notifications/uxc.lifecycle_changed" {
@@ -2525,9 +2533,10 @@ impl ManagedSourceManager {
             stop_rx.clone(),
             event_tx,
         );
+        let mut last_synced_state: Option<ManagedSourceRuntimeStateSnapshot> = None;
 
         loop {
-            tokio::select! {
+            let should_sync = tokio::select! {
                 maybe_event = event_rx.recv() => {
                     match maybe_event {
                         Some(event) => {
@@ -2541,6 +2550,7 @@ impl ManagedSourceManager {
                                     }
                                 }
                             }
+                            true
                         }
                         None => {
                             let snapshot = runtime_view.lock().await.clone();
@@ -2549,17 +2559,28 @@ impl ManagedSourceManager {
                         }
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-            }
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    let fallback_status = runtime_view.lock().await.status.clone();
+                    let next_state =
+                        managed_source_runtime_state_snapshot(&runtime_view, &fallback_status)
+                            .await;
+                    last_synced_state.as_ref() != Some(&next_state)
+                }
+            };
 
-            let fallback_status = runtime_view.lock().await.status.clone();
-            if let Err(err) =
-                sync_managed_source_state(&self.store, &entry, &runtime_view, &fallback_status)
-                    .await
-            {
-                self.fail_managed_source(&entry, err.to_string()).await;
-                let _ = entry.stop_tx.lock().await.send(true);
-                break;
+            if should_sync {
+                let fallback_status = runtime_view.lock().await.status.clone();
+                if let Err(err) =
+                    sync_managed_source_state(&self.store, &entry, &runtime_view, &fallback_status)
+                        .await
+                {
+                    self.fail_managed_source(&entry, err.to_string()).await;
+                    let _ = entry.stop_tx.lock().await.send(true);
+                    break;
+                }
+                last_synced_state = Some(
+                    managed_source_runtime_state_snapshot(&runtime_view, &fallback_status).await,
+                );
             }
 
             if runner_task.is_finished() && event_rx.is_closed() {
@@ -2609,6 +2630,7 @@ impl ManagedSourceManager {
         update_subscription_view(runtime_view, Some("running"), None, false).await;
 
         let default_interval_secs = config.interval_secs.max(1);
+        let base_args = request.args.clone().unwrap_or_default();
         loop {
             if *stop_rx.borrow() {
                 update_subscription_view(runtime_view, Some("stopped"), None, false).await;
@@ -2619,7 +2641,7 @@ impl ManagedSourceManager {
                 return;
             }
 
-            let args = runner.build_request_args(&request.args.clone().unwrap_or_default());
+            let args = runner.build_request_args(&base_args);
             let previous_checkpoint = runner.checkpoint().clone();
             let fetch =
                 fetch_managed_source_poll(runtime, request, args, runner.checkpoint()).await;
@@ -2669,11 +2691,12 @@ impl ManagedSourceManager {
                             }
                         };
                         update_subscription_view(runtime_view, Some("running"), None, false).await;
+                        let ingested_at_unix = now_unix_secs();
                         let events = output
                             .emitted_items
                             .into_iter()
                             .map(|payload| PendingStreamEvent {
-                                ingested_at_unix: now_unix_secs(),
+                                ingested_at_unix,
                                 payload,
                             })
                             .collect::<Vec<_>>();
@@ -3083,6 +3106,30 @@ async fn sync_managed_source_state(
     state.stopped_at_unix = stopped_at_unix;
     state.last_error = snapshot.last_error;
     Ok(())
+}
+
+async fn managed_source_runtime_state_snapshot(
+    runtime_view: &Arc<Mutex<SubscriptionJobView>>,
+    fallback_status: &str,
+) -> ManagedSourceRuntimeStateSnapshot {
+    let snapshot = runtime_view.lock().await.clone();
+    let status = if snapshot.status.is_empty() {
+        fallback_status.to_string()
+    } else {
+        snapshot.status
+    };
+    let stopped_at_unix = if status == "running" || status == "reconnecting" || status == "starting"
+    {
+        None
+    } else {
+        snapshot.stopped_at_unix
+    };
+    ManagedSourceRuntimeStateSnapshot {
+        status,
+        started_at_unix: snapshot.started_at_unix,
+        stopped_at_unix,
+        last_error: snapshot.last_error,
+    }
 }
 
 fn view_from_record(record: &ManagedSourceRecord) -> ManagedSourceView {
@@ -3965,10 +4012,16 @@ async fn build_subscription_event_record(
         meta,
     };
     *seq = next_seq;
+    record
+}
+
+async fn note_subscription_event_delivered(
+    view: &Arc<Mutex<SubscriptionJobView>>,
+    timestamp_unix: u64,
+) {
     let mut guard = view.lock().await;
     guard.written_events = guard.written_events.saturating_add(1);
-    guard.last_event_at_unix = Some(record.timestamp_unix);
-    record
+    guard.last_event_at_unix = Some(timestamp_unix);
 }
 
 #[async_trait::async_trait]
@@ -3990,9 +4043,10 @@ impl SubscriptionEventRecorder for ChannelSubscriptionRecorder<'_> {
         )
         .await;
         self.tx
-            .send(record)
+            .send(record.clone())
             .await
             .map_err(|_| anyhow!("managed source event channel closed"))?;
+        note_subscription_event_delivered(self.view, record.timestamp_unix).await;
         Ok(())
     }
 
