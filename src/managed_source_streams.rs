@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 const DEFAULT_RETENTION_MAX_ROWS: u64 = 10_000;
 const DEFAULT_RETENTION_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+const MANAGED_SOURCE_SCHEMA_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedSourceRecord {
@@ -90,6 +91,12 @@ pub struct SourceRuntimeUpdate {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingStreamEvent {
+    pub ingested_at_unix: u64,
+    pub payload: Value,
+}
+
 #[derive(Clone)]
 pub struct ManagedSourceStore {
     path: PathBuf,
@@ -111,7 +118,7 @@ impl ManagedSourceStore {
     }
 
     fn init(&self) -> Result<()> {
-        let conn = Connection::open(&self.path)
+        let mut conn = Connection::open(&self.path)
             .with_context(|| format!("Failed to open {}", self.path.display()))?;
         conn.execute_batch(
             r#"
@@ -131,6 +138,7 @@ impl ManagedSourceStore {
                 started_at_unix integer,
                 stopped_at_unix integer,
                 last_error text,
+                poll_checkpoint_json text,
                 underlying_job_id text,
                 mirrored_after_seq integer not null default 0,
                 primary key (namespace, source_key)
@@ -160,6 +168,7 @@ impl ManagedSourceStore {
                 on stream_events(stream_id, ingested_at_unix);
             "#,
         )?;
+        migrate_schema(&mut conn)?;
         Ok(())
     }
 
@@ -404,6 +413,181 @@ impl ManagedSourceStore {
         .await?
     }
 
+    pub async fn load_poll_checkpoint(
+        &self,
+        namespace: &str,
+        source_key: &str,
+        run_id: &str,
+    ) -> Result<Option<crate::subscription_poll::PollCheckpointState>> {
+        let _guard = self.gate.lock().await;
+        let path = self.path.clone();
+        let namespace = namespace.to_string();
+        let source_key = source_key.to_string();
+        let run_id = run_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            let json = conn
+                .query_row(
+                    r#"
+                select poll_checkpoint_json
+                from managed_sources
+                where namespace = ?1 and source_key = ?2 and run_id = ?3
+                "#,
+                    params![namespace, source_key, run_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            json.map(|raw| {
+                serde_json::from_str::<crate::subscription_poll::PollCheckpointState>(&raw)
+                    .map_err(Into::into)
+            })
+            .transpose()
+        })
+        .await?
+    }
+
+    pub async fn store_poll_checkpoint_if_missing(
+        &self,
+        namespace: &str,
+        source_key: &str,
+        run_id: &str,
+        checkpoint: &crate::subscription_poll::PollCheckpointState,
+    ) -> Result<bool> {
+        let _guard = self.gate.lock().await;
+        let path = self.path.clone();
+        let namespace = namespace.to_string();
+        let source_key = source_key.to_string();
+        let run_id = run_id.to_string();
+        let checkpoint_json = serde_json::to_string(checkpoint)?;
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            let changed = conn.execute(
+                r#"
+                update managed_sources
+                set poll_checkpoint_json = ?4
+                where namespace = ?1
+                  and source_key = ?2
+                  and run_id = ?3
+                  and poll_checkpoint_json is null
+                "#,
+                params![namespace, source_key, run_id, checkpoint_json],
+            )?;
+            Ok(changed > 0)
+        })
+        .await?
+    }
+
+    pub async fn clear_poll_checkpoint(
+        &self,
+        namespace: &str,
+        source_key: &str,
+        run_id: &str,
+    ) -> Result<()> {
+        let _guard = self.gate.lock().await;
+        let path = self.path.clone();
+        let namespace = namespace.to_string();
+        let source_key = source_key.to_string();
+        let run_id = run_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            conn.execute(
+                r#"
+                update managed_sources
+                set poll_checkpoint_json = null
+                where namespace = ?1 and source_key = ?2 and run_id = ?3
+                "#,
+                params![namespace, source_key, run_id],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
+    pub async fn append_events_and_store_poll_checkpoint(
+        &self,
+        namespace: &str,
+        source_key: &str,
+        run_id: &str,
+        stream_id: &str,
+        events: &[PendingStreamEvent],
+        checkpoint: &crate::subscription_poll::PollCheckpointState,
+    ) -> Result<Vec<u64>> {
+        let _guard = self.gate.lock().await;
+        let path = self.path.clone();
+        let namespace = namespace.to_string();
+        let source_key = source_key.to_string();
+        let run_id = run_id.to_string();
+        let stream_id = stream_id.to_string();
+        let events = events.to_vec();
+        let checkpoint_json = serde_json::to_string(checkpoint)?;
+        tokio::task::spawn_blocking(move || {
+            let mut conn = Connection::open(&path)?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current_stream_id: Option<String> = tx
+                .query_row(
+                    r#"
+                    select stream_id
+                    from managed_sources
+                    where namespace = ?1 and source_key = ?2 and run_id = ?3
+                    "#,
+                    params![namespace, source_key, run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(current_stream_id) = current_stream_id else {
+                anyhow::bail!("managed source row not found while storing poll checkpoint");
+            };
+            if current_stream_id != stream_id {
+                anyhow::bail!("managed source stream mismatch while storing poll checkpoint");
+            }
+
+            let mut next_offset: u64 = tx.query_row(
+                "select coalesce(max(offset), 0) + 1 from stream_events where stream_id = ?1",
+                params![stream_id],
+                |row| row.get(0),
+            )?;
+            let mut offsets = Vec::with_capacity(events.len());
+            let mut latest_ingested_at_unix = None;
+            for event in &events {
+                tx.execute(
+                    r#"
+                    insert into stream_events(stream_id, offset, ingested_at_unix, raw_payload_json)
+                    values (?1, ?2, ?3, ?4)
+                    "#,
+                    params![
+                        stream_id,
+                        next_offset,
+                        event.ingested_at_unix,
+                        serde_json::to_string(&event.payload)?
+                    ],
+                )?;
+                latest_ingested_at_unix = Some(event.ingested_at_unix);
+                offsets.push(next_offset);
+                next_offset = next_offset.saturating_add(1);
+            }
+
+            let changed = tx.execute(
+                r#"
+                update managed_sources
+                set poll_checkpoint_json = ?4
+                where namespace = ?1 and source_key = ?2 and run_id = ?3
+                "#,
+                params![namespace, source_key, run_id, checkpoint_json],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("managed source row changed while storing poll checkpoint");
+            }
+
+            if let Some(now_unix) = latest_ingested_at_unix {
+                apply_retention_tx(&tx, &stream_id, now_unix)?;
+            }
+            tx.commit()?;
+            Ok(offsets)
+        })
+        .await?
+    }
+
     pub async fn append_event(
         &self,
         stream_id: &str,
@@ -591,9 +775,10 @@ fn upsert_source_tx(
             updated_at_unix,
             started_at_unix,
             stopped_at_unix,
-            last_error
+            last_error,
+            poll_checkpoint_json
         )
-        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
         on conflict(namespace, source_key) do update set
             spec_json = excluded.spec_json,
             spec_key = excluded.spec_key,
@@ -603,7 +788,8 @@ fn upsert_source_tx(
             updated_at_unix = excluded.updated_at_unix,
             started_at_unix = excluded.started_at_unix,
             stopped_at_unix = excluded.stopped_at_unix,
-            last_error = excluded.last_error
+            last_error = excluded.last_error,
+            poll_checkpoint_json = excluded.poll_checkpoint_json
         "#,
         params![
             record.namespace,
@@ -617,7 +803,8 @@ fn upsert_source_tx(
             record.updated_at_unix,
             record.started_at_unix,
             record.stopped_at_unix,
-            record.last_error
+            record.last_error,
+            Option::<String>::None
         ],
     )?;
     if create_stream {
@@ -687,4 +874,34 @@ fn apply_retention_tx(
 
 fn to_sqlite_error(err: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+}
+
+fn migrate_schema(conn: &mut Connection) -> Result<()> {
+    let version: i64 = conn.query_row("pragma user_version", [], |row| row.get(0))?;
+    if version < 1 {
+        migrate_v0_to_v1(conn)?;
+        conn.pragma_update(None, "user_version", MANAGED_SOURCE_SCHEMA_VERSION)?;
+    }
+    Ok(())
+}
+
+fn migrate_v0_to_v1(conn: &mut Connection) -> Result<()> {
+    if !table_has_column(conn, "managed_sources", "poll_checkpoint_json")? {
+        conn.execute(
+            "alter table managed_sources add column poll_checkpoint_json text",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
