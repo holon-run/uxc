@@ -14,8 +14,8 @@ use crate::error::{
     StructuredErrorPayload, UxcError,
 };
 use crate::managed_source_streams::{
-    ManagedSourceListRecord, ManagedSourceRecord, ManagedSourceStore, SourceRuntimeUpdate,
-    StreamEventRecord, StreamInfoRecord,
+    ManagedSourceListRecord, ManagedSourceRecord, ManagedSourceStore, PendingStreamEvent,
+    SourceRuntimeUpdate, StreamEventRecord, StreamInfoRecord,
 };
 use crate::subscription_discord::{
     derive_gateway_bot_endpoint, parse_gateway_bot_response, prepare_gateway_websocket_url,
@@ -34,7 +34,7 @@ use crate::subscription_graphql::{
 use crate::subscription_jsonrpc::{
     resolve_jsonrpc_unsubscribe_operation, JsonRpcSubscriptionConfig, JsonRpcSubscriptionHandler,
 };
-use crate::subscription_poll::{PollRuntimeContext, PollRuntimeObserver, PollSubscriptionConfig};
+use crate::subscription_poll::PollSubscriptionConfig;
 use crate::subscription_slack::{
     derive_socket_mode_open_endpoint, parse_socket_mode_open_response, SlackSocketModeHandler,
 };
@@ -64,7 +64,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 const JSONRPC_VERSION: &str = "2.0";
@@ -428,48 +428,40 @@ fn should_read_mcp_resource_snapshot(notification: &JsonRpcNotification) -> bool
 }
 
 async fn append_mcp_resource_snapshot(
-    sink: &mut tokio::fs::File,
-    view: &Arc<Mutex<SubscriptionJobView>>,
-    seq: &mut u64,
+    recorder: &mut impl SubscriptionEventRecorder,
     reason: &str,
     resource_contents: ResourceContents,
 ) -> Result<()> {
-    append_subscription_event(
-        sink,
-        view,
-        seq,
-        "mcp_resource",
-        "snapshot",
-        Some(serde_json::to_value(resource_contents)?),
-        Some(json!({ "reason": reason })),
-    )
-    .await
+    recorder
+        .emit(
+            "mcp_resource",
+            "snapshot",
+            Some(serde_json::to_value(resource_contents)?),
+            Some(json!({ "reason": reason })),
+        )
+        .await
 }
 
 async fn append_mcp_resource_read_result(
-    sink: &mut tokio::fs::File,
-    view: &Arc<Mutex<SubscriptionJobView>>,
-    seq: &mut u64,
+    recorder: &mut impl SubscriptionEventRecorder,
     resource_uri: &str,
     reason: &str,
     error_context: &str,
     read_result: Result<ResourceContents>,
 ) -> Result<()> {
     match read_result {
-        Ok(contents) => append_mcp_resource_snapshot(sink, view, seq, reason, contents).await,
+        Ok(contents) => append_mcp_resource_snapshot(recorder, reason, contents).await,
         Err(err) => {
             let msg = format!("{}: {}", error_context, err);
-            append_subscription_event(
-                sink,
-                view,
-                seq,
-                "mcp_resource",
-                "error",
-                None,
-                Some(json!({ "message": msg, "resource_uri": resource_uri })),
-            )
-            .await?;
-            update_subscription_view(view, None, Some(msg), false).await;
+            recorder
+                .emit(
+                    "mcp_resource",
+                    "error",
+                    None,
+                    Some(json!({ "message": msg, "resource_uri": resource_uri })),
+                )
+                .await?;
+            recorder.update_status(None, Some(msg), false).await?;
             Ok(())
         }
     }
@@ -2504,194 +2496,324 @@ impl ManagedSourceManager {
         entry: Arc<ManagedSourceEntry>,
         record: ManagedSourceRecord,
         spec: ManagedSourceSpec,
-        mut stop_rx: watch::Receiver<bool>,
+        stop_rx: watch::Receiver<bool>,
     ) {
-        let sink_path = runtime.managed_source_sink_path(&record.run_id);
-        let cursor_path = runtime.managed_source_cursor_path(&record.run_id);
-        let request = managed_source_subscription_request(&record, &spec, &sink_path);
+        let request = managed_source_subscription_request(&record, &spec);
         let runtime_view = Arc::new(Mutex::new(subscription_view_for_managed_source(
             &record, &request,
         )));
-        let runner_task = spawn_source_runtime_task(
+        if spec.mode == SubscriptionMode::Poll {
+            self.run_managed_source_poll(
+                &runtime,
+                &entry,
+                &record,
+                &request,
+                &runtime_view,
+                stop_rx,
+            )
+            .await;
+            self.entries.lock().await.remove(&identity_key);
+            return;
+        }
+
+        let (event_tx, mut event_rx) = mpsc::channel(SUBSCRIPTION_EVENTS_MAX_LIMIT);
+        let runner_task = spawn_managed_source_stream_task(
             runtime.clone(),
             &record.run_id,
             request,
-            sink_path.clone(),
             runtime_view.clone(),
             stop_rx.clone(),
-            runtime.managed_source_checkpoint_path(&record.run_id),
+            event_tx,
         );
 
-        let mut cursor = match load_managed_source_cursor(&cursor_path).await {
-            Ok(cursor) => cursor,
-            Err(err) => {
-                let now = now_unix_secs();
-                let _ = self
-                    .store
-                    .clear_source_job(
-                        &entry.namespace,
-                        &entry.source_key,
-                        "failed",
-                        now,
-                        Some(now),
-                        Some(err.to_string()),
-                    )
-                    .await;
-                let mut state = entry.state.lock().await;
-                state.status = "failed".to_string();
-                state.updated_at_unix = now;
-                state.stopped_at_unix = Some(now);
-                state.last_error = Some(err.to_string());
-                let _ = entry.stop_tx.lock().await.send(true);
-                let _ = runner_task.await;
-                self.entries.lock().await.remove(&identity_key);
-                return;
-            }
-        };
-        'managed_source: loop {
-            let batch =
-                match load_subscription_events(&sink_path, &cursor, SUBSCRIPTION_EVENTS_MAX_LIMIT)
-                    .await
-                {
-                    Ok(batch) => batch,
-                    Err(err) => {
-                        let now = now_unix_secs();
-                        let _ = self
-                            .store
-                            .clear_source_job(
-                                &entry.namespace,
-                                &entry.source_key,
-                                "failed",
-                                now,
-                                Some(now),
-                                Some(err.to_string()),
-                            )
-                            .await;
-                        let mut state = entry.state.lock().await;
-                        state.status = "failed".to_string();
-                        state.updated_at_unix = now;
-                        state.stopped_at_unix = Some(now);
-                        state.last_error = Some(err.to_string());
-                        let _ = entry.stop_tx.lock().await.send(true);
-                        break 'managed_source;
-                    }
-                };
-
-            for event in &batch.events {
-                if matches!(event.event_kind.as_str(), "data" | "snapshot") {
-                    let payload = event.data.as_ref().or(event.meta.as_ref());
-                    if let Some(payload) = payload {
-                        if let Err(err) = self
-                            .store
-                            .append_event(&entry.stream_id, event.timestamp_unix, payload)
-                            .await
-                        {
-                            tracing::warn!(
-                                "failed to append managed source event for {}/{}: {}",
-                                entry.namespace,
-                                entry.source_key,
-                                err
-                            );
-                            let now = now_unix_secs();
-                            let mut state = entry.state.lock().await;
-                            state.status = "failed".to_string();
-                            state.updated_at_unix = now;
-                            state.stopped_at_unix = Some(now);
-                            state.last_error = Some(err.to_string());
-                            drop(state);
-                            let _ = self
-                                .store
-                                .clear_source_job(
-                                    &entry.namespace,
-                                    &entry.source_key,
-                                    "failed",
-                                    now,
-                                    Some(now),
-                                    Some(err.to_string()),
-                                )
-                                .await;
-                            let _ = entry.stop_tx.lock().await.send(true);
-                            break 'managed_source;
+        loop {
+            tokio::select! {
+                maybe_event = event_rx.recv() => {
+                    match maybe_event {
+                        Some(event) => {
+                            if matches!(event.event_kind.as_str(), "data" | "snapshot") {
+                                let payload = event.data.as_ref().or(event.meta.as_ref());
+                                if let Some(payload) = payload {
+                                    if let Err(err) = self.store.append_event(&entry.stream_id, event.timestamp_unix, payload).await {
+                                        self.fail_managed_source(&entry, err.to_string()).await;
+                                        let _ = entry.stop_tx.lock().await.send(true);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            let snapshot = runtime_view.lock().await.clone();
+                            let _ = sync_managed_source_state(&self.store, &entry, &runtime_view, &snapshot.status).await;
+                            break;
                         }
                     }
                 }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
             }
-            if batch.next_after_seq > cursor.after_seq
-                || batch.next_offset_bytes > cursor.offset_bytes
-            {
-                cursor.after_seq = batch.next_after_seq;
-                cursor.offset_bytes = batch.next_offset_bytes;
-                if let Err(err) = store_managed_source_cursor(&cursor_path, &cursor).await {
-                    tracing::warn!(
-                        "failed to persist managed source cursor for {}/{}: {}",
-                        entry.namespace,
-                        entry.source_key,
-                        err
-                    );
-                    let now = now_unix_secs();
-                    let mut state = entry.state.lock().await;
-                    state.status = "failed".to_string();
-                    state.updated_at_unix = now;
-                    state.stopped_at_unix = Some(now);
-                    state.last_error = Some(err.to_string());
-                    drop(state);
-                    let _ = self
-                        .store
-                        .clear_source_job(
-                            &entry.namespace,
-                            &entry.source_key,
-                            "failed",
-                            now,
-                            Some(now),
-                            Some(err.to_string()),
-                        )
-                        .await;
-                    let _ = entry.stop_tx.lock().await.send(true);
-                    break 'managed_source;
-                }
-            }
+
             let fallback_status = runtime_view.lock().await.status.clone();
             if let Err(err) =
                 sync_managed_source_state(&self.store, &entry, &runtime_view, &fallback_status)
                     .await
             {
-                tracing::warn!(
-                    "failed to persist managed source runtime update for {}/{}: {}",
-                    entry.namespace,
-                    entry.source_key,
-                    err
-                );
-                let now = now_unix_secs();
-                let mut state = entry.state.lock().await;
-                state.status = "failed".to_string();
-                state.updated_at_unix = now;
-                state.stopped_at_unix = Some(now);
-                state.last_error = Some(err.to_string());
+                self.fail_managed_source(&entry, err.to_string()).await;
                 let _ = entry.stop_tx.lock().await.send(true);
-                break 'managed_source;
-            }
-
-            let snapshot = runtime_view.lock().await.clone();
-            let should_exit = snapshot.status != "running"
-                && batch.events.is_empty()
-                && runner_task.is_finished();
-            if should_exit {
                 break;
             }
 
-            if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_millis(100)).await
-                && runner_task.is_finished()
-            {
-                let snapshot = runtime_view.lock().await.clone();
-                let _ =
-                    sync_managed_source_state(&self.store, &entry, &runtime_view, &snapshot.status)
-                        .await;
+            if runner_task.is_finished() && event_rx.is_closed() {
                 break;
             }
         }
 
         let _ = runner_task.await;
         self.entries.lock().await.remove(&identity_key);
+    }
+
+    async fn run_managed_source_poll(
+        &self,
+        runtime: &DaemonRuntime,
+        entry: &Arc<ManagedSourceEntry>,
+        record: &ManagedSourceRecord,
+        request: &SubscribeStartRequest,
+        runtime_view: &Arc<Mutex<SubscriptionJobView>>,
+        mut stop_rx: watch::Receiver<bool>,
+    ) {
+        let config = match resolve_poll_subscription_config(request) {
+            Ok(config) => config,
+            Err(err) => {
+                self.fail_managed_source(entry, err.to_string()).await;
+                return;
+            }
+        };
+        let mut runner = match crate::subscription_poll::PollSubscriptionRunner::new(config.clone())
+        {
+            Ok(runner) => runner,
+            Err(err) => {
+                self.fail_managed_source(entry, err.to_string()).await;
+                return;
+            }
+        };
+        match self
+            .load_or_import_legacy_managed_source_checkpoint(runtime, record)
+            .await
+        {
+            Ok(Some(checkpoint)) => runner.restore_checkpoint(checkpoint),
+            Ok(None) => {}
+            Err(err) => {
+                self.fail_managed_source(entry, err.to_string()).await;
+                return;
+            }
+        }
+        update_subscription_view(runtime_view, Some("running"), None, false).await;
+
+        let default_interval_secs = config.interval_secs.max(1);
+        loop {
+            if *stop_rx.borrow() {
+                update_subscription_view(runtime_view, Some("stopped"), None, false).await;
+                let snapshot = runtime_view.lock().await.clone();
+                let _ =
+                    sync_managed_source_state(&self.store, entry, runtime_view, &snapshot.status)
+                        .await;
+                return;
+            }
+
+            let args = runner.build_request_args(&request.args.clone().unwrap_or_default());
+            let previous_checkpoint = runner.checkpoint().clone();
+            let fetch =
+                fetch_managed_source_poll(runtime, request, args, runner.checkpoint()).await;
+            let next_interval_secs;
+
+            match fetch {
+                Ok(result) => {
+                    if let Some(etag) = crate::subscription_poll::extract_header_value(
+                        &result.response_headers,
+                        "etag",
+                    ) {
+                        let mut checkpoint = runner.checkpoint().clone();
+                        checkpoint.etag = Some(etag.to_string());
+                        runner.restore_checkpoint(checkpoint);
+                    }
+                    next_interval_secs = crate::subscription_poll::parse_poll_interval_secs(
+                        &result.response_headers,
+                    )
+                    .unwrap_or(default_interval_secs);
+
+                    if result.status_code == Some(304) {
+                        update_subscription_view(runtime_view, Some("running"), None, false).await;
+                        if runner.checkpoint() != &previous_checkpoint {
+                            if let Err(err) = self
+                                .store
+                                .append_events_and_store_poll_checkpoint(
+                                    &entry.namespace,
+                                    &entry.source_key,
+                                    &record.run_id,
+                                    &entry.stream_id,
+                                    &[],
+                                    runner.checkpoint(),
+                                )
+                                .await
+                            {
+                                self.fail_managed_source(entry, err.to_string()).await;
+                                return;
+                            }
+                        }
+                    } else {
+                        let output = match runner.process_response(result.data, result.duration_ms)
+                        {
+                            Ok(output) => output,
+                            Err(err) => {
+                                self.fail_managed_source(entry, err.to_string()).await;
+                                return;
+                            }
+                        };
+                        update_subscription_view(runtime_view, Some("running"), None, false).await;
+                        let events = output
+                            .emitted_items
+                            .into_iter()
+                            .map(|payload| PendingStreamEvent {
+                                ingested_at_unix: now_unix_secs(),
+                                payload,
+                            })
+                            .collect::<Vec<_>>();
+                        if !events.is_empty() || runner.checkpoint() != &previous_checkpoint {
+                            if let Err(err) = self
+                                .store
+                                .append_events_and_store_poll_checkpoint(
+                                    &entry.namespace,
+                                    &entry.source_key,
+                                    &record.run_id,
+                                    &entry.stream_id,
+                                    &events,
+                                    runner.checkpoint(),
+                                )
+                                .await
+                            {
+                                self.fail_managed_source(entry, err.to_string()).await;
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    update_subscription_view(
+                        runtime_view,
+                        Some("reconnecting"),
+                        Some(message.clone()),
+                        true,
+                    )
+                    .await;
+                    if let Err(sync_err) =
+                        sync_managed_source_state(&self.store, entry, runtime_view, "reconnecting")
+                            .await
+                    {
+                        self.fail_managed_source(entry, sync_err.to_string()).await;
+                        return;
+                    }
+                    if wait_for_stop_or_timeout(
+                        &mut stop_rx,
+                        Duration::from_secs(default_interval_secs),
+                    )
+                    .await
+                    {
+                        update_subscription_view(runtime_view, Some("stopped"), None, false).await;
+                        let snapshot = runtime_view.lock().await.clone();
+                        let _ = sync_managed_source_state(
+                            &self.store,
+                            entry,
+                            runtime_view,
+                            &snapshot.status,
+                        )
+                        .await;
+                        return;
+                    }
+                    continue;
+                }
+            }
+
+            let fallback_status = runtime_view.lock().await.status.clone();
+            if let Err(err) =
+                sync_managed_source_state(&self.store, entry, runtime_view, &fallback_status).await
+            {
+                self.fail_managed_source(entry, err.to_string()).await;
+                return;
+            }
+
+            if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(next_interval_secs)).await
+            {
+                update_subscription_view(runtime_view, Some("stopped"), None, false).await;
+                let snapshot = runtime_view.lock().await.clone();
+                let _ =
+                    sync_managed_source_state(&self.store, entry, runtime_view, &snapshot.status)
+                        .await;
+                return;
+            }
+        }
+    }
+
+    async fn load_or_import_legacy_managed_source_checkpoint(
+        &self,
+        runtime: &DaemonRuntime,
+        record: &ManagedSourceRecord,
+    ) -> Result<Option<crate::subscription_poll::PollCheckpointState>> {
+        if let Some(checkpoint) = self
+            .store
+            .load_poll_checkpoint(&record.namespace, &record.source_key, &record.run_id)
+            .await?
+        {
+            return Ok(Some(checkpoint));
+        }
+
+        let checkpoint_path = runtime.managed_source_checkpoint_path(&record.run_id);
+        match tokio::fs::read(&checkpoint_path).await {
+            Ok(bytes) => {
+                let checkpoint = serde_json::from_slice::<
+                    crate::subscription_poll::PollCheckpointState,
+                >(&bytes)?;
+                let imported = self
+                    .store
+                    .store_poll_checkpoint_if_missing(
+                        &record.namespace,
+                        &record.source_key,
+                        &record.run_id,
+                        &checkpoint,
+                    )
+                    .await?;
+                if imported {
+                    let _ = tokio::fs::remove_file(&checkpoint_path).await;
+                }
+                Ok(Some(checkpoint))
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).with_context(|| {
+                format!(
+                    "Failed to read legacy checkpoint {}",
+                    checkpoint_path.display()
+                )
+            }),
+        }
+    }
+
+    async fn fail_managed_source(&self, entry: &Arc<ManagedSourceEntry>, message: String) {
+        let now = now_unix_secs();
+        let _ = self
+            .store
+            .clear_source_job(
+                &entry.namespace,
+                &entry.source_key,
+                "failed",
+                now,
+                Some(now),
+                Some(message.clone()),
+            )
+            .await;
+        let mut state = entry.state.lock().await;
+        state.status = "failed".to_string();
+        state.updated_at_unix = now;
+        state.stopped_at_unix = Some(now);
+        state.last_error = Some(message);
     }
 
     async fn stop_internal(
@@ -2729,6 +2851,9 @@ impl ManagedSourceManager {
                 Some(now_unix_secs()),
                 None,
             )
+            .await?;
+        self.store
+            .clear_poll_checkpoint(namespace, source_key, &stored.run_id)
             .await?;
         let _ = tokio::fs::remove_file(runtime.managed_source_sink_path(&stored.run_id)).await;
         let _ =
@@ -2824,12 +2949,11 @@ fn compute_managed_source_spec_key(spec: &ManagedSourceSpec) -> Result<String> {
 fn managed_source_subscription_request(
     record: &ManagedSourceRecord,
     spec: &ManagedSourceSpec,
-    sink_path: &Path,
 ) -> SubscribeStartRequest {
     SubscribeStartRequest {
         request_id: format!("managed-source:{}:{}", record.namespace, record.source_key),
         endpoint: spec.endpoint.clone(),
-        sink: format!("file:{}", sink_path.display()),
+        sink: "memory:".to_string(),
         operation_id: spec.operation_id.clone(),
         args: spec.args.clone(),
         resource_uri: spec.resource_uri.clone(),
@@ -2886,41 +3010,25 @@ async fn reset_managed_source_runtime_files(runtime: &DaemonRuntime, run_id: &st
     Ok(())
 }
 
-fn spawn_source_runtime_task(
+fn spawn_managed_source_stream_task(
     runtime: DaemonRuntime,
     run_id: &str,
     request: SubscribeStartRequest,
-    sink_path: PathBuf,
     view: Arc<Mutex<SubscriptionJobView>>,
     stop_rx: watch::Receiver<bool>,
-    checkpoint_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
 ) -> JoinHandle<()> {
     let run_id = run_id.to_string();
     tokio::spawn(async move {
-        let result = match request.mode {
-            SubscriptionMode::Stream => {
-                run_stream_subscription_job(
-                    &runtime,
-                    &run_id,
-                    &request,
-                    sink_path,
-                    view.clone(),
-                    stop_rx,
-                )
-                .await
-            }
-            SubscriptionMode::Poll => {
-                run_poll_subscription_job_with_checkpoint(
-                    &runtime,
-                    &request,
-                    checkpoint_path,
-                    sink_path,
-                    view.clone(),
-                    stop_rx,
-                )
-                .await
-            }
-        };
+        let result = run_stream_subscription_job(
+            &runtime,
+            &run_id,
+            &request,
+            event_tx,
+            view.clone(),
+            stop_rx,
+        )
+        .await;
 
         let mut guard = view.lock().await;
         if guard.status != "stopped" {
@@ -3791,151 +3899,6 @@ enum SubscriptionRunError {
     Fatal(anyhow::Error),
 }
 
-#[cfg(test)]
-fn parse_file_sink(spec: &str) -> Result<PathBuf> {
-    let Some(path) = spec.strip_prefix("file:") else {
-        bail!("subscription sink must use file:<path> or memory:");
-    };
-    if path.trim().is_empty() {
-        bail!("subscription sink path cannot be empty");
-    }
-    let path = PathBuf::from(path);
-    validate_subscription_sink_path(&path)?;
-    Ok(path)
-}
-
-#[cfg(test)]
-fn validate_subscription_sink_path(path: &Path) -> Result<()> {
-    if path.as_os_str().is_empty() {
-        bail!("subscription sink path cannot be empty");
-    }
-    if path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        bail!("subscription sink path cannot contain '..'");
-    }
-    Ok(())
-}
-
-async fn open_subscription_sink(path: &Path) -> Result<tokio::fs::File> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("Failed to create sink directory {}", parent.display()))?;
-    }
-    tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await
-        .with_context(|| format!("Failed to open sink file {}", path.display()))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct ManagedSourceCursor {
-    after_seq: u64,
-    offset_bytes: u64,
-}
-
-struct LoadedSubscriptionEvents {
-    events: Vec<SubscriptionEventEnvelope>,
-    next_after_seq: u64,
-    next_offset_bytes: u64,
-}
-
-async fn load_subscription_events(
-    path: &Path,
-    cursor: &ManagedSourceCursor,
-    limit: usize,
-) -> Result<LoadedSubscriptionEvents> {
-    let raw = match tokio::fs::read(path).await {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => Vec::new(),
-        Err(err) => {
-            return Err(err)
-                .with_context(|| format!("Failed to read subscription sink {}", path.display()))
-        }
-    };
-    let file_len = raw.len() as u64;
-    let (start_offset, after_seq) = if cursor.offset_bytes > file_len {
-        (0_usize, 0_u64)
-    } else {
-        (cursor.offset_bytes as usize, cursor.after_seq)
-    };
-    let raw = std::str::from_utf8(&raw[start_offset..])
-        .with_context(|| format!("Invalid utf-8 in subscription sink {}", path.display()))?;
-    let mut events = Vec::new();
-    let mut next_after_seq = after_seq;
-    let mut next_offset_bytes = start_offset as u64;
-    let mut earliest_new_seq: Option<u64> = None;
-    for (index, line) in raw.split_inclusive('\n').enumerate() {
-        let trimmed = line.trim();
-        let line_end_offset = next_offset_bytes.saturating_add(line.len() as u64);
-        if trimmed.is_empty() {
-            next_offset_bytes = line_end_offset;
-            continue;
-        }
-        let event =
-            serde_json::from_str::<SubscriptionEventEnvelope>(trimmed).with_context(|| {
-                format!(
-                    "Invalid subscription event in {} at line {}",
-                    path.display(),
-                    index + 1
-                )
-            })?;
-        if event.seq > after_seq && earliest_new_seq.is_none() {
-            earliest_new_seq = Some(event.seq);
-        }
-        if event.seq <= after_seq {
-            next_offset_bytes = line_end_offset;
-            continue;
-        }
-        if events.len() >= limit {
-            break;
-        }
-        next_after_seq = event.seq;
-        next_offset_bytes = line_end_offset;
-        events.push(event);
-    }
-
-    if let Some(first_seq) = earliest_new_seq {
-        if after_seq > 0 && after_seq < first_seq.saturating_sub(1) {
-            return Err(UxcError::InvalidArguments(format!(
-                "subscription cursor expired for sink {}: earliest available seq is {}",
-                path.display(),
-                first_seq
-            ))
-            .into());
-        }
-    }
-
-    Ok(LoadedSubscriptionEvents {
-        events,
-        next_after_seq,
-        next_offset_bytes,
-    })
-}
-
-async fn load_managed_source_cursor(path: &Path) -> Result<ManagedSourceCursor> {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(ManagedSourceCursor::default()),
-        Err(err) => Err(err)
-            .with_context(|| format!("Failed to read managed source cursor {}", path.display())),
-    }
-}
-
-async fn store_managed_source_cursor(path: &Path, cursor: &ManagedSourceCursor) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(path, serde_json::to_vec(cursor)?)
-        .await
-        .with_context(|| format!("Failed to write managed source cursor {}", path.display()))?;
-    Ok(())
-}
-
 async fn update_subscription_view(
     view: &Arc<Mutex<SubscriptionJobView>>,
     status: Option<&str>,
@@ -3956,15 +3919,38 @@ async fn update_subscription_view(
     }
 }
 
-async fn append_subscription_event(
-    sink: &mut tokio::fs::File,
+#[async_trait::async_trait]
+trait SubscriptionEventRecorder: Send {
+    async fn emit(
+        &mut self,
+        source_kind: &str,
+        event_kind: &str,
+        data: Option<Value>,
+        meta: Option<Value>,
+    ) -> Result<()>;
+
+    async fn update_status(
+        &mut self,
+        status: Option<&str>,
+        last_error: Option<String>,
+        increment_reconnect: bool,
+    ) -> Result<()>;
+}
+
+struct ChannelSubscriptionRecorder<'a> {
+    tx: &'a mpsc::Sender<SubscriptionEventEnvelope>,
+    view: &'a Arc<Mutex<SubscriptionJobView>>,
+    seq: &'a mut u64,
+}
+
+async fn build_subscription_event_record(
     view: &Arc<Mutex<SubscriptionJobView>>,
     seq: &mut u64,
     source_kind: &str,
     event_kind: &str,
     data: Option<Value>,
     meta: Option<Value>,
-) -> Result<()> {
+) -> SubscriptionEventEnvelope {
     let next_seq = seq.saturating_add(1);
     let snapshot = view.lock().await.clone();
     let record = SubscriptionEventEnvelope {
@@ -3978,16 +3964,47 @@ async fn append_subscription_event(
         data,
         meta,
     };
-    let mut line = serde_json::to_vec(&record)?;
-    line.push(b'\n');
-    sink.write_all(&line).await?;
-    sink.flush().await?;
-
     *seq = next_seq;
     let mut guard = view.lock().await;
     guard.written_events = guard.written_events.saturating_add(1);
-    guard.last_event_at_unix = Some(now_unix_secs());
-    Ok(())
+    guard.last_event_at_unix = Some(record.timestamp_unix);
+    record
+}
+
+#[async_trait::async_trait]
+impl SubscriptionEventRecorder for ChannelSubscriptionRecorder<'_> {
+    async fn emit(
+        &mut self,
+        source_kind: &str,
+        event_kind: &str,
+        data: Option<Value>,
+        meta: Option<Value>,
+    ) -> Result<()> {
+        let record = build_subscription_event_record(
+            self.view,
+            self.seq,
+            source_kind,
+            event_kind,
+            data,
+            meta,
+        )
+        .await;
+        self.tx
+            .send(record)
+            .await
+            .map_err(|_| anyhow!("managed source event channel closed"))?;
+        Ok(())
+    }
+
+    async fn update_status(
+        &mut self,
+        status: Option<&str>,
+        last_error: Option<String>,
+        increment_reconnect: bool,
+    ) -> Result<()> {
+        update_subscription_view(self.view, status, last_error, increment_reconnect).await;
+        Ok(())
+    }
 }
 
 fn ensure_subscription_buffer_limit(len: usize, kind: &str) -> Result<()> {
@@ -4098,30 +4115,24 @@ async fn wait_for_stop_or_timeout(stop_rx: &mut watch::Receiver<bool>, duration:
 }
 
 async fn close_subscription_as_stopped(
-    sink: &mut tokio::fs::File,
-    view: &Arc<Mutex<SubscriptionJobView>>,
-    seq: &mut u64,
+    recorder: &mut impl SubscriptionEventRecorder,
     source_kind: &str,
 ) -> Result<()> {
-    append_subscription_event(
-        sink,
-        view,
-        seq,
-        source_kind,
-        "closed",
-        None,
-        Some(json!({"reason":"stopped"})),
-    )
-    .await?;
-    update_subscription_view(view, Some("stopped"), None, false).await;
+    recorder
+        .emit(
+            source_kind,
+            "closed",
+            None,
+            Some(json!({"reason":"stopped"})),
+        )
+        .await?;
+    recorder.update_status(Some("stopped"), None, false).await?;
     Ok(())
 }
 
 async fn execute_http_stream_once(
     request: &SubscribeStartRequest,
-    view: &Arc<Mutex<SubscriptionJobView>>,
-    sink: &mut tokio::fs::File,
-    seq: &mut u64,
+    recorder: &mut impl SubscriptionEventRecorder,
     stop_rx: &mut watch::Receiver<bool>,
 ) -> std::result::Result<(), SubscriptionRunError> {
     let auth_profile =
@@ -4156,7 +4167,7 @@ async fn execute_http_stream_once(
         }
     }
     if *stop_rx.borrow() {
-        close_subscription_as_stopped(sink, view, seq, "http")
+        close_subscription_as_stopped(recorder, "http")
             .await
             .map_err(SubscriptionRunError::Fatal)?;
         return Ok(());
@@ -4164,7 +4175,7 @@ async fn execute_http_stream_once(
     let response = tokio::select! {
         changed = stop_rx.changed() => {
             if changed.is_ok() && *stop_rx.borrow() {
-                close_subscription_as_stopped(sink, view, seq, "http").await
+                close_subscription_as_stopped(recorder, "http").await
                     .map_err(SubscriptionRunError::Fatal)?;
                 return Ok(());
             }
@@ -4192,25 +4203,26 @@ async fn execute_http_stream_once(
         "http_ndjson"
     };
 
-    append_subscription_event(
-        sink,
-        view,
-        seq,
-        source_kind,
-        "open",
-        None,
-        Some(json!({ "content_type": content_type, "url": redact_endpoint(target_url) })),
-    )
-    .await
-    .map_err(SubscriptionRunError::Fatal)?;
-    update_subscription_view(view, Some("running"), None, false).await;
+    recorder
+        .emit(
+            source_kind,
+            "open",
+            None,
+            Some(json!({ "content_type": content_type, "url": redact_endpoint(target_url) })),
+        )
+        .await
+        .map_err(SubscriptionRunError::Fatal)?;
+    recorder
+        .update_status(Some("running"), None, false)
+        .await
+        .map_err(SubscriptionRunError::Fatal)?;
 
     let mut stream = response.bytes_stream();
     let mut raw_buffer = Vec::new();
     let mut text_buffer = String::new();
     loop {
         if *stop_rx.borrow() {
-            close_subscription_as_stopped(sink, view, seq, source_kind)
+            close_subscription_as_stopped(recorder, source_kind)
                 .await
                 .map_err(SubscriptionRunError::Fatal)?;
             return Ok(());
@@ -4218,7 +4230,7 @@ async fn execute_http_stream_once(
         tokio::select! {
             changed = stop_rx.changed() => {
                 if changed.is_ok() && *stop_rx.borrow() {
-                    close_subscription_as_stopped(sink, view, seq, source_kind).await
+                    close_subscription_as_stopped(recorder, source_kind).await
                         .map_err(SubscriptionRunError::Fatal)?;
                     return Ok(());
                 }
@@ -4238,15 +4250,10 @@ async fn execute_http_stream_once(
                             drain_ndjson_events(&mut text_buffer).map_err(SubscriptionRunError::Fatal)?
                         };
                         for value in values {
-                            append_subscription_event(
-                                sink,
-                                view,
-                                seq,
-                                source_kind,
-                                "data",
-                                Some(value),
-                                None,
-                            ).await.map_err(SubscriptionRunError::Fatal)?;
+                            recorder
+                                .emit(source_kind, "data", Some(value), None)
+                                .await
+                                .map_err(SubscriptionRunError::Fatal)?;
                         }
                     }
                     Some(Err(err)) => {
@@ -4264,47 +4271,43 @@ async fn execute_http_stream_once(
 async fn run_http_subscription_job(
     _job_id: &str,
     request: &SubscribeStartRequest,
-    sink_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
+    let mut recorder = ChannelSubscriptionRecorder {
+        tx: &event_tx,
+        view: &view,
+        seq: &mut seq,
+    };
     let mut delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
     loop {
         if *stop_rx.borrow() {
-            close_subscription_as_stopped(&mut sink, &view, &mut seq, "http").await?;
+            close_subscription_as_stopped(&mut recorder, "http").await?;
             return Ok(());
         }
-        match execute_http_stream_once(request, &view, &mut sink, &mut seq, &mut stop_rx).await {
+        match execute_http_stream_once(request, &mut recorder, &mut stop_rx).await {
             Ok(()) => return Ok(()),
             Err(SubscriptionRunError::Fatal(err)) => return Err(err),
             Err(SubscriptionRunError::Retry(err)) => {
                 let msg = err.to_string();
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "http",
-                    "error",
-                    None,
-                    Some(json!({ "message": msg })),
-                )
-                .await?;
-                update_subscription_view(&view, Some("reconnecting"), Some(msg.clone()), true)
-                    .await;
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "http",
-                    "reconnect",
-                    None,
-                    Some(json!({ "delay_secs": delay_secs })),
-                )
-                .await?;
+                recorder
+                    .emit("http", "error", None, Some(json!({ "message": msg })))
+                    .await?;
+                recorder
+                    .update_status(Some("reconnecting"), Some(msg.clone()), true)
+                    .await?;
+                recorder
+                    .emit(
+                        "http",
+                        "reconnect",
+                        None,
+                        Some(json!({ "delay_secs": delay_secs })),
+                    )
+                    .await?;
                 if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
-                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "http").await?;
+                    close_subscription_as_stopped(&mut recorder, "http").await?;
                     return Ok(());
                 }
                 delay_secs =
@@ -4314,31 +4317,24 @@ async fn run_http_subscription_job(
     }
 }
 
-struct DaemonWebSocketObserver<'a> {
-    sink: &'a mut tokio::fs::File,
-    view: &'a Arc<Mutex<SubscriptionJobView>>,
-    seq: &'a mut u64,
+struct SubscriptionRecorderObserver<'a, R> {
+    recorder: &'a mut R,
     source_kind: &'a str,
 }
 
 #[async_trait::async_trait]
-impl WebSocketRuntimeObserver for DaemonWebSocketObserver<'_> {
+impl<R: SubscriptionEventRecorder> WebSocketRuntimeObserver
+    for SubscriptionRecorderObserver<'_, R>
+{
     async fn emit(
         &mut self,
         event_kind: &str,
         data: Option<Value>,
         meta: Option<Value>,
     ) -> Result<()> {
-        append_subscription_event(
-            self.sink,
-            self.view,
-            self.seq,
-            self.source_kind,
-            event_kind,
-            data,
-            meta,
-        )
-        .await
+        self.recorder
+            .emit(self.source_kind, event_kind, data, meta)
+            .await
     }
 
     async fn update_status(
@@ -4347,39 +4343,9 @@ impl WebSocketRuntimeObserver for DaemonWebSocketObserver<'_> {
         last_error: Option<String>,
         increment_reconnect: bool,
     ) -> Result<()> {
-        update_subscription_view(self.view, status, last_error, increment_reconnect).await;
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl PollRuntimeObserver for DaemonWebSocketObserver<'_> {
-    async fn emit(
-        &mut self,
-        event_kind: &str,
-        data: Option<Value>,
-        meta: Option<Value>,
-    ) -> Result<()> {
-        append_subscription_event(
-            self.sink,
-            self.view,
-            self.seq,
-            self.source_kind,
-            event_kind,
-            data,
-            meta,
-        )
-        .await
-    }
-
-    async fn update_status(
-        &mut self,
-        status: Option<&str>,
-        last_error: Option<String>,
-        increment_reconnect: bool,
-    ) -> Result<()> {
-        update_subscription_view(self.view, status, last_error, increment_reconnect).await;
-        Ok(())
+        self.recorder
+            .update_status(status, last_error, increment_reconnect)
+            .await
     }
 }
 
@@ -4434,7 +4400,7 @@ async fn run_stream_subscription_job(
     runtime: &DaemonRuntime,
     job_id: &str,
     request: &SubscribeStartRequest,
-    sink_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
     view: Arc<Mutex<SubscriptionJobView>>,
     stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -4442,20 +4408,20 @@ async fn run_stream_subscription_job(
         request.transport_hint,
         Some(SubscriptionTransportHint::Websocket)
     ) {
-        return run_websocket_subscription_job(job_id, request, sink_path, view, stop_rx).await;
+        return run_websocket_subscription_job(job_id, request, event_tx, view, stop_rx).await;
     }
     if matches!(
         request.transport_hint,
         Some(SubscriptionTransportHint::DiscordGateway)
     ) {
-        return run_discord_gateway_subscription_job(job_id, request, sink_path, view, stop_rx)
+        return run_discord_gateway_subscription_job(job_id, request, event_tx, view, stop_rx)
             .await;
     }
     if matches!(
         request.transport_hint,
         Some(SubscriptionTransportHint::SlackSocketMode)
     ) {
-        return run_slack_socket_mode_subscription_job(job_id, request, sink_path, view, stop_rx)
+        return run_slack_socket_mode_subscription_job(job_id, request, event_tx, view, stop_rx)
             .await;
     }
     if matches!(
@@ -4463,7 +4429,7 @@ async fn run_stream_subscription_job(
         Some(SubscriptionTransportHint::FeishuLongConnection)
     ) {
         return run_feishu_long_connection_subscription_job(
-            job_id, request, sink_path, view, stop_rx,
+            job_id, request, event_tx, view, stop_rx,
         )
         .await;
     }
@@ -4474,34 +4440,36 @@ async fn run_stream_subscription_job(
             .as_deref()
             .is_some_and(|operation_id| operation_id.starts_with("subscription/"))
         {
-            return run_graphql_subscription_job(job_id, request, sink_path, view, stop_rx).await;
+            return run_graphql_subscription_job(job_id, request, event_tx, view, stop_rx).await;
         }
-        return run_jsonrpc_subscription_job(job_id, request, sink_path, view, stop_rx).await;
+        return run_jsonrpc_subscription_job(job_id, request, event_tx, view, stop_rx).await;
     }
 
     if request.resource_uri.is_some() {
-        return run_mcp_subscription_job(runtime, job_id, request, sink_path, view, stop_rx).await;
+        return run_mcp_subscription_job(runtime, job_id, request, event_tx, view, stop_rx).await;
     }
 
-    run_http_subscription_job(job_id, request, sink_path, view, stop_rx).await
+    run_http_subscription_job(job_id, request, event_tx, view, stop_rx).await
 }
 
 async fn run_websocket_subscription_job(
     _job_id: &str,
     request: &SubscribeStartRequest,
-    sink_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let auth_profile =
         auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
-    let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
-    let mut handler = RawFrameHandler;
-    let mut observer = DaemonWebSocketObserver {
-        sink: &mut sink,
+    let mut recorder = ChannelSubscriptionRecorder {
+        tx: &event_tx,
         view: &view,
         seq: &mut seq,
+    };
+    let mut handler = RawFrameHandler;
+    let mut observer = SubscriptionRecorderObserver {
+        recorder: &mut recorder,
         source_kind: "websocket",
     };
 
@@ -4525,19 +4493,23 @@ async fn run_websocket_subscription_job(
 async fn run_discord_gateway_subscription_job(
     _job_id: &str,
     request: &SubscribeStartRequest,
-    sink_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let resolved = resolve_discord_gateway_runtime_config(request)?;
-    let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
+    let mut recorder = ChannelSubscriptionRecorder {
+        tx: &event_tx,
+        view: &view,
+        seq: &mut seq,
+    };
     let mut delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
     let mut handler = DiscordGatewayHandler::new(resolved.session);
 
     loop {
         if *stop_rx.borrow() {
-            close_subscription_as_stopped(&mut sink, &view, &mut seq, "discord_gateway").await?;
+            close_subscription_as_stopped(&mut recorder, "discord_gateway").await?;
             return Ok(());
         }
 
@@ -4548,37 +4520,28 @@ async fn run_discord_gateway_subscription_job(
                 Ok((url, _open_meta)) => url,
                 Err(err) => {
                     let message = err.to_string();
-                    append_subscription_event(
-                        &mut sink,
-                        &view,
-                        &mut seq,
-                        "discord_gateway",
-                        "error",
-                        None,
-                        Some(json!({ "message": message })),
-                    )
-                    .await?;
-                    update_subscription_view(&view, Some("reconnecting"), Some(message), true)
-                        .await;
-                    append_subscription_event(
-                        &mut sink,
-                        &view,
-                        &mut seq,
-                        "discord_gateway",
-                        "reconnect",
-                        None,
-                        Some(json!({ "delay_secs": delay_secs, "phase": "gateway_open" })),
-                    )
-                    .await?;
-                    if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await
-                    {
-                        close_subscription_as_stopped(
-                            &mut sink,
-                            &view,
-                            &mut seq,
+                    recorder
+                        .emit(
                             "discord_gateway",
+                            "error",
+                            None,
+                            Some(json!({ "message": message })),
                         )
                         .await?;
+                    recorder
+                        .update_status(Some("reconnecting"), Some(message), true)
+                        .await?;
+                    recorder
+                        .emit(
+                            "discord_gateway",
+                            "reconnect",
+                            None,
+                            Some(json!({ "delay_secs": delay_secs, "phase": "gateway_open" })),
+                        )
+                        .await?;
+                    if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await
+                    {
+                        close_subscription_as_stopped(&mut recorder, "discord_gateway").await?;
                         return Ok(());
                     }
                     delay_secs =
@@ -4599,10 +4562,8 @@ async fn run_discord_gateway_subscription_job(
         };
 
         let result = {
-            let mut observer = DaemonWebSocketObserver {
-                sink: &mut sink,
-                view: &view,
-                seq: &mut seq,
+            let mut observer = SubscriptionRecorderObserver {
+                recorder: &mut recorder,
                 source_kind: "discord_gateway",
             };
             subscription_websocket::run_websocket_subscription_session_once(
@@ -4617,45 +4578,39 @@ async fn run_discord_gateway_subscription_job(
         match result {
             Ok(()) => return Ok(()),
             Err(WebSocketRunError::Fatal(err)) => {
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "discord_gateway",
-                    "error",
-                    None,
-                    Some(json!({ "message": err.to_string() })),
-                )
-                .await?;
+                recorder
+                    .emit(
+                        "discord_gateway",
+                        "error",
+                        None,
+                        Some(json!({ "message": err.to_string() })),
+                    )
+                    .await?;
                 return Err(err);
             }
             Err(WebSocketRunError::Retry(err)) => {
                 let message = err.to_string();
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "discord_gateway",
-                    "error",
-                    None,
-                    Some(json!({ "message": message })),
-                )
-                .await?;
-                update_subscription_view(&view, Some("reconnecting"), Some(err.to_string()), true)
-                    .await;
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "discord_gateway",
-                    "reconnect",
-                    None,
-                    Some(json!({ "delay_secs": delay_secs })),
-                )
-                .await?;
+                recorder
+                    .emit(
+                        "discord_gateway",
+                        "error",
+                        None,
+                        Some(json!({ "message": message })),
+                    )
+                    .await?;
+                recorder
+                    .update_status(Some("reconnecting"), Some(err.to_string()), true)
+                    .await?;
+                recorder
+                    .emit(
+                        "discord_gateway",
+                        "reconnect",
+                        None,
+                        Some(json!({ "delay_secs": delay_secs })),
+                    )
+                    .await?;
                 if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
-                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "discord_gateway")
-                        .await?;
+                    close_subscription_as_stopped(&mut recorder, "discord_gateway").await?;
                     return Ok(());
                 }
                 delay_secs =
@@ -4870,17 +4825,21 @@ async fn open_discord_gateway_websocket_url(
 async fn run_slack_socket_mode_subscription_job(
     _job_id: &str,
     request: &SubscribeStartRequest,
-    sink_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
+    let mut recorder = ChannelSubscriptionRecorder {
+        tx: &event_tx,
+        view: &view,
+        seq: &mut seq,
+    };
     let mut delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
 
     loop {
         if *stop_rx.borrow() {
-            close_subscription_as_stopped(&mut sink, &view, &mut seq, "slack_socket_mode").await?;
+            close_subscription_as_stopped(&mut recorder, "slack_socket_mode").await?;
             return Ok(());
         }
 
@@ -4888,30 +4847,27 @@ async fn run_slack_socket_mode_subscription_job(
             Ok(url) => url,
             Err(err) => {
                 let message = err.to_string();
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "slack_socket_mode",
-                    "error",
-                    None,
-                    Some(json!({ "message": message })),
-                )
-                .await?;
-                update_subscription_view(&view, Some("reconnecting"), Some(message), true).await;
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "slack_socket_mode",
-                    "reconnect",
-                    None,
-                    Some(json!({ "delay_secs": delay_secs, "phase": "open_url" })),
-                )
-                .await?;
+                recorder
+                    .emit(
+                        "slack_socket_mode",
+                        "error",
+                        None,
+                        Some(json!({ "message": message })),
+                    )
+                    .await?;
+                recorder
+                    .update_status(Some("reconnecting"), Some(message), true)
+                    .await?;
+                recorder
+                    .emit(
+                        "slack_socket_mode",
+                        "reconnect",
+                        None,
+                        Some(json!({ "delay_secs": delay_secs, "phase": "open_url" })),
+                    )
+                    .await?;
                 if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
-                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "slack_socket_mode")
-                        .await?;
+                    close_subscription_as_stopped(&mut recorder, "slack_socket_mode").await?;
                     return Ok(());
                 }
                 delay_secs =
@@ -4932,10 +4888,8 @@ async fn run_slack_socket_mode_subscription_job(
         };
 
         let result = {
-            let mut observer = DaemonWebSocketObserver {
-                sink: &mut sink,
-                view: &view,
-                seq: &mut seq,
+            let mut observer = SubscriptionRecorderObserver {
+                recorder: &mut recorder,
                 source_kind: "slack_socket_mode",
             };
             subscription_websocket::run_websocket_subscription_session_once(
@@ -4950,45 +4904,39 @@ async fn run_slack_socket_mode_subscription_job(
         match result {
             Ok(()) => return Ok(()),
             Err(WebSocketRunError::Fatal(err)) => {
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "slack_socket_mode",
-                    "error",
-                    None,
-                    Some(json!({ "message": err.to_string() })),
-                )
-                .await?;
+                recorder
+                    .emit(
+                        "slack_socket_mode",
+                        "error",
+                        None,
+                        Some(json!({ "message": err.to_string() })),
+                    )
+                    .await?;
                 return Err(err);
             }
             Err(WebSocketRunError::Retry(err)) => {
                 let message = err.to_string();
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "slack_socket_mode",
-                    "error",
-                    None,
-                    Some(json!({ "message": message })),
-                )
-                .await?;
-                update_subscription_view(&view, Some("reconnecting"), Some(err.to_string()), true)
-                    .await;
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "slack_socket_mode",
-                    "reconnect",
-                    None,
-                    Some(json!({ "delay_secs": delay_secs })),
-                )
-                .await?;
+                recorder
+                    .emit(
+                        "slack_socket_mode",
+                        "error",
+                        None,
+                        Some(json!({ "message": message })),
+                    )
+                    .await?;
+                recorder
+                    .update_status(Some("reconnecting"), Some(err.to_string()), true)
+                    .await?;
+                recorder
+                    .emit(
+                        "slack_socket_mode",
+                        "reconnect",
+                        None,
+                        Some(json!({ "delay_secs": delay_secs })),
+                    )
+                    .await?;
                 if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
-                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "slack_socket_mode")
-                        .await?;
+                    close_subscription_as_stopped(&mut recorder, "slack_socket_mode").await?;
                     return Ok(());
                 }
                 delay_secs =
@@ -5001,18 +4949,21 @@ async fn run_slack_socket_mode_subscription_job(
 async fn run_feishu_long_connection_subscription_job(
     _job_id: &str,
     request: &SubscribeStartRequest,
-    sink_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
+    let mut recorder = ChannelSubscriptionRecorder {
+        tx: &event_tx,
+        view: &view,
+        seq: &mut seq,
+    };
     let mut delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
 
     loop {
         if *stop_rx.borrow() {
-            close_subscription_as_stopped(&mut sink, &view, &mut seq, "feishu_long_connection")
-                .await?;
+            close_subscription_as_stopped(&mut recorder, "feishu_long_connection").await?;
             return Ok(());
         }
 
@@ -5020,35 +4971,27 @@ async fn run_feishu_long_connection_subscription_job(
             Ok(open) => open,
             Err(err) => {
                 let message = err.to_string();
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "feishu_long_connection",
-                    "error",
-                    None,
-                    Some(json!({ "message": message })),
-                )
-                .await?;
-                update_subscription_view(&view, Some("reconnecting"), Some(message), true).await;
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "feishu_long_connection",
-                    "reconnect",
-                    None,
-                    Some(json!({ "delay_secs": delay_secs, "phase": "open_url" })),
-                )
-                .await?;
-                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
-                    close_subscription_as_stopped(
-                        &mut sink,
-                        &view,
-                        &mut seq,
+                recorder
+                    .emit(
                         "feishu_long_connection",
+                        "error",
+                        None,
+                        Some(json!({ "message": message })),
                     )
                     .await?;
+                recorder
+                    .update_status(Some("reconnecting"), Some(message), true)
+                    .await?;
+                recorder
+                    .emit(
+                        "feishu_long_connection",
+                        "reconnect",
+                        None,
+                        Some(json!({ "delay_secs": delay_secs, "phase": "open_url" })),
+                    )
+                    .await?;
+                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
+                    close_subscription_as_stopped(&mut recorder, "feishu_long_connection").await?;
                     return Ok(());
                 }
                 delay_secs =
@@ -5070,10 +5013,8 @@ async fn run_feishu_long_connection_subscription_job(
             FeishuLongConnectionHandler::new(open.service_id, open.ping_interval_secs);
 
         let result = {
-            let mut observer = DaemonWebSocketObserver {
-                sink: &mut sink,
-                view: &view,
-                seq: &mut seq,
+            let mut observer = SubscriptionRecorderObserver {
+                recorder: &mut recorder,
                 source_kind: "feishu_long_connection",
             };
             subscription_websocket::run_websocket_subscription_session_once(
@@ -5088,56 +5029,45 @@ async fn run_feishu_long_connection_subscription_job(
         match result {
             Ok(()) => return Ok(()),
             Err(WebSocketRunError::Fatal(err)) => {
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "feishu_long_connection",
-                    "error",
-                    None,
-                    Some(json!({ "message": err.to_string() })),
-                )
-                .await?;
+                recorder
+                    .emit(
+                        "feishu_long_connection",
+                        "error",
+                        None,
+                        Some(json!({ "message": err.to_string() })),
+                    )
+                    .await?;
                 return Err(err);
             }
             Err(WebSocketRunError::Retry(err)) => {
                 let message = err.to_string();
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "feishu_long_connection",
-                    "error",
-                    None,
-                    Some(json!({ "message": message })),
-                )
-                .await?;
-                update_subscription_view(&view, Some("reconnecting"), Some(err.to_string()), true)
-                    .await;
-                append_subscription_event(
-                    &mut sink,
-                    &view,
-                    &mut seq,
-                    "feishu_long_connection",
-                    "reconnect",
-                    None,
-                    Some(json!({
-                        "delay_secs": delay_secs,
-                        "ping_interval_secs": open.ping_interval_secs,
-                        "reconnect_count": open.reconnect_count,
-                        "reconnect_interval_secs": open.reconnect_interval_secs,
-                        "reconnect_nonce_secs": open.reconnect_nonce_secs,
-                    })),
-                )
-                .await?;
-                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
-                    close_subscription_as_stopped(
-                        &mut sink,
-                        &view,
-                        &mut seq,
+                recorder
+                    .emit(
                         "feishu_long_connection",
+                        "error",
+                        None,
+                        Some(json!({ "message": message })),
                     )
                     .await?;
+                recorder
+                    .update_status(Some("reconnecting"), Some(err.to_string()), true)
+                    .await?;
+                recorder
+                    .emit(
+                        "feishu_long_connection",
+                        "reconnect",
+                        None,
+                        Some(json!({
+                            "delay_secs": delay_secs,
+                            "ping_interval_secs": open.ping_interval_secs,
+                            "reconnect_count": open.reconnect_count,
+                            "reconnect_interval_secs": open.reconnect_interval_secs,
+                            "reconnect_nonce_secs": open.reconnect_nonce_secs,
+                        })),
+                    )
+                    .await?;
+                if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
+                    close_subscription_as_stopped(&mut recorder, "feishu_long_connection").await?;
                     return Ok(());
                 }
                 delay_secs =
@@ -5260,7 +5190,7 @@ async fn resolve_graphql_subscription_prepared_operation(
 async fn run_graphql_subscription_job(
     _job_id: &str,
     request: &SubscribeStartRequest,
-    sink_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -5273,17 +5203,19 @@ async fn run_graphql_subscription_job(
 
     let auth_profile =
         auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
-    let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
+    let mut recorder = ChannelSubscriptionRecorder {
+        tx: &event_tx,
+        view: &view,
+        seq: &mut seq,
+    };
     let handler_config = GraphQLSubscriptionConfig {
         operation_id: operation_id.clone(),
         query: prepared.query,
         variables: prepared.variables,
     };
-    let mut observer = DaemonWebSocketObserver {
-        sink: &mut sink,
-        view: &view,
-        seq: &mut seq,
+    let mut observer = SubscriptionRecorderObserver {
+        recorder: &mut recorder,
         source_kind: "graphql",
     };
 
@@ -5390,7 +5322,7 @@ async fn run_graphql_subscription_job(
                 )
                 .await?;
                 if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(delay_secs)).await {
-                    close_subscription_as_stopped(&mut sink, &view, &mut seq, "graphql").await?;
+                    close_subscription_as_stopped(&mut recorder, "graphql").await?;
                     break Ok(());
                 }
                 delay_secs =
@@ -5400,19 +5332,17 @@ async fn run_graphql_subscription_job(
     };
 
     if let Err(err) = result {
-        append_subscription_event(
-            &mut sink,
-            &view,
-            &mut seq,
-            "graphql",
-            "error",
-            None,
-            Some(json!({
-                "message": err.to_string(),
-                "operation_id": operation_id,
-            })),
-        )
-        .await?;
+        recorder
+            .emit(
+                "graphql",
+                "error",
+                None,
+                Some(json!({
+                    "message": err.to_string(),
+                    "operation_id": operation_id,
+                })),
+            )
+            .await?;
         return Err(err);
     }
 
@@ -5422,21 +5352,23 @@ async fn run_graphql_subscription_job(
 async fn run_jsonrpc_subscription_job(
     _job_id: &str,
     request: &SubscribeStartRequest,
-    sink_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let config = resolve_jsonrpc_subscription_config(request)?;
     let auth_profile =
         auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
-    let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
-    let subscribe_message = JsonRpcSubscriptionHandler::new(config.clone()).subscribe_message();
-    let mut handler = JsonRpcSubscriptionHandler::new(config.clone());
-    let mut observer = DaemonWebSocketObserver {
-        sink: &mut sink,
+    let mut recorder = ChannelSubscriptionRecorder {
+        tx: &event_tx,
         view: &view,
         seq: &mut seq,
+    };
+    let subscribe_message = JsonRpcSubscriptionHandler::new(config.clone()).subscribe_message();
+    let mut handler = JsonRpcSubscriptionHandler::new(config.clone());
+    let mut observer = SubscriptionRecorderObserver {
+        recorder: &mut recorder,
         source_kind: "jsonrpc_pubsub",
     };
 
@@ -5457,123 +5389,58 @@ async fn run_jsonrpc_subscription_job(
     .await;
 
     if let Err(err) = result {
-        append_subscription_event(
-            &mut sink,
-            &view,
-            &mut seq,
-            "jsonrpc_pubsub",
-            "error",
-            None,
-            Some(json!({
-                "message": err.to_string(),
-                "operation_id": config.operation_id,
-            })),
-        )
-        .await?;
+        recorder
+            .emit(
+                "jsonrpc_pubsub",
+                "error",
+                None,
+                Some(json!({
+                    "message": err.to_string(),
+                    "operation_id": config.operation_id,
+                })),
+            )
+            .await?;
         return Err(err);
     }
 
     Ok(())
 }
 
-struct DaemonPollContext {
-    runtime: DaemonRuntime,
-    request: SubscribeStartRequest,
-    checkpoint_path: PathBuf,
-}
-
-#[async_trait::async_trait]
-impl PollRuntimeContext for DaemonPollContext {
-    async fn load_checkpoint(
-        &mut self,
-    ) -> Result<Option<crate::subscription_poll::PollCheckpointState>> {
-        match tokio::fs::read(&self.checkpoint_path).await {
-            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err.into()),
-        }
-    }
-
-    async fn store_checkpoint(
-        &mut self,
-        checkpoint: &crate::subscription_poll::PollCheckpointState,
-    ) -> Result<()> {
-        if let Some(parent) = self.checkpoint_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&self.checkpoint_path, serde_json::to_vec(checkpoint)?).await?;
-        Ok(())
-    }
-
-    async fn fetch(
-        &mut self,
-        args: HashMap<String, Value>,
-        checkpoint: &crate::subscription_poll::PollCheckpointState,
-    ) -> Result<crate::subscription_poll::PollFetchResult> {
-        let mut options = self.request.options.clone();
-        if let Some(etag) = checkpoint.etag.as_ref() {
-            options
-                .request_headers
-                .insert("if-none-match".to_string(), etag.clone());
-        }
-        let response = self
-            .runtime
-            .invoke(RuntimeInvokeRequest {
-                request_id: format!("{}-poll-{}", self.request.request_id, now_unix_secs()),
-                endpoint: self.request.endpoint.clone(),
-                action: RuntimeAction::Execute,
-                operation_id: self.request.operation_id.clone(),
-                args: Some(args),
-                options,
-            })
-            .await?;
-        Ok(crate::subscription_poll::PollFetchResult {
-            data: response.data,
-            duration_ms: response.duration_ms,
-            status_code: response.meta.response_status_code,
-            response_headers: response.meta.response_headers.unwrap_or_default(),
-        })
-    }
-}
-
-async fn run_poll_subscription_job_with_checkpoint(
+async fn fetch_managed_source_poll(
     runtime: &DaemonRuntime,
     request: &SubscribeStartRequest,
-    checkpoint_path: PathBuf,
-    sink_path: PathBuf,
-    view: Arc<Mutex<SubscriptionJobView>>,
-    mut stop_rx: watch::Receiver<bool>,
-) -> Result<()> {
-    let config = resolve_poll_subscription_config(request)?;
-    let mut sink = open_subscription_sink(&sink_path).await?;
-    let mut seq = 0u64;
-    let mut observer = DaemonWebSocketObserver {
-        sink: &mut sink,
-        view: &view,
-        seq: &mut seq,
-        source_kind: "poll",
-    };
-    let mut context = DaemonPollContext {
-        runtime: runtime.clone(),
-        request: request.clone(),
-        checkpoint_path,
-    };
-
-    crate::subscription_poll::run_poll_subscription_runtime(
-        config,
-        request.args.clone().unwrap_or_default(),
-        &mut context,
-        &mut observer,
-        &mut stop_rx,
-    )
-    .await
+    args: HashMap<String, Value>,
+    checkpoint: &crate::subscription_poll::PollCheckpointState,
+) -> Result<crate::subscription_poll::PollFetchResult> {
+    let mut options = request.options.clone();
+    if let Some(etag) = checkpoint.etag.as_ref() {
+        options
+            .request_headers
+            .insert("if-none-match".to_string(), etag.clone());
+    }
+    let response = runtime
+        .invoke(RuntimeInvokeRequest {
+            request_id: format!("{}-poll-{}", request.request_id, now_unix_secs()),
+            endpoint: request.endpoint.clone(),
+            action: RuntimeAction::Execute,
+            operation_id: request.operation_id.clone(),
+            args: Some(args),
+            options,
+        })
+        .await?;
+    Ok(crate::subscription_poll::PollFetchResult {
+        data: response.data,
+        duration_ms: response.duration_ms,
+        status_code: response.meta.response_status_code,
+        response_headers: response.meta.response_headers.unwrap_or_default(),
+    })
 }
 
 async fn run_mcp_subscription_job(
     runtime: &DaemonRuntime,
     _job_id: &str,
     request: &SubscribeStartRequest,
-    sink_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -5585,7 +5452,7 @@ async fn run_mcp_subscription_job(
         return run_mcp_http_subscription_job(
             runtime,
             request,
-            sink_path,
+            event_tx,
             view,
             resource_uri,
             stop_rx,
@@ -5637,19 +5504,21 @@ async fn run_mcp_subscription_job(
             .await?;
     }
 
-    let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
+    let mut recorder = ChannelSubscriptionRecorder {
+        tx: &event_tx,
+        view: &view,
+        seq: &mut seq,
+    };
     let mut cursor = 0u64;
-    append_subscription_event(
-        &mut sink,
-        &view,
-        &mut seq,
-        "mcp_resource",
-        "open",
-        None,
-        Some(json!({ "resource_uri": resource_uri })),
-    )
-    .await?;
+    recorder
+        .emit(
+            "mcp_resource",
+            "open",
+            None,
+            Some(json!({ "resource_uri": resource_uri })),
+        )
+        .await?;
     if request.read_resource {
         let read_result = {
             let mut guard = session.lock().await;
@@ -5658,9 +5527,7 @@ async fn run_mcp_subscription_job(
                 .await
         };
         append_mcp_resource_read_result(
-            &mut sink,
-            &view,
-            &mut seq,
+            &mut recorder,
             resource_uri,
             "initial_read",
             "failed to read initial resource snapshot",
@@ -5673,7 +5540,7 @@ async fn run_mcp_subscription_job(
         tokio::select! {
             stop_requested = subscription_stop_requested(&mut stop_rx) => {
                 if stop_requested {
-                    match close_subscription_as_stopped(&mut sink, &view, &mut seq, "mcp_resource").await {
+                    match close_subscription_as_stopped(&mut recorder, "mcp_resource").await {
                         Ok(()) => break 'run Ok(()),
                         Err(err) => break 'run Err(err),
                     }
@@ -5688,15 +5555,15 @@ async fn run_mcp_subscription_job(
                 };
                 cursor = next_cursor;
                 for notification in notifications {
-                    if let Err(err) = append_subscription_event(
-                        &mut sink,
-                        &view,
-                        &mut seq,
-                        "mcp_resource",
-                        "data",
-                        notification.params.clone(),
-                        Some(json!({"method": notification.method})),
-                    ).await {
+                    if let Err(err) = recorder
+                        .emit(
+                            "mcp_resource",
+                            "data",
+                            notification.params.clone(),
+                            Some(json!({"method": notification.method})),
+                        )
+                        .await
+                    {
                         break 'run Err(err);
                     }
                     if request.read_resource && should_read_mcp_resource_snapshot(&notification) {
@@ -5707,9 +5574,7 @@ async fn run_mcp_subscription_job(
                                 .await
                         };
                         if let Err(err) = append_mcp_resource_read_result(
-                            &mut sink,
-                            &view,
-                            &mut seq,
+                            &mut recorder,
                             resource_uri,
                             "resource_updated",
                             "failed to read resource after update",
@@ -5732,17 +5597,17 @@ async fn run_mcp_subscription_job(
     };
     if let Err(err) = unsubscribe_result {
         let msg = format!("failed to unsubscribe resource before shutdown: {}", err);
-        append_subscription_event(
-            &mut sink,
-            &view,
-            &mut seq,
-            "mcp_resource",
-            "error",
-            None,
-            Some(json!({ "message": msg })),
-        )
-        .await?;
-        update_subscription_view(&view, None, Some(msg.clone()), false).await;
+        recorder
+            .emit(
+                "mcp_resource",
+                "error",
+                None,
+                Some(json!({ "message": msg })),
+            )
+            .await?;
+        recorder
+            .update_status(None, Some(msg.clone()), false)
+            .await?;
         if run_result.is_ok() {
             return Err(err);
         }
@@ -5754,7 +5619,7 @@ async fn run_mcp_subscription_job(
 async fn run_mcp_http_subscription_job(
     runtime: &DaemonRuntime,
     request: &SubscribeStartRequest,
-    sink_path: PathBuf,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
     view: Arc<Mutex<SubscriptionJobView>>,
     resource_uri: &str,
     mut stop_rx: watch::Receiver<bool>,
@@ -5788,35 +5653,35 @@ async fn run_mcp_http_subscription_job(
         };
     session.ensure_resource_subscription(resource_uri).await?;
 
-    let mut sink = open_subscription_sink(&sink_path).await?;
     let mut seq = 0u64;
+    let mut recorder = ChannelSubscriptionRecorder {
+        tx: &event_tx,
+        view: &view,
+        seq: &mut seq,
+    };
     let mut cursor = 0u64;
-    append_subscription_event(
-        &mut sink,
-        &view,
-        &mut seq,
-        "mcp_resource",
-        "open",
-        None,
-        Some(json!({
-            "resource_uri": resource_uri,
-            "transport_mode": resolved_transport
-                .as_ref()
-                .map(|value| format!("{:?}", value.mode))
-                .unwrap_or_else(|| "reused".to_string()),
-            "connect_url": resolved_transport
-                .as_ref()
-                .map(|value| redact_endpoint(&value.connect_url))
-                .unwrap_or_else(|| redact_endpoint(&request.endpoint)),
-        })),
-    )
-    .await?;
+    recorder
+        .emit(
+            "mcp_resource",
+            "open",
+            None,
+            Some(json!({
+                "resource_uri": resource_uri,
+                "transport_mode": resolved_transport
+                    .as_ref()
+                    .map(|value| format!("{:?}", value.mode))
+                    .unwrap_or_else(|| "reused".to_string()),
+                "connect_url": resolved_transport
+                    .as_ref()
+                    .map(|value| redact_endpoint(&value.connect_url))
+                    .unwrap_or_else(|| redact_endpoint(&request.endpoint)),
+            })),
+        )
+        .await?;
     if request.read_resource {
         let read_result = session.read_resource(resource_uri).await;
         append_mcp_resource_read_result(
-            &mut sink,
-            &view,
-            &mut seq,
+            &mut recorder,
             resource_uri,
             "initial_read",
             "failed to read initial resource snapshot",
@@ -5829,7 +5694,7 @@ async fn run_mcp_http_subscription_job(
         tokio::select! {
             stop_requested = subscription_stop_requested(&mut stop_rx) => {
                 if stop_requested {
-                    match close_subscription_as_stopped(&mut sink, &view, &mut seq, "mcp_resource").await {
+                    match close_subscription_as_stopped(&mut recorder, "mcp_resource").await {
                         Ok(()) => break 'run Ok(()),
                         Err(err) => break 'run Err(err),
                     }
@@ -5842,23 +5707,21 @@ async fn run_mcp_http_subscription_job(
                     break 'run Err(anyhow!("MCP HTTP subscription stream failed: {}", err));
                 }
                 for notification in notifications {
-                    if let Err(err) = append_subscription_event(
-                        &mut sink,
-                        &view,
-                        &mut seq,
-                        "mcp_resource",
-                        "data",
-                        notification.params.clone(),
-                        Some(json!({"method": notification.method})),
-                    ).await {
+                    if let Err(err) = recorder
+                        .emit(
+                            "mcp_resource",
+                            "data",
+                            notification.params.clone(),
+                            Some(json!({"method": notification.method})),
+                        )
+                        .await
+                    {
                         break 'run Err(err);
                     }
                     if request.read_resource && should_read_mcp_resource_snapshot(&notification) {
                         let read_result = session.read_resource(resource_uri).await;
                         if let Err(err) = append_mcp_resource_read_result(
-                            &mut sink,
-                            &view,
-                            &mut seq,
+                            &mut recorder,
                             resource_uri,
                             "resource_updated",
                             "failed to read resource after update",
@@ -5876,17 +5739,17 @@ async fn run_mcp_http_subscription_job(
     let unsubscribe_result = session.release_resource_subscription(resource_uri).await;
     if let Err(err) = unsubscribe_result {
         let msg = format!("failed to unsubscribe resource before shutdown: {}", err);
-        append_subscription_event(
-            &mut sink,
-            &view,
-            &mut seq,
-            "mcp_resource",
-            "error",
-            None,
-            Some(json!({ "message": msg })),
-        )
-        .await?;
-        update_subscription_view(&view, None, Some(msg.clone()), false).await;
+        recorder
+            .emit(
+                "mcp_resource",
+                "error",
+                None,
+                Some(json!({ "message": msg })),
+            )
+            .await?;
+        recorder
+            .update_status(None, Some(msg.clone()), false)
+            .await?;
         if run_result.is_ok() {
             return Err(err);
         }
@@ -8236,6 +8099,8 @@ impl Default for DaemonRuntime {
 mod tests {
     use super::*;
     use futures::SinkExt;
+    use rusqlite::Connection;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc as StdArc;
     use std::time::Duration as StdDuration;
@@ -8441,70 +8306,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_file_sink_requires_file_prefix() {
-        let err = parse_file_sink("stdout").unwrap_err();
-        assert!(err.to_string().contains("file:<path>"));
-    }
-
-    #[test]
-    fn parse_file_sink_rejects_parent_relative_path() {
-        let err = parse_file_sink("file:../events.ndjson").unwrap_err();
-        assert!(err.to_string().contains("cannot contain '..'"));
-    }
-
-    #[test]
-    fn parse_file_sink_accepts_arbitrary_absolute_path() {
-        let path = parse_file_sink("file:/tmp/arbitrary/output.ndjson").unwrap();
-        assert_eq!(path, PathBuf::from("/tmp/arbitrary/output.ndjson"));
-    }
-
-    #[test]
-    fn parse_file_sink_rejects_absolute_path_with_parent_component() {
-        let err = parse_file_sink("file:/tmp/../events.ndjson").unwrap_err();
-        assert!(err.to_string().contains("cannot contain '..'"));
-    }
-
-    #[tokio::test]
-    async fn load_subscription_events_uses_cursor_offset_without_replaying_history() {
-        let temp = tempdir().unwrap();
-        let sink = temp.path().join("events.ndjson");
-        fs::write(
-            &sink,
-            concat!(
-                "{\"version\":\"v1\",\"job_id\":\"job\",\"seq\":1,\"timestamp_unix\":1,\"protocol\":\"poll\",\"source_kind\":\"poll\",\"event_kind\":\"data\",\"data\":{\"value\":1},\"meta\":null}\n",
-                "{\"version\":\"v1\",\"job_id\":\"job\",\"seq\":2,\"timestamp_unix\":2,\"protocol\":\"poll\",\"source_kind\":\"poll\",\"event_kind\":\"data\",\"data\":{\"value\":2},\"meta\":null}\n"
-            ),
-        )
-        .unwrap();
-
-        let first = load_subscription_events(&sink, &ManagedSourceCursor::default(), 10)
-            .await
-            .unwrap();
-        assert_eq!(first.events.len(), 2);
-        assert_eq!(first.next_after_seq, 2);
-
-        let cursor = ManagedSourceCursor {
-            after_seq: first.next_after_seq,
-            offset_bytes: first.next_offset_bytes,
-        };
-        let second = load_subscription_events(&sink, &cursor, 10).await.unwrap();
-        assert!(second.events.is_empty());
-
-        fs::write(
-            &sink,
-            concat!(
-                "{\"version\":\"v1\",\"job_id\":\"job\",\"seq\":1,\"timestamp_unix\":1,\"protocol\":\"poll\",\"source_kind\":\"poll\",\"event_kind\":\"data\",\"data\":{\"value\":1},\"meta\":null}\n",
-                "{\"version\":\"v1\",\"job_id\":\"job\",\"seq\":2,\"timestamp_unix\":2,\"protocol\":\"poll\",\"source_kind\":\"poll\",\"event_kind\":\"data\",\"data\":{\"value\":2},\"meta\":null}\n",
-                "{\"version\":\"v1\",\"job_id\":\"job\",\"seq\":3,\"timestamp_unix\":3,\"protocol\":\"poll\",\"source_kind\":\"poll\",\"event_kind\":\"data\",\"data\":{\"value\":3},\"meta\":null}\n"
-            ),
-        )
-        .unwrap();
-        let third = load_subscription_events(&sink, &cursor, 10).await.unwrap();
-        assert_eq!(third.events.len(), 1);
-        assert_eq!(third.events[0].data.as_ref().unwrap()["value"], 3);
-    }
-
-    #[test]
     fn drain_ndjson_events_parses_complete_lines_and_leaves_partial() {
         let mut buffer = "{\"a\":1}\n{\"b\":2}\n{\"c\":".to_string();
         let values = drain_ndjson_events(&mut buffer).unwrap();
@@ -8697,6 +8498,46 @@ mod tests {
         }
     }
 
+    fn poll_checkpoint_test_record(
+        namespace: &str,
+        source_key: &str,
+        run_id: &str,
+    ) -> ManagedSourceRecord {
+        let now = now_unix_secs();
+        ManagedSourceRecord {
+            namespace: namespace.to_string(),
+            source_key: source_key.to_string(),
+            spec_json: json!({
+                "endpoint": "https://example.com/events",
+                "operation_id": "get:/events",
+                "mode": "poll",
+                "poll_config": {
+                    "interval_secs": 1,
+                    "extract_items_pointer": "/items",
+                    "checkpoint_strategy": {
+                        "type": "item_key",
+                        "item_key_pointer": "/id"
+                    }
+                }
+            }),
+            spec_key: "spec-key".to_string(),
+            run_id: run_id.to_string(),
+            stream_id: managed_stream_id(namespace, source_key),
+            status: "starting".to_string(),
+            created_at_unix: now,
+            updated_at_unix: now,
+            started_at_unix: Some(now),
+            stopped_at_unix: None,
+            last_error: None,
+        }
+    }
+
+    fn assert_no_legacy_managed_source_files(base_dir: &Path, run_id: &str) {
+        assert!(!managed_source_sink_path(base_dir, run_id).exists());
+        assert!(!managed_source_checkpoint_path(base_dir, run_id).exists());
+        assert!(!managed_source_cursor_path(base_dir, run_id).exists());
+    }
+
     fn test_runtime_with_store(temp: &tempfile::TempDir) -> DaemonRuntime {
         DaemonRuntime::try_new_with_managed_source_base_dir(temp.path().to_path_buf())
             .expect("test daemon runtime should initialize")
@@ -8749,6 +8590,7 @@ mod tests {
             managed_stream_id("test", "websocket:demo")
         );
         assert!(!temp.path().join("subscriptions.json").exists());
+        assert_no_legacy_managed_source_files(temp.path(), &ensured.run_id);
 
         let mut seen = None;
         for _ in 0..30 {
@@ -8779,6 +8621,160 @@ mod tests {
         assert!(stopped.stopped);
 
         server_task.abort();
+    }
+
+    #[test]
+    fn managed_source_store_migrates_v0_schema_to_v1() {
+        let temp = tempdir().unwrap();
+        let db_path = managed_source_streams_db_path(temp.path());
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            pragma user_version = 0;
+            create table managed_sources (
+                namespace text not null,
+                source_key text not null,
+                spec_json text not null,
+                spec_key text not null,
+                run_id text not null,
+                stream_id text not null,
+                status text not null,
+                created_at_unix integer not null,
+                updated_at_unix integer not null,
+                started_at_unix integer,
+                stopped_at_unix integer,
+                last_error text,
+                underlying_job_id text,
+                mirrored_after_seq integer not null default 0,
+                primary key (namespace, source_key)
+            );
+            create table event_streams (
+                stream_id text primary key,
+                namespace text not null,
+                source_key text not null,
+                created_at_unix integer not null,
+                retention_max_rows integer not null,
+                retention_max_age_secs integer not null
+            );
+            create table stream_events (
+                stream_id text not null,
+                offset integer not null,
+                ingested_at_unix integer not null,
+                raw_payload_json text not null,
+                primary key (stream_id, offset)
+            );
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let _store = ManagedSourceStore::new(db_path.clone()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        let version: i64 = conn
+            .query_row("pragma user_version", [], |row| row.get(0))
+            .unwrap();
+        let has_column: i64 = conn
+            .query_row(
+                "select count(*) from pragma_table_info('managed_sources') where name = 'poll_checkpoint_json'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 1);
+        assert_eq!(has_column, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_managed_source_checkpoint_imports_into_database() {
+        let temp = tempdir().unwrap();
+        let runtime = test_runtime_with_store(&temp);
+        let record = poll_checkpoint_test_record("test", "poll-import", "run-import");
+        runtime
+            .managed_sources
+            .store
+            .upsert_source(&record, true)
+            .await
+            .unwrap();
+
+        let checkpoint = crate::subscription_poll::PollCheckpointState {
+            cursor: Some(json!(123)),
+            watermark: None,
+            tie_breaker: None,
+            seen_keys: VecDeque::from([json!("event-123").to_string()]),
+            etag: Some("\"etag-v1\"".to_string()),
+        };
+        let checkpoint_path = runtime.managed_source_checkpoint_path(&record.run_id);
+        fs::create_dir_all(checkpoint_path.parent().unwrap()).unwrap();
+        fs::write(&checkpoint_path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+
+        let loaded = runtime
+            .managed_sources
+            .load_or_import_legacy_managed_source_checkpoint(&runtime, &record)
+            .await
+            .unwrap();
+        assert_eq!(loaded, Some(checkpoint.clone()));
+        assert!(!checkpoint_path.exists());
+
+        let stored = runtime
+            .managed_sources
+            .store
+            .load_poll_checkpoint(&record.namespace, &record.source_key, &record.run_id)
+            .await
+            .unwrap();
+        assert_eq!(stored, Some(checkpoint));
+    }
+
+    #[tokio::test]
+    async fn poll_checkpoint_write_failure_does_not_advance_checkpoint() {
+        let temp = tempdir().unwrap();
+        let runtime = test_runtime_with_store(&temp);
+        let record = poll_checkpoint_test_record("test", "poll-atomic", "run-atomic");
+        runtime
+            .managed_sources
+            .store
+            .upsert_source(&record, true)
+            .await
+            .unwrap();
+
+        let checkpoint = crate::subscription_poll::PollCheckpointState {
+            cursor: Some(json!(456)),
+            ..Default::default()
+        };
+        let err = runtime
+            .managed_sources
+            .store
+            .append_events_and_store_poll_checkpoint(
+                &record.namespace,
+                &record.source_key,
+                &record.run_id,
+                "stream_wrong",
+                &[PendingStreamEvent {
+                    ingested_at_unix: now_unix_secs(),
+                    payload: json!({"id": 456}),
+                }],
+                &checkpoint,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("stream mismatch"));
+
+        let stored = runtime
+            .managed_sources
+            .store
+            .load_poll_checkpoint(&record.namespace, &record.source_key, &record.run_id)
+            .await
+            .unwrap();
+        assert!(stored.is_none());
+
+        let page = runtime
+            .stream_read(&ManagedStreamReadRequest {
+                stream_id: record.stream_id.clone(),
+                after_offset: 0,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert!(page.events.is_empty());
     }
 
     #[tokio::test]

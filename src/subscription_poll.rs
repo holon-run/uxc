@@ -1,12 +1,9 @@
 use anyhow::{anyhow, bail, Result};
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
-use std::time::Duration;
-use tokio::sync::watch;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PollSubscriptionConfig {
@@ -75,6 +72,7 @@ pub struct PollFetchResult {
     pub response_headers: HashMap<String, String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PollCycleOutput {
     pub emitted_items: Vec<Value>,
@@ -84,34 +82,6 @@ pub struct PollCycleOutput {
     pub checkpoint_meta: Option<Value>,
     pub not_modified: bool,
     pub poll_interval_secs: Option<u64>,
-}
-
-#[async_trait]
-pub trait PollRuntimeContext: Send {
-    async fn load_checkpoint(&mut self) -> Result<Option<PollCheckpointState>>;
-    async fn store_checkpoint(&mut self, checkpoint: &PollCheckpointState) -> Result<()>;
-    async fn fetch(
-        &mut self,
-        args: HashMap<String, Value>,
-        checkpoint: &PollCheckpointState,
-    ) -> Result<PollFetchResult>;
-}
-
-#[async_trait]
-pub trait PollRuntimeObserver: Send {
-    async fn emit(
-        &mut self,
-        event_kind: &str,
-        data: Option<Value>,
-        meta: Option<Value>,
-    ) -> Result<()>;
-
-    async fn update_status(
-        &mut self,
-        status: Option<&str>,
-        last_error: Option<String>,
-        increment_reconnect: bool,
-    ) -> Result<()>;
 }
 
 pub struct PollSubscriptionRunner {
@@ -435,122 +405,6 @@ impl PollSubscriptionRunner {
     }
 }
 
-pub async fn run_poll_subscription_runtime<C: PollRuntimeContext, O: PollRuntimeObserver>(
-    config: PollSubscriptionConfig,
-    base_args: HashMap<String, Value>,
-    context: &mut C,
-    observer: &mut O,
-    stop_rx: &mut watch::Receiver<bool>,
-) -> Result<()> {
-    let mut runner = PollSubscriptionRunner::new(config.clone())?;
-    let default_interval_secs = config.interval_secs.max(1);
-    if let Some(checkpoint) = context.load_checkpoint().await? {
-        runner.restore_checkpoint(checkpoint);
-    }
-
-    observer.update_status(Some("running"), None, false).await?;
-
-    loop {
-        if stop_requested(stop_rx) {
-            close_as_stopped(observer).await?;
-            return Ok(());
-        }
-
-        let args = runner.build_request_args(&base_args);
-        let next_interval_secs: u64;
-        let fetch = context.fetch(args, runner.checkpoint()).await;
-        match fetch {
-            Ok(result) => {
-                let previous_checkpoint = runner.checkpoint().clone();
-                if let Some(etag) = extract_header_value(&result.response_headers, "etag") {
-                    runner.checkpoint.etag = Some(etag.to_string());
-                }
-
-                if let Some(interval) = parse_poll_interval_secs(&result.response_headers) {
-                    next_interval_secs = interval;
-                } else {
-                    next_interval_secs = default_interval_secs;
-                }
-
-                if result.status_code == Some(304) {
-                    observer.update_status(Some("running"), None, false).await?;
-                    observer
-                        .emit(
-                            "poll",
-                            None,
-                            Some(json!({
-                                "fetched_items": 0,
-                                "emitted_items": 0,
-                                "skipped_items": 0,
-                                "duration_ms": result.duration_ms,
-                                "not_modified": true,
-                                "poll_interval_secs": next_interval_secs,
-                            })),
-                        )
-                        .await?;
-                    if runner.checkpoint() != &previous_checkpoint {
-                        context.store_checkpoint(runner.checkpoint()).await?;
-                        observer
-                            .emit(
-                                "checkpoint",
-                                None,
-                                Some(json!({
-                                    "cursor": runner.checkpoint().cursor.clone(),
-                                    "watermark": runner.checkpoint().watermark.clone(),
-                                    "tie_breaker": runner.checkpoint().tie_breaker.clone(),
-                                    "seen_window_len": runner.checkpoint().seen_keys.len(),
-                                    "etag": runner.checkpoint().etag.clone(),
-                                })),
-                            )
-                            .await?;
-                    }
-                } else {
-                    let mut output = runner.process_response(result.data, result.duration_ms)?;
-                    output.poll_interval_secs = Some(next_interval_secs);
-                    observer.update_status(Some("running"), None, false).await?;
-                    let emitted_items = output.emitted_items.len();
-                    for item in output.emitted_items {
-                        observer.emit("data", Some(item), None).await?;
-                    }
-                    observer
-                        .emit(
-                            "poll",
-                            None,
-                            Some(json!({
-                                "fetched_items": output.fetched_items,
-                                "emitted_items": emitted_items,
-                                "skipped_items": output.skipped_items,
-                                "duration_ms": output.duration_ms,
-                                "not_modified": output.not_modified,
-                                "poll_interval_secs": output.poll_interval_secs,
-                            })),
-                        )
-                        .await?;
-                    if let Some(meta) = output.checkpoint_meta {
-                        context.store_checkpoint(runner.checkpoint()).await?;
-                        observer.emit("checkpoint", None, Some(meta)).await?;
-                    }
-                }
-            }
-            Err(err) => {
-                next_interval_secs = default_interval_secs;
-                let message = err.to_string();
-                observer
-                    .emit("error", None, Some(json!({ "message": message })))
-                    .await?;
-                observer
-                    .update_status(Some("reconnecting"), Some(message), true)
-                    .await?;
-            }
-        }
-
-        if wait_for_stop_or_timeout(stop_rx, Duration::from_secs(next_interval_secs)).await {
-            close_as_stopped(observer).await?;
-            return Ok(());
-        }
-    }
-}
-
 fn pointer_required<'a>(value: &'a Value, pointer: &str) -> Result<&'a Value> {
     value
         .pointer(pointer)
@@ -665,7 +519,10 @@ fn is_newer_item(
     }
 }
 
-fn extract_header_value<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
+pub(crate) fn extract_header_value<'a>(
+    headers: &'a HashMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
     headers
         .get(&name.to_ascii_lowercase())
         .or_else(|| {
@@ -677,31 +534,10 @@ fn extract_header_value<'a>(headers: &'a HashMap<String, String>, name: &str) ->
         .map(String::as_str)
 }
 
-fn parse_poll_interval_secs(headers: &HashMap<String, String>) -> Option<u64> {
+pub(crate) fn parse_poll_interval_secs(headers: &HashMap<String, String>) -> Option<u64> {
     let raw = extract_header_value(headers, "x-poll-interval")?;
     let parsed = raw.trim().parse::<u64>().ok()?;
     Some(parsed.clamp(1, 3600))
-}
-
-fn stop_requested(stop_rx: &watch::Receiver<bool>) -> bool {
-    *stop_rx.borrow()
-}
-
-async fn wait_for_stop_or_timeout(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -> bool {
-    if *stop_rx.borrow() {
-        return true;
-    }
-    tokio::select! {
-        changed = stop_rx.changed() => matches!(changed, Ok(())) && *stop_rx.borrow(),
-        _ = tokio::time::sleep(duration) => false,
-    }
-}
-
-async fn close_as_stopped<O: PollRuntimeObserver>(observer: &mut O) -> Result<()> {
-    observer
-        .emit("closed", None, Some(json!({"reason": "stopped"})))
-        .await?;
-    observer.update_status(Some("stopped"), None, false).await
 }
 
 trait ResultExt<T> {
