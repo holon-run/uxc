@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-04-14
+
+### Fixed
+- Made direct managed-source stream writes atomic with checkpoint updates so poll sources do not advance progress without persisting the corresponding stream rows.
+- Tightened managed-source recovery around sink cursors and runtime state updates so GitHub repo event sources do not silently replay or drop recent events after daemon restarts.
+
 ## [0.15.0] - 2026-04-13
 
 ### Changed
@@ -432,7 +438,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/holon-run/uxc/releases/tag/v0.15.1
 [0.15.0]: https://github.com/holon-run/uxc/releases/tag/v0.15.0
 [0.14.0]: https://github.com/holon-run/uxc/releases/tag/v0.14.0
 [0.13.3]: https://github.com/holon-run/uxc/releases/tag/v0.13.3
