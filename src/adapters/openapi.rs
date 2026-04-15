@@ -1032,10 +1032,18 @@ impl OpenAPIAdapter {
         }
 
         let body_config = Self::request_body_config(path_item, operation_spec, root)?;
+        let body_is_schema_property =
+            Self::request_body_schema_has_body_property(path_item, operation_spec, root);
         let (json_body, form_body, multipart_body) = match &body_config {
             RequestBodyConfig::None => (None, None, None),
             RequestBodyConfig::FormUrlEncoded => {
-                if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
+                if let Some(body) = explicit_body.or_else(|| {
+                    if body_is_schema_property {
+                        None
+                    } else {
+                        remaining.remove("body")
+                    }
+                }) {
                     if !remaining.is_empty() || !form_pairs.is_empty() {
                         anyhow::bail!("Cannot mix 'body' with form arguments for this operation");
                     }
@@ -1056,8 +1064,11 @@ impl OpenAPIAdapter {
                         anyhow::bail!("Missing required parameter '{}'", name);
                     }
                 }
-                let json_body =
-                    Self::json_body_from_remaining_with_explicit(&mut remaining, explicit_body)?;
+                let json_body = Self::json_body_from_remaining_with_explicit(
+                    &mut remaining,
+                    explicit_body,
+                    body_is_schema_property,
+                )?;
                 (Some(json_body), None, None)
             }
             RequestBodyConfig::JsonOrMultipart(spec) => {
@@ -1068,7 +1079,13 @@ impl OpenAPIAdapter {
                         }
                     }
                     if !form_pairs.is_empty() {
-                        if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
+                        if let Some(body) = explicit_body.or_else(|| {
+                            if body_is_schema_property {
+                                None
+                            } else {
+                                remaining.remove("body")
+                            }
+                        }) {
                             if !remaining.is_empty() {
                                 anyhow::bail!(
                                     "Cannot mix 'body' with form arguments for this operation"
@@ -1090,6 +1107,7 @@ impl OpenAPIAdapter {
                         let multipart_body = Self::multipart_body_from_remaining_with_explicit(
                             &mut remaining,
                             explicit_body,
+                            body_is_schema_property,
                             spec,
                         )?;
                         (None, None, Some(multipart_body))
@@ -1103,6 +1121,7 @@ impl OpenAPIAdapter {
                     let json_body = Self::json_body_from_remaining_with_explicit(
                         &mut remaining,
                         explicit_body,
+                        body_is_schema_property,
                     )?;
                     (Some(json_body), None, None)
                 }
@@ -1114,7 +1133,13 @@ impl OpenAPIAdapter {
                     }
                 }
                 if !form_pairs.is_empty() {
-                    if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
+                    if let Some(body) = explicit_body.or_else(|| {
+                        if body_is_schema_property {
+                            None
+                        } else {
+                            remaining.remove("body")
+                        }
+                    }) {
                         if !remaining.is_empty() {
                             anyhow::bail!(
                                 "Cannot mix 'body' with form arguments for this operation"
@@ -1136,6 +1161,7 @@ impl OpenAPIAdapter {
                     let multipart_body = Self::multipart_body_from_remaining_with_explicit(
                         &mut remaining,
                         explicit_body,
+                        body_is_schema_property,
                         spec,
                     )?;
                     (None, None, Some(multipart_body))
@@ -1324,6 +1350,60 @@ impl OpenAPIAdapter {
         Ok(RequestBodyConfig::FormUrlEncoded)
     }
 
+    /// Returns true if the request body schema defines "body" as a property name.
+    /// When true, a user-supplied `body=...` arg should be treated as a normal
+    /// schema field rather than the raw HTTP request body.
+    fn request_body_schema_has_body_property(
+        path_item: &Value,
+        operation_spec: &Value,
+        root: &Value,
+    ) -> bool {
+        // OAS3: check requestBody → content → schema → properties
+        if let Some(request_body_raw) = operation_spec.get("requestBody") {
+            let request_body = Self::dereference_value(request_body_raw, root);
+            if let Some(content) = request_body.get("content").and_then(Value::as_object) {
+                for media_type in [
+                    "application/json",
+                    "multipart/form-data",
+                    "application/x-www-form-urlencoded",
+                ] {
+                    if let Some(schema_raw) = content
+                        .get(media_type)
+                        .and_then(|entry| entry.get("schema"))
+                    {
+                        let schema = Self::dereference_value(schema_raw, root);
+                        if schema
+                            .get("properties")
+                            .and_then(Value::as_object)
+                            .map_or(false, |props| props.contains_key("body"))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Swagger 2.0: check in:body parameter → schema → properties
+        for parameter in Self::collect_effective_operation_parameters(path_item, operation_spec) {
+            let resolved = Self::dereference_value(parameter, root);
+            if resolved.get("in").and_then(Value::as_str) == Some("body") {
+                if let Some(schema_raw) = resolved.get("schema") {
+                    let schema = Self::dereference_value(schema_raw, root);
+                    if schema
+                        .get("properties")
+                        .and_then(Value::as_object)
+                        .map_or(false, |props| props.contains_key("body"))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
     fn encode_path_param_value(value: &str) -> String {
         utf8_percent_encode(value, Self::PATH_SEGMENT_ENCODE_SET).to_string()
     }
@@ -1333,14 +1413,21 @@ impl OpenAPIAdapter {
     }
 
     fn json_body_from_remaining(remaining: &mut HashMap<String, Value>) -> Result<Value> {
-        Self::json_body_from_remaining_with_explicit(remaining, None)
+        Self::json_body_from_remaining_with_explicit(remaining, None, false)
     }
 
     fn json_body_from_remaining_with_explicit(
         remaining: &mut HashMap<String, Value>,
         explicit_body: Option<Value>,
+        body_is_schema_property: bool,
     ) -> Result<Value> {
-        if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
+        if let Some(body) = explicit_body.or_else(|| {
+            if body_is_schema_property {
+                None
+            } else {
+                remaining.remove("body")
+            }
+        }) {
             if !remaining.is_empty() {
                 anyhow::bail!(
                     "Cannot mix explicit request body with other request body arguments: {}",
@@ -1360,9 +1447,16 @@ impl OpenAPIAdapter {
     fn multipart_body_from_remaining_with_explicit(
         remaining: &mut HashMap<String, Value>,
         explicit_body: Option<Value>,
+        body_is_schema_property: bool,
         spec: &MultipartRequestSpec,
     ) -> Result<PreparedMultipartBody> {
-        let body_value = if let Some(body) = explicit_body.or_else(|| remaining.remove("body")) {
+        let body_value = if let Some(body) = explicit_body.or_else(|| {
+            if body_is_schema_property {
+                None
+            } else {
+                remaining.remove("body")
+            }
+        }) {
             if !remaining.is_empty() {
                 anyhow::bail!(
                     "Cannot mix explicit request body with other request body arguments: {}",
@@ -3365,6 +3459,106 @@ mod tests {
                 .contains("must be provided as a local file path string"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    #[test]
+    fn prepare_request_body_schema_property_not_consumed_as_raw_body() {
+        // Reproduces the Front API comment endpoint case: the request body
+        // schema has a property literally named "body" which must not be
+        // consumed as the raw HTTP body.
+        let root = json!({});
+        let path_item = json!({});
+        let operation = json!({
+            "parameters": [
+                {"name": "conversation_id", "in": "path", "required": true}
+            ],
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": ["body"],
+                            "properties": {
+                                "body": { "type": "string" },
+                                "author_id": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let mut args = HashMap::new();
+        args.insert(
+            "conversation_id".to_string(),
+            Value::String("cnv_abc123".to_string()),
+        );
+        args.insert(
+            "body".to_string(),
+            Value::String("Test comment".to_string()),
+        );
+
+        let prepared = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://api2.frontapp.com",
+            "/conversations/{conversation_id}/comments",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.url,
+            "https://api2.frontapp.com/conversations/cnv_abc123/comments"
+        );
+        // "body" must appear as a property inside the JSON object,
+        // NOT as the raw HTTP body.
+        assert_eq!(
+            prepared.json_body,
+            Some(json!({"body": "Test comment"}))
+        );
+    }
+
+    #[test]
+    fn prepare_request_body_key_still_works_as_raw_body_without_schema_property() {
+        // When the schema does NOT define "body" as a property,
+        // body=... should still work as the raw HTTP body (existing behavior).
+        let root = json!({});
+        let path_item = json!({});
+        let operation = json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {"type": "object"}
+                    }
+                }
+            }
+        });
+
+        let mut args = HashMap::new();
+        args.insert(
+            "body".to_string(),
+            json!({"name": "test", "value": 42}),
+        );
+
+        let prepared = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://example.com",
+            "/items",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.json_body,
+            Some(json!({"name": "test", "value": 42}))
         );
     }
 }
