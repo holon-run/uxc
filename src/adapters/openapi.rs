@@ -1032,13 +1032,25 @@ impl OpenAPIAdapter {
         }
 
         let body_config = Self::request_body_config(path_item, operation_spec, root)?;
-        let body_is_schema_property =
-            Self::request_body_schema_has_body_property(path_item, operation_spec, root);
+        // Closure to check whether the request body schema for a given media
+        // type defines "body" as a property.  Scoped per media type so that
+        // e.g. a multipart-only `body` property does not leak into the JSON
+        // branch of a JsonOrMultipart operation.
+        let body_in_schema = |media_type: &str| {
+            Self::request_body_schema_has_body_property(
+                path_item,
+                operation_spec,
+                root,
+                media_type,
+            )
+        };
+
         let (json_body, form_body, multipart_body) = match &body_config {
             RequestBodyConfig::None => (None, None, None),
             RequestBodyConfig::FormUrlEncoded => {
+                let body_is_prop = body_in_schema("application/x-www-form-urlencoded");
                 if let Some(body) = explicit_body.or_else(|| {
-                    if body_is_schema_property {
+                    if body_is_prop {
                         None
                     } else {
                         remaining.remove("body")
@@ -1059,6 +1071,7 @@ impl OpenAPIAdapter {
                 (None, Some(form_pairs), None)
             }
             RequestBodyConfig::Json => {
+                let body_is_prop = body_in_schema("application/json");
                 if explicit_body.is_none() && remaining.is_empty() {
                     if let Some(name) = &missing_required_body_param {
                         anyhow::bail!("Missing required parameter '{}'", name);
@@ -1067,12 +1080,13 @@ impl OpenAPIAdapter {
                 let json_body = Self::json_body_from_remaining_with_explicit(
                     &mut remaining,
                     explicit_body,
-                    body_is_schema_property,
+                    body_is_prop,
                 )?;
                 (Some(json_body), None, None)
             }
             RequestBodyConfig::JsonOrMultipart(spec) => {
                 if Self::multipart_should_be_preferred(explicit_body.as_ref(), &remaining, spec) {
+                    let body_is_prop = body_in_schema("multipart/form-data");
                     if explicit_body.is_none() && remaining.is_empty() && form_pairs.is_empty() {
                         if let Some(name) = &missing_required_body_param {
                             anyhow::bail!("Missing required parameter '{}'", name);
@@ -1080,7 +1094,7 @@ impl OpenAPIAdapter {
                     }
                     if !form_pairs.is_empty() {
                         if let Some(body) = explicit_body.or_else(|| {
-                            if body_is_schema_property {
+                            if body_is_prop {
                                 None
                             } else {
                                 remaining.remove("body")
@@ -1107,12 +1121,13 @@ impl OpenAPIAdapter {
                         let multipart_body = Self::multipart_body_from_remaining_with_explicit(
                             &mut remaining,
                             explicit_body,
-                            body_is_schema_property,
+                            body_is_prop,
                             spec,
                         )?;
                         (None, None, Some(multipart_body))
                     }
                 } else {
+                    let body_is_prop = body_in_schema("application/json");
                     if explicit_body.is_none() && remaining.is_empty() {
                         if let Some(name) = &missing_required_body_param {
                             anyhow::bail!("Missing required parameter '{}'", name);
@@ -1121,12 +1136,13 @@ impl OpenAPIAdapter {
                     let json_body = Self::json_body_from_remaining_with_explicit(
                         &mut remaining,
                         explicit_body,
-                        body_is_schema_property,
+                        body_is_prop,
                     )?;
                     (Some(json_body), None, None)
                 }
             }
             RequestBodyConfig::Multipart(spec) => {
+                let body_is_prop = body_in_schema("multipart/form-data");
                 if explicit_body.is_none() && remaining.is_empty() && form_pairs.is_empty() {
                     if let Some(name) = &missing_required_body_param {
                         anyhow::bail!("Missing required parameter '{}'", name);
@@ -1134,7 +1150,7 @@ impl OpenAPIAdapter {
                 }
                 if !form_pairs.is_empty() {
                     if let Some(body) = explicit_body.or_else(|| {
-                        if body_is_schema_property {
+                        if body_is_prop {
                             None
                         } else {
                             remaining.remove("body")
@@ -1161,7 +1177,7 @@ impl OpenAPIAdapter {
                     let multipart_body = Self::multipart_body_from_remaining_with_explicit(
                         &mut remaining,
                         explicit_body,
-                        body_is_schema_property,
+                        body_is_prop,
                         spec,
                     )?;
                     (None, None, Some(multipart_body))
@@ -1350,51 +1366,69 @@ impl OpenAPIAdapter {
         Ok(RequestBodyConfig::FormUrlEncoded)
     }
 
-    /// Returns true if the request body schema defines "body" as a property name.
-    /// When true, a user-supplied `body=...` arg should be treated as a normal
-    /// schema field rather than the raw HTTP request body.
+    /// Returns true if the request body schema for a specific media type
+    /// defines "body" as a property name. When true, a user-supplied
+    /// `body=...` arg should be treated as a normal schema field rather
+    /// than the raw HTTP request body.
+    ///
+    /// The check is scoped to a single media type so that a `body` property
+    /// in a multipart schema does not accidentally disable the raw-body
+    /// shorthand on the JSON branch of a `JsonOrMultipart` operation.
     fn request_body_schema_has_body_property(
         path_item: &Value,
         operation_spec: &Value,
         root: &Value,
+        media_type: &str,
     ) -> bool {
-        // OAS3: check requestBody → content → schema → properties
+        // OAS3: check requestBody → content → <media_type> → schema
         if let Some(request_body_raw) = operation_spec.get("requestBody") {
             let request_body = Self::dereference_value(request_body_raw, root);
-            if let Some(content) = request_body.get("content").and_then(Value::as_object) {
-                for media_type in [
-                    "application/json",
-                    "multipart/form-data",
-                    "application/x-www-form-urlencoded",
-                ] {
-                    if let Some(schema_raw) = content
-                        .get(media_type)
-                        .and_then(|entry| entry.get("schema"))
-                    {
-                        let schema = Self::dereference_value(schema_raw, root);
-                        if schema
-                            .get("properties")
-                            .and_then(Value::as_object)
-                            .map_or(false, |props| props.contains_key("body"))
-                        {
-                            return true;
-                        }
-                    }
+            if let Some(schema_raw) = request_body
+                .get("content")
+                .and_then(|c| c.get(media_type))
+                .and_then(|entry| entry.get("schema"))
+            {
+                let schema = Self::dereference_value(schema_raw, root);
+                if Self::schema_has_property(schema, root, "body") {
+                    return true;
                 }
             }
         }
 
-        // Swagger 2.0: check in:body parameter → schema → properties
+        // Swagger 2.0: check in:body parameter → schema
         for parameter in Self::collect_effective_operation_parameters(path_item, operation_spec) {
             let resolved = Self::dereference_value(parameter, root);
             if resolved.get("in").and_then(Value::as_str) == Some("body") {
                 if let Some(schema_raw) = resolved.get("schema") {
                     let schema = Self::dereference_value(schema_raw, root);
-                    if schema
-                        .get("properties")
-                        .and_then(Value::as_object)
-                        .map_or(false, |props| props.contains_key("body"))
-                    {
+                    if Self::schema_has_property(schema, root, "body") {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Checks whether `schema` (or any sub-schema reachable via `allOf`,
+    /// `oneOf`, or `anyOf`) defines the given property name.
+    fn schema_has_property(schema: &Value, root: &Value, property: &str) -> bool {
+        // Direct properties check
+        if schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .map_or(false, |props| props.contains_key(property))
+        {
+            return true;
+        }
+
+        // Walk composed schemas (allOf / oneOf / anyOf)
+        for keyword in ["allOf", "oneOf", "anyOf"] {
+            if let Some(sub_schemas) = schema.get(keyword).and_then(Value::as_array) {
+                for sub_schema_raw in sub_schemas {
+                    let sub_schema = Self::dereference_value(sub_schema_raw, root);
+                    if Self::schema_has_property(sub_schema, root, property) {
                         return true;
                     }
                 }
@@ -3559,6 +3593,123 @@ mod tests {
         assert_eq!(
             prepared.json_body,
             Some(json!({"name": "test", "value": 42}))
+        );
+    }
+
+    #[test]
+    fn prepare_request_body_property_detected_through_allof_composition() {
+        // "body" is defined inside an allOf sub-schema and must still be
+        // recognized as a schema property rather than the raw HTTP body.
+        let root = json!({
+            "components": {
+                "schemas": {
+                    "CommentBase": {
+                        "type": "object",
+                        "required": ["body"],
+                        "properties": {
+                            "body": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        let path_item = json!({});
+        let operation = json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "allOf": [
+                                { "$ref": "#/components/schemas/CommentBase" },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "author_id": { "type": "string" }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let mut args = HashMap::new();
+        args.insert(
+            "body".to_string(),
+            Value::String("composed comment".to_string()),
+        );
+
+        let prepared = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://example.com",
+            "/comments",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.json_body,
+            Some(json!({"body": "composed comment"}))
+        );
+    }
+
+    #[test]
+    fn prepare_request_body_property_scoped_to_selected_media_type() {
+        // "body" exists only in the multipart schema, not in JSON.
+        // On the JSON branch, body=... should still work as the raw HTTP body.
+        let root = json!({});
+        let path_item = json!({});
+        let operation = json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "text": { "type": "string" }
+                            }
+                        }
+                    },
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "body": { "type": "string" },
+                                "file": { "type": "string", "format": "binary" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // No file field → multipart_should_be_preferred returns false → JSON branch
+        let mut args = HashMap::new();
+        args.insert(
+            "body".to_string(),
+            json!({"text": "hello"}),
+        );
+
+        let prepared = OpenAPIAdapter::prepare_request(
+            "post",
+            "https://example.com",
+            "/messages",
+            &path_item,
+            &operation,
+            &root,
+            &args,
+        )
+        .unwrap();
+
+        // JSON schema does NOT define "body" as a property, so the raw-body
+        // shorthand should still work on this branch.
+        assert_eq!(
+            prepared.json_body,
+            Some(json!({"text": "hello"}))
         );
     }
 }
