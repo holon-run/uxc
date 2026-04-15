@@ -1414,6 +1414,19 @@ impl OpenAPIAdapter {
     /// Checks whether `schema` (or any sub-schema reachable via `allOf`,
     /// `oneOf`, or `anyOf`) defines the given property name.
     fn schema_has_property(schema: &Value, root: &Value, property: &str) -> bool {
+        Self::schema_has_property_recursive(schema, root, property, 0)
+    }
+
+    fn schema_has_property_recursive(
+        schema: &Value,
+        root: &Value,
+        property: &str,
+        depth: usize,
+    ) -> bool {
+        if depth > Self::MAX_SCHEMA_EXPANSION_DEPTH {
+            return false;
+        }
+
         // Direct properties check
         if schema
             .get("properties")
@@ -1428,7 +1441,12 @@ impl OpenAPIAdapter {
             if let Some(sub_schemas) = schema.get(keyword).and_then(Value::as_array) {
                 for sub_schema_raw in sub_schemas {
                     let sub_schema = Self::dereference_value(sub_schema_raw, root);
-                    if Self::schema_has_property(sub_schema, root, property) {
+                    if Self::schema_has_property_recursive(
+                        sub_schema,
+                        root,
+                        property,
+                        depth + 1,
+                    ) {
                         return true;
                     }
                 }
