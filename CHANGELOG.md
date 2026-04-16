@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-04-16
+
+### Fixed
+- Fixed OpenAPI request-body argument handling so a schema-defined `body` property no longer collides with the raw `body=...` shorthand, including composed schemas and mixed JSON/multipart operations.
+- Updated `rustls-webpki` to `0.103.12` so `Security Audit` clears the current repository-wide advisories without blocking unrelated PRs.
+
 ## [0.15.1] - 2026-04-14
 
 ### Fixed
@@ -438,7 +444,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.2...HEAD
+[0.15.2]: https://github.com/holon-run/uxc/releases/tag/v0.15.2
 [0.15.1]: https://github.com/holon-run/uxc/releases/tag/v0.15.1
 [0.15.0]: https://github.com/holon-run/uxc/releases/tag/v0.15.0
 [0.14.0]: https://github.com/holon-run/uxc/releases/tag/v0.14.0
