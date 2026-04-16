@@ -1032,17 +1032,20 @@ impl OpenAPIAdapter {
         }
 
         let body_config = Self::request_body_config(path_item, operation_spec, root)?;
+        let should_check_body_schema =
+            explicit_body.is_none() && remaining.contains_key("body");
         // Closure to check whether the request body schema for a given media
         // type defines "body" as a property.  Scoped per media type so that
         // e.g. a multipart-only `body` property does not leak into the JSON
         // branch of a JsonOrMultipart operation.
         let body_in_schema = |media_type: &str| {
-            Self::request_body_schema_has_body_property(
-                path_item,
-                operation_spec,
-                root,
-                media_type,
-            )
+            should_check_body_schema
+                && Self::request_body_schema_has_body_property(
+                    path_item,
+                    operation_spec,
+                    root,
+                    media_type,
+                )
         };
 
         let (json_body, form_body, multipart_body) = match &body_config {
@@ -1371,9 +1374,11 @@ impl OpenAPIAdapter {
     /// `body=...` arg should be treated as a normal schema field rather
     /// than the raw HTTP request body.
     ///
-    /// The check is scoped to a single media type so that a `body` property
-    /// in a multipart schema does not accidentally disable the raw-body
-    /// shorthand on the JSON branch of a `JsonOrMultipart` operation.
+    /// For OAS3, the check is scoped to a single media type so that a
+    /// `body` property in a multipart schema does not accidentally disable
+    /// the raw-body shorthand on the JSON branch of a `JsonOrMultipart`
+    /// operation. For Swagger 2.0, the in:body parameter has a single
+    /// schema not keyed by media type, so the check applies globally.
     fn request_body_schema_has_body_property(
         path_item: &Value,
         operation_spec: &Value,
@@ -1431,7 +1436,7 @@ impl OpenAPIAdapter {
         if schema
             .get("properties")
             .and_then(Value::as_object)
-            .map_or(false, |props| props.contains_key(property))
+            .is_some_and(|props| props.contains_key(property))
         {
             return true;
         }
