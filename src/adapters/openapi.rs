@@ -1032,8 +1032,7 @@ impl OpenAPIAdapter {
         }
 
         let body_config = Self::request_body_config(path_item, operation_spec, root)?;
-        let should_check_body_schema =
-            explicit_body.is_none() && remaining.contains_key("body");
+        let should_check_body_schema = explicit_body.is_none() && remaining.contains_key("body");
         // Closure to check whether the request body schema for a given media
         // type defines "body" as a property.  Scoped per media type so that
         // e.g. a multipart-only `body` property does not leak into the JSON
@@ -1446,12 +1445,7 @@ impl OpenAPIAdapter {
             if let Some(sub_schemas) = schema.get(keyword).and_then(Value::as_array) {
                 for sub_schema_raw in sub_schemas {
                     let sub_schema = Self::dereference_value(sub_schema_raw, root);
-                    if Self::schema_has_property_recursive(
-                        sub_schema,
-                        root,
-                        property,
-                        depth + 1,
-                    ) {
+                    if Self::schema_has_property_recursive(sub_schema, root, property, depth + 1) {
                         return true;
                     }
                 }
@@ -3574,10 +3568,7 @@ mod tests {
         );
         // "body" must appear as a property inside the JSON object,
         // NOT as the raw HTTP body.
-        assert_eq!(
-            prepared.json_body,
-            Some(json!({"body": "Test comment"}))
-        );
+        assert_eq!(prepared.json_body, Some(json!({"body": "Test comment"})));
     }
 
     #[test]
@@ -3597,10 +3588,7 @@ mod tests {
         });
 
         let mut args = HashMap::new();
-        args.insert(
-            "body".to_string(),
-            json!({"name": "test", "value": 42}),
-        );
+        args.insert("body".to_string(), json!({"name": "test", "value": 42}));
 
         let prepared = OpenAPIAdapter::prepare_request(
             "post",
@@ -3712,10 +3700,7 @@ mod tests {
 
         // No file field → multipart_should_be_preferred returns false → JSON branch
         let mut args = HashMap::new();
-        args.insert(
-            "body".to_string(),
-            json!({"text": "hello"}),
-        );
+        args.insert("body".to_string(), json!({"text": "hello"}));
 
         let prepared = OpenAPIAdapter::prepare_request(
             "post",
@@ -3730,9 +3715,6 @@ mod tests {
 
         // JSON schema does NOT define "body" as a property, so the raw-body
         // shorthand should still work on this branch.
-        assert_eq!(
-            prepared.json_body,
-            Some(json!({"text": "hello"}))
-        );
+        assert_eq!(prepared.json_body, Some(json!({"text": "hello"})));
     }
 }
