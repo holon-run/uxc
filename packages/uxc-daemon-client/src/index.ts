@@ -421,16 +421,16 @@ export class UxcDaemonClient {
       if (!this.autoStart || !isSocketError(error)) {
         throw error;
       }
-      await this.ensureDaemon(true);
+      await this.ensureDaemon();
       return this.requestOnce<T>(method, params);
     }
   }
 
-  private async ensureDaemon(force = false): Promise<void> {
+  private async ensureDaemon(): Promise<void> {
     if (!this.autoStart) {
       return;
     }
-    if (!this.ensureDaemonPromise || force) {
+    if (!this.ensureDaemonPromise) {
       const startPromise = this.startDaemonProcess().finally(() => {
         if (this.ensureDaemonPromise === startPromise) {
           this.ensureDaemonPromise = undefined;
