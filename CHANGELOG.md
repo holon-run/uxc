@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-04-16
+
+### Fixed
+- Tightened `@holon-run/uxc-daemon-client` daemon autostart behavior so normal requests no longer shell out to `uxc daemon start` unless the failure is actually socket-related, while still deduplicating concurrent retry-triggered autostarts.
+
 ## [0.15.2] - 2026-04-16
 
 ### Fixed
@@ -444,7 +449,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.2...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.3...HEAD
+[0.15.3]: https://github.com/holon-run/uxc/releases/tag/v0.15.3
 [0.15.2]: https://github.com/holon-run/uxc/releases/tag/v0.15.2
 [0.15.1]: https://github.com/holon-run/uxc/releases/tag/v0.15.1
 [0.15.0]: https://github.com/holon-run/uxc/releases/tag/v0.15.0
