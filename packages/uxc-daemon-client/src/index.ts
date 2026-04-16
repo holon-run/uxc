@@ -415,7 +415,6 @@ export class UxcDaemonClient {
   }
 
   async request<T>(method: string, params?: unknown): Promise<T> {
-    await this.ensureDaemon();
     try {
       return await this.requestOnce<T>(method, params);
     } catch (error) {
@@ -432,12 +431,21 @@ export class UxcDaemonClient {
       return;
     }
     if (!this.ensureDaemonPromise || force) {
-      this.ensureDaemonPromise = execFileAsync(this.binaryPath, ["daemon", "start"], {
-        env: this.env,
-        timeout: this.requestTimeoutMs,
-      }).then(() => undefined);
+      const startPromise = this.startDaemonProcess().finally(() => {
+        if (this.ensureDaemonPromise === startPromise) {
+          this.ensureDaemonPromise = undefined;
+        }
+      });
+      this.ensureDaemonPromise = startPromise;
     }
     await this.ensureDaemonPromise;
+  }
+
+  private async startDaemonProcess(): Promise<void> {
+    await execFileAsync(this.binaryPath, ["daemon", "start"], {
+      env: this.env,
+      timeout: this.requestTimeoutMs,
+    }).then(() => undefined);
   }
 
   private async requestOnce<T>(method: string, params?: unknown): Promise<T> {

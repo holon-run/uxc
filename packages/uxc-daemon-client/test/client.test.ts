@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { WebSocketServer } from "ws";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { generateTypeScriptClient, UxcDaemonClient, type CodegenHostSchemaV1 } from "../src/index.js";
+import { DaemonRpcError, generateTypeScriptClient, UxcDaemonClient, type CodegenHostSchemaV1 } from "../src/index.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -48,6 +48,81 @@ describe("UxcDaemonClient", () => {
     const status = await client.daemonStatus();
     expect(status.running).toBe(true);
     expect(status.socket).toContain("uxc.sock");
+  });
+
+  test("request uses the live socket before attempting daemon autostart", async () => {
+    const stub = new UxcDaemonClient();
+    let startCalls = 0;
+    (stub as unknown as { requestOnce: () => Promise<unknown> }).requestOnce = async () => ({
+      running: true,
+    });
+    (stub as unknown as { startDaemonProcess: () => Promise<void> }).startDaemonProcess = async () => {
+      startCalls += 1;
+    };
+
+    const result = await stub.request("daemon.status");
+    expect(result).toEqual({ running: true });
+    expect(startCalls).toBe(0);
+  });
+
+  test("request autostarts only after a socket error and retries once", async () => {
+    const stub = new UxcDaemonClient();
+    let requestCalls = 0;
+    let startCalls = 0;
+    (stub as unknown as { requestOnce: () => Promise<unknown> }).requestOnce = async () => {
+      requestCalls += 1;
+      if (requestCalls === 1) {
+        throw new Error("connect ENOENT /tmp/uxc.sock");
+      }
+      return { running: true };
+    };
+    (stub as unknown as { startDaemonProcess: () => Promise<void> }).startDaemonProcess = async () => {
+      startCalls += 1;
+    };
+
+    const result = await stub.request("daemon.status");
+    expect(result).toEqual({ running: true });
+    expect(requestCalls).toBe(2);
+    expect(startCalls).toBe(1);
+  });
+
+  test("request does not autostart for non-socket errors", async () => {
+    const stub = new UxcDaemonClient();
+    let startCalls = 0;
+    (stub as unknown as { requestOnce: () => Promise<unknown> }).requestOnce = async () => {
+      throw new DaemonRpcError("method failed", -32000, "daemon.status");
+    };
+    (stub as unknown as { startDaemonProcess: () => Promise<void> }).startDaemonProcess = async () => {
+      startCalls += 1;
+    };
+
+    await expect(stub.request("daemon.status")).rejects.toThrow(/method failed/);
+    expect(startCalls).toBe(0);
+  });
+
+  test("failed autostart does not poison later socket recovery", async () => {
+    const stub = new UxcDaemonClient();
+    let requestCalls = 0;
+    let startCalls = 0;
+    (stub as unknown as { requestOnce: () => Promise<unknown> }).requestOnce = async () => {
+      requestCalls += 1;
+      if (requestCalls <= 2) {
+        throw new Error("connect ECONNREFUSED /tmp/uxc.sock");
+      }
+      return { running: true };
+    };
+    (stub as unknown as { startDaemonProcess: () => Promise<void> }).startDaemonProcess = async () => {
+      startCalls += 1;
+      if (startCalls === 1) {
+        throw new Error("daemon start failed");
+      }
+    };
+
+    await expect(stub.request("daemon.status")).rejects.toThrow(/daemon start failed/);
+    const result = await stub.request("daemon.status");
+    expect(result).toEqual({ running: true });
+    expect(startCalls).toBe(2);
+    expect(requestCalls).toBe(3);
   });
 
   test("daemonSessionKill sends daemon.session.kill with session key", async () => {
