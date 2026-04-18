@@ -44,10 +44,18 @@ struct SessionResourceState {
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
     jsonrpc: String,
-    id: Value,
+    // `id` is absent for JSON-RPC notifications (e.g. `notifications/initialized`).
+    #[serde(default)]
+    id: Option<Value>,
     method: String,
     #[serde(default)]
     params: Value,
+}
+
+impl JsonRpcRequest {
+    fn id_or_null(&self) -> Value {
+        self.id.clone().unwrap_or(Value::Null)
+    }
 }
 
 async fn mcp_handler(
@@ -58,11 +66,18 @@ async fn mcp_handler(
     if req.jsonrpc != "2.0" {
         return Ok(Json(json!({
             "jsonrpc": "2.0",
-            "id": req.id,
+            "id": req.id_or_null(),
             "error": {"code": -32600, "message": "Invalid Request"}
         }))
         .into_response());
     }
+
+    // JSON-RPC notifications (no id) receive no response body. This matches
+    // real MCP servers which typically respond 202 Accepted to
+    // `notifications/initialized` and friends.
+    let Some(req_id) = req.id.clone() else {
+        return Ok(StatusCode::ACCEPTED.into_response());
+    };
 
     if matches!(state.scenario, Scenario::AuthRequired) {
         return Err(StatusCode::UNAUTHORIZED);
@@ -102,7 +117,7 @@ async fn mcp_handler(
         "tools/list" => {
             if matches!(state.scenario, Scenario::SessionScopedResource) {
                 return with_session_response(
-                    req.id,
+                    req_id.clone(),
                     session_id.clone(),
                     &state,
                     json!({
@@ -129,7 +144,7 @@ async fn mcp_handler(
             if matches!(state.scenario, Scenario::ToolsListFailAfterFirst) && calls > 1 {
                 return Ok(Json(json!({
                     "jsonrpc": "2.0",
-                    "id": req.id,
+                    "id": req_id.clone(),
                     "error": {"code": -32002, "message": "tools/list failed after first request"}
                 }))
                 .into_response());
@@ -165,7 +180,7 @@ async fn mcp_handler(
             if matches!(state.scenario, Scenario::ToolStructuredError) {
                 return Ok(Json(json!({
                     "jsonrpc": "2.0",
-                    "id": req.id,
+                    "id": req_id.clone(),
                     "error": {
                         "code": -32010,
                         "message": "Failed to call tool 'gemini.image.download'",
@@ -192,7 +207,7 @@ async fn mcp_handler(
                 if name != "set_resource" {
                     return Ok(Json(json!({
                         "jsonrpc": "2.0",
-                        "id": req.id,
+                        "id": req_id.clone(),
                         "error": {"code": -32601, "message": "Tool not found"}
                     }))
                     .into_response());
@@ -213,7 +228,7 @@ async fn mcp_handler(
                     entry.value = value;
                 }
                 return with_session_response(
-                    req.id,
+                    req_id.clone(),
                     Some(session_id),
                     &state,
                     json!({
@@ -229,7 +244,7 @@ async fn mcp_handler(
             if name != "echo" {
                 return Ok(Json(json!({
                     "jsonrpc": "2.0",
-                    "id": req.id,
+                    "id": req_id.clone(),
                     "error": {"code": -32601, "message": "Tool not found"}
                 }))
                 .into_response());
@@ -258,7 +273,7 @@ async fn mcp_handler(
                         .expect("session resource map");
                     sessions.entry(session_id.clone()).or_default().subscribed = true;
                 }
-                return with_session_response(req.id, Some(session_id), &state, json!({}));
+                return with_session_response(req_id.clone(), Some(session_id), &state, json!({}));
             }
             state.resource_subscribed.store(true, Ordering::SeqCst);
             state.resource_event_seq.store(0, Ordering::SeqCst);
@@ -275,7 +290,7 @@ async fn mcp_handler(
             {
                 return Ok(Json(json!({
                     "jsonrpc": "2.0",
-                    "id": req.id,
+                    "id": req_id.clone(),
                     "error": {"code": -32003, "message": "resource read failed once"}
                 }))
                 .into_response());
@@ -313,7 +328,7 @@ async fn mcp_handler(
                         sessions.entry(session_id.clone()).or_default().subscribed = false;
                     }
                 }
-                return with_session_response(req.id, Some(session_id), &state, json!({}));
+                return with_session_response(req_id.clone(), Some(session_id), &state, json!({}));
             }
             state.resource_subscribed.store(false, Ordering::SeqCst);
             state.resource_event_seq.store(0, Ordering::SeqCst);
@@ -322,14 +337,14 @@ async fn mcp_handler(
         _ => {
             return Ok(Json(json!({
                 "jsonrpc": "2.0",
-                "id": req.id,
+                "id": req_id.clone(),
                 "error": {"code": -32601, "message": "Method not found"}
             }))
             .into_response())
         }
     };
 
-    with_session_response(req.id, session_id, &state, result)
+    with_session_response(req_id, session_id, &state, result)
 }
 
 async fn mcp_event_stream(
