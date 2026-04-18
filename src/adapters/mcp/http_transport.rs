@@ -1008,6 +1008,71 @@ impl McpHttpTransport {
         serde_json::from_value(result).context("Failed to parse initialize result")
     }
 
+    /// Send the `notifications/initialized` JSON-RPC notification.
+    ///
+    /// MCP lifecycle (2025-03-26) requires the client to send this notification
+    /// after `initialize` returns successfully. Spec-compliant servers will not
+    /// service subsequent requests on the session until this ack has been
+    /// received. The notification carries no id and expects no response body;
+    /// servers typically reply with 202 Accepted or 204 No Content.
+    pub async fn initialized(&self) -> Result<()> {
+        self.maybe_refresh_auth_token().await?;
+
+        let notification = JsonRpcNotification {
+            jsonrpc: "2.0".to_string(),
+            method: "notifications/initialized".to_string(),
+            params: None,
+        };
+
+        tracing::debug!(
+            "Sending MCP HTTP notification: {} to {}",
+            notification.method,
+            self.server_url
+        );
+
+        let response = self
+            .send_jsonrpc_notification(&notification)
+            .await
+            .context("Failed to send HTTP notification to MCP server")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let www_authenticate = response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let body = response.text().await.unwrap_or_default();
+            Self::map_http_error(status, &body, www_authenticate.as_deref())?;
+            unreachable!("map_http_error should always return an error");
+        }
+
+        Ok(())
+    }
+
+    /// POST a JSON-RPC notification (no id, no response body) reusing the
+    /// session id and resolved auth headers from `send_jsonrpc_request`.
+    async fn send_jsonrpc_notification(
+        &self,
+        notification: &JsonRpcNotification,
+    ) -> Result<reqwest::Response> {
+        let profile = self.auth_profile.lock().await.clone();
+        let session_id = self.session_id.lock().await.clone();
+        let resolved = Self::resolve_request_auth("POST", &self.server_url, profile.as_ref())?;
+
+        let mut req = self
+            .client
+            .post(&resolved.url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+        if let Some(session_id) = session_id {
+            req = req.header("mcp-session-id", session_id);
+        }
+        req = Self::apply_resolved_request_auth(req, &resolved);
+
+        req.json(notification).send().await.map_err(Into::into)
+    }
+
     /// List available tools
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {
         let result = self.send_request("tools/list", None).await?;
@@ -1546,6 +1611,72 @@ impl LegacySseTransport {
         serde_json::from_value(result).context("Failed to parse initialize result")
     }
 
+    /// Send the `notifications/initialized` JSON-RPC notification over the
+    /// legacy SSE POST channel. Mirrors `McpHttpTransport::initialized` but
+    /// targets the session's `messages_url`.
+    async fn initialized(&self) -> Result<()> {
+        self.ensure_connected().await?;
+        self.maybe_refresh_auth_token().await?;
+
+        let notification = JsonRpcNotification {
+            jsonrpc: "2.0".to_string(),
+            method: "notifications/initialized".to_string(),
+            params: None,
+        };
+
+        let messages_url = {
+            let session = self.session.lock().await;
+            session
+                .as_ref()
+                .context("Legacy SSE transport not connected after bootstrap")?
+                .messages_url
+                .clone()
+        };
+
+        tracing::debug!(
+            "Sending legacy SSE MCP notification: {} to {}",
+            notification.method,
+            messages_url
+        );
+
+        let response = self
+            .send_messages_notification(&messages_url, &notification)
+            .await
+            .context("Failed to send legacy SSE HTTP notification")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let www_authenticate = response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let body = response.text().await.unwrap_or_default();
+            McpHttpTransport::map_http_error(status, &body, www_authenticate.as_deref())?;
+            unreachable!("map_http_error should always return an error");
+        }
+
+        Ok(())
+    }
+
+    async fn send_messages_notification(
+        &self,
+        messages_url: &str,
+        notification: &JsonRpcNotification,
+    ) -> Result<reqwest::Response> {
+        let profile = self.auth_profile.lock().await.clone();
+        let resolved =
+            McpHttpTransport::resolve_request_auth("POST", messages_url, profile.as_ref())?;
+        let mut req = self
+            .client
+            .post(&resolved.url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+        req = McpHttpTransport::apply_resolved_request_auth(req, &resolved);
+
+        req.json(notification).send().await.map_err(Into::into)
+    }
+
     async fn list_tools(&self) -> Result<Vec<Tool>> {
         let result = self.send_request("tools/list", None).await?;
         let response: ToolsListResponse =
@@ -1844,6 +1975,15 @@ impl McpRemoteTransport {
         match self {
             Self::Streamable(transport) => transport.initialize().await,
             Self::Legacy(transport) => transport.initialize().await,
+        }
+    }
+
+    /// Send the `notifications/initialized` acknowledgement required by the
+    /// MCP lifecycle spec after `initialize` returns successfully.
+    pub async fn initialized(&self) -> Result<()> {
+        match self {
+            Self::Streamable(transport) => transport.initialized().await,
+            Self::Legacy(transport) => transport.initialized().await,
         }
     }
 
