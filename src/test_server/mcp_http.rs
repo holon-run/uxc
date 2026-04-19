@@ -124,17 +124,17 @@ async fn mcp_handler(
     // spec 2025-03-26). When this scenario is active, mimic that behaviour so
     // tests can catch a client that forgets the post-init ack.
     if matches!(state.scenario, Scenario::RequiresInitializedAck) && req.method != "initialize" {
-        let initialized = session_id
-            .as_ref()
-            .and_then(|id| {
-                state
-                    .session_resources
-                    .lock()
-                    .ok()
-                    .and_then(|sessions| sessions.get(id).map(|entry| entry.initialized_acked))
-            })
-            .unwrap_or(false);
-        if !initialized {
+        let Some(session_id) = session_id.as_ref() else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+        let sessions = state
+            .session_resources
+            .lock()
+            .expect("session resource map");
+        let Some(entry) = sessions.get(session_id) else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+        if !entry.initialized_acked {
             return Ok(Json(json!({
                 "jsonrpc": "2.0",
                 "id": req_id,
