@@ -904,6 +904,48 @@ fn mcp_stdio_execute_does_not_relist_tools_on_reused_session() {
 
 #[test]
 #[serial]
+fn mcp_http_host_help_autostarts_daemon_and_sends_initialized_ack() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let server = start_test_server("mcp-http", "requires_initialized_ack");
+    let endpoint = mcp_http_endpoint(&server.addr);
+
+    let help = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("-h")
+        .output()
+        .expect("host help should run");
+    assert!(
+        help.status.success(),
+        "daemon-autostarted host help should succeed once initialized ack is sent\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&help.stdout),
+        String::from_utf8_lossy(&help.stderr)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&help.stdout).expect("help stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["meta"]["daemon_used"], true);
+    assert_eq!(json["meta"]["daemon_autostarted"], true);
+
+    let ops: Vec<&str> = json["data"]["operations"]
+        .as_array()
+        .expect("operations array in host_help")
+        .iter()
+        .filter_map(|v| v["operation_id"].as_str())
+        .collect();
+    assert!(
+        ops.contains(&"echo"),
+        "expected echo operation, got {ops:?}"
+    );
+
+    daemon_stop_best_effort_with_home(temp_home.path());
+}
+
+#[test]
+#[serial]
 fn mcp_http_daemon_session_sends_initialized_ack_before_first_request() {
     let temp_home = tempfile::tempdir().expect("temp home should be created");
     daemon_stop_best_effort_with_home(temp_home.path());

@@ -880,6 +880,8 @@ fn test_mcp_http_sends_initialized_ack_after_initialize() {
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert_eq!(json["ok"], true);
     assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["meta"]["daemon_used"], true);
+    assert_eq!(json["meta"]["daemon_autostarted"], true);
 
     let ops: Vec<&str> = json["data"]["operations"]
         .as_array()
@@ -917,6 +919,8 @@ fn test_mcp_http_tool_call_works_after_initialized_ack() {
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert_eq!(json["ok"], true);
     assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["meta"]["daemon_used"], true);
+    assert_eq!(json["meta"]["daemon_autostarted"], true);
     assert_eq!(json["data"]["content"][0]["text"], "hello ack");
 }
 
