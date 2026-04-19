@@ -41,6 +41,12 @@ pub enum Scenario {
     LifecycleStatefulAllow,
     /// uxc/lifecycle_contract returns stateful and sends no lifecycle snapshot
     LifecycleStatefulNoSnapshot,
+    /// Simulates a spec-compliant MCP HTTP server that enforces the
+    /// `notifications/initialized` lifecycle ack (MCP spec 2025-03-26):
+    /// refuses `tools/list` and `tools/call` with JSON-RPC -32002 until the
+    /// ack arrives. Used to regression-test UXC's HTTP transport sending the
+    /// ack between `initialize` and follow-up requests.
+    RequiresInitializedAck,
 }
 
 impl Scenario {
@@ -65,8 +71,9 @@ impl Scenario {
             "lifecycle_stateful_hold" => Ok(Self::LifecycleStatefulHold),
             "lifecycle_stateful_allow" => Ok(Self::LifecycleStatefulAllow),
             "lifecycle_stateful_no_snapshot" => Ok(Self::LifecycleStatefulNoSnapshot),
+            "requires_initialized_ack" => Ok(Self::RequiresInitializedAck),
             _ => anyhow::bail!(
-                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, tool_structured_error, resource_read_fail_once, dynamic_toolset, empty_object_required, sui_pubsub, session_scoped_resource, lifecycle_stateful_hold, lifecycle_stateful_allow, lifecycle_stateful_no_snapshot",
+                "Unknown scenario: {}. Use: ok, auth_required, malformed, timeout, legacy, tool_call_timeout, tools_list_fail_after_first, structured_content, tool_structured_error, resource_read_fail_once, dynamic_toolset, empty_object_required, sui_pubsub, session_scoped_resource, lifecycle_stateful_hold, lifecycle_stateful_allow, lifecycle_stateful_no_snapshot, requires_initialized_ack",
                 s
             ),
         }

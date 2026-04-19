@@ -340,7 +340,8 @@ async fn execute_query(
         | Scenario::DynamicToolset
         | Scenario::LifecycleStatefulHold
         | Scenario::LifecycleStatefulAllow
-        | Scenario::LifecycleStatefulNoSnapshot => {
+        | Scenario::LifecycleStatefulNoSnapshot
+        | Scenario::RequiresInitializedAck => {
             // Introspection query
             if query.contains("__schema") || query.contains("__type(") {
                 return Ok(GraphQLResponse {

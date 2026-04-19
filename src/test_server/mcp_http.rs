@@ -33,6 +33,10 @@ struct ServerState {
     resource_read_failed_once: Arc<AtomicBool>,
     next_session_id: Arc<AtomicU64>,
     session_resources: Arc<Mutex<std::collections::HashMap<String, SessionResourceState>>>,
+    /// Tracks whether `notifications/initialized` has been received. Used by
+    /// `Scenario::RequiresInitializedAck` to reject requests that arrive
+    /// before the spec-mandated post-init ack.
+    initialized_acked: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,6 +80,9 @@ async fn mcp_handler(
     // real MCP servers which typically respond 202 Accepted to
     // `notifications/initialized` and friends.
     let Some(req_id) = req.id.clone() else {
+        if req.method == "notifications/initialized" {
+            state.initialized_acked.store(true, Ordering::SeqCst);
+        }
         return Ok(StatusCode::ACCEPTED.into_response());
     };
 
@@ -100,6 +107,22 @@ async fn mcp_handler(
         .get("mcp-session-id")
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string());
+
+    // Spec-compliant MCP servers refuse any request other than `initialize`
+    // until the client has sent `notifications/initialized` (MCP lifecycle
+    // spec 2025-03-26). When this scenario is active, mimic that behaviour so
+    // tests can catch a client that forgets the post-init ack.
+    if matches!(state.scenario, Scenario::RequiresInitializedAck)
+        && req.method != "initialize"
+        && !state.initialized_acked.load(Ordering::SeqCst)
+    {
+        return Ok(Json(json!({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32002, "message": "Server not initialized"}
+        }))
+        .into_response());
+    }
 
     let result = match req.method.as_str() {
         "initialize" => json!({
@@ -479,6 +502,7 @@ pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
         resource_read_failed_once: Arc::new(AtomicBool::new(false)),
         next_session_id: Arc::new(AtomicU64::new(1)),
         session_resources: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        initialized_acked: Arc::new(AtomicBool::new(false)),
     });
 
     info!("MCP HTTP test server listening on http://{}", addr);

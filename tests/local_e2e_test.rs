@@ -857,6 +857,69 @@ fn test_mcp_http_execute_does_not_depend_on_tools_list() {
     assert_eq!(json["data"]["content"][0]["text"], "hello cache");
 }
 
+/// Regression: the HTTP MCP transport MUST send `notifications/initialized`
+/// after `initialize` (MCP lifecycle spec 2025-03-26). Without the ack,
+/// spec-compliant servers (e.g. rmcp) refuse subsequent requests. The
+/// `requires_initialized_ack` scenario mimics that enforcement: any request
+/// other than `initialize` returns JSON-RPC -32002 until the ack arrives.
+#[test]
+#[serial_test::serial]
+fn test_mcp_http_sends_initialized_ack_after_initialize() {
+    let _server = start_test_server("mcp-http", "requires_initialized_ack");
+    let endpoint = mcp_http_endpoint(&_server.addr);
+
+    let result = run_uxc(&[&endpoint, "-h"]);
+
+    assert!(
+        result.is_ok(),
+        "uxc must send notifications/initialized after initialize; -h failed: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+
+    let ops: Vec<&str> = json["data"]["operations"]
+        .as_array()
+        .expect("operations array in host_help")
+        .iter()
+        .filter_map(|v| v["operation_id"].as_str())
+        .collect();
+    assert!(
+        ops.contains(&"echo"),
+        "tools/list must succeed under requires_initialized_ack scenario, meaning the ack was sent; got ops: {:?}",
+        ops
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_mcp_http_tool_call_works_after_initialized_ack() {
+    let _server = start_test_server("mcp-http", "requires_initialized_ack");
+    let endpoint = mcp_http_endpoint(&_server.addr);
+
+    let result = run_uxc(&[
+        &endpoint,
+        "echo",
+        "--input-json",
+        r#"{"message":"hello ack"}"#,
+    ]);
+
+    assert!(
+        result.is_ok(),
+        "tools/call must succeed under requires_initialized_ack scenario: {:?}",
+        result
+    );
+
+    let output = result.unwrap();
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["protocol"], "mcp");
+    assert_eq!(json["data"]["content"][0]["text"], "hello ack");
+}
+
 #[test]
 #[serial_test::serial]
 fn test_mcp_stdio_host_help_lists_operations() {
