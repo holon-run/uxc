@@ -8293,7 +8293,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_artifact_compaction_defaults_to_enabled() {
+    fn runtime_artifact_compaction_runs_when_enabled() {
         let mut data = json!({
             "blob": "x".repeat(80_000),
             "ok": true
