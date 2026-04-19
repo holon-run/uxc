@@ -1,6 +1,6 @@
 mod common;
 
-use common::{test_server_binary, uxc_command, uxc_command_with_home};
+use common::{start_test_server, test_server_binary, uxc_command, uxc_command_with_home};
 use serial_test::serial;
 use std::fs;
 #[cfg(unix)]
@@ -18,6 +18,10 @@ fn daemon_stop_best_effort_with_home(home: &Path) {
         .arg("daemon")
         .arg("stop")
         .output();
+}
+
+fn mcp_http_endpoint(addr: &str) -> String {
+    format!("http://{addr}/mcp")
 }
 
 #[cfg(unix)]
@@ -894,6 +898,65 @@ fn mcp_stdio_execute_does_not_relist_tools_on_reused_session() {
     assert_eq!(json["protocol"], "mcp");
     assert_eq!(json["data"]["content"][0]["text"], "second");
     assert_eq!(json["meta"]["daemon_session_reused"], true);
+
+    daemon_stop_best_effort_with_home(temp_home.path());
+}
+
+#[test]
+#[serial]
+fn mcp_http_daemon_session_sends_initialized_ack_before_first_request() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let server = start_test_server("mcp-http", "requires_initialized_ack");
+    let endpoint = mcp_http_endpoint(&server.addr);
+
+    let start = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("start")
+        .output()
+        .expect("daemon start should run");
+    assert!(start.status.success());
+
+    let cold = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"cold ack"}"#)
+        .output()
+        .expect("cold call should run");
+    assert!(
+        cold.status.success(),
+        "cold daemon-backed HTTP MCP call should succeed once initialized ack is sent\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&cold.stdout),
+        String::from_utf8_lossy(&cold.stderr)
+    );
+    let cold_json: serde_json::Value =
+        serde_json::from_slice(&cold.stdout).expect("cold stdout should be valid JSON");
+    assert_eq!(cold_json["ok"], true);
+    assert_eq!(cold_json["protocol"], "mcp");
+    assert_eq!(cold_json["meta"]["daemon_used"], true);
+    assert_eq!(cold_json["data"]["content"][0]["text"], "cold ack");
+
+    let warm = uxc_command_with_home(temp_home.path())
+        .arg(&endpoint)
+        .arg("echo")
+        .arg("--input-json")
+        .arg(r#"{"message":"warm ack"}"#)
+        .output()
+        .expect("warm call should run");
+    assert!(
+        warm.status.success(),
+        "warm daemon-backed HTTP MCP call should also succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&warm.stdout),
+        String::from_utf8_lossy(&warm.stderr)
+    );
+    let warm_json: serde_json::Value =
+        serde_json::from_slice(&warm.stdout).expect("warm stdout should be valid JSON");
+    assert_eq!(warm_json["ok"], true);
+    assert_eq!(warm_json["protocol"], "mcp");
+    assert_eq!(warm_json["data"]["content"][0]["text"], "warm ack");
+    assert_eq!(warm_json["meta"]["daemon_session_reused"], true);
 
     daemon_stop_best_effort_with_home(temp_home.path());
 }

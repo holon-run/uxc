@@ -294,10 +294,8 @@ impl GrpcAdapter {
                                 ) => return Ok::<bool, anyhow::Error>(true),
                                 Some(
                                     reflection::server_reflection_response::MessageResponse::ErrorResponse(err),
-                                ) => {
-                                    if err.error_code == tonic::Code::Unimplemented as i32 {
-                                        return Ok::<bool, anyhow::Error>(false);
-                                    }
+                                ) if err.error_code == tonic::Code::Unimplemented as i32 => {
+                                    return Ok::<bool, anyhow::Error>(false);
                                 }
                                 _ => {}
                             }

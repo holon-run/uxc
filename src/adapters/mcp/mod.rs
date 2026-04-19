@@ -404,6 +404,11 @@ impl McpAdapter {
                 self.request_timeout_or_default(),
             )?;
             let init_result = transport.initialize().await?;
+            // MCP lifecycle (2025-03-26) requires the client to ack with
+            // `notifications/initialized` before the server will service
+            // subsequent requests on the session. Spec-compliant servers
+            // (e.g., rmcp 0.15) otherwise hang on follow-up requests.
+            transport.initialized().await?;
             let tools = match transport.list_tools().await {
                 Ok(tools) => Some(tools),
                 Err(err) => {
@@ -573,6 +578,8 @@ impl Adapter for McpAdapter {
                 self.request_timeout_or_default(),
             )?;
             transport.initialize().await?;
+            // See notification rationale above in `fetch_schema_for_url`.
+            transport.initialized().await?;
 
             let arguments = Self::build_tool_arguments(args);
 

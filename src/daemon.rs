@@ -1955,6 +1955,7 @@ impl McpSessionManager {
             request_timeout.unwrap_or_else(|| Duration::from_secs(30)),
         )?;
         transport.initialize().await?;
+        transport.initialized().await?;
         let session = Arc::new(McpHttpSession {
             transport,
             notifications: Mutex::new(SessionNotificationFanout::default()),

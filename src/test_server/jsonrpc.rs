@@ -331,7 +331,8 @@ async fn execute_method(
         | Scenario::DynamicToolset
         | Scenario::LifecycleStatefulHold
         | Scenario::LifecycleStatefulAllow
-        | Scenario::LifecycleStatefulNoSnapshot => {
+        | Scenario::LifecycleStatefulNoSnapshot
+        | Scenario::RequiresInitializedAck => {
             let result = match method {
                 "rpc.discover" => schema_value(state.scenario),
                 "health" => json!({"status": "ok"}),

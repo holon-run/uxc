@@ -37,7 +37,8 @@ impl addsvc::add_server::Add for AddService {
             | Scenario::DynamicToolset
             | Scenario::LifecycleStatefulHold
             | Scenario::LifecycleStatefulAllow
-            | Scenario::LifecycleStatefulNoSnapshot => {
+            | Scenario::LifecycleStatefulNoSnapshot
+            | Scenario::RequiresInitializedAck => {
                 let req = request.into_inner();
                 Ok(Response::new(addsvc::SumReply { v: req.a + req.b }))
             }

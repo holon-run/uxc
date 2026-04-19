@@ -448,7 +448,7 @@ impl Cache for SchemaCache {
             }
         }
 
-        results.sort_by(|a, b| b.fetched_at.cmp(&a.fetched_at));
+        results.sort_by_key(|entry| std::cmp::Reverse(entry.fetched_at));
         Ok(results)
     }
 
