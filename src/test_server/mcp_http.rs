@@ -32,15 +32,12 @@ struct ServerState {
     resource_event_seq: Arc<AtomicU64>,
     resource_read_failed_once: Arc<AtomicBool>,
     next_session_id: Arc<AtomicU64>,
-    session_resources: Arc<Mutex<std::collections::HashMap<String, SessionResourceState>>>,
-    /// Tracks whether `notifications/initialized` has been received. Used by
-    /// `Scenario::RequiresInitializedAck` to reject requests that arrive
-    /// before the spec-mandated post-init ack.
-    initialized_acked: Arc<AtomicBool>,
+    session_resources: Arc<Mutex<std::collections::HashMap<String, SessionState>>>,
 }
 
 #[derive(Debug, Clone, Default)]
-struct SessionResourceState {
+struct SessionState {
+    initialized_acked: bool,
     subscribed: bool,
     value: u64,
 }
@@ -80,8 +77,22 @@ async fn mcp_handler(
     // real MCP servers which typically respond 202 Accepted to
     // `notifications/initialized` and friends.
     let Some(req_id) = req.id.clone() else {
-        if req.method == "notifications/initialized" {
-            state.initialized_acked.store(true, Ordering::SeqCst);
+        if req.method == "notifications/initialized"
+            && matches!(state.scenario, Scenario::RequiresInitializedAck)
+        {
+            let session_id = headers
+                .get("mcp-session-id")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.to_string())
+                .ok_or(StatusCode::BAD_REQUEST)?;
+            let mut sessions = state
+                .session_resources
+                .lock()
+                .expect("session resource map");
+            let Some(entry) = sessions.get_mut(&session_id) else {
+                return Err(StatusCode::BAD_REQUEST);
+            };
+            entry.initialized_acked = true;
         }
         return Ok(StatusCode::ACCEPTED.into_response());
     };
@@ -112,31 +123,52 @@ async fn mcp_handler(
     // until the client has sent `notifications/initialized` (MCP lifecycle
     // spec 2025-03-26). When this scenario is active, mimic that behaviour so
     // tests can catch a client that forgets the post-init ack.
-    if matches!(state.scenario, Scenario::RequiresInitializedAck)
-        && req.method != "initialize"
-        && !state.initialized_acked.load(Ordering::SeqCst)
-    {
-        return Ok(Json(json!({
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "error": {"code": -32002, "message": "Server not initialized"}
-        }))
-        .into_response());
+    if matches!(state.scenario, Scenario::RequiresInitializedAck) && req.method != "initialize" {
+        let Some(session_id) = session_id.as_ref() else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+        let sessions = state
+            .session_resources
+            .lock()
+            .expect("session resource map");
+        let Some(entry) = sessions.get(session_id) else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+        if !entry.initialized_acked {
+            return Ok(Json(json!({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32002, "message": "Server not initialized"}
+            }))
+            .into_response());
+        }
     }
 
     let result = match req.method.as_str() {
-        "initialize" => json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": {"listChanged": false},
-                "resources": {"subscribe": true}
-            },
-            "serverInfo": {
-                "name": "uxc-test-mcp-http",
-                "version": "1.0.0"
-            },
-            "instructions": "MCP HTTP test server for local e2e"
-        }),
+        "initialize" => {
+            let session_id = if matches!(state.scenario, Scenario::RequiresInitializedAck) {
+                Some(ensure_session_id(session_id.clone(), &state))
+            } else {
+                session_id.clone()
+            };
+            return with_session_response(
+                req_id.clone(),
+                session_id,
+                &state,
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {"listChanged": false},
+                        "resources": {"subscribe": true}
+                    },
+                    "serverInfo": {
+                        "name": "uxc-test-mcp-http",
+                        "version": "1.0.0"
+                    },
+                    "instructions": "MCP HTTP test server for local e2e"
+                }),
+            );
+        }
         "tools/list" => {
             if matches!(state.scenario, Scenario::SessionScopedResource) {
                 return with_session_response(
@@ -459,7 +491,10 @@ fn with_session_response(
     state: &ServerState,
     result: Value,
 ) -> Result<Response, StatusCode> {
-    let session_id = if matches!(state.scenario, Scenario::SessionScopedResource) {
+    let session_id = if matches!(
+        state.scenario,
+        Scenario::SessionScopedResource | Scenario::RequiresInitializedAck
+    ) {
         Some(ensure_session_id(session_id, state))
     } else {
         session_id
@@ -502,7 +537,6 @@ pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
         resource_read_failed_once: Arc::new(AtomicBool::new(false)),
         next_session_id: Arc::new(AtomicU64::new(1)),
         session_resources: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        initialized_acked: Arc::new(AtomicBool::new(false)),
     });
 
     info!("MCP HTTP test server listening on http://{}", addr);
