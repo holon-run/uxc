@@ -7,10 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.15.3] - 2026-04-16
+## [0.15.3] - 2026-04-19
+
+### Added
+- Added request-level `artifact_compaction` control to runtime invoke options, while defaulting `@holon-run/uxc-daemon-client` requests to inline full payloads for programmatic consumers.
 
 ### Fixed
 - Tightened `@holon-run/uxc-daemon-client` daemon autostart behavior so normal requests no longer shell out to `uxc daemon start` unless the failure is actually socket-related, while still deduplicating concurrent retry-triggered autostarts.
+- Fixed MCP HTTP lifecycle handling to send the required `notifications/initialized` acknowledgment from the transport path before follow-up requests.
+- Added daemon-backed MCP HTTP regression coverage for initialized-session bootstrap so the default CLI/daemon path stays aligned with the non-daemon transport behavior.
 
 ## [0.15.2] - 2026-04-16
 

@@ -70,10 +70,6 @@ pub fn test_server_binary(name: &str) -> PathBuf {
     let built = BUILT_SERVERS.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
     let bin_name = format!("uxc-test-{}-server", name);
 
-    if let Some(path) = sibling_bin(&bin_name) {
-        return path;
-    }
-
     // Build each protocol test server once per test process.
     {
         let mut guard = built.lock().expect("lock test server build cache");
@@ -85,6 +81,10 @@ pub fn test_server_binary(name: &str) -> PathBuf {
             assert!(status.success(), "Failed to build {} test server", name);
             guard.insert(name.to_string());
         }
+    }
+
+    if let Some(path) = sibling_bin(&bin_name) {
+        return path;
     }
 
     let target_dir = cargo_target_dir();

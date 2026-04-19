@@ -4,18 +4,23 @@
 
 mod common;
 
-use common::{test_server_binary, uxc_command, uxc_command_with_home};
+use common::{test_server_binary, uxc_command_with_home};
 use serial_test::serial;
 use std::fs;
 
 #[test]
 #[serial]
 fn daemon_status_includes_log_file_path() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+
     // Stop any running daemon first
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let _ = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output();
 
     // Start daemon
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
@@ -23,7 +28,7 @@ fn daemon_status_includes_log_file_path() {
     assert!(start.status.success());
 
     // Check status includes log_file
-    let status = uxc_command()
+    let status = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("status")
         .output()
@@ -43,7 +48,10 @@ fn daemon_status_includes_log_file_path() {
     );
 
     // Cleanup
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let _ = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output();
 }
 
 #[test]
@@ -52,17 +60,15 @@ fn daemon_creates_log_file() {
     use std::fs;
     use std::path::PathBuf;
 
-    // Stop any running daemon first
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
 
-    // Determine log file location
-    let log_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir).join("uxc")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".uxc").join("daemon")
-    } else {
-        return; // Skip test if we can't determine log location
-    };
+    // Stop any running daemon first
+    let _ = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output();
+
+    let log_dir = PathBuf::from(temp_home.path()).join("runtime").join("uxc");
 
     // Remove existing log file if present
     let log_file = log_dir.join("daemon.log");
@@ -71,7 +77,7 @@ fn daemon_creates_log_file() {
     }
 
     // Start daemon
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
@@ -99,7 +105,10 @@ fn daemon_creates_log_file() {
     }
 
     // Cleanup
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let _ = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output();
     let _ = fs::remove_file(&log_file);
 }
 
@@ -109,17 +118,15 @@ fn daemon_log_contains_start_event() {
     use std::fs;
     use std::path::PathBuf;
 
-    // Stop any running daemon first
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
 
-    // Determine log file location
-    let log_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir).join("uxc")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".uxc").join("daemon")
-    } else {
-        return; // Skip test if we can't determine log location
-    };
+    // Stop any running daemon first
+    let _ = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output();
+
+    let log_dir = PathBuf::from(temp_home.path()).join("runtime").join("uxc");
 
     let log_file = log_dir.join("daemon.log");
     if log_file.exists() {
@@ -127,7 +134,7 @@ fn daemon_log_contains_start_event() {
     }
 
     // Start daemon
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
@@ -153,34 +160,34 @@ fn daemon_log_contains_start_event() {
     );
 
     // Cleanup
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let _ = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output();
     let _ = fs::remove_file(&log_file);
 }
 
 #[test]
 #[serial]
 fn daemon_log_contains_stdio_session_lifecycle_events() {
-    use std::fs;
     use std::path::PathBuf;
     use std::thread;
     use std::time::Duration;
 
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    let _ = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output();
 
-    let log_dir = if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir).join("uxc")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".uxc").join("daemon")
-    } else {
-        return;
-    };
+    let log_dir = PathBuf::from(temp_home.path()).join("runtime").join("uxc");
 
     let log_file = log_dir.join("daemon.log");
     if log_file.exists() {
         let _ = fs::remove_file(&log_file);
     }
 
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
@@ -189,7 +196,7 @@ fn daemon_log_contains_stdio_session_lifecycle_events() {
 
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} ok", bin.display());
-    let first = uxc_command()
+    let first = uxc_command_with_home(temp_home.path())
         .arg("--daemon-idle-ttl")
         .arg("1")
         .arg(&endpoint)
@@ -202,7 +209,7 @@ fn daemon_log_contains_stdio_session_lifecycle_events() {
 
     thread::sleep(Duration::from_millis(1500));
 
-    let second = uxc_command()
+    let second = uxc_command_with_home(temp_home.path())
         .arg(&endpoint)
         .arg("echo")
         .arg("--input-json")
@@ -227,7 +234,10 @@ fn daemon_log_contains_stdio_session_lifecycle_events() {
         "log should include idle_reaped removal reason"
     );
 
-    let _ = uxc_command().arg("daemon").arg("stop").output();
+    let _ = uxc_command_with_home(temp_home.path())
+        .arg("daemon")
+        .arg("stop")
+        .output();
     let _ = fs::remove_file(&log_file);
 }
 

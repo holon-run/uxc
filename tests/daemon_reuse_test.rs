@@ -652,12 +652,13 @@ fn stateful_session_without_snapshot_is_kept_for_reuse() {
 #[test]
 #[serial]
 fn daemon_sessions_reports_active_state_for_busy_stdio_session() {
-    daemon_stop_best_effort();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} tool_call_timeout", bin.display());
 
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .env("UXC_TEST_TIMEOUT_MS", "3000")
         .arg("daemon")
         .arg("start")
@@ -665,8 +666,9 @@ fn daemon_sessions_reports_active_state_for_busy_stdio_session() {
         .expect("daemon start should run");
     assert!(start.status.success());
 
+    let busy_home = temp_home.path().to_path_buf();
     let busy = std::thread::spawn(move || {
-        uxc_command()
+        uxc_command_with_home(&busy_home)
             .arg(&endpoint)
             .arg("echo")
             .arg("--input-json")
@@ -678,7 +680,7 @@ fn daemon_sessions_reports_active_state_for_busy_stdio_session() {
     let mut found_active = false;
     for _ in 0..30 {
         std::thread::sleep(Duration::from_millis(100));
-        let sessions = uxc_command()
+        let sessions = uxc_command_with_home(temp_home.path())
             .arg("daemon")
             .arg("sessions")
             .output()
@@ -705,7 +707,7 @@ fn daemon_sessions_reports_active_state_for_busy_stdio_session() {
     );
 
     let _ = busy.join().expect("busy thread should join");
-    daemon_stop_best_effort();
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]
@@ -781,12 +783,13 @@ fn concurrent_cold_calls_share_stdio_session() {
 #[test]
 #[serial]
 fn daemon_status_not_blocked_by_stuck_mcp_invoke() {
-    daemon_stop_best_effort();
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
 
     let bin = test_server_binary("mcp-stdio");
     let endpoint = format!("{} timeout", bin.display());
 
-    let start = uxc_command()
+    let start = uxc_command_with_home(temp_home.path())
         .arg("daemon")
         .arg("start")
         .output()
@@ -794,8 +797,9 @@ fn daemon_status_not_blocked_by_stuck_mcp_invoke() {
     assert!(start.status.success());
 
     let endpoint_first = endpoint.clone();
+    let first_home = temp_home.path().to_path_buf();
     let first = std::thread::spawn(move || {
-        uxc_command()
+        uxc_command_with_home(&first_home)
             .env("UXC_TEST_TIMEOUT_MS", "4000")
             .arg(&endpoint_first)
             .arg("echo")
@@ -808,8 +812,9 @@ fn daemon_status_not_blocked_by_stuck_mcp_invoke() {
     std::thread::sleep(Duration::from_millis(200));
 
     let endpoint_second = endpoint.clone();
+    let second_home = temp_home.path().to_path_buf();
     let second = std::thread::spawn(move || {
-        uxc_command()
+        uxc_command_with_home(&second_home)
             .env("UXC_TEST_TIMEOUT_MS", "4000")
             .arg(&endpoint_second)
             .arg("echo")
@@ -822,8 +827,9 @@ fn daemon_status_not_blocked_by_stuck_mcp_invoke() {
     std::thread::sleep(Duration::from_millis(200));
 
     let (tx, rx) = std::sync::mpsc::channel();
+    let status_home = temp_home.path().to_path_buf();
     std::thread::spawn(move || {
-        let out = uxc_command()
+        let out = uxc_command_with_home(&status_home)
             .arg("daemon")
             .arg("status")
             .output()
@@ -846,7 +852,7 @@ fn daemon_status_not_blocked_by_stuck_mcp_invoke() {
     // daemon status being responsive, not about the timeout calls themselves
     let _second_output = second.join().expect("second timeout thread panicked");
 
-    daemon_stop_best_effort();
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 #[test]
