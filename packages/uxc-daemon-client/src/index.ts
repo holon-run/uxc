@@ -14,6 +14,7 @@ export interface RuntimeInvokeOptions {
   no_cache?: boolean;
   cache_ttl?: number;
   refresh_schema?: boolean;
+  artifact_compaction?: boolean;
   schema_url?: string;
   link_name?: string;
   link_skill?: string;
@@ -934,6 +935,7 @@ function normalizeOptions(options: RuntimeInvokeOptions | undefined): RuntimeInv
     inject_env: [],
     no_cache: false,
     refresh_schema: false,
+    artifact_compaction: false,
     daemon_exclusive: [],
     ...options,
   };

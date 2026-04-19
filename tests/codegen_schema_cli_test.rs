@@ -56,6 +56,11 @@ fn endpoint_codegen_schema_exports_runtime_contract_boundaries() {
         "integer"
     );
     assert_eq!(
+        json["data"]["runtime"]["invoke_options_schema"]["properties"]["artifact_compaction"]
+            ["default"],
+        true
+    );
+    assert_eq!(
         json["data"]["runtime"]["lifecycle_contract"]["idle_policy"]["latest_request_wins_ttl"],
         true
     );
