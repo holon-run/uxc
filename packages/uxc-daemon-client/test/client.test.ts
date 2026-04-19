@@ -170,6 +170,62 @@ describe("UxcDaemonClient", () => {
     }
   });
 
+  test("call defaults artifact compaction off for daemon client consumers", async () => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    const calls: Array<{ method: string; params: any }> = [];
+    (stub as unknown as { request: (method: string, params?: unknown) => Promise<unknown> }).request = async (
+      method,
+      params,
+    ) => {
+      calls.push({ method, params });
+      return {
+        protocol: "openapi",
+        endpoint: "https://example.test",
+        kind: "call_result",
+        operation: "get:/health",
+        data: { ok: true },
+        meta: {},
+      };
+    };
+
+    await stub.call({
+      endpoint: "https://example.test",
+      operation: "get:/health",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("runtime.invoke");
+    expect(calls[0]?.params.options.artifact_compaction).toBe(false);
+  });
+
+  test("call preserves explicit artifact compaction override", async () => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    const calls: Array<{ method: string; params: any }> = [];
+    (stub as unknown as { request: (method: string, params?: unknown) => Promise<unknown> }).request = async (
+      method,
+      params,
+    ) => {
+      calls.push({ method, params });
+      return {
+        protocol: "openapi",
+        endpoint: "https://example.test",
+        kind: "call_result",
+        operation: "get:/health",
+        data: { ok: true },
+        meta: {},
+      };
+    };
+
+    await stub.call({
+      endpoint: "https://example.test",
+      operation: "get:/health",
+      options: { artifact_compaction: true },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.params.options.artifact_compaction).toBe(true);
+  });
+
   test("codegenSchema exports host-scoped runtime codegen input", async () => {
     const server = createOpenApiServer();
     await server.start();

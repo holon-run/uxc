@@ -143,6 +143,8 @@ pub struct RuntimeInvokeOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     pub refresh_schema: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_compaction: Option<bool>,
     pub schema_url: Option<String>,
     pub link_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3348,7 +3350,12 @@ impl DaemonRuntime {
                 ..Default::default()
             };
             let mut response_data = data;
-            apply_runtime_artifact_compaction(&kind, &mut response_data, &mut response_meta)?;
+            apply_runtime_artifact_compaction(
+                &kind,
+                &mut response_data,
+                &mut response_meta,
+                request.options.artifact_compaction.unwrap_or(true),
+            )?;
             return Ok(RuntimeInvokeResponse {
                 protocol: "mcp".to_string(),
                 endpoint: request.endpoint,
@@ -3582,7 +3589,12 @@ impl DaemonRuntime {
                         meta.response_headers = Some(execution_meta.response_headers);
                     }
                 }
-                apply_runtime_artifact_compaction(&kind, &mut data, &mut meta)?;
+                apply_runtime_artifact_compaction(
+                    &kind,
+                    &mut data,
+                    &mut meta,
+                    request.options.artifact_compaction.unwrap_or(true),
+                )?;
                 self.log(
                     DaemonLogEntry::new(DaemonEventType::RuntimeInvokeSuccess)
                         .with_request_id(request.request_id.clone())
@@ -7212,7 +7224,12 @@ fn apply_runtime_artifact_compaction(
     kind: &str,
     data: &mut Value,
     meta: &mut RuntimeMeta,
+    artifact_compaction: bool,
 ) -> Result<()> {
+    if !artifact_compaction {
+        return Ok(());
+    }
+
     if !matches!(kind, "host_help" | "operation_detail" | "call_result") {
         return Ok(());
     }
@@ -8180,6 +8197,7 @@ mod tests {
                 cache_ttl: None,
                 timeout_ms: None,
                 refresh_schema: false,
+                artifact_compaction: None,
                 schema_url: Some("https://example.com/schema.json".to_string()),
                 link_name: None,
                 link_skill: None,
@@ -8227,6 +8245,7 @@ mod tests {
             cache_ttl: None,
             timeout_ms: None,
             refresh_schema: false,
+            artifact_compaction: None,
             schema_url: None,
             link_name: None,
             link_skill: None,
@@ -8253,6 +8272,7 @@ mod tests {
             cache_ttl: None,
             timeout_ms: None,
             refresh_schema: false,
+            artifact_compaction: None,
             schema_url: None,
             link_name: None,
             link_skill: None,
@@ -8270,6 +8290,43 @@ mod tests {
         assert!(err
             .to_string()
             .contains("--inject-env is only supported for stdio endpoints"));
+    }
+
+    #[test]
+    fn runtime_artifact_compaction_runs_when_enabled() {
+        let mut data = json!({
+            "blob": "x".repeat(80_000),
+            "ok": true
+        });
+        let mut meta = RuntimeMeta::default();
+
+        apply_runtime_artifact_compaction("call_result", &mut data, &mut meta, true)
+            .expect("compaction should succeed");
+
+        assert_eq!(meta.artifact_truncated, Some(true));
+        assert_eq!(meta.artifact_kind.as_deref(), Some("call_result"));
+        assert!(meta.artifact_path.is_some());
+        assert!(data["blob"]
+            .as_str()
+            .is_some_and(|preview| preview.len() < 80_000));
+    }
+
+    #[test]
+    fn runtime_artifact_compaction_can_be_disabled_per_request() {
+        let mut data = json!({
+            "blob": "x".repeat(80_000),
+            "ok": true
+        });
+        let original = data.clone();
+        let mut meta = RuntimeMeta::default();
+
+        apply_runtime_artifact_compaction("call_result", &mut data, &mut meta, false)
+            .expect("disabled compaction should leave payload inline");
+
+        assert_eq!(data, original);
+        assert!(meta.artifact_truncated.is_none());
+        assert!(meta.artifact_kind.is_none());
+        assert!(meta.artifact_path.is_none());
     }
 
     #[test]
@@ -8344,6 +8401,7 @@ mod tests {
                 cache_ttl: None,
                 timeout_ms: None,
                 refresh_schema: false,
+                artifact_compaction: None,
                 schema_url: Some("https://example.com/schema.json".to_string()),
                 link_name: None,
                 link_skill: None,
@@ -8397,6 +8455,7 @@ mod tests {
                 cache_ttl: None,
                 timeout_ms: None,
                 refresh_schema: false,
+                artifact_compaction: None,
                 schema_url: None,
                 link_name: None,
                 link_skill: None,
@@ -8431,6 +8490,7 @@ mod tests {
                 cache_ttl: None,
                 timeout_ms: None,
                 refresh_schema: false,
+                artifact_compaction: None,
                 schema_url: None,
                 link_name: None,
                 link_skill: None,
@@ -8539,6 +8599,7 @@ mod tests {
                 cache_ttl: None,
                 timeout_ms: None,
                 refresh_schema: false,
+                artifact_compaction: None,
                 schema_url: None,
                 link_name: None,
                 link_skill: None,

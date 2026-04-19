@@ -168,6 +168,7 @@ fn invoke_options_schema() -> Value {
             "cache_ttl": { "type": ["integer", "null"], "minimum": 0 },
             "timeout_ms": { "type": ["integer", "null"], "minimum": 0 },
             "refresh_schema": { "type": "boolean", "default": false },
+            "artifact_compaction": { "type": ["boolean", "null"], "default": true },
             "schema_url": { "type": ["string", "null"] },
             "link_name": { "type": ["string", "null"] },
             "schema_mapping_file": { "type": ["string", "null"] },
