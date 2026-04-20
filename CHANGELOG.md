@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-04-20
+
+### Added
+- Added richer managed-source diagnostics through expanded `uxc source status` runtime progress fields plus the new `uxc source doctor` command for checkpoint, stream, and legacy-file health checks.
+
+### Fixed
+- Redacted managed-source endpoints returned by `source status` and `source doctor` so daemon diagnostics no longer expose raw endpoint secrets.
+
 ## [0.15.3] - 2026-04-19
 
 ### Added
@@ -454,7 +462,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.3...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.4...HEAD
+[0.15.4]: https://github.com/holon-run/uxc/releases/tag/v0.15.4
 [0.15.3]: https://github.com/holon-run/uxc/releases/tag/v0.15.3
 [0.15.2]: https://github.com/holon-run/uxc/releases/tag/v0.15.2
 [0.15.1]: https://github.com/holon-run/uxc/releases/tag/v0.15.1
