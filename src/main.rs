@@ -357,6 +357,14 @@ enum SourceCommands {
         #[arg(value_name = "SOURCE_KEY")]
         source_key: String,
     },
+    /// Diagnose a managed source
+    Doctor {
+        #[arg(value_name = "NAMESPACE")]
+        namespace: String,
+
+        #[arg(value_name = "SOURCE_KEY")]
+        source_key: String,
+    },
     /// Stop a managed source
     Stop {
         #[arg(value_name = "NAMESPACE")]
@@ -1471,7 +1479,7 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
         "daemon" => {
             if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
                 match level1 {
-                    "start" | "stop" | "status" | "sessions" | "restart" | "_serve" => {
+                    "start" | "stop" | "doctor" | "status" | "sessions" | "restart" | "_serve" => {
                         path.push(level1.to_string());
                     }
                     "session" => {
@@ -1488,7 +1496,7 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
         }
         "source" => {
             if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
-                if matches!(level1, "ensure" | "status" | "stop" | "delete") {
+                if matches!(level1, "ensure" | "status" | "doctor" | "stop" | "delete") {
                     path.push(level1.to_string());
                 }
             }
@@ -1607,6 +1615,7 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             SourceCommands::List => Some(vec!["source", "list"]),
             SourceCommands::Ensure { .. } => Some(vec!["source", "ensure"]),
             SourceCommands::Status { .. } => Some(vec!["source", "status"]),
+            SourceCommands::Doctor { .. } => Some(vec!["source", "doctor"]),
             SourceCommands::Stop { .. } => Some(vec!["source", "stop"]),
             SourceCommands::Delete { .. } => Some(vec!["source", "delete"]),
         },
@@ -2207,11 +2216,12 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["source"] => HelpData {
             path: "uxc source".to_string(),
             about: "Manage daemon-backed source streams".to_string(),
-            usage: "uxc source <list|ensure|status|stop|delete> ...".to_string(),
+            usage: "uxc source <list|ensure|status|doctor|stop|delete> ...".to_string(),
             commands: commands(&[
                 ("list", "List managed sources"),
                 ("ensure", "Ensure a managed source exists and is running"),
                 ("status", "Show a managed source"),
+                ("doctor", "Diagnose a managed source"),
                 ("stop", "Stop a managed source"),
                 ("delete", "Delete a managed source binding"),
             ]),
@@ -2262,9 +2272,19 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             usage: "uxc source status <namespace> <source_key>".to_string(),
             commands: vec![],
             notes: vec![
-                "Shows the current run, stable stream ID, status, current spec fingerprint, and last persisted checkpoint for the managed source.".to_string(),
+                "Shows the current run, stable stream ID, status, current spec fingerprint, health/progress counters, stream activity, and last persisted checkpoint summary for the managed source.".to_string(),
             ],
             examples: vec!["uxc source status agentinbox github_repo:holon-run/uxc".to_string()],
+        },
+        ["source", "doctor"] => HelpData {
+            path: "uxc source doctor".to_string(),
+            about: "Diagnose a managed source".to_string(),
+            usage: "uxc source doctor <namespace> <source_key>".to_string(),
+            commands: vec![],
+            notes: vec![
+                "Checks supported diagnostics for the current managed source runtime, including runner presence, stream binding, legacy runtime files, checkpoint visibility, and stalled progress heuristics.".to_string(),
+            ],
+            examples: vec!["uxc source doctor agentinbox github_repo:holon-run/uxc".to_string()],
         },
         ["source", "stop"] => HelpData {
             path: "uxc source stop".to_string(),
@@ -5714,6 +5734,19 @@ async fn handle_source_command(command: &SourceCommands, cli: &Cli) -> Result<Ou
                 .await?,
             )?;
             OutputEnvelope::success("source_status", "cli", "uxc", None, data, None)
+        }
+        SourceCommands::Doctor {
+            namespace,
+            source_key,
+        } => {
+            let data = serde_json::to_value(
+                daemon::source_doctor_client(&daemon::ManagedSourceStatusRequest {
+                    namespace: namespace.clone(),
+                    source_key: source_key.clone(),
+                })
+                .await?,
+            )?;
+            OutputEnvelope::success("source_doctor_result", "cli", "uxc", None, data, None)
         }
         SourceCommands::Stop {
             namespace,

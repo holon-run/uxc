@@ -257,6 +257,7 @@ pub struct SubscriptionJobView {
     pub created_at_unix: u64,
     pub started_at_unix: Option<u64>,
     pub stopped_at_unix: Option<u64>,
+    pub last_success_at_unix: Option<u64>,
     pub last_event_at_unix: Option<u64>,
     pub last_error: Option<String>,
     #[serde(default)]
@@ -332,6 +333,32 @@ pub struct ManagedSourceStatusRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceCheckpointSummary {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tie_breaker: Option<Value>,
+    #[serde(default)]
+    pub seen_window_len: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceStreamSummary {
+    pub event_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_event_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedSourceView {
     pub namespace: String,
     pub source_key: String,
@@ -344,6 +371,28 @@ pub struct ManagedSourceView {
     pub started_at_unix: Option<u64>,
     pub stopped_at_unix: Option<u64>,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SubscriptionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_at_unix: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_at_unix: Option<u64>,
+    #[serde(default)]
+    pub reconnect_count: u64,
+    #[serde(default)]
+    pub written_events: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<ManagedSourceCheckpointSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<ManagedSourceStreamSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +418,34 @@ pub struct ManagedSourceDeleteResponse {
     pub namespace: String,
     pub source_key: String,
     pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceDoctorIssue {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedSourceDoctorResponse {
+    pub namespace: String,
+    pub source_key: String,
+    pub observed_at_unix: u64,
+    pub status: String,
+    pub runner_active: bool,
+    pub stream_exists: bool,
+    pub legacy_checkpoint_file_present: bool,
+    pub legacy_cursor_file_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds_since_last_success: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds_since_last_event: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_threshold_secs: Option<u64>,
+    pub source: ManagedSourceView,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<ManagedSourceDoctorIssue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,6 +481,8 @@ pub struct ManagedStreamInfo {
     pub created_at_unix: u64,
     pub earliest_offset: Option<u64>,
     pub latest_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_event_at_unix: Option<u64>,
     pub event_count: u64,
     pub retention_max_rows: u64,
     pub retention_max_age_secs: u64,
@@ -822,6 +901,7 @@ struct ManagedSourceEntry {
     source_key: String,
     stream_id: String,
     state: Arc<Mutex<ManagedSourceView>>,
+    runtime_view: Mutex<Option<Arc<Mutex<SubscriptionJobView>>>>,
     stop_tx: Mutex<watch::Sender<bool>>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -832,6 +912,10 @@ struct ManagedSourceRuntimeStateSnapshot {
     started_at_unix: Option<u64>,
     stopped_at_unix: Option<u64>,
     last_error: Option<String>,
+    last_success_at_unix: Option<u64>,
+    last_event_at_unix: Option<u64>,
+    reconnect_count: u64,
+    written_events: u64,
 }
 
 impl McpStdioSession {
@@ -2248,6 +2332,10 @@ impl ManagedSourceManager {
                     started_at_unix: None,
                     stopped_at_unix: None,
                     last_error: None,
+                    last_success_at_unix: None,
+                    last_event_at_unix: None,
+                    reconnect_count: 0,
+                    written_events: 0,
                 }
             }
         } else {
@@ -2264,6 +2352,10 @@ impl ManagedSourceManager {
                 started_at_unix: None,
                 stopped_at_unix: None,
                 last_error: None,
+                last_success_at_unix: None,
+                last_event_at_unix: None,
+                reconnect_count: 0,
+                written_events: 0,
             }
         };
 
@@ -2282,10 +2374,6 @@ impl ManagedSourceManager {
     }
 
     async fn status(&self, namespace: &str, source_key: &str) -> Result<ManagedSourceView> {
-        let identity_key = managed_source_identity_key(namespace, source_key);
-        if let Some(entry) = self.entries.lock().await.get(&identity_key).cloned() {
-            return Ok(entry.state.lock().await.clone());
-        }
         let record = self
             .store
             .get_source(namespace, source_key)
@@ -2296,7 +2384,7 @@ impl ManagedSourceManager {
                     namespace, source_key
                 ))
             })?;
-        Ok(view_from_record(&record))
+        self.build_status_view(&record).await
     }
 
     async fn list(&self) -> Result<Vec<ManagedSourceListEntry>> {
@@ -2311,6 +2399,213 @@ impl ManagedSourceManager {
             summary.running_source_count,
             summary.stream_count,
         ))
+    }
+
+    async fn build_status_view(&self, record: &ManagedSourceRecord) -> Result<ManagedSourceView> {
+        let mut view = view_from_record(record);
+        let identity_key = managed_source_identity_key(&record.namespace, &record.source_key);
+        let active_entry = { self.entries.lock().await.get(&identity_key).cloned() };
+        if let Some(entry) = active_entry {
+            let current = entry.state.lock().await.clone();
+            view.status = current.status;
+            view.updated_at_unix = current.updated_at_unix;
+            view.started_at_unix = current.started_at_unix;
+            view.stopped_at_unix = current.stopped_at_unix;
+            view.last_error = current.last_error;
+            view.last_success_at_unix = current.last_success_at_unix;
+            view.last_event_at_unix = current.last_event_at_unix;
+            view.reconnect_count = current.reconnect_count;
+            view.written_events = current.written_events;
+            if let Some(runtime_view) = entry.runtime_view.lock().await.clone() {
+                let snapshot = runtime_view.lock().await.clone();
+                view.status = snapshot.status;
+                view.started_at_unix = snapshot.started_at_unix;
+                view.stopped_at_unix = snapshot.stopped_at_unix;
+                view.last_error = snapshot.last_error;
+                view.last_success_at_unix = snapshot.last_success_at_unix;
+                view.last_event_at_unix = snapshot.last_event_at_unix;
+                view.reconnect_count = snapshot.reconnect_count;
+                view.written_events = snapshot.written_events;
+            }
+        }
+
+        enrich_managed_source_view_from_spec(&mut view, &record.spec_json);
+        if let Some(stream_info) = self.store.stream_info(&record.stream_id).await? {
+            view.stream = Some(ManagedSourceStreamSummary {
+                event_count: stream_info.event_count,
+                earliest_offset: stream_info.earliest_offset,
+                latest_offset: stream_info.latest_offset,
+                latest_event_at_unix: stream_info.latest_event_at_unix,
+            });
+        }
+        if view.mode == Some(SubscriptionMode::Poll) {
+            if let Some(checkpoint) = self
+                .store
+                .load_poll_checkpoint(&record.namespace, &record.source_key, &record.run_id)
+                .await?
+            {
+                view.checkpoint = Some(checkpoint_summary_from_state(
+                    managed_source_checkpoint_kind(&record.spec_json),
+                    checkpoint,
+                ));
+            }
+        }
+
+        Ok(view)
+    }
+
+    async fn doctor(
+        &self,
+        runtime: &DaemonRuntime,
+        request: &ManagedSourceStatusRequest,
+    ) -> Result<ManagedSourceDoctorResponse> {
+        validate_managed_source_identity(&request.namespace, &request.source_key)?;
+        let record = self
+            .store
+            .get_source(&request.namespace, &request.source_key)
+            .await?
+            .ok_or_else(|| {
+                UxcError::OperationNotFound(format!(
+                    "managed source not found: {}/{}",
+                    request.namespace, request.source_key
+                ))
+            })?;
+        let source = self.build_status_view(&record).await?;
+        let runner_active = self
+            .entries
+            .lock()
+            .await
+            .contains_key(&managed_source_identity_key(
+                &request.namespace,
+                &request.source_key,
+            ));
+        let stream_exists = self.store.stream_info(&record.stream_id).await?.is_some();
+        let legacy_checkpoint_file_present = runtime
+            .managed_source_checkpoint_path(&record.run_id)
+            .exists();
+        let legacy_cursor_file_present =
+            runtime.managed_source_cursor_path(&record.run_id).exists();
+        let observed_at_unix = now_unix_secs();
+        let seconds_since_last_success = source
+            .last_success_at_unix
+            .map(|ts| observed_at_unix.saturating_sub(ts));
+        let seconds_since_last_event = source
+            .last_event_at_unix
+            .map(|ts| observed_at_unix.saturating_sub(ts));
+        let stall_threshold_secs = source
+            .poll_interval_secs
+            .map(|interval| interval.saturating_mul(3).max(60))
+            .or_else(|| {
+                matches!(
+                    source.status.as_str(),
+                    "running" | "reconnecting" | "starting"
+                )
+                .then_some(300)
+            });
+
+        let mut issues = Vec::new();
+        if !stream_exists {
+            issues.push(ManagedSourceDoctorIssue {
+                severity: "error".to_string(),
+                code: "stream_missing".to_string(),
+                message: format!(
+                    "Managed source {} / {} points to missing stream {}",
+                    request.namespace, request.source_key, record.stream_id
+                ),
+            });
+        }
+        if matches!(
+            source.status.as_str(),
+            "running" | "reconnecting" | "starting"
+        ) && !runner_active
+        {
+            issues.push(ManagedSourceDoctorIssue {
+                severity: "warn".to_string(),
+                code: "runner_inactive".to_string(),
+                message: "Source record reports an active runtime state, but no live runner is registered in the daemon.".to_string(),
+            });
+        }
+        if legacy_checkpoint_file_present {
+            issues.push(ManagedSourceDoctorIssue {
+                severity: "warn".to_string(),
+                code: "legacy_checkpoint_file_present".to_string(),
+                message:
+                    "A legacy managed source checkpoint file is still present for the current run."
+                        .to_string(),
+            });
+        }
+        if legacy_cursor_file_present {
+            issues.push(ManagedSourceDoctorIssue {
+                severity: "warn".to_string(),
+                code: "legacy_cursor_file_present".to_string(),
+                message:
+                    "A legacy managed source cursor file is still present for the current run."
+                        .to_string(),
+            });
+        }
+        if source.mode == Some(SubscriptionMode::Poll)
+            && source
+                .stream
+                .as_ref()
+                .is_some_and(|stream| stream.event_count > 0)
+            && source.checkpoint.is_none()
+            && !legacy_checkpoint_file_present
+        {
+            issues.push(ManagedSourceDoctorIssue {
+                severity: "warn".to_string(),
+                code: "checkpoint_missing".to_string(),
+                message: "Poll source has durable events but no persisted checkpoint summary."
+                    .to_string(),
+            });
+        }
+        if matches!(source.status.as_str(), "running" | "reconnecting")
+            && stall_threshold_secs.is_some()
+        {
+            let progress_age = seconds_since_last_success
+                .or(seconds_since_last_event)
+                .or_else(|| {
+                    source
+                        .started_at_unix
+                        .map(|ts| observed_at_unix.saturating_sub(ts))
+                });
+            if let (Some(age), Some(threshold)) = (progress_age, stall_threshold_secs) {
+                if age > threshold {
+                    issues.push(ManagedSourceDoctorIssue {
+                        severity: "warn".to_string(),
+                        code: "stalled".to_string(),
+                        message: format!(
+                            "Source has been {} seconds without observed progress; threshold is {} seconds.",
+                            age, threshold
+                        ),
+                    });
+                }
+            }
+        }
+
+        let status = if issues.iter().any(|issue| issue.severity == "error") {
+            "error"
+        } else if issues.iter().any(|issue| issue.severity == "warn") {
+            "warn"
+        } else {
+            "healthy"
+        }
+        .to_string();
+
+        Ok(ManagedSourceDoctorResponse {
+            namespace: request.namespace.clone(),
+            source_key: request.source_key.clone(),
+            observed_at_unix,
+            status,
+            runner_active,
+            stream_exists,
+            legacy_checkpoint_file_present,
+            legacy_cursor_file_present,
+            seconds_since_last_success,
+            seconds_since_last_event,
+            stall_threshold_secs,
+            source,
+            issues,
+        })
     }
 
     async fn stop(
@@ -2481,6 +2776,7 @@ impl ManagedSourceManager {
             source_key: record.source_key.clone(),
             stream_id: record.stream_id.clone(),
             state: state.clone(),
+            runtime_view: Mutex::new(None),
             stop_tx: Mutex::new(stop_tx),
             task: Mutex::new(None),
         });
@@ -2513,6 +2809,7 @@ impl ManagedSourceManager {
         let runtime_view = Arc::new(Mutex::new(subscription_view_for_managed_source(
             &record, &request,
         )));
+        *entry.runtime_view.lock().await = Some(runtime_view.clone());
         if spec.mode == SubscriptionMode::Poll {
             self.run_managed_source_poll(
                 &runtime,
@@ -2523,6 +2820,7 @@ impl ManagedSourceManager {
                 stop_rx,
             )
             .await;
+            *entry.runtime_view.lock().await = None;
             self.entries.lock().await.remove(&identity_key);
             return;
         }
@@ -2592,6 +2890,7 @@ impl ManagedSourceManager {
         }
 
         let _ = runner_task.await;
+        *entry.runtime_view.lock().await = None;
         self.entries.lock().await.remove(&identity_key);
     }
 
@@ -2666,6 +2965,7 @@ impl ManagedSourceManager {
                     .unwrap_or(default_interval_secs);
 
                     if result.status_code == Some(304) {
+                        note_subscription_success(runtime_view, now_unix_secs()).await;
                         update_subscription_view(runtime_view, Some("running"), None, false).await;
                         if runner.checkpoint() != &previous_checkpoint {
                             if let Err(err) = self
@@ -2693,8 +2993,9 @@ impl ManagedSourceManager {
                                 return;
                             }
                         };
-                        update_subscription_view(runtime_view, Some("running"), None, false).await;
                         let ingested_at_unix = now_unix_secs();
+                        note_subscription_success(runtime_view, ingested_at_unix).await;
+                        update_subscription_view(runtime_view, Some("running"), None, false).await;
                         let events = output
                             .emitted_items
                             .into_iter()
@@ -2718,6 +3019,14 @@ impl ManagedSourceManager {
                             {
                                 self.fail_managed_source(entry, err.to_string()).await;
                                 return;
+                            }
+                            if !events.is_empty() {
+                                note_subscription_events_written(
+                                    runtime_view,
+                                    ingested_at_unix,
+                                    events.len() as u64,
+                                )
+                                .await;
                             }
                         }
                     }
@@ -2903,6 +3212,60 @@ fn managed_source_identity_key(namespace: &str, source_key: &str) -> String {
     format!("{namespace}\u{0}{source_key}")
 }
 
+fn managed_source_checkpoint_kind(spec_json: &Value) -> String {
+    serde_json::from_value::<ManagedSourceSpec>(spec_json.clone())
+        .ok()
+        .and_then(|spec| spec.poll_config)
+        .and_then(|value| {
+            serde_json::from_value::<crate::subscription_poll::PollSubscriptionConfig>(value).ok()
+        })
+        .map(|config| match config.checkpoint_strategy {
+            crate::subscription_poll::PollCheckpointStrategy::CursorOnly => {
+                "cursor_only".to_string()
+            }
+            crate::subscription_poll::PollCheckpointStrategy::ItemKey { .. } => {
+                "item_key".to_string()
+            }
+            crate::subscription_poll::PollCheckpointStrategy::Watermark { .. } => {
+                "watermark".to_string()
+            }
+            crate::subscription_poll::PollCheckpointStrategy::ContentHash { .. } => {
+                "content_hash".to_string()
+            }
+        })
+        .unwrap_or_else(|| "poll".to_string())
+}
+
+fn checkpoint_summary_from_state(
+    kind: String,
+    checkpoint: crate::subscription_poll::PollCheckpointState,
+) -> ManagedSourceCheckpointSummary {
+    ManagedSourceCheckpointSummary {
+        kind,
+        cursor: checkpoint.cursor,
+        watermark: checkpoint.watermark,
+        tie_breaker: checkpoint.tie_breaker,
+        seen_window_len: checkpoint.seen_keys.len(),
+        etag: checkpoint.etag,
+    }
+}
+
+fn enrich_managed_source_view_from_spec(view: &mut ManagedSourceView, spec_json: &Value) {
+    let Ok(spec) = serde_json::from_value::<ManagedSourceSpec>(spec_json.clone()) else {
+        return;
+    };
+    view.mode = Some(spec.mode);
+    view.endpoint = Some(spec.endpoint);
+    view.operation_id = spec.operation_id;
+    view.resource_uri = spec.resource_uri;
+    view.poll_interval_secs = spec
+        .poll_config
+        .and_then(|value| {
+            serde_json::from_value::<crate::subscription_poll::PollSubscriptionConfig>(value).ok()
+        })
+        .map(|config| config.interval_secs);
+}
+
 fn managed_source_streams_db_path(base_dir: &Path) -> PathBuf {
     base_dir.join("managed-source-streams.db")
 }
@@ -3019,13 +3382,14 @@ fn subscription_view_for_managed_source(
         created_at_unix: record.created_at_unix,
         started_at_unix: record.started_at_unix,
         stopped_at_unix: record.stopped_at_unix,
-        last_event_at_unix: None,
+        last_event_at_unix: record.last_event_at_unix,
         last_error: record.last_error.clone(),
         restart_count: 0,
         last_resume_at_unix: None,
         last_resume_error: None,
-        reconnect_count: 0,
-        written_events: 0,
+        reconnect_count: record.reconnect_count,
+        written_events: record.written_events,
+        last_success_at_unix: record.last_success_at_unix,
     }
 }
 
@@ -3099,6 +3463,10 @@ async fn sync_managed_source_state(
                 started_at_unix: snapshot.started_at_unix,
                 stopped_at_unix,
                 last_error: snapshot.last_error.clone(),
+                last_success_at_unix: snapshot.last_success_at_unix,
+                last_event_at_unix: snapshot.last_event_at_unix,
+                reconnect_count: snapshot.reconnect_count,
+                written_events: snapshot.written_events,
             },
         )
         .await?;
@@ -3108,6 +3476,10 @@ async fn sync_managed_source_state(
     state.started_at_unix = snapshot.started_at_unix;
     state.stopped_at_unix = stopped_at_unix;
     state.last_error = snapshot.last_error;
+    state.last_success_at_unix = snapshot.last_success_at_unix;
+    state.last_event_at_unix = snapshot.last_event_at_unix;
+    state.reconnect_count = snapshot.reconnect_count;
+    state.written_events = snapshot.written_events;
     Ok(())
 }
 
@@ -3132,6 +3504,10 @@ async fn managed_source_runtime_state_snapshot(
         started_at_unix: snapshot.started_at_unix,
         stopped_at_unix,
         last_error: snapshot.last_error,
+        last_success_at_unix: snapshot.last_success_at_unix,
+        last_event_at_unix: snapshot.last_event_at_unix,
+        reconnect_count: snapshot.reconnect_count,
+        written_events: snapshot.written_events,
     }
 }
 
@@ -3148,6 +3524,17 @@ fn view_from_record(record: &ManagedSourceRecord) -> ManagedSourceView {
         started_at_unix: record.started_at_unix,
         stopped_at_unix: record.stopped_at_unix,
         last_error: record.last_error.clone(),
+        mode: None,
+        endpoint: None,
+        operation_id: None,
+        resource_uri: None,
+        poll_interval_secs: None,
+        last_success_at_unix: record.last_success_at_unix,
+        last_event_at_unix: record.last_event_at_unix,
+        reconnect_count: record.reconnect_count,
+        written_events: record.written_events,
+        checkpoint: None,
+        stream: None,
     }
 }
 
@@ -3180,6 +3567,7 @@ fn stream_info_view(record: &StreamInfoRecord) -> ManagedStreamInfo {
         created_at_unix: record.created_at_unix,
         earliest_offset: record.earliest_offset,
         latest_offset: record.latest_offset,
+        latest_event_at_unix: record.latest_event_at_unix,
         event_count: record.event_count,
         retention_max_rows: record.retention_max_rows,
         retention_max_age_secs: record.retention_max_age_secs,
@@ -3702,6 +4090,13 @@ impl DaemonRuntime {
             .await
     }
 
+    pub async fn source_doctor(
+        &self,
+        request: &ManagedSourceStatusRequest,
+    ) -> Result<ManagedSourceDoctorResponse> {
+        self.managed_sources.doctor(self, request).await
+    }
+
     pub async fn source_stop(
         &self,
         request: &ManagedSourceStatusRequest,
@@ -4032,9 +4427,23 @@ async fn note_subscription_event_delivered(
     view: &Arc<Mutex<SubscriptionJobView>>,
     timestamp_unix: u64,
 ) {
+    note_subscription_events_written(view, timestamp_unix, 1).await;
+}
+
+async fn note_subscription_events_written(
+    view: &Arc<Mutex<SubscriptionJobView>>,
+    timestamp_unix: u64,
+    count: u64,
+) {
     let mut guard = view.lock().await;
-    guard.written_events = guard.written_events.saturating_add(1);
+    guard.written_events = guard.written_events.saturating_add(count);
+    guard.last_success_at_unix = Some(timestamp_unix);
     guard.last_event_at_unix = Some(timestamp_unix);
+}
+
+async fn note_subscription_success(view: &Arc<Mutex<SubscriptionJobView>>, timestamp_unix: u64) {
+    let mut guard = view.lock().await;
+    guard.last_success_at_unix = Some(timestamp_unix);
 }
 
 #[async_trait::async_trait]
@@ -5920,6 +6329,21 @@ pub async fn source_status_client(
 }
 
 #[cfg(unix)]
+pub async fn source_doctor_client(
+    request: &ManagedSourceStatusRequest,
+) -> Result<ManagedSourceDoctorResponse> {
+    let value = client_call("source.doctor", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+pub async fn source_doctor_client(
+    _request: &ManagedSourceStatusRequest,
+) -> Result<ManagedSourceDoctorResponse> {
+    bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
+}
+
+#[cfg(unix)]
 pub async fn source_list_client() -> Result<Vec<ManagedSourceListEntry>> {
     let value = client_call("source.list", None).await?;
     Ok(serde_json::from_value(value)?)
@@ -6472,6 +6896,53 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 }
             };
             match runtime.source_status(&status).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
+        "source.doctor" => {
+            let Some(params) = req.params else {
+                let resp = JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32602,
+                        message: "Missing params".to_string(),
+                        data: None,
+                    }),
+                };
+                write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                return Ok(());
+            };
+            let status: ManagedSourceStatusRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    let resp = JsonRpcResponse {
+                        jsonrpc: JSONRPC_VERSION.to_string(),
+                        id: req.id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Invalid params: {err}"),
+                            data: None,
+                        }),
+                    };
+                    write_frame(&mut stream, &serde_json::to_value(resp)?).await?;
+                    return Ok(());
+                }
+            };
+            match runtime.source_doctor(&status).await {
                 Ok(result) => JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
                     id: req.id,

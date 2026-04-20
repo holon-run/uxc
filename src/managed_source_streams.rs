@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 const DEFAULT_RETENTION_MAX_ROWS: u64 = 10_000;
 const DEFAULT_RETENTION_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
-const MANAGED_SOURCE_SCHEMA_VERSION: i64 = 1;
+const MANAGED_SOURCE_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedSourceRecord {
@@ -24,6 +24,10 @@ pub struct ManagedSourceRecord {
     pub started_at_unix: Option<u64>,
     pub stopped_at_unix: Option<u64>,
     pub last_error: Option<String>,
+    pub last_success_at_unix: Option<u64>,
+    pub last_event_at_unix: Option<u64>,
+    pub reconnect_count: u64,
+    pub written_events: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +63,7 @@ pub struct StreamInfoRecord {
     pub created_at_unix: u64,
     pub earliest_offset: Option<u64>,
     pub latest_offset: Option<u64>,
+    pub latest_event_at_unix: Option<u64>,
     pub event_count: u64,
     pub retention_max_rows: u64,
     pub retention_max_age_secs: u64,
@@ -89,6 +94,10 @@ pub struct SourceRuntimeUpdate {
     pub started_at_unix: Option<u64>,
     pub stopped_at_unix: Option<u64>,
     pub last_error: Option<String>,
+    pub last_success_at_unix: Option<u64>,
+    pub last_event_at_unix: Option<u64>,
+    pub reconnect_count: u64,
+    pub written_events: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +147,10 @@ impl ManagedSourceStore {
                 started_at_unix integer,
                 stopped_at_unix integer,
                 last_error text,
+                last_success_at_unix integer,
+                last_event_at_unix integer,
+                reconnect_count integer not null default 0,
+                written_events integer not null default 0,
                 poll_checkpoint_json text,
                 underlying_job_id text,
                 mirrored_after_seq integer not null default 0,
@@ -191,7 +204,11 @@ impl ManagedSourceStore {
                     updated_at_unix,
                     started_at_unix,
                     stopped_at_unix,
-                    last_error
+                    last_error,
+                    last_success_at_unix,
+                    last_event_at_unix,
+                    reconnect_count,
+                    written_events
                 from managed_sources
                 order by namespace, source_key
                 "#,
@@ -290,7 +307,11 @@ impl ManagedSourceStore {
                     updated_at_unix,
                     started_at_unix,
                     stopped_at_unix,
-                    last_error
+                    last_error,
+                    last_success_at_unix,
+                    last_event_at_unix,
+                    reconnect_count,
+                    written_events
                 from managed_sources
                 where namespace = ?1 and source_key = ?2
                 "#,
@@ -340,7 +361,11 @@ impl ManagedSourceStore {
                     updated_at_unix = ?4,
                     started_at_unix = ?5,
                     stopped_at_unix = ?6,
-                    last_error = ?7
+                    last_error = ?7,
+                    last_success_at_unix = ?8,
+                    last_event_at_unix = ?9,
+                    reconnect_count = ?10,
+                    written_events = ?11
                 where namespace = ?1 and source_key = ?2
                 "#,
                 params![
@@ -350,7 +375,11 @@ impl ManagedSourceStore {
                     update.updated_at_unix,
                     update.started_at_unix,
                     update.stopped_at_unix,
-                    update.last_error
+                    update.last_error,
+                    update.last_success_at_unix,
+                    update.last_event_at_unix,
+                    update.reconnect_count,
+                    update.written_events
                 ],
             )?;
             Ok(())
@@ -697,15 +726,20 @@ impl ManagedSourceStore {
             let Some(stream) = stream else {
                 return Ok(None);
             };
-            let (earliest_offset, latest_offset, event_count): (Option<u64>, Option<u64>, u64) =
+            let (earliest_offset, latest_offset, latest_event_at_unix, event_count): (
+                Option<u64>,
+                Option<u64>,
+                Option<u64>,
+                u64,
+            ) =
                 conn.query_row(
                     r#"
-                    select min(offset), max(offset), count(*)
+                    select min(offset), max(offset), max(ingested_at_unix), count(*)
                     from stream_events
                     where stream_id = ?1
                     "#,
                     params![stream.stream_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )?;
             Ok(Some(StreamInfoRecord {
                 stream_id: stream.stream_id,
@@ -714,6 +748,7 @@ impl ManagedSourceStore {
                 created_at_unix: stream.created_at_unix,
                 earliest_offset,
                 latest_offset,
+                latest_event_at_unix,
                 event_count,
                 retention_max_rows: stream.retention_max_rows,
                 retention_max_age_secs: stream.retention_max_age_secs,
@@ -753,6 +788,10 @@ fn row_to_managed_source_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Man
         started_at_unix: row.get(9)?,
         stopped_at_unix: row.get(10)?,
         last_error: row.get(11)?,
+        last_success_at_unix: row.get(12)?,
+        last_event_at_unix: row.get(13)?,
+        reconnect_count: row.get(14)?,
+        written_events: row.get(15)?,
     })
 }
 
@@ -776,9 +815,13 @@ fn upsert_source_tx(
             started_at_unix,
             stopped_at_unix,
             last_error,
+            last_success_at_unix,
+            last_event_at_unix,
+            reconnect_count,
+            written_events,
             poll_checkpoint_json
         )
-        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
         on conflict(namespace, source_key) do update set
             spec_json = excluded.spec_json,
             spec_key = excluded.spec_key,
@@ -789,6 +832,10 @@ fn upsert_source_tx(
             started_at_unix = excluded.started_at_unix,
             stopped_at_unix = excluded.stopped_at_unix,
             last_error = excluded.last_error,
+            last_success_at_unix = excluded.last_success_at_unix,
+            last_event_at_unix = excluded.last_event_at_unix,
+            reconnect_count = excluded.reconnect_count,
+            written_events = excluded.written_events,
             poll_checkpoint_json = excluded.poll_checkpoint_json
         "#,
         params![
@@ -804,6 +851,10 @@ fn upsert_source_tx(
             record.started_at_unix,
             record.stopped_at_unix,
             record.last_error,
+            record.last_success_at_unix,
+            record.last_event_at_unix,
+            record.reconnect_count,
+            record.written_events,
             Option::<String>::None
         ],
     )?;
@@ -880,8 +931,11 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
     let version: i64 = conn.query_row("pragma user_version", [], |row| row.get(0))?;
     if version < 1 {
         migrate_v0_to_v1(conn)?;
-        conn.pragma_update(None, "user_version", MANAGED_SOURCE_SCHEMA_VERSION)?;
     }
+    if version < 2 {
+        migrate_v1_to_v2(conn)?;
+    }
+    conn.pragma_update(None, "user_version", MANAGED_SOURCE_SCHEMA_VERSION)?;
     Ok(())
 }
 
@@ -889,6 +943,34 @@ fn migrate_v0_to_v1(conn: &mut Connection) -> Result<()> {
     if !table_has_column(conn, "managed_sources", "poll_checkpoint_json")? {
         conn.execute(
             "alter table managed_sources add column poll_checkpoint_json text",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
+    if !table_has_column(conn, "managed_sources", "last_success_at_unix")? {
+        conn.execute(
+            "alter table managed_sources add column last_success_at_unix integer",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "managed_sources", "last_event_at_unix")? {
+        conn.execute(
+            "alter table managed_sources add column last_event_at_unix integer",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "managed_sources", "reconnect_count")? {
+        conn.execute(
+            "alter table managed_sources add column reconnect_count integer not null default 0",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "managed_sources", "written_events")? {
+        conn.execute(
+            "alter table managed_sources add column written_events integer not null default 0",
             [],
         )?;
     }

@@ -880,7 +880,7 @@ fn source_help_flag_outputs_subcommand_help_json() {
     assert!(json["data"]["usage"]
         .as_str()
         .unwrap_or_default()
-        .contains("uxc source <list|ensure|status|stop|delete>"));
+        .contains("uxc source <list|ensure|status|doctor|stop|delete>"));
 }
 
 #[test]
@@ -920,6 +920,27 @@ fn source_ensure_help_flag_outputs_subcommand_help_json() {
         .as_str()
         .unwrap_or_default()
         .contains("<namespace> <source_key> <endpoint>"));
+}
+
+#[test]
+#[serial]
+fn source_doctor_help_flag_outputs_subcommand_help_json() {
+    let output = uxc_command()
+        .arg("source")
+        .arg("doctor")
+        .arg("--help")
+        .output()
+        .expect("failed to run uxc source doctor --help");
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc source doctor");
+    assert_eq!(
+        json["data"]["usage"],
+        "uxc source doctor <namespace> <source_key>"
+    );
 }
 
 #[test]
