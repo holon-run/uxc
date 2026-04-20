@@ -3255,7 +3255,7 @@ fn enrich_managed_source_view_from_spec(view: &mut ManagedSourceView, spec_json:
         return;
     };
     view.mode = Some(spec.mode);
-    view.endpoint = Some(spec.endpoint);
+    view.endpoint = Some(redact_endpoint(&spec.endpoint));
     view.operation_id = spec.operation_id;
     view.resource_uri = spec.resource_uri;
     view.poll_interval_secs = spec
@@ -9116,6 +9116,10 @@ mod tests {
             started_at_unix: Some(now),
             stopped_at_unix: None,
             last_error: None,
+            last_success_at_unix: None,
+            last_event_at_unix: None,
+            reconnect_count: 0,
+            written_events: 0,
         }
     }
 
@@ -9211,7 +9215,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_source_store_migrates_v0_schema_to_v1() {
+    fn managed_source_store_migrates_v0_schema_to_v2() {
         let temp = tempdir().unwrap();
         let db_path = managed_source_streams_db_path(temp.path());
         let conn = Connection::open(&db_path).unwrap();
@@ -9260,15 +9264,97 @@ mod tests {
         let version: i64 = conn
             .query_row("pragma user_version", [], |row| row.get(0))
             .unwrap();
-        let has_column: i64 = conn
+        let has_checkpoint_column: i64 = conn
             .query_row(
                 "select count(*) from pragma_table_info('managed_sources') where name = 'poll_checkpoint_json'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 1);
-        assert_eq!(has_column, 1);
+        let has_last_success_column: i64 = conn
+            .query_row(
+                "select count(*) from pragma_table_info('managed_sources') where name = 'last_success_at_unix'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_last_event_column: i64 = conn
+            .query_row(
+                "select count(*) from pragma_table_info('managed_sources') where name = 'last_event_at_unix'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_reconnect_column: i64 = conn
+            .query_row(
+                "select count(*) from pragma_table_info('managed_sources') where name = 'reconnect_count'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_written_events_column: i64 = conn
+            .query_row(
+                "select count(*) from pragma_table_info('managed_sources') where name = 'written_events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(has_checkpoint_column, 1);
+        assert_eq!(has_last_success_column, 1);
+        assert_eq!(has_last_event_column, 1);
+        assert_eq!(has_reconnect_column, 1);
+        assert_eq!(has_written_events_column, 1);
+    }
+
+    #[test]
+    fn managed_source_view_redacts_endpoint_from_spec() {
+        let mut view = ManagedSourceView {
+            namespace: "test".to_string(),
+            source_key: "redacted".to_string(),
+            spec_key: "spec-redacted".to_string(),
+            run_id: "run-redacted".to_string(),
+            stream_id: managed_stream_id("test", "redacted"),
+            status: "running".to_string(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+            started_at_unix: Some(1),
+            stopped_at_unix: None,
+            last_error: None,
+            mode: None,
+            endpoint: None,
+            operation_id: None,
+            resource_uri: None,
+            poll_interval_secs: None,
+            last_success_at_unix: None,
+            last_event_at_unix: None,
+            reconnect_count: 0,
+            written_events: 0,
+            checkpoint: None,
+            stream: None,
+        };
+        let mut spec =
+            managed_source_spec("https://user:pass@example.com/events?api_key=secret123&token=abc");
+        spec.mode = SubscriptionMode::Poll;
+        spec.poll_config = Some(json!({
+            "interval_secs": 5,
+            "extract_items_pointer": "/items",
+            "checkpoint_strategy": {
+                "type": "cursor_only"
+            }
+        }));
+
+        enrich_managed_source_view_from_spec(
+            &mut view,
+            &serde_json::to_value(spec).expect("managed source spec should serialize"),
+        );
+
+        assert_eq!(
+            view.endpoint.as_deref(),
+            Some("https://***:***@example.com/events?api_key=***&token=***")
+        );
+        assert_eq!(view.mode, Some(SubscriptionMode::Poll));
+        assert_eq!(view.poll_interval_secs, Some(5));
     }
 
     #[tokio::test]
