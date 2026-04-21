@@ -1,6 +1,13 @@
 ---
 name: alchemy-openapi-skill
-description: Operate Alchemy Prices API reads through UXC with a curated OpenAPI schema, path-templated API-key auth, and read-first guardrails.
+description: "Look up token prices by symbol or contract address and retrieve historical price data through the Alchemy Prices API via UXC. Use when the task involves real-time or historical cryptocurrency token price queries on Alchemy."
+user-invocable: true
+triggers:
+  - alchemy
+  - token price
+  - alchemy prices
+  - crypto price lookup
+  - historical prices
 ---
 
 # Alchemy Prices API Skill
@@ -19,19 +26,9 @@ Reuse the `uxc` skill for shared execution, auth, and error-handling guidance.
 
 ## Scope
 
-This v1 skill intentionally covers the narrow Prices API surface:
+Prices API surface: token price by symbol, token price by contract address, and historical token prices.
 
-- token price lookup by symbol
-- token price lookup by contract address
-- historical token prices
-
-This skill does **not** cover:
-
-- node JSON-RPC
-- NFT or portfolio APIs
-- write operations
-- the broader Alchemy API surface
-- multi-symbol batch lookup in one `uxc` call
+Does **not** cover node JSON-RPC, NFT/portfolio APIs, write operations, or multi-symbol batch lookup in one call.
 
 ## Authentication
 
@@ -76,24 +73,17 @@ uxc auth binding match https://api.g.alchemy.com
    - `alchemy-openapi-cli get:/tokens/by-symbol symbols=ETH currency=USD`
    - `alchemy-openapi-cli post:/tokens/by-address '{"addresses":[{"network":"eth-mainnet","address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"}],"currency":"USD"}'`
 
- 4. Use positional JSON only for the POST endpoints:
+4. Use positional JSON only for the POST endpoints:
    - `alchemy-openapi-cli post:/tokens/historical '{"symbol":"ETH","startTime":"2025-01-01T00:00:00Z","endTime":"2025-01-07T00:00:00Z","interval":"1d","currency":"USD"}'`
-
-## Operations
-
-- `get:/tokens/by-symbol`
-- `post:/tokens/by-address`
-- `post:/tokens/historical`
 
 ## Guardrails
 
 - Keep automation on the JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Treat this v1 skill as read-only and prices-only. Do not imply RPC, trade execution, or wallet mutation support.
-- API keys are sensitive because they appear in the request path. Use `--secret-env` or `--secret-op`, not shell history literals, when possible.
-- `/tokens/by-symbol` is query-based in the live API.
-- The live API supports repeated `symbols=` parameters, but this v1 skill intentionally narrows that endpoint to a single `symbols=<TOKEN>` query because current `uxc` query argument handling does not reliably execute array-shaped query parameters.
-- Historical requests can expand quickly. Keep time windows tight unless the user explicitly wants a larger backfill.
+- API keys appear in the request path — use `--secret-env` or `--secret-op`, not shell history literals.
+- This v1 skill intentionally narrows `/tokens/by-symbol` to a single `symbols=<TOKEN>` query because current `uxc` query argument handling does not reliably execute array-shaped query parameters.
+- Historical requests can expand quickly — keep time windows tight unless the user explicitly wants a larger backfill.
 - `alchemy-openapi-cli <operation> ...` is equivalent to `uxc https://api.g.alchemy.com --schema-url <alchemy_openapi_schema> <operation> ...`.
 
 ## References
