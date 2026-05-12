@@ -77,6 +77,7 @@ const DAEMON_OWNER_TERM_SIGNAL: i32 = 15;
 const STDIO_INIT_LOCK_STALE_SECS: u64 = 30;
 const MCP_IDLE_TTL_DEFAULT_SECS: u64 = 3600;
 const MCP_IDLE_TTL_ENV: &str = "UXC_DAEMON_MCP_IDLE_TTL_SECS";
+const MCP_IDLE_TTL_MAX_SECS: u64 = 24 * 60 * 60;
 const MCP_IDLE_CLEANUP_INTERVAL_MS: u64 = 500;
 // Five seconds is long enough for cooperative stdio servers to notice stdin EOF
 // and release external resources, while still bounding daemon-side eviction stalls.
@@ -878,7 +879,12 @@ fn default_mcp_idle_ttl_secs() -> u64 {
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|ttl| *ttl > 0)
+        .map(|ttl| ttl.min(MCP_IDLE_TTL_MAX_SECS))
         .unwrap_or(MCP_IDLE_TTL_DEFAULT_SECS)
+}
+
+fn instant_cutoff(now: Instant, age_secs: u64) -> Option<Instant> {
+    now.checked_sub(Duration::from_secs(age_secs))
 }
 
 fn resolve_stdio_request_metadata(
@@ -1372,7 +1378,8 @@ impl McpSessionManager {
 
     async fn cleanup_idle(&self) {
         let default_idle_ttl_secs = default_mcp_idle_ttl_secs();
-        let http_cutoff = Instant::now() - Duration::from_secs(default_idle_ttl_secs);
+        let now = Instant::now();
+        let http_cutoff = instant_cutoff(now, default_idle_ttl_secs);
         let stdio_entries: Vec<(String, Arc<Mutex<McpStdioSession>>)> = {
             let map = self.stdio.lock().await;
             map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
@@ -1387,9 +1394,9 @@ impl McpSessionManager {
                 if guard.idle_ttl_secs == 0 {
                     continue;
                 }
-                let now = Instant::now();
-                let cutoff = now - Duration::from_secs(guard.idle_ttl_secs);
-                if guard.last_used < cutoff {
+                let should_reap = instant_cutoff(Instant::now(), guard.idle_ttl_secs)
+                    .is_some_and(|cutoff| guard.last_used < cutoff);
+                if should_reap {
                     let lifecycle_allows_reap = match (
                         guard.lifecycle_contract_fetch_state,
                         guard
@@ -1444,29 +1451,34 @@ impl McpSessionManager {
             }
         }
 
-        let init_lock_cutoff = Instant::now() - Duration::from_secs(STDIO_INIT_LOCK_STALE_SECS);
-        let mut lock_map = self.stdio_init_locks.lock().await;
-        // Retain locks that are:
-        // 1. Still in use (strong_count > 1 means someone is holding the lock), or
-        // 2. Were touched recently (not stale)
-        // This avoids dropping an init lock during an ongoing initialization,
-        // which could otherwise allow a concurrent cold call to create a duplicate
-        // lock and spawn another MCP process, breaking the singleflight guarantee.
-        lock_map.retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
+        let now = Instant::now();
+        if let Some(init_lock_cutoff) = instant_cutoff(now, STDIO_INIT_LOCK_STALE_SECS) {
+            let mut lock_map = self.stdio_init_locks.lock().await;
+            // Retain locks that are:
+            // 1. Still in use (strong_count > 1 means someone is holding the lock), or
+            // 2. Were touched recently (not stale)
+            // This avoids dropping an init lock during an ongoing initialization,
+            // which could otherwise allow a concurrent cold call to create a duplicate
+            // lock and spawn another MCP process, breaking the singleflight guarantee.
+            lock_map
+                .retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
 
-        let mut exclusive_lock_map = self.stdio_exclusive_locks.lock().await;
-        exclusive_lock_map
-            .retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
+            let mut exclusive_lock_map = self.stdio_exclusive_locks.lock().await;
+            exclusive_lock_map
+                .retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
+        }
 
-        let http_entries: Vec<(String, Arc<McpHttpSession>)> = {
-            let map = self.http.lock().await;
-            map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
-        };
         let mut http_remove = Vec::new();
-        for (key, session) in &http_entries {
-            let last_used = *session.last_used.lock().await;
-            if last_used < http_cutoff {
-                http_remove.push(key.clone());
+        if let Some(http_cutoff) = http_cutoff {
+            let http_entries: Vec<(String, Arc<McpHttpSession>)> = {
+                let map = self.http.lock().await;
+                map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
+            };
+            for (key, session) in &http_entries {
+                let last_used = *session.last_used.lock().await;
+                if last_used < http_cutoff {
+                    http_remove.push(key.clone());
+                }
             }
         }
         if !http_remove.is_empty() {
@@ -8836,28 +8848,86 @@ mod tests {
         assert!(meta.artifact_path.is_none());
     }
 
+    fn with_mcp_idle_ttl_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let previous = std::env::var_os(MCP_IDLE_TTL_ENV);
+        match value {
+            Some(value) => std::env::set_var(MCP_IDLE_TTL_ENV, value),
+            None => std::env::remove_var(MCP_IDLE_TTL_ENV),
+        }
+
+        let result = f();
+
+        match previous {
+            Some(previous) => std::env::set_var(MCP_IDLE_TTL_ENV, previous),
+            None => std::env::remove_var(MCP_IDLE_TTL_ENV),
+        }
+        result
+    }
+
+    #[test]
+    fn default_mcp_idle_ttl_secs_uses_default_without_env() {
+        with_mcp_idle_ttl_env(None, || {
+            assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_DEFAULT_SECS);
+        });
+    }
+
+    #[test]
+    fn default_mcp_idle_ttl_secs_accepts_positive_env_override() {
+        with_mcp_idle_ttl_env(Some("7200"), || {
+            assert_eq!(default_mcp_idle_ttl_secs(), 7200);
+        });
+    }
+
+    #[test]
+    fn default_mcp_idle_ttl_secs_rejects_invalid_zero_and_clamps_extreme_env_overrides() {
+        with_mcp_idle_ttl_env(Some("not-a-number"), || {
+            assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_DEFAULT_SECS);
+        });
+        with_mcp_idle_ttl_env(Some("0"), || {
+            assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_DEFAULT_SECS);
+        });
+        with_mcp_idle_ttl_env(Some("-1"), || {
+            assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_DEFAULT_SECS);
+        });
+        with_mcp_idle_ttl_env(Some("9999999999999999999"), || {
+            assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_MAX_SECS);
+        });
+    }
+
+    #[test]
+    fn instant_cutoff_returns_none_for_unrepresentable_age() {
+        let now = Instant::now();
+
+        assert!(instant_cutoff(now, 0).is_some());
+        assert!(instant_cutoff(now, u64::MAX).is_none());
+    }
+
     #[test]
     fn resolve_stdio_request_metadata_resets_ttl_and_link_name_from_current_request() {
-        let resolved = resolve_stdio_request_metadata(
-            &StdioSessionRequestMetadata {
-                idle_ttl_secs: None,
-                link_name: None,
-                link_skill: None,
-                link_skill_doc: None,
-                link_skill_path: None,
-                endpoint: "https://new.example.com",
-                exclusive_keys: &[],
-            },
-            &["/tmp/profile".to_string()],
-        );
+        with_mcp_idle_ttl_env(None, || {
+            let resolved = resolve_stdio_request_metadata(
+                &StdioSessionRequestMetadata {
+                    idle_ttl_secs: None,
+                    link_name: None,
+                    link_skill: None,
+                    link_skill_doc: None,
+                    link_skill_path: None,
+                    endpoint: "https://new.example.com",
+                    exclusive_keys: &[],
+                },
+                &["/tmp/profile".to_string()],
+            );
 
-        assert_eq!(resolved.idle_ttl_secs, default_mcp_idle_ttl_secs());
-        assert_eq!(resolved.link_name, None);
-        assert_eq!(resolved.link_skill, None);
-        assert_eq!(resolved.link_skill_doc, None);
-        assert_eq!(resolved.link_skill_path, None);
-        assert_eq!(resolved.endpoint, "https://new.example.com");
-        assert_eq!(resolved.daemon_exclusive, vec!["/tmp/profile".to_string()]);
+            assert_eq!(resolved.idle_ttl_secs, default_mcp_idle_ttl_secs());
+            assert_eq!(resolved.link_name, None);
+            assert_eq!(resolved.link_skill, None);
+            assert_eq!(resolved.link_skill_doc, None);
+            assert_eq!(resolved.link_skill_path, None);
+            assert_eq!(resolved.endpoint, "https://new.example.com");
+            assert_eq!(resolved.daemon_exclusive, vec!["/tmp/profile".to_string()]);
+        });
     }
 
     #[test]
