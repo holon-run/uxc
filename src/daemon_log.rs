@@ -15,9 +15,9 @@ use serde_json::json;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot};
 
 const DEFAULT_MAX_LOG_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 const DEFAULT_LOG_BACKUPS: usize = 3;
@@ -158,16 +158,18 @@ impl DaemonLogEntry {
 #[derive(Clone)]
 pub struct DaemonLogger {
     log_file: PathBuf,
-    max_bytes: u64,
-    backups: usize,
-    #[allow(dead_code)]
-    inner: Arc<Mutex<LoggerInner>>,
+    sender: mpsc::UnboundedSender<LoggerCommand>,
 }
 
 struct LoggerInner {
     file: Option<File>,
     pending_bytes: usize,
     last_flush: Instant,
+}
+
+enum LoggerCommand {
+    Write(String),
+    Flush(oneshot::Sender<Result<()>>),
 }
 
 impl DaemonLogger {
@@ -188,54 +190,38 @@ impl DaemonLogger {
         }
 
         let file = open_log_file(&log_file)?;
-
-        Ok(Self {
-            log_file,
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(logger_worker(
+            log_file.clone(),
             max_bytes,
             backups,
-            inner: Arc::new(Mutex::new(LoggerInner {
+            receiver,
+            LoggerInner {
                 file: Some(file),
                 pending_bytes: 0,
                 last_flush: Instant::now(),
-            })),
-        })
+            },
+        ));
+
+        Ok(Self { log_file, sender })
     }
 
     /// Write a log entry
     pub async fn log(&self, entry: &DaemonLogEntry) -> Result<()> {
         let line = serde_json::to_string(entry).context("Failed to serialize log entry")?;
-
-        let mut inner = self.inner.lock().await;
-        if inner.file.is_none() {
-            inner.file = Some(open_log_file(&self.log_file)?);
-        }
-
-        if let Some(file) = &mut inner.file {
-            writeln!(file, "{}", line).context("Failed to write log entry")?;
-            inner.pending_bytes = inner.pending_bytes.saturating_add(line.len() + 1);
-        }
-        if inner.pending_bytes >= LOG_FLUSH_BYTES
-            || inner.last_flush.elapsed() >= LOG_FLUSH_INTERVAL
-        {
-            flush_locked(&mut inner)?;
-        }
-
-        // Keep write + rotate in one critical section to avoid races and stale fds.
-        // Close the active fd before rotate so Windows rename can succeed.
-        if should_rotate(&self.log_file, self.max_bytes)? {
-            flush_locked(&mut inner)?;
-            inner.file.take();
-            rotate_log_if_needed(&self.log_file, self.backups)?;
-            inner.file = Some(open_log_file(&self.log_file)?);
-        }
-
+        self.sender
+            .send(LoggerCommand::Write(line))
+            .context("Failed to enqueue daemon log entry")?;
         Ok(())
     }
 
     /// Flush any buffered log entries to disk.
     pub async fn flush(&self) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        flush_locked(&mut inner)
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(LoggerCommand::Flush(tx))
+            .context("Failed to enqueue daemon log flush")?;
+        rx.await.context("Daemon log worker stopped before flush")?
     }
 
     /// Get the log file path
@@ -248,6 +234,63 @@ impl DaemonLogger {
     pub fn is_enabled(&self) -> bool {
         true // Logging is always enabled when logger is created
     }
+}
+
+async fn logger_worker(
+    log_file: PathBuf,
+    max_bytes: u64,
+    backups: usize,
+    mut receiver: mpsc::UnboundedReceiver<LoggerCommand>,
+    mut inner: LoggerInner,
+) {
+    while let Some(command) = receiver.recv().await {
+        match command {
+            LoggerCommand::Write(line) => {
+                if let Err(error) = write_log_line(&log_file, max_bytes, backups, &mut inner, &line)
+                {
+                    tracing::debug!("Failed to write daemon log: {}", error);
+                }
+            }
+            LoggerCommand::Flush(reply) => {
+                let _ = reply.send(flush_locked(&mut inner));
+            }
+        }
+    }
+
+    if let Err(error) = flush_locked(&mut inner) {
+        tracing::debug!("Failed to flush daemon log during shutdown: {}", error);
+    }
+}
+
+fn write_log_line(
+    log_file: &Path,
+    max_bytes: u64,
+    backups: usize,
+    inner: &mut LoggerInner,
+    line: &str,
+) -> Result<()> {
+    if inner.file.is_none() {
+        inner.file = Some(open_log_file(log_file)?);
+    }
+
+    if let Some(file) = &mut inner.file {
+        writeln!(file, "{}", line).context("Failed to write log entry")?;
+        inner.pending_bytes = inner.pending_bytes.saturating_add(line.len() + 1);
+    }
+    if inner.pending_bytes >= LOG_FLUSH_BYTES || inner.last_flush.elapsed() >= LOG_FLUSH_INTERVAL {
+        flush_locked(inner)?;
+    }
+
+    // Keep write + rotate in one worker-owned sequence to avoid races and stale fds.
+    // Close the active fd before rotate so Windows rename can succeed.
+    if should_rotate(log_file, max_bytes)? {
+        flush_locked(inner)?;
+        inner.file.take();
+        rotate_log_if_needed(log_file, backups)?;
+        inner.file = Some(open_log_file(log_file)?);
+    }
+
+    Ok(())
 }
 
 fn flush_locked(inner: &mut LoggerInner) -> Result<()> {
@@ -547,9 +590,15 @@ mod tests {
             .log(&DaemonLogEntry::new(DaemonEventType::DaemonStart))
             .await
             .unwrap();
+        logger
+            .log(&DaemonLogEntry::new(DaemonEventType::RuntimeInvokeStart))
+            .await
+            .unwrap();
         logger.flush().await.unwrap();
 
         let contents = std::fs::read_to_string(logger.log_file_path()).unwrap();
         assert!(contents.contains("\"type\":\"daemon_start\""));
+        assert!(contents.contains("\"type\":\"runtime_invoke_start\""));
+        assert_eq!(contents.lines().count(), 2);
     }
 }
