@@ -75,7 +75,9 @@ const STOP_POLL_INTERVAL_MS: u64 = 100;
 const START_LOCK_STALE_SECS: u64 = 30;
 const DAEMON_OWNER_TERM_SIGNAL: i32 = 15;
 const STDIO_INIT_LOCK_STALE_SECS: u64 = 30;
-const MCP_IDLE_TTL_SECS: u64 = 600;
+const MCP_IDLE_TTL_DEFAULT_SECS: u64 = 3600;
+const MCP_IDLE_TTL_ENV: &str = "UXC_DAEMON_MCP_IDLE_TTL_SECS";
+const MCP_IDLE_TTL_MAX_SECS: u64 = 24 * 60 * 60;
 const MCP_IDLE_CLEANUP_INTERVAL_MS: u64 = 500;
 // Five seconds is long enough for cooperative stdio servers to notice stdin EOF
 // and release external resources, while still bounding daemon-side eviction stalls.
@@ -130,6 +132,8 @@ pub struct RuntimeInvokeRequest {
     pub action: RuntimeAction,
     pub operation_id: Option<String>,
     pub args: Option<HashMap<String, Value>>,
+    #[serde(default)]
+    pub suppress_routine_logs: bool,
     pub options: RuntimeInvokeOptions,
 }
 
@@ -870,6 +874,19 @@ struct ResolvedStdioRequestMetadata {
     daemon_exclusive: Vec<String>,
 }
 
+fn default_mcp_idle_ttl_secs() -> u64 {
+    std::env::var(MCP_IDLE_TTL_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ttl| *ttl > 0)
+        .map(|ttl| ttl.min(MCP_IDLE_TTL_MAX_SECS))
+        .unwrap_or(MCP_IDLE_TTL_DEFAULT_SECS)
+}
+
+fn instant_cutoff(now: Instant, age_secs: u64) -> Option<Instant> {
+    now.checked_sub(Duration::from_secs(age_secs))
+}
+
 fn resolve_stdio_request_metadata(
     metadata: &StdioSessionRequestMetadata<'_>,
     existing_exclusive_keys: &[String],
@@ -880,7 +897,9 @@ fn resolve_stdio_request_metadata(
         metadata.exclusive_keys.to_vec()
     };
     ResolvedStdioRequestMetadata {
-        idle_ttl_secs: metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
+        idle_ttl_secs: metadata
+            .idle_ttl_secs
+            .unwrap_or_else(default_mcp_idle_ttl_secs),
         link_name: metadata.link_name.map(str::to_string),
         link_skill: metadata.link_skill.map(str::to_string),
         link_skill_doc: metadata.link_skill_doc.map(str::to_string),
@@ -1358,7 +1377,9 @@ impl McpSessionManager {
     }
 
     async fn cleanup_idle(&self) {
-        let http_cutoff = Instant::now() - Duration::from_secs(MCP_IDLE_TTL_SECS);
+        let default_idle_ttl_secs = default_mcp_idle_ttl_secs();
+        let now = Instant::now();
+        let http_cutoff = instant_cutoff(now, default_idle_ttl_secs);
         let stdio_entries: Vec<(String, Arc<Mutex<McpStdioSession>>)> = {
             let map = self.stdio.lock().await;
             map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
@@ -1373,9 +1394,9 @@ impl McpSessionManager {
                 if guard.idle_ttl_secs == 0 {
                     continue;
                 }
-                let now = Instant::now();
-                let cutoff = now - Duration::from_secs(guard.idle_ttl_secs);
-                if guard.last_used < cutoff {
+                let should_reap = instant_cutoff(Instant::now(), guard.idle_ttl_secs)
+                    .is_some_and(|cutoff| guard.last_used < cutoff);
+                if should_reap {
                     let lifecycle_allows_reap = match (
                         guard.lifecycle_contract_fetch_state,
                         guard
@@ -1430,29 +1451,34 @@ impl McpSessionManager {
             }
         }
 
-        let init_lock_cutoff = Instant::now() - Duration::from_secs(STDIO_INIT_LOCK_STALE_SECS);
-        let mut lock_map = self.stdio_init_locks.lock().await;
-        // Retain locks that are:
-        // 1. Still in use (strong_count > 1 means someone is holding the lock), or
-        // 2. Were touched recently (not stale)
-        // This avoids dropping an init lock during an ongoing initialization,
-        // which could otherwise allow a concurrent cold call to create a duplicate
-        // lock and spawn another MCP process, breaking the singleflight guarantee.
-        lock_map.retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
+        let now = Instant::now();
+        if let Some(init_lock_cutoff) = instant_cutoff(now, STDIO_INIT_LOCK_STALE_SECS) {
+            let mut lock_map = self.stdio_init_locks.lock().await;
+            // Retain locks that are:
+            // 1. Still in use (strong_count > 1 means someone is holding the lock), or
+            // 2. Were touched recently (not stale)
+            // This avoids dropping an init lock during an ongoing initialization,
+            // which could otherwise allow a concurrent cold call to create a duplicate
+            // lock and spawn another MCP process, breaking the singleflight guarantee.
+            lock_map
+                .retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
 
-        let mut exclusive_lock_map = self.stdio_exclusive_locks.lock().await;
-        exclusive_lock_map
-            .retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
+            let mut exclusive_lock_map = self.stdio_exclusive_locks.lock().await;
+            exclusive_lock_map
+                .retain(|_, v| Arc::strong_count(&v.lock) > 1 || v.touched_at >= init_lock_cutoff);
+        }
 
-        let http_entries: Vec<(String, Arc<McpHttpSession>)> = {
-            let map = self.http.lock().await;
-            map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
-        };
         let mut http_remove = Vec::new();
-        for (key, session) in &http_entries {
-            let last_used = *session.last_used.lock().await;
-            if last_used < http_cutoff {
-                http_remove.push(key.clone());
+        if let Some(http_cutoff) = http_cutoff {
+            let http_entries: Vec<(String, Arc<McpHttpSession>)> = {
+                let map = self.http.lock().await;
+                map.iter().map(|(k, s)| (k.clone(), s.clone())).collect()
+            };
+            for (key, session) in &http_entries {
+                let last_used = *session.last_used.lock().await;
+                if last_used < http_cutoff {
+                    http_remove.push(key.clone());
+                }
             }
         }
         if !http_remove.is_empty() {
@@ -1604,7 +1630,9 @@ impl McpSessionManager {
             resource_subscriptions: HashMap::new(),
             last_used: Instant::now(),
             last_used_at_unix: created_at_unix,
-            idle_ttl_secs: metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
+            idle_ttl_secs: metadata
+                .idle_ttl_secs
+                .unwrap_or_else(default_mcp_idle_ttl_secs),
             link_name: metadata.link_name.map(str::to_string),
             link_skill: metadata.link_skill.map(str::to_string),
             link_skill_doc: metadata.link_skill_doc.map(str::to_string),
@@ -1634,7 +1662,9 @@ impl McpSessionManager {
                 child_pid,
                 started_at_unix: created_at_unix,
                 last_used_at_unix: created_at_unix,
-                idle_ttl_secs: metadata.idle_ttl_secs.unwrap_or(MCP_IDLE_TTL_SECS),
+                idle_ttl_secs: metadata
+                    .idle_ttl_secs
+                    .unwrap_or_else(default_mcp_idle_ttl_secs),
                 daemon_exclusive: exclusive_keys.clone(),
                 in_flight_requests: 0,
                 reuse_eligible: true,
@@ -3649,6 +3679,14 @@ impl DaemonRuntime {
         }
     }
 
+    async fn flush_logs(&self) {
+        if let Some(ref logger) = self.logger {
+            if let Err(e) = logger.flush().await {
+                tracing::debug!("Failed to flush daemon log: {}", e);
+            }
+        }
+    }
+
     pub async fn invoke(&self, request: RuntimeInvokeRequest) -> Result<RuntimeInvokeResponse> {
         if request
             .options
@@ -3672,15 +3710,18 @@ impl DaemonRuntime {
         }
 
         let start = Instant::now();
+        let log_routine_events = !request.suppress_routine_logs;
 
         // Log runtime invoke start
-        self.log(
-            DaemonLogEntry::new(DaemonEventType::RuntimeInvokeStart)
-                .with_request_id(request.request_id.clone())
-                .with_endpoint(request.endpoint.clone())
-                .with_operation_id(request.operation_id.clone().unwrap_or_default()),
-        )
-        .await;
+        if log_routine_events {
+            self.log(
+                DaemonLogEntry::new(DaemonEventType::RuntimeInvokeStart)
+                    .with_request_id(request.request_id.clone())
+                    .with_endpoint(request.endpoint.clone())
+                    .with_operation_id(request.operation_id.clone().unwrap_or_default()),
+            )
+            .await;
+        }
 
         let cache = self.build_cache(&request.options)?;
         let cache_for_fallback = cache.clone();
@@ -3715,7 +3756,7 @@ impl DaemonRuntime {
             .await?
         {
             let duration_ms = start.elapsed().as_millis() as u64;
-            if reused {
+            if reused && log_routine_events {
                 self.log(
                     DaemonLogEntry::new(DaemonEventType::DaemonSessionReused)
                         .with_request_id(request.request_id.clone())
@@ -3723,15 +3764,17 @@ impl DaemonRuntime {
                 )
                 .await;
             }
-            self.log(
-                DaemonLogEntry::new(DaemonEventType::RuntimeInvokeSuccess)
-                    .with_request_id(request.request_id.clone())
-                    .with_endpoint(request.endpoint.clone())
-                    .with_operation_id(request.operation_id.clone().unwrap_or_default())
-                    .with_protocol("mcp".to_string())
-                    .with_duration_ms(duration_ms),
-            )
-            .await;
+            if log_routine_events {
+                self.log(
+                    DaemonLogEntry::new(DaemonEventType::RuntimeInvokeSuccess)
+                        .with_request_id(request.request_id.clone())
+                        .with_endpoint(request.endpoint.clone())
+                        .with_operation_id(request.operation_id.clone().unwrap_or_default())
+                        .with_protocol("mcp".to_string())
+                        .with_duration_ms(duration_ms),
+                )
+                .await;
+            }
             let mut response_meta = RuntimeMeta {
                 schema_involved: Some(true),
                 daemon_session_reused: Some(reused),
@@ -3828,7 +3871,7 @@ impl DaemonRuntime {
                         .with_protocol(protocol.clone()),
                 )
                 .await;
-            } else {
+            } else if log_routine_events {
                 self.log(
                     DaemonLogEntry::new(DaemonEventType::CacheHit)
                         .with_request_id(request.request_id.clone())
@@ -3865,7 +3908,7 @@ impl DaemonRuntime {
                 .await?;
             meta.daemon_session_reused = Some(reused);
 
-            if reused {
+            if reused && log_routine_events {
                 self.log(
                     DaemonLogEntry::new(DaemonEventType::DaemonSessionReused)
                         .with_request_id(request.request_id.clone())
@@ -3983,15 +4026,17 @@ impl DaemonRuntime {
                     &mut meta,
                     request.options.artifact_compaction.unwrap_or(true),
                 )?;
-                self.log(
-                    DaemonLogEntry::new(DaemonEventType::RuntimeInvokeSuccess)
-                        .with_request_id(request.request_id.clone())
-                        .with_endpoint(request.endpoint.clone())
-                        .with_operation_id(request.operation_id.clone().unwrap_or_default())
-                        .with_protocol(protocol.clone())
-                        .with_duration_ms(duration_ms),
-                )
-                .await;
+                if log_routine_events {
+                    self.log(
+                        DaemonLogEntry::new(DaemonEventType::RuntimeInvokeSuccess)
+                            .with_request_id(request.request_id.clone())
+                            .with_endpoint(request.endpoint.clone())
+                            .with_operation_id(request.operation_id.clone().unwrap_or_default())
+                            .with_protocol(protocol.clone())
+                            .with_duration_ms(duration_ms),
+                    )
+                    .await;
+                }
 
                 Ok(RuntimeInvokeResponse {
                     protocol,
@@ -5901,6 +5946,7 @@ async fn fetch_managed_source_poll(
             action: RuntimeAction::Execute,
             operation_id: request.operation_id.clone(),
             args: Some(args),
+            suppress_routine_logs: true,
             options,
         })
         .await?;
@@ -6637,6 +6683,7 @@ pub async fn run_daemon_server() -> Result<()> {
     runtime
         .log(DaemonLogEntry::new(DaemonEventType::DaemonStop))
         .await;
+    runtime.flush_logs().await;
 
     owner_lock.clear_metadata();
     let _ = fs::remove_file(&socket);
@@ -8661,6 +8708,7 @@ mod tests {
             action: RuntimeAction::Execute,
             operation_id: Some("get:/api/v3/account".to_string()),
             args: None,
+            suppress_routine_logs: false,
             options: RuntimeInvokeOptions {
                 auth: None,
                 inject_env: Vec::new(),
@@ -8800,28 +8848,86 @@ mod tests {
         assert!(meta.artifact_path.is_none());
     }
 
+    fn with_mcp_idle_ttl_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let previous = std::env::var_os(MCP_IDLE_TTL_ENV);
+        match value {
+            Some(value) => std::env::set_var(MCP_IDLE_TTL_ENV, value),
+            None => std::env::remove_var(MCP_IDLE_TTL_ENV),
+        }
+
+        let result = f();
+
+        match previous {
+            Some(previous) => std::env::set_var(MCP_IDLE_TTL_ENV, previous),
+            None => std::env::remove_var(MCP_IDLE_TTL_ENV),
+        }
+        result
+    }
+
+    #[test]
+    fn default_mcp_idle_ttl_secs_uses_default_without_env() {
+        with_mcp_idle_ttl_env(None, || {
+            assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_DEFAULT_SECS);
+        });
+    }
+
+    #[test]
+    fn default_mcp_idle_ttl_secs_accepts_positive_env_override() {
+        with_mcp_idle_ttl_env(Some("7200"), || {
+            assert_eq!(default_mcp_idle_ttl_secs(), 7200);
+        });
+    }
+
+    #[test]
+    fn default_mcp_idle_ttl_secs_rejects_invalid_zero_and_clamps_extreme_env_overrides() {
+        with_mcp_idle_ttl_env(Some("not-a-number"), || {
+            assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_DEFAULT_SECS);
+        });
+        with_mcp_idle_ttl_env(Some("0"), || {
+            assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_DEFAULT_SECS);
+        });
+        with_mcp_idle_ttl_env(Some("-1"), || {
+            assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_DEFAULT_SECS);
+        });
+        with_mcp_idle_ttl_env(Some("9999999999999999999"), || {
+            assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_MAX_SECS);
+        });
+    }
+
+    #[test]
+    fn instant_cutoff_returns_none_for_unrepresentable_age() {
+        let now = Instant::now();
+
+        assert!(instant_cutoff(now, 0).is_some());
+        assert!(instant_cutoff(now, u64::MAX).is_none());
+    }
+
     #[test]
     fn resolve_stdio_request_metadata_resets_ttl_and_link_name_from_current_request() {
-        let resolved = resolve_stdio_request_metadata(
-            &StdioSessionRequestMetadata {
-                idle_ttl_secs: None,
-                link_name: None,
-                link_skill: None,
-                link_skill_doc: None,
-                link_skill_path: None,
-                endpoint: "https://new.example.com",
-                exclusive_keys: &[],
-            },
-            &["/tmp/profile".to_string()],
-        );
+        with_mcp_idle_ttl_env(None, || {
+            let resolved = resolve_stdio_request_metadata(
+                &StdioSessionRequestMetadata {
+                    idle_ttl_secs: None,
+                    link_name: None,
+                    link_skill: None,
+                    link_skill_doc: None,
+                    link_skill_path: None,
+                    endpoint: "https://new.example.com",
+                    exclusive_keys: &[],
+                },
+                &["/tmp/profile".to_string()],
+            );
 
-        assert_eq!(resolved.idle_ttl_secs, MCP_IDLE_TTL_SECS);
-        assert_eq!(resolved.link_name, None);
-        assert_eq!(resolved.link_skill, None);
-        assert_eq!(resolved.link_skill_doc, None);
-        assert_eq!(resolved.link_skill_path, None);
-        assert_eq!(resolved.endpoint, "https://new.example.com");
-        assert_eq!(resolved.daemon_exclusive, vec!["/tmp/profile".to_string()]);
+            assert_eq!(resolved.idle_ttl_secs, default_mcp_idle_ttl_secs());
+            assert_eq!(resolved.link_name, None);
+            assert_eq!(resolved.link_skill, None);
+            assert_eq!(resolved.link_skill_doc, None);
+            assert_eq!(resolved.link_skill_path, None);
+            assert_eq!(resolved.endpoint, "https://new.example.com");
+            assert_eq!(resolved.daemon_exclusive, vec!["/tmp/profile".to_string()]);
+        });
     }
 
     #[test]
@@ -8865,6 +8971,7 @@ mod tests {
             action: RuntimeAction::OperationHelp,
             operation_id: Some("post:/api/v3/order".to_string()),
             args: None,
+            suppress_routine_logs: false,
             options: RuntimeInvokeOptions {
                 auth: None,
                 inject_env: Vec::new(),
@@ -8919,6 +9026,7 @@ mod tests {
             action: RuntimeAction::Execute,
             operation_id: Some("post:/pet".to_string()),
             args: None,
+            suppress_routine_logs: false,
             options: RuntimeInvokeOptions {
                 auth: None,
                 inject_env: Vec::new(),
@@ -8954,6 +9062,7 @@ mod tests {
             action: RuntimeAction::Execute,
             operation_id: Some("get:/health".to_string()),
             args: None,
+            suppress_routine_logs: false,
             options: RuntimeInvokeOptions {
                 auth: None,
                 inject_env: Vec::new(),

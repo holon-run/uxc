@@ -1904,6 +1904,7 @@ async fn execute_endpoint_via_daemon(
         action,
         operation_id,
         args: args_map,
+        suppress_routine_logs: false,
         options: daemon::RuntimeInvokeOptions {
             auth: cli.auth.clone(),
             inject_env: collect_inject_env_specs(cli)?,

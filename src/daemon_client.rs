@@ -99,6 +99,7 @@ impl DaemonClient {
             action: RuntimeAction::Execute,
             operation_id: Some(operation.into()),
             args: payload,
+            suppress_routine_logs: false,
             options: options.into(),
         };
         daemon::runtime_invoke_client(&request).await

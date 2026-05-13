@@ -16,10 +16,13 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 const DEFAULT_MAX_LOG_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 const DEFAULT_LOG_BACKUPS: usize = 3;
+const LOG_FLUSH_BYTES: usize = 64 * 1024;
+const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Daemon log event types for troubleshooting
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +166,8 @@ pub struct DaemonLogger {
 
 struct LoggerInner {
     file: Option<File>,
+    pending_bytes: usize,
+    last_flush: Instant,
 }
 
 impl DaemonLogger {
@@ -188,7 +193,11 @@ impl DaemonLogger {
             log_file,
             max_bytes,
             backups,
-            inner: Arc::new(Mutex::new(LoggerInner { file: Some(file) })),
+            inner: Arc::new(Mutex::new(LoggerInner {
+                file: Some(file),
+                pending_bytes: 0,
+                last_flush: Instant::now(),
+            })),
         })
     }
 
@@ -203,18 +212,30 @@ impl DaemonLogger {
 
         if let Some(file) = &mut inner.file {
             writeln!(file, "{}", line).context("Failed to write log entry")?;
-            file.flush().context("Failed to flush log entry")?;
+            inner.pending_bytes = inner.pending_bytes.saturating_add(line.len() + 1);
+        }
+        if inner.pending_bytes >= LOG_FLUSH_BYTES
+            || inner.last_flush.elapsed() >= LOG_FLUSH_INTERVAL
+        {
+            flush_locked(&mut inner)?;
         }
 
         // Keep write + rotate in one critical section to avoid races and stale fds.
         // Close the active fd before rotate so Windows rename can succeed.
         if should_rotate(&self.log_file, self.max_bytes)? {
+            flush_locked(&mut inner)?;
             inner.file.take();
             rotate_log_if_needed(&self.log_file, self.backups)?;
             inner.file = Some(open_log_file(&self.log_file)?);
         }
 
         Ok(())
+    }
+
+    /// Flush any buffered log entries to disk.
+    pub async fn flush(&self) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        flush_locked(&mut inner)
     }
 
     /// Get the log file path
@@ -227,6 +248,18 @@ impl DaemonLogger {
     pub fn is_enabled(&self) -> bool {
         true // Logging is always enabled when logger is created
     }
+}
+
+fn flush_locked(inner: &mut LoggerInner) -> Result<()> {
+    if inner.pending_bytes == 0 {
+        return Ok(());
+    }
+    if let Some(file) = &mut inner.file {
+        file.flush().context("Failed to flush log entries")?;
+    }
+    inner.pending_bytes = 0;
+    inner.last_flush = Instant::now();
+    Ok(())
 }
 
 /// Rotate log file
@@ -503,5 +536,20 @@ mod tests {
         assert_eq!(parsed["type"], "runtime_invoke_start");
         assert_eq!(parsed["request_id"], "req-123");
         assert!(parsed["endpoint"].as_str().unwrap().contains("***"));
+    }
+
+    #[tokio::test]
+    async fn test_logger_flush_writes_buffered_entries() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let logger = DaemonLogger::new(temp_dir.path()).unwrap();
+
+        logger
+            .log(&DaemonLogEntry::new(DaemonEventType::DaemonStart))
+            .await
+            .unwrap();
+        logger.flush().await.unwrap();
+
+        let contents = std::fs::read_to_string(logger.log_file_path()).unwrap();
+        assert!(contents.contains("\"type\":\"daemon_start\""));
     }
 }
