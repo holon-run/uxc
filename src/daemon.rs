@@ -2309,6 +2309,45 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
     bail!("subscription execution requires an http(s) endpoint or --resource-uri for MCP subscriptions")
 }
 
+const MANAGED_SOURCE_POLL_JITTER_MAX_MS: u64 = 30_000;
+
+fn stable_managed_source_hash(namespace: &str, source_key: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in namespace
+        .bytes()
+        .chain(std::iter::once(0))
+        .chain(source_key.bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn managed_source_poll_jitter_duration(
+    namespace: &str,
+    source_key: &str,
+    interval_secs: u64,
+) -> Duration {
+    let interval_ms = interval_secs.max(1).saturating_mul(1000);
+    let jitter_window_ms = (interval_ms / 4).clamp(1, MANAGED_SOURCE_POLL_JITTER_MAX_MS);
+    Duration::from_millis(
+        stable_managed_source_hash(namespace, source_key) % (jitter_window_ms + 1),
+    )
+}
+
+fn managed_source_poll_wait_duration(
+    namespace: &str,
+    source_key: &str,
+    interval_secs: u64,
+) -> Duration {
+    Duration::from_secs(interval_secs.max(1))
+        + managed_source_poll_jitter_duration(namespace, source_key, interval_secs)
+}
+
 impl ManagedSourceManager {
     fn new(store: ManagedSourceStore) -> Self {
         Self {
@@ -2970,6 +3009,18 @@ impl ManagedSourceManager {
 
         let default_interval_secs = config.interval_secs.max(1);
         let base_args = request.args.clone().unwrap_or_default();
+        let initial_delay = managed_source_poll_jitter_duration(
+            &entry.namespace,
+            &entry.source_key,
+            default_interval_secs,
+        );
+        if !initial_delay.is_zero() && wait_for_stop_or_timeout(&mut stop_rx, initial_delay).await {
+            update_subscription_view(runtime_view, Some("stopped"), None, false).await;
+            let snapshot = runtime_view.lock().await.clone();
+            let _ =
+                sync_managed_source_state(&self.store, entry, runtime_view, &snapshot.status).await;
+            return;
+        }
         loop {
             if *stop_rx.borrow() {
                 update_subscription_view(runtime_view, Some("stopped"), None, false).await;
@@ -3086,7 +3137,11 @@ impl ManagedSourceManager {
                     }
                     if wait_for_stop_or_timeout(
                         &mut stop_rx,
-                        Duration::from_secs(default_interval_secs),
+                        managed_source_poll_wait_duration(
+                            &entry.namespace,
+                            &entry.source_key,
+                            default_interval_secs,
+                        ),
                     )
                     .await
                     {
@@ -3113,7 +3168,15 @@ impl ManagedSourceManager {
                 return;
             }
 
-            if wait_for_stop_or_timeout(&mut stop_rx, Duration::from_secs(next_interval_secs)).await
+            if wait_for_stop_or_timeout(
+                &mut stop_rx,
+                managed_source_poll_wait_duration(
+                    &entry.namespace,
+                    &entry.source_key,
+                    next_interval_secs,
+                ),
+            )
+            .await
             {
                 update_subscription_view(runtime_view, Some("stopped"), None, false).await;
                 let snapshot = runtime_view.lock().await.clone();
@@ -8708,6 +8771,25 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     #[test]
+    fn managed_source_poll_jitter_is_stable_and_bounded() {
+        let one =
+            managed_source_poll_jitter_duration("agentinbox", "github_repo:holon-run/uxc", 30);
+        let two =
+            managed_source_poll_jitter_duration("agentinbox", "github_repo:holon-run/uxc", 30);
+        let other =
+            managed_source_poll_jitter_duration("agentinbox", "github_checks:holon-run/uxc", 30);
+
+        assert_eq!(one, two);
+        assert_ne!(one, other);
+        assert!(one <= StdDuration::from_millis(7_500));
+        assert!(other <= StdDuration::from_millis(7_500));
+        assert!(
+            managed_source_poll_wait_duration("agentinbox", "github_repo:holon-run/uxc", 30)
+                >= StdDuration::from_secs(30)
+        );
+    }
+
+    #[test]
     fn openapi_runtime_endpoint_appends_operation_path_for_execute() {
         let request = RuntimeInvokeRequest {
             request_id: "req-1".to_string(),
@@ -9511,6 +9593,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored, Some(checkpoint));
+    }
+
+    #[tokio::test]
+    async fn poll_checkpoint_only_write_updates_checkpoint_without_stream_events() {
+        let temp = tempdir().unwrap();
+        let runtime = test_runtime_with_store(&temp);
+        let record =
+            poll_checkpoint_test_record("test", "poll-checkpoint-only", "run-checkpoint-only");
+        runtime
+            .managed_sources
+            .store
+            .upsert_source(&record, true)
+            .await
+            .unwrap();
+
+        let checkpoint = crate::subscription_poll::PollCheckpointState {
+            cursor: Some(json!(789)),
+            watermark: Some(json!("2024-01-01T00:00:00Z")),
+            tie_breaker: Some(json!("event-789")),
+            seen_keys: VecDeque::from([json!("event-789").to_string()]),
+            etag: Some("\"etag-v2\"".to_string()),
+        };
+        let offsets = runtime
+            .managed_sources
+            .store
+            .append_events_and_store_poll_checkpoint(
+                &record.namespace,
+                &record.source_key,
+                &record.run_id,
+                &record.stream_id,
+                &[],
+                &checkpoint,
+            )
+            .await
+            .unwrap();
+        assert!(offsets.is_empty());
+
+        let stored = runtime
+            .managed_sources
+            .store
+            .load_poll_checkpoint(&record.namespace, &record.source_key, &record.run_id)
+            .await
+            .unwrap();
+        assert_eq!(stored, Some(checkpoint));
+
+        let page = runtime
+            .stream_read(&ManagedStreamReadRequest {
+                stream_id: record.stream_id.clone(),
+                after_offset: 0,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert!(page.events.is_empty());
     }
 
     #[tokio::test]
