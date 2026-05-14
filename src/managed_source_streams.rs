@@ -571,11 +571,16 @@ impl ManagedSourceStore {
                 anyhow::bail!("managed source stream mismatch while storing poll checkpoint");
             }
 
-            let mut next_offset: u64 = tx.query_row(
-                "select coalesce(max(offset), 0) + 1 from stream_events where stream_id = ?1",
-                params![stream_id],
-                |row| row.get(0),
-            )?;
+            // Checkpoint-only poll rounds should not pay the stream offset lookup cost.
+            let mut next_offset: u64 = if events.is_empty() {
+                0
+            } else {
+                tx.query_row(
+                    "select coalesce(max(offset), 0) + 1 from stream_events where stream_id = ?1",
+                    params![stream_id],
+                    |row| row.get(0),
+                )?
+            };
             let mut offsets = Vec::with_capacity(events.len());
             let mut latest_ingested_at_unix = None;
             for event in &events {
