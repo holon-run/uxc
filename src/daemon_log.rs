@@ -9,7 +9,7 @@
 //! - Simple log rotation to bound file size
 //! - Thread-safe async operations
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::{File, OpenOptions};
@@ -22,6 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 const DEFAULT_MAX_LOG_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 const DEFAULT_LOG_BACKUPS: usize = 3;
 const LOG_FLUSH_BYTES: usize = 64 * 1024;
+const LOG_QUEUE_CAPACITY: usize = 1024;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Daemon log event types for troubleshooting
@@ -158,13 +159,14 @@ impl DaemonLogEntry {
 #[derive(Clone)]
 pub struct DaemonLogger {
     log_file: PathBuf,
-    sender: mpsc::UnboundedSender<LoggerCommand>,
+    sender: mpsc::Sender<LoggerCommand>,
 }
 
 struct LoggerInner {
     file: Option<File>,
     pending_bytes: usize,
     last_flush: Instant,
+    last_error: Option<String>,
 }
 
 enum LoggerCommand {
@@ -190,8 +192,10 @@ impl DaemonLogger {
         }
 
         let file = open_log_file(&log_file)?;
-        let (sender, receiver) = mpsc::unbounded_channel();
-        tokio::spawn(logger_worker(
+        let (sender, receiver) = mpsc::channel(LOG_QUEUE_CAPACITY);
+        let handle = tokio::runtime::Handle::try_current()
+            .context("Daemon logger requires an active Tokio runtime for background logging")?;
+        handle.spawn(logger_worker(
             log_file.clone(),
             max_bytes,
             backups,
@@ -200,6 +204,7 @@ impl DaemonLogger {
                 file: Some(file),
                 pending_bytes: 0,
                 last_flush: Instant::now(),
+                last_error: None,
             },
         ));
 
@@ -211,6 +216,7 @@ impl DaemonLogger {
         let line = serde_json::to_string(entry).context("Failed to serialize log entry")?;
         self.sender
             .send(LoggerCommand::Write(line))
+            .await
             .context("Failed to enqueue daemon log entry")?;
         Ok(())
     }
@@ -220,6 +226,7 @@ impl DaemonLogger {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(LoggerCommand::Flush(tx))
+            .await
             .context("Failed to enqueue daemon log flush")?;
         rx.await.context("Daemon log worker stopped before flush")?
     }
@@ -240,7 +247,7 @@ async fn logger_worker(
     log_file: PathBuf,
     max_bytes: u64,
     backups: usize,
-    mut receiver: mpsc::UnboundedReceiver<LoggerCommand>,
+    mut receiver: mpsc::Receiver<LoggerCommand>,
     mut inner: LoggerInner,
 ) {
     while let Some(command) = receiver.recv().await {
@@ -249,10 +256,19 @@ async fn logger_worker(
                 if let Err(error) = write_log_line(&log_file, max_bytes, backups, &mut inner, &line)
                 {
                     tracing::debug!("Failed to write daemon log: {}", error);
+                    inner.last_error = Some(error.to_string());
                 }
             }
             LoggerCommand::Flush(reply) => {
-                let _ = reply.send(flush_locked(&mut inner));
+                let result = flush_locked(&mut inner).and_then(|_| {
+                    if let Some(error) = inner.last_error.take() {
+                        Err(anyhow!("Previous daemon log write failed: {}", error))
+                    } else {
+                        Ok(())
+                    }
+                });
+
+                let _ = reply.send(result);
             }
         }
     }
@@ -579,6 +595,12 @@ mod tests {
         assert_eq!(parsed["type"], "runtime_invoke_start");
         assert_eq!(parsed["request_id"], "req-123");
         assert!(parsed["endpoint"].as_str().unwrap().contains("***"));
+    }
+
+    #[test]
+    fn test_logger_new_returns_error_without_tokio_runtime() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        assert!(DaemonLogger::new(temp_dir.path()).is_err());
     }
 
     #[tokio::test]
