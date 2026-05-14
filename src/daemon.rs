@@ -2461,12 +2461,19 @@ impl ManagedSourceManager {
 
         enrich_managed_source_view_from_spec(&mut view, &record.spec_json);
         if let Some(stream_info) = self.store.stream_info(&record.stream_id).await? {
+            let latest_event_at_unix = stream_info.latest_event_at_unix;
             view.stream = Some(ManagedSourceStreamSummary {
                 event_count: stream_info.event_count,
                 earliest_offset: stream_info.earliest_offset,
                 latest_offset: stream_info.latest_offset,
-                latest_event_at_unix: stream_info.latest_event_at_unix,
+                latest_event_at_unix,
             });
+            if let Some(latest_event_at_unix) = latest_event_at_unix {
+                view.last_event_at_unix = view
+                    .last_event_at_unix
+                    .map(|current| current.max(latest_event_at_unix))
+                    .or(Some(latest_event_at_unix));
+            }
         }
         if view.mode == Some(SubscriptionMode::Poll) {
             if let Some(checkpoint) = self
