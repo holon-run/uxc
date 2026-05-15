@@ -1,6 +1,6 @@
 {
   "name": "@holon-run/uxc-daemon-client",
-  "version": "0.15.4",
+  "version": "0.15.5",
   "description": "Thin Node.js client for UXC daemon-backed operations",
   "license": "MIT",
   "repository": {

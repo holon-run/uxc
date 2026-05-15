@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-05-14
+
+### Changed
+- Improved daemon responsiveness under managed-source load by offloading log writes, adding shared-runtime pooling, and staggering managed-source polling startup.
+
 ## [0.15.4] - 2026-04-20
 
 ### Added
