@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 const DEFAULT_RETENTION_MAX_ROWS: u64 = 10_000;
 const DEFAULT_RETENTION_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
-const MANAGED_SOURCE_SCHEMA_VERSION: i64 = 2;
+const MANAGED_SOURCE_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedSourceRecord {
@@ -163,7 +163,8 @@ impl ManagedSourceStore {
                 source_key text not null,
                 created_at_unix integer not null,
                 retention_max_rows integer not null,
-                retention_max_age_secs integer not null
+                retention_max_age_secs integer not null,
+                next_event_offset integer not null default 1
             );
 
             create table if not exists stream_events (
@@ -571,12 +572,11 @@ impl ManagedSourceStore {
                 anyhow::bail!("managed source stream mismatch while storing poll checkpoint");
             }
 
-            // Checkpoint-only poll rounds should not pay the stream offset lookup cost.
             let mut next_offset: u64 = if events.is_empty() {
                 0
             } else {
                 tx.query_row(
-                    "select coalesce(max(offset), 0) + 1 from stream_events where stream_id = ?1",
+                    "select next_event_offset from event_streams where stream_id = ?1",
                     params![stream_id],
                     |row| row.get(0),
                 )?
@@ -614,6 +614,10 @@ impl ManagedSourceStore {
             }
 
             if let Some(now_unix) = latest_ingested_at_unix {
+                tx.execute(
+                    "update event_streams set next_event_offset = ?2 where stream_id = ?1",
+                    params![stream_id, next_offset],
+                )?;
                 apply_retention_tx(&tx, &stream_id, now_unix)?;
             }
             tx.commit()?;
@@ -636,7 +640,7 @@ impl ManagedSourceStore {
             let mut conn = Connection::open(&path)?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let next_offset: u64 = tx.query_row(
-                "select coalesce(max(offset), 0) + 1 from stream_events where stream_id = ?1",
+                "select next_event_offset from event_streams where stream_id = ?1",
                 params![stream_id],
                 |row| row.get(0),
             )?;
@@ -646,6 +650,10 @@ impl ManagedSourceStore {
                 values (?1, ?2, ?3, ?4)
                 "#,
                 params![stream_id, next_offset, ingested_at_unix, payload_json],
+            )?;
+            tx.execute(
+                "update event_streams set next_event_offset = ?2 where stream_id = ?1",
+                params![stream_id, next_offset.saturating_add(1)],
             )?;
             apply_retention_tx(&tx, &stream_id, ingested_at_unix)?;
             tx.commit()?;
@@ -872,9 +880,10 @@ fn upsert_source_tx(
                 source_key,
                 created_at_unix,
                 retention_max_rows,
-                retention_max_age_secs
+                retention_max_age_secs,
+                next_event_offset
             )
-            values (?1, ?2, ?3, ?4, ?5, ?6)
+            values (?1, ?2, ?3, ?4, ?5, ?6, 1)
             "#,
             params![
                 record.stream_id,
@@ -940,6 +949,9 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
     if version < 2 {
         migrate_v1_to_v2(conn)?;
     }
+    if version < 3 {
+        migrate_v2_to_v3(conn)?;
+    }
     conn.pragma_update(None, "user_version", MANAGED_SOURCE_SCHEMA_VERSION)?;
     Ok(())
 }
@@ -979,6 +991,30 @@ fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
             [],
         )?;
     }
+    Ok(())
+}
+
+fn migrate_v2_to_v3(conn: &mut Connection) -> Result<()> {
+    if !table_has_column(conn, "event_streams", "next_event_offset")? {
+        conn.execute(
+            "alter table event_streams add column next_event_offset integer not null default 1",
+            [],
+        )?;
+    }
+    conn.execute(
+        r#"
+        update event_streams
+        set next_event_offset = coalesce(
+            (
+                select max(offset) + 1
+                from stream_events
+                where stream_events.stream_id = event_streams.stream_id
+            ),
+            1
+        )
+        "#,
+        [],
+    )?;
     Ok(())
 }
 
