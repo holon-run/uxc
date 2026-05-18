@@ -41,6 +41,15 @@ fn read_session_json(files: &AuthFiles, session_id: &str) -> Value {
     serde_json::from_str(&contents).expect("session file should be valid JSON")
 }
 
+fn rewrite_session_id(files: &AuthFiles, old_session_id: &str, new_session_id: &str) {
+    let old_path = files.session_dir.join(format!("{}.json", old_session_id));
+    let new_path = files.session_dir.join(format!("{}.json", new_session_id));
+    let mut session_json = read_session_json(files, old_session_id);
+    session_json["session_id"] = serde_json::json!(new_session_id);
+    fs::write(&new_path, serde_json::to_vec_pretty(&session_json).unwrap()).unwrap();
+    fs::remove_file(old_path).unwrap();
+}
+
 #[test]
 fn oauth_start_returns_authorization_url_and_session() {
     let files = AuthFiles::new();
@@ -300,7 +309,9 @@ fn oauth_complete_state_mismatch_deletes_session() {
         .output()
         .expect("oauth start should run");
     let start_json = parse_stdout_json(&start);
-    let session_id = start_json["data"]["session_id"].as_str().unwrap();
+    let original_session_id = start_json["data"]["session_id"].as_str().unwrap();
+    let session_id = "-state-mismatch-session";
+    rewrite_session_id(&files, original_session_id, session_id);
 
     let complete = uxc_command(&files)
         .arg("auth")

@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Detect changed files
         id: filter
@@ -66,7 +66,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -82,10 +82,10 @@ jobs:
       - name: Install grpcurl
         run: |
           go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.1
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.4.0
         with:
           node-version: "20"
 
@@ -229,7 +229,7 @@ jobs:
           # Host help (operation discovery) with retry
           for attempt in {1..3}; do
             echo "Attempt $attempt/3: Fetching host help..."
-            if OUTPUT=$($UXC grpcb.in:9000 -h 2>&1); then
+            if OUTPUT=$("$UXC" grpcb.in:9000 -h 2>&1); then
               if echo "$OUTPUT" | jq -e '.ok == true and .kind == "host_help" and any(.data.operations[]; .operation_id == "addsvc.Add/Sum")' >/dev/null; then
                 echo "✓ Host help succeeded"
                 break
@@ -255,10 +255,10 @@ jobs:
           # Call operation with retry
           for attempt in {1..3}; do
             echo "Attempt $attempt/3: Calling addsvc.Add/Sum..."
-            if OUTPUT=$($UXC grpcb.in:9000 addsvc.Add/Sum '{"a":1,"b":2}' 2>&1); then
+            if OUTPUT=$("$UXC" grpcb.in:9000 addsvc.Add/Sum '{"a":1,"b":2}' 2>&1); then
               if echo "$OUTPUT" | jq -e '.ok == true and .protocol == "grpc" and .data.v == "3"' >/dev/null; then
                 echo "✓ Call operation succeeded"
-                echo "Result: 1 + 2 = $(echo \"$OUTPUT\" | jq -r '.data.v')"
+                echo "Result: 1 + 2 = $(jq -r '.data.v' <<<"$OUTPUT")"
                 break
               else
                 echo "✗ Call operation returned unexpected output:"
