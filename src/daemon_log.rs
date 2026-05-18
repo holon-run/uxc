@@ -39,6 +39,7 @@ pub enum DaemonEventType {
     RuntimeInvokeStart,
     RuntimeInvokeSuccess,
     RuntimeInvokeFailure,
+    ManagedSourcePollSummary,
 
     // Protocol detection events
     ProtocolDetectionSuccess,

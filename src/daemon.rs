@@ -3041,6 +3041,7 @@ impl ManagedSourceManager {
         }
         let mut poll_round = 0_u64;
         loop {
+            let poll_started = Instant::now();
             if *stop_rx.borrow() {
                 update_subscription_view(runtime_view, Some("stopped"), None, false).await;
                 let snapshot = runtime_view.lock().await.clone();
@@ -3058,6 +3059,8 @@ impl ManagedSourceManager {
 
             match fetch {
                 Ok(result) => {
+                    let fetch_duration_ms = result.duration_ms;
+                    let status_code = result.status_code;
                     if let Some(etag) = crate::subscription_poll::extract_header_value(
                         &result.response_headers,
                         "etag",
@@ -3074,7 +3077,9 @@ impl ManagedSourceManager {
                     if result.status_code == Some(304) {
                         note_subscription_success(runtime_view, now_unix_secs()).await;
                         update_subscription_view(runtime_view, Some("running"), None, false).await;
+                        let mut db_write_duration_ms = 0;
                         if runner.checkpoint() != &previous_checkpoint {
+                            let db_write_started = Instant::now();
                             if let Err(err) = self
                                 .store
                                 .append_events_and_store_poll_checkpoint(
@@ -3090,8 +3095,24 @@ impl ManagedSourceManager {
                                 self.fail_managed_source(entry, err.to_string()).await;
                                 return;
                             }
+                            db_write_duration_ms = db_write_started.elapsed().as_millis() as u64;
                         }
+                        log_managed_source_poll_summary(
+                            runtime,
+                            entry,
+                            ManagedSourcePollSummaryLog {
+                                status_code,
+                                fetch_duration_ms,
+                                process_duration_ms: 0,
+                                db_write_duration_ms,
+                                event_count: 0,
+                                total_duration_ms: poll_started.elapsed().as_millis() as u64,
+                                error: None,
+                            },
+                        )
+                        .await;
                     } else {
+                        let process_started = Instant::now();
                         let output = match runner.process_response(result.data, result.duration_ms)
                         {
                             Ok(output) => output,
@@ -3100,6 +3121,7 @@ impl ManagedSourceManager {
                                 return;
                             }
                         };
+                        let process_duration_ms = process_started.elapsed().as_millis() as u64;
                         let ingested_at_unix = now_unix_secs();
                         note_subscription_success(runtime_view, ingested_at_unix).await;
                         update_subscription_view(runtime_view, Some("running"), None, false).await;
@@ -3111,7 +3133,10 @@ impl ManagedSourceManager {
                                 payload,
                             })
                             .collect::<Vec<_>>();
+                        let event_count = events.len();
+                        let mut db_write_duration_ms = 0;
                         if !events.is_empty() || runner.checkpoint() != &previous_checkpoint {
+                            let db_write_started = Instant::now();
                             if let Err(err) = self
                                 .store
                                 .append_events_and_store_poll_checkpoint(
@@ -3127,19 +3152,48 @@ impl ManagedSourceManager {
                                 self.fail_managed_source(entry, err.to_string()).await;
                                 return;
                             }
+                            db_write_duration_ms = db_write_started.elapsed().as_millis() as u64;
                             if !events.is_empty() {
                                 note_subscription_events_written(
                                     runtime_view,
                                     ingested_at_unix,
-                                    events.len() as u64,
+                                    event_count as u64,
                                 )
                                 .await;
                             }
                         }
+                        log_managed_source_poll_summary(
+                            runtime,
+                            entry,
+                            ManagedSourcePollSummaryLog {
+                                status_code,
+                                fetch_duration_ms,
+                                process_duration_ms,
+                                db_write_duration_ms,
+                                event_count,
+                                total_duration_ms: poll_started.elapsed().as_millis() as u64,
+                                error: None,
+                            },
+                        )
+                        .await;
                     }
                 }
                 Err(err) => {
                     let message = err.to_string();
+                    log_managed_source_poll_summary(
+                        runtime,
+                        entry,
+                        ManagedSourcePollSummaryLog {
+                            status_code: None,
+                            fetch_duration_ms: None,
+                            process_duration_ms: 0,
+                            db_write_duration_ms: 0,
+                            event_count: 0,
+                            total_duration_ms: poll_started.elapsed().as_millis() as u64,
+                            error: Some(message.clone()),
+                        },
+                    )
+                    .await;
                     update_subscription_view(
                         runtime_view,
                         Some("reconnecting"),
@@ -3319,6 +3373,43 @@ impl ManagedSourceManager {
         let _ = tokio::fs::remove_file(runtime.managed_source_cursor_path(&stored.run_id)).await;
         Ok(())
     }
+}
+
+struct ManagedSourcePollSummaryLog {
+    status_code: Option<u16>,
+    fetch_duration_ms: Option<u64>,
+    process_duration_ms: u64,
+    db_write_duration_ms: u64,
+    event_count: usize,
+    total_duration_ms: u64,
+    error: Option<String>,
+}
+
+async fn log_managed_source_poll_summary(
+    runtime: &DaemonRuntime,
+    entry: &ManagedSourceEntry,
+    summary: ManagedSourcePollSummaryLog,
+) {
+    let mut log_entry = DaemonLogEntry::new(DaemonEventType::ManagedSourcePollSummary)
+        .with_request_id(format!(
+            "managed-source:{}:{}",
+            entry.namespace, entry.source_key
+        ))
+        .with_meta(json!({
+            "namespace": entry.namespace,
+            "source_key": entry.source_key,
+            "stream_id": entry.stream_id,
+            "status_code": summary.status_code,
+            "fetch_duration_ms": summary.fetch_duration_ms,
+            "process_duration_ms": summary.process_duration_ms,
+            "db_write_duration_ms": summary.db_write_duration_ms,
+            "event_count": summary.event_count,
+            "total_duration_ms": summary.total_duration_ms,
+        }));
+    if let Some(error) = summary.error {
+        log_entry = log_entry.with_error(error);
+    }
+    runtime.log(log_entry).await;
 }
 
 fn validate_managed_source_identity(namespace: &str, source_key: &str) -> Result<()> {
@@ -9453,7 +9544,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_source_store_migrates_v0_schema_to_v2() {
+    fn managed_source_store_migrates_v0_schema_to_v3() {
         let temp = tempdir().unwrap();
         let db_path = managed_source_streams_db_path(temp.path());
         let conn = Connection::open(&db_path).unwrap();
@@ -9493,6 +9584,29 @@ mod tests {
                 primary key (stream_id, offset)
             );
             "#,
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            insert into event_streams(
+                stream_id,
+                namespace,
+                source_key,
+                created_at_unix,
+                retention_max_rows,
+                retention_max_age_secs
+            )
+            values ('stream_v0', 'test', 'poll-v0', 1, 10000, 604800)
+            "#,
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            insert into stream_events(stream_id, offset, ingested_at_unix, raw_payload_json)
+            values ('stream_v0', 5, 1, '{"id":5}')
+            "#,
+            [],
         )
         .unwrap();
         drop(conn);
@@ -9537,12 +9651,28 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 2);
+        let has_next_event_offset_column: i64 = conn
+            .query_row(
+                "select count(*) from pragma_table_info('event_streams') where name = 'next_event_offset'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let next_event_offset: u64 = conn
+            .query_row(
+                "select next_event_offset from event_streams where stream_id = 'stream_v0'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 3);
         assert_eq!(has_checkpoint_column, 1);
         assert_eq!(has_last_success_column, 1);
         assert_eq!(has_last_event_column, 1);
         assert_eq!(has_reconnect_column, 1);
         assert_eq!(has_written_events_column, 1);
+        assert_eq!(has_next_event_offset_column, 1);
+        assert_eq!(next_event_offset, 6);
     }
 
     #[test]
@@ -9687,6 +9817,80 @@ mod tests {
             .await
             .unwrap();
         assert!(page.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_event_writes_use_stream_offset_counter() {
+        let temp = tempdir().unwrap();
+        let runtime = test_runtime_with_store(&temp);
+        let record = poll_checkpoint_test_record("test", "poll-offset-counter", "run-offset");
+        runtime
+            .managed_sources
+            .store
+            .upsert_source(&record, true)
+            .await
+            .unwrap();
+
+        let checkpoint = crate::subscription_poll::PollCheckpointState {
+            cursor: Some(json!(2)),
+            ..Default::default()
+        };
+        let offsets = runtime
+            .managed_sources
+            .store
+            .append_events_and_store_poll_checkpoint(
+                &record.namespace,
+                &record.source_key,
+                &record.run_id,
+                &record.stream_id,
+                &[
+                    PendingStreamEvent {
+                        ingested_at_unix: now_unix_secs(),
+                        payload: json!({"id": 1}),
+                    },
+                    PendingStreamEvent {
+                        ingested_at_unix: now_unix_secs(),
+                        payload: json!({"id": 2}),
+                    },
+                ],
+                &checkpoint,
+            )
+            .await
+            .unwrap();
+        assert_eq!(offsets, vec![1, 2]);
+
+        let db_path = managed_source_streams_db_path(temp.path());
+        let next_event_offset: u64 = Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "select next_event_offset from event_streams where stream_id = ?1",
+                [&record.stream_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(next_event_offset, 3);
+
+        let checkpoint = crate::subscription_poll::PollCheckpointState {
+            cursor: Some(json!(3)),
+            ..Default::default()
+        };
+        let offsets = runtime
+            .managed_sources
+            .store
+            .append_events_and_store_poll_checkpoint(
+                &record.namespace,
+                &record.source_key,
+                &record.run_id,
+                &record.stream_id,
+                &[PendingStreamEvent {
+                    ingested_at_unix: now_unix_secs(),
+                    payload: json!({"id": 3}),
+                }],
+                &checkpoint,
+            )
+            .await
+            .unwrap();
+        assert_eq!(offsets, vec![3]);
     }
 
     #[tokio::test]
@@ -9915,7 +10119,8 @@ mod tests {
             .await
             .unwrap();
 
-        let sources = runtime.source_list().await.unwrap();
+        let mut sources = runtime.source_list().await.unwrap();
+        sources.sort_by(|left, right| left.source_key.cmp(&right.source_key));
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0].namespace, "team");
         assert_eq!(sources[0].source_key, "alpha");
