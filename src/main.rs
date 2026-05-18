@@ -683,7 +683,7 @@ enum AuthOauthCommands {
         credential_id: String,
 
         /// OAuth session ID
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         session_id: String,
 
         /// Authorization response, callback URL, or plain authorization code
