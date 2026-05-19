@@ -1,0 +1,643 @@
+{
+  "components": {
+    "schemas": {
+      "BatchGetUserIdRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "emails": {
+            "description": "Email addresses to resolve",
+            "items": {
+              "format": "email",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "include_resigned": {
+            "description": "Whether to include resigned users in the lookup",
+            "type": "boolean"
+          },
+          "mobiles": {
+            "description": "Mobile numbers to resolve",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "BotInfo": {
+        "properties": {
+          "activate_status": {
+            "description": "Current app activation status in the tenant.",
+            "type": "integer"
+          },
+          "app_name": {
+            "description": "App bot display name.",
+            "type": "string"
+          },
+          "avatar_url": {
+            "description": "App bot avatar URL.",
+            "type": "string"
+          },
+          "ip_white_list": {
+            "description": "Configured IP allow list for the app.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "open_id": {
+            "description": "Bot open_id for the configured app.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app_name",
+          "open_id"
+        ],
+        "type": "object"
+      },
+      "BotInfoResponse": {
+        "properties": {
+          "bot": {
+            "$ref": "#/components/schemas/BotInfo"
+          },
+          "code": {
+            "description": "Feishu/Lark API status code. 0 means success.",
+            "type": "integer"
+          },
+          "msg": {
+            "description": "Feishu/Lark API status message.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "msg",
+          "bot"
+        ],
+        "type": "object"
+      },
+      "CreateMessageRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "description": "Stringified JSON payload expected by Feishu, for example {\"text\":\"hello\"}",
+            "type": "string"
+          },
+          "msg_type": {
+            "description": "Message content type",
+            "enum": [
+              "text",
+              "post",
+              "image",
+              "interactive",
+              "share_chat",
+              "share_user",
+              "audio",
+              "media",
+              "file",
+              "sticker"
+            ],
+            "type": "string"
+          },
+          "receive_id": {
+            "description": "Target identifier whose type is defined by receive_id_type",
+            "type": "string"
+          },
+          "uuid": {
+            "description": "Optional client-generated idempotency token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receive_id",
+          "msg_type",
+          "content"
+        ],
+        "type": "object"
+      },
+      "ReplyMessageRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "description": "Stringified JSON payload expected by Feishu, for example {\"text\":\"reply\"}",
+            "type": "string"
+          },
+          "msg_type": {
+            "description": "Message content type. Defaults vary by API behavior; set it explicitly.",
+            "enum": [
+              "text",
+              "post",
+              "image",
+              "interactive",
+              "share_chat",
+              "share_user",
+              "audio",
+              "media",
+              "file",
+              "sticker"
+            ],
+            "type": "string"
+          },
+          "uuid": {
+            "description": "Optional client-generated idempotency token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "UploadFileRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "duration": {
+            "description": "Optional duration in milliseconds for audio or video uploads",
+            "type": "integer"
+          },
+          "file": {
+            "description": "Local file path to upload",
+            "format": "binary",
+            "type": "string"
+          },
+          "file_name": {
+            "description": "Original filename shown in Feishu",
+            "type": "string"
+          },
+          "file_type": {
+            "description": "File upload type. Use stream for general file uploads.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_type",
+          "file_name",
+          "file"
+        ],
+        "type": "object"
+      },
+      "UploadImageRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "image": {
+            "description": "Local image file path to upload",
+            "format": "binary",
+            "type": "string"
+          },
+          "image_type": {
+            "description": "Image upload purpose. Use message for IM sends.",
+            "enum": [
+              "message"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "image_type",
+          "image"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "FeishuBearerAuth": {
+        "bearerFormat": "tenant_access_token",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "paths": {
+    "/bot/v3/info": {
+      "get": {
+        "description": "Returns the configured Feishu/Lark app bot identity, including bot.open_id and bot.app_name. Requires tenant_access_token but no additional API scope.",
+        "operationId": "botGetInfo",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BotInfoResponse"
+                }
+              }
+            },
+            "description": "Bot identity response"
+          }
+        },
+        "summary": "Get bot identity information for the configured app",
+        "x-feishu-access-tokens": [
+          "tenant"
+        ],
+        "x-feishu-doc-url": "https://open.feishu.cn/document/client-docs/bot-v3/obtain-bot-info.md",
+        "x-feishu-scopes": [],
+        "x-feishu-source": "llms.txt:bot-v3/obtain-bot-info"
+      }
+    },
+    "/contact/v3/users/batch_get_id": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchGetUserIdRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Batch user ID lookup response"
+          }
+        },
+        "summary": "Resolve user IDs from email or mobile values"
+      }
+    },
+    "/contact/v3/users/{user_id}": {
+      "get": {
+        "parameters": [
+          {
+            "description": "User identifier",
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Identifier type used for the path parameter",
+            "in": "query",
+            "name": "user_id_type",
+            "required": false,
+            "schema": {
+              "enum": [
+                "open_id",
+                "union_id",
+                "user_id"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Preferred department ID type in the response",
+            "in": "query",
+            "name": "department_id_type",
+            "required": false,
+            "schema": {
+              "enum": [
+                "department_id",
+                "open_department_id"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User profile response"
+          }
+        },
+        "summary": "Get one user profile"
+      }
+    },
+    "/im/v1/chats": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Number of chats to return",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Pagination token from a previous response",
+            "in": "query",
+            "name": "page_token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort order for the chat list",
+            "in": "query",
+            "name": "sort_type",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ByCreateTimeAsc",
+                "ByCreateTimeDesc",
+                "ByActiveTimeAsc",
+                "ByActiveTimeDesc"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat list response"
+          }
+        },
+        "summary": "List chats visible to the app"
+      }
+    },
+    "/im/v1/chats/{chat_id}": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Feishu chat identifier",
+            "in": "path",
+            "name": "chat_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat detail response"
+          }
+        },
+        "summary": "Get details for one chat"
+      }
+    },
+    "/im/v1/chats/{chat_id}/members": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Feishu chat identifier",
+            "in": "path",
+            "name": "chat_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Identifier type for returned members",
+            "in": "query",
+            "name": "member_id_type",
+            "required": false,
+            "schema": {
+              "enum": [
+                "open_id",
+                "union_id",
+                "user_id"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of members to return",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Pagination token from a previous response",
+            "in": "query",
+            "name": "page_token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat member list response"
+          }
+        },
+        "summary": "List members of a chat"
+      }
+    },
+    "/im/v1/files": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadFileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "File upload response"
+          }
+        },
+        "summary": "Upload a file and receive a file_key"
+      }
+    },
+    "/im/v1/images": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadImageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Image upload response"
+          }
+        },
+        "summary": "Upload an image and receive an image_key"
+      }
+    },
+    "/im/v1/messages": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Container type used for the lookup",
+            "in": "query",
+            "name": "container_id_type",
+            "required": true,
+            "schema": {
+              "enum": [
+                "chat"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Chat identifier whose history should be returned",
+            "in": "query",
+            "name": "container_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sort order for the message history",
+            "in": "query",
+            "name": "sort_type",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ByCreateTimeAsc",
+                "ByCreateTimeDesc"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of messages to return",
+            "in": "query",
+            "name": "page_size",
+            "required": false,
+            "schema": {
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Pagination token from a previous response",
+            "in": "query",
+            "name": "page_token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Inclusive start time filter, typically epoch milliseconds as a string",
+            "in": "query",
+            "name": "start_time",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Inclusive end time filter, typically epoch milliseconds as a string",
+            "in": "query",
+            "name": "end_time",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message history response"
+          }
+        },
+        "summary": "List historical messages for a container"
+      },
+      "post": {
+        "parameters": [
+          {
+            "description": "Identifier type for the receive_id field",
+            "in": "query",
+            "name": "receive_id_type",
+            "required": true,
+            "schema": {
+              "enum": [
+                "open_id",
+                "user_id",
+                "union_id",
+                "chat_id",
+                "email"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Send message response"
+          }
+        },
+        "summary": "Send a message to a user, chat, or thread target"
+      }
+    },
+    "/im/v1/messages/{message_id}": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Feishu message identifier",
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message detail response"
+          }
+        },
+        "summary": "Get one message by ID"
+      }
+    },
+    "/im/v1/messages/{message_id}/reply": {
+      "post": {
+        "parameters": [
+          {
+            "description": "Message identifier to reply to",
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplyMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Reply message response"
+          }
+        },
+        "summary": "Reply to an existing message"
+      }
+    }
+  }
+}
