@@ -297,6 +297,7 @@ def build_schema(meta: dict[str, Any], overlay: dict[str, Any], services: set[st
             {"url": "https://open.feishu.cn/open-apis"},
             {"url": "https://open.larksuite.com/open-apis"},
         ],
+        "security": [{"FeishuBearerAuth": []}],
         "paths": convert_meta(meta, services),
         "components": {"schemas": {}},
         "x-feishu-meta-version": meta.get("version"),

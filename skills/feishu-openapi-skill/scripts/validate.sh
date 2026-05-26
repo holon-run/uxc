@@ -27,6 +27,7 @@ for file in "${SKILL_FILE}" "${OPENAI_FILE}" "${USAGE_FILE}" "${SCHEMA_FILE}" "$
 done
 
 jq -e '.openapi and .paths' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'invalid OpenAPI schema JSON or missing .openapi/.paths'
+jq -e '.security[]? | has("FeishuBearerAuth")' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'OpenAPI schema missing FeishuBearerAuth security requirement'
 jq -e '.paths["/bot/v3/info"].get' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'OpenAPI schema missing /bot/v3/info path'
 jq -e '.paths["/im/v1/chats"]' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'OpenAPI schema missing /im/v1/chats path'
 jq -e '.paths["/im/v1/images"]' "${SCHEMA_FILE}" >/dev/null 2>&1 || fail 'OpenAPI schema missing /im/v1/images path'

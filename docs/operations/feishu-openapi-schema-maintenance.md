@@ -95,7 +95,16 @@ services incrementally.
 Use `larksuite/cli` as an implementation reference for endpoints missing from
 the registry metadata.
 
-Useful local sources:
+Useful sources in this repository:
+
+- `skills/feishu-openapi-skill/scripts/generate_openapi.py`: metadata to
+  OpenAPI converter
+- `skills/feishu-openapi-skill/references/feishu-openapi.overlay.json`:
+  curated overlay for missing endpoints and UXC guardrails
+- `skills/feishu-openapi-skill/scripts/validate.sh`: schema validation checks
+
+Useful external reference sources in `larksuite/cli`
+(`https://github.com/larksuite/cli`, paths relative to that repository):
 
 - `scripts/fetch_meta.py`: official metadata fetch shape
 - `internal/registry/remote.go`: Feishu/Lark metadata endpoint and cache rules
