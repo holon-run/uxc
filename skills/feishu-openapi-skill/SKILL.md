@@ -22,6 +22,7 @@ Reuse the `uxc` skill for shared execution, auth, and error-handling guidance.
 
 This skill covers an IM-focused request/response surface:
 
+- bot identity lookup
 - chat lookup
 - chat member lookup
 - image and file upload for IM sends
@@ -162,6 +163,7 @@ uxc auth binding match https://open.feishu.cn/open-apis
    - `feishu-openapi-cli -h`
 
 2. Inspect operation schema first:
+   - `feishu-openapi-cli get:/bot/v3/info -h`
    - `feishu-openapi-cli get:/im/v1/chats -h`
    - `feishu-openapi-cli post:/im/v1/images -h`
    - `feishu-openapi-cli post:/im/v1/files -h`
@@ -169,6 +171,7 @@ uxc auth binding match https://open.feishu.cn/open-apis
    - `feishu-openapi-cli get:/im/v1/messages -h`
 
 3. Prefer read/setup validation before writes:
+   - `feishu-openapi-cli get:/bot/v3/info`
    - `feishu-openapi-cli get:/im/v1/chats page_size=20`
    - `feishu-openapi-cli get:/im/v1/chats/{chat_id} chat_id=oc_xxx`
    - `feishu-openapi-cli get:/contact/v3/users/{user_id} user_id=ou_xxx user_id_type=open_id`
@@ -186,6 +189,10 @@ uxc auth binding match https://open.feishu.cn/open-apis
    - send a bot-visible message, then inspect the sink for `header.event_type = "im.message.receive_v1"`
 
 ## Operation Groups
+
+### Bot Identity
+
+- `get:/bot/v3/info`
 
 ### Chat Reads
 
@@ -215,6 +222,7 @@ uxc auth binding match https://open.feishu.cn/open-apis
 - Keep automation on the JSON output envelope; do not use `--text`.
 - Parse stable fields first: `ok`, `kind`, `protocol`, `data`, `error`.
 - Prefer `uxc auth bootstrap` over manual token management. Manual `tenant_access_token` setup is still supported as a fallback.
+- `get:/bot/v3/info` requires a tenant token for an app with bot capability enabled, but does not require additional API scopes.
 - `feishu-long-connection` requires the app credential fields `app_id` and `app_secret`; a plain bearer-only credential is not enough for event intake.
 - `post:/im/v1/images` and `post:/im/v1/files` use `multipart/form-data`. File fields must be local path strings; help output marks them as multipart file fields.
 - `post:/im/v1/messages` requires the `receive_id_type` query parameter and the body `content` field is a JSON-encoded string, not a nested JSON object.

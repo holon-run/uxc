@@ -16,6 +16,7 @@ For public product docs, use the docs site:
 
 - [`operations/release.md`](./operations/release.md): release workflow and publishing checklist
 - [`operations/skills.md`](./operations/skills.md): skills publish and maintenance log
+- [`operations/feishu-openapi-schema-maintenance.md`](./operations/feishu-openapi-schema-maintenance.md): Feishu/Lark schema generation and update plan
 - [`decisions/matrix-auth.md`](./decisions/matrix-auth.md): issue-specific Matrix auth decision note for #274
 - [`decisions/daemon-session-lifecycle.md`](./decisions/daemon-session-lifecycle.md): daemon session lifecycle contract note for #337
 - [`decisions/artifact-contract.md`](./decisions/artifact-contract.md): artifact contract note for #338
