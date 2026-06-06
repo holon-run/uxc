@@ -17,7 +17,7 @@ fn runtime_root(test_home: &Path) -> PathBuf {
 }
 
 fn daemon_socket_path(test_home: &Path) -> PathBuf {
-    runtime_root(test_home).join("uxc").join("uxc.sock")
+    test_home.join(".uxc").join("daemon").join("uxc.sock")
 }
 
 fn read_frame(stream: &mut UnixStream) -> Value {

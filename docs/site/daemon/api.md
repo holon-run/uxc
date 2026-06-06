@@ -21,8 +21,8 @@ UXC exposes a stable local daemon control plane over a Unix socket using
 
 Socket path follows the same daemon rules as the CLI:
 
-- `$XDG_RUNTIME_DIR/uxc/uxc.sock`
-- fallback: `$HOME/.uxc/daemon/uxc.sock`
+- `$HOME/.uxc/daemon/uxc.sock`
+- fallback when `HOME` is unavailable: the OS temporary directory under a per-user `uxc-<user>/daemon/` directory
 
 Frame format:
 

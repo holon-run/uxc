@@ -7702,9 +7702,6 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Value> {
 }
 
 fn daemon_dir() -> PathBuf {
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(runtime).join("uxc");
-    }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home).join(".uxc").join("daemon");
     }
