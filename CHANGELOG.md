@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.6] - 2026-06-06
+
+### Fixed
+- Stabilized daemon socket, log, and database paths by keeping UXC-managed runtime state under the UXC data directory instead of XDG runtime or state environment overrides.
+- Report `cursor_out_of_range` when managed-source stream reads request an offset beyond the latest available stream offset.
+- Refreshed the Feishu OpenAPI schema.
+
+### Performance
+- Reduced managed-source poller hot-path overhead.
+
 ## [0.15.5] - 2026-05-14
 
 ### Changed
