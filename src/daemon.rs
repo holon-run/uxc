@@ -9923,6 +9923,16 @@ mod tests {
             .await
             .unwrap();
 
+        let zero_limit = runtime
+            .managed_sources
+            .store
+            .read_stream(&record.stream_id, 0, 0)
+            .await
+            .unwrap();
+        assert!(zero_limit.events.is_empty());
+        assert_eq!(zero_limit.next_after_offset, 0);
+        assert!(!zero_limit.has_more);
+
         let caught_up = runtime
             .stream_read(&ManagedStreamReadRequest {
                 stream_id: record.stream_id.clone(),

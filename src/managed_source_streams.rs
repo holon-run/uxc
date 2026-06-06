@@ -700,6 +700,13 @@ impl ManagedSourceStore {
                     .into());
                 }
             }
+            if limit == 0 {
+                return Ok(StreamReadPage {
+                    events: Vec::new(),
+                    next_after_offset: after_offset,
+                    has_more: false,
+                });
+            }
             let query_limit = limit.saturating_add(1) as u64;
             let mut stmt = conn.prepare(
                 r#"
