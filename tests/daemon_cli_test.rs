@@ -24,7 +24,7 @@ fn daemon_stop_best_effort_with_home(home: &Path) {
 }
 
 fn daemon_runtime_dir(home: &Path) -> PathBuf {
-    home.join("runtime").join("uxc")
+    home.join(".uxc").join("daemon")
 }
 
 fn daemon_socket_path(home: &Path) -> PathBuf {
@@ -49,6 +49,37 @@ fn spawn_daemon_serve(home: &Path) -> Child {
         .stderr(Stdio::null())
         .spawn()
         .expect("daemon _serve should spawn")
+}
+
+#[test]
+#[serial]
+fn daemon_paths_ignore_xdg_runtime_dir_by_default() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+
+    let runtime_dir = temp_home.path().join("runtime");
+    fs::create_dir_all(&runtime_dir).expect("runtime dir should exist");
+
+    let output = uxc_command()
+        .arg("daemon")
+        .arg("start")
+        .env("HOME", temp_home.path())
+        .env("USERPROFILE", temp_home.path())
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .output()
+        .expect("daemon start should run");
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(
+        json["data"]["socket"],
+        daemon_socket_path(temp_home.path()).display().to_string()
+    );
+    assert!(daemon_socket_path(temp_home.path()).exists());
+    assert!(!runtime_dir.join("uxc").join("uxc.sock").exists());
+
+    daemon_stop_best_effort_with_home(temp_home.path());
 }
 
 fn wait_for_path(path: &Path) {

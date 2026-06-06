@@ -16,7 +16,7 @@ fn daemon_stop_best_effort_with_home(home: &Path) {
 }
 
 fn daemon_runtime_dir(home: &Path) -> PathBuf {
-    home.join("runtime").join("uxc")
+    home.join(".uxc").join("daemon")
 }
 
 fn read_json_output(output: &std::process::Output) -> serde_json::Value {

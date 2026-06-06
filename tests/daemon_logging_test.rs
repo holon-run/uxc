@@ -68,7 +68,7 @@ fn daemon_creates_log_file() {
         .arg("stop")
         .output();
 
-    let log_dir = PathBuf::from(temp_home.path()).join("runtime").join("uxc");
+    let log_dir = PathBuf::from(temp_home.path()).join(".uxc").join("daemon");
 
     // Remove existing log file if present
     let log_file = log_dir.join("daemon.log");
@@ -126,7 +126,7 @@ fn daemon_log_contains_start_event() {
         .arg("stop")
         .output();
 
-    let log_dir = PathBuf::from(temp_home.path()).join("runtime").join("uxc");
+    let log_dir = PathBuf::from(temp_home.path()).join(".uxc").join("daemon");
 
     let log_file = log_dir.join("daemon.log");
     if log_file.exists() {
@@ -180,7 +180,7 @@ fn daemon_log_contains_stdio_session_lifecycle_events() {
         .arg("stop")
         .output();
 
-    let log_dir = PathBuf::from(temp_home.path()).join("runtime").join("uxc");
+    let log_dir = PathBuf::from(temp_home.path()).join(".uxc").join("daemon");
 
     let log_file = log_dir.join("daemon.log");
     if log_file.exists() {
@@ -254,7 +254,7 @@ fn daemon_log_contains_lifecycle_snapshot_metadata_for_stateful_stdio_sessions()
         .arg("stop")
         .output();
 
-    let log_dir = PathBuf::from(temp_home.path()).join("runtime").join("uxc");
+    let log_dir = PathBuf::from(temp_home.path()).join(".uxc").join("daemon");
 
     let log_file = log_dir.join("daemon.log");
     if log_file.exists() {
