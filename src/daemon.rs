@@ -9891,6 +9891,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_read_reports_cursor_out_of_range_after_latest_offset() {
+        let temp = tempdir().unwrap();
+        let runtime = test_runtime_with_store(&temp);
+        let record = poll_checkpoint_test_record("test", "poll-cursor-range", "run-cursor-range");
+        runtime
+            .managed_sources
+            .store
+            .upsert_source(&record, true)
+            .await
+            .unwrap();
+
+        let checkpoint = crate::subscription_poll::PollCheckpointState {
+            cursor: Some(json!(1)),
+            ..Default::default()
+        };
+        runtime
+            .managed_sources
+            .store
+            .append_events_and_store_poll_checkpoint(
+                &record.namespace,
+                &record.source_key,
+                &record.run_id,
+                &record.stream_id,
+                &[PendingStreamEvent {
+                    ingested_at_unix: now_unix_secs(),
+                    payload: json!({"id": 1}),
+                }],
+                &checkpoint,
+            )
+            .await
+            .unwrap();
+
+        let caught_up = runtime
+            .stream_read(&ManagedStreamReadRequest {
+                stream_id: record.stream_id.clone(),
+                after_offset: 1,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert!(caught_up.events.is_empty());
+        assert_eq!(caught_up.next_after_offset, 1);
+
+        let err = runtime
+            .stream_read(&ManagedStreamReadRequest {
+                stream_id: record.stream_id.clone(),
+                after_offset: 2,
+                limit: 10,
+            })
+            .await
+            .unwrap_err();
+        let structured =
+            structured_error_from_anyhow(&err).expect("cursor error should be structured");
+        assert_eq!(structured.code, "cursor_out_of_range");
+        let details = structured
+            .details
+            .expect("cursor error should include details");
+        assert_eq!(details["stream_id"], record.stream_id);
+        assert_eq!(details["after_offset"], json!(2));
+        assert_eq!(details["latest_offset"], json!(1));
+    }
+
+    #[tokio::test]
     async fn poll_checkpoint_write_failure_does_not_advance_checkpoint() {
         let temp = tempdir().unwrap();
         let runtime = test_runtime_with_store(&temp);

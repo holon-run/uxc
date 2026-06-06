@@ -1,6 +1,8 @@
+use crate::error::StructuredError;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -673,6 +675,31 @@ impl ManagedSourceStore {
         let stream_id = stream_id.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = Connection::open(&path)?;
+            let latest_offset = conn
+                .query_row(
+                    "select max(offset) from stream_events where stream_id = ?1",
+                    params![stream_id],
+                    |row| row.get::<_, Option<u64>>(0),
+                )
+                .optional()?
+                .flatten();
+            if let Some(latest_offset) = latest_offset {
+                if after_offset > latest_offset {
+                    return Err(StructuredError::new(
+                        "cursor_out_of_range",
+                        format!(
+                            "stream read cursor is out of range: after_offset {} is greater than latest_offset {} for stream {}",
+                            after_offset, latest_offset, stream_id
+                        ),
+                        Some(json!({
+                            "stream_id": stream_id,
+                            "after_offset": after_offset,
+                            "latest_offset": latest_offset,
+                        })),
+                    )
+                    .into());
+                }
+            }
             let query_limit = limit.saturating_add(1) as u64;
             let mut stmt = conn.prepare(
                 r#"
