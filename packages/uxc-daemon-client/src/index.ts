@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
@@ -942,17 +941,17 @@ function normalizeOptions(options: RuntimeInvokeOptions | undefined): RuntimeInv
 }
 
 function defaultSocketPath(env: NodeJS.ProcessEnv | undefined): string {
-  if (env?.XDG_RUNTIME_DIR) {
-    return join(env.XDG_RUNTIME_DIR, "uxc", "uxc.sock");
-  }
   if (env?.HOME) {
     return join(env.HOME, ".uxc", "daemon", "uxc.sock");
   }
-  const label = createHash("sha1")
-    .update(env?.USER ?? env?.USERNAME ?? "user")
-    .digest("hex")
-    .slice(0, 8);
+  const label = bestEffortUserLabel(env);
   return join(tmpdir(), `uxc-${label}`, "daemon", "uxc.sock");
+}
+
+function bestEffortUserLabel(env: NodeJS.ProcessEnv | undefined): string {
+  const raw = env?.USER ?? env?.USERNAME ?? "unknown";
+  const filtered = raw.replace(/[^A-Za-z0-9_-]/g, "_");
+  return filtered.length > 0 ? filtered : "unknown";
 }
 
 function requestId(prefix: string): string {
