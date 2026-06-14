@@ -2,8 +2,10 @@
 
 use anyhow::Result;
 use assert_cmd::Command as AssertCommand;
+use std::ffi::OsStr;
 use std::fs;
-use std::path::PathBuf;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -161,7 +163,7 @@ pub fn start_test_server(protocol: &str, scenario: &str) -> TestServerHandle {
 /// Run uxc command and check result
 pub fn run_uxc(args: &[&str]) -> Result<String, String> {
     let test_home = fresh_test_home_dir();
-    run_uxc_in_home(args, &test_home)
+    run_uxc_in_home(args, test_home.path())
 }
 
 /// Run uxc command using an explicit HOME path.
@@ -193,12 +195,55 @@ pub fn run_uxc_in_home(args: &[&str], test_home: &std::path::Path) -> Result<Str
     }
 }
 
+/// Temporary HOME for tests that may auto-start a daemon.
+///
+/// The daemon intentionally detaches from the invoking process, so dropping the
+/// directory alone is not enough: tests must stop the daemon for this HOME before
+/// the path disappears. This guard keeps cleanup tied to the HOME lifetime.
+pub struct TestHome {
+    path: PathBuf,
+}
+
+impl TestHome {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Deref for TestHome {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        self.path()
+    }
+}
+
+impl AsRef<OsStr> for TestHome {
+    fn as_ref(&self) -> &OsStr {
+        self.path.as_os_str()
+    }
+}
+
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        let runtime_dir = self.path.join("runtime");
+        let _ = fs::create_dir_all(&runtime_dir);
+        let _ = Command::new(uxc_binary())
+            .args(["daemon", "stop"])
+            .env("HOME", &self.path)
+            .env("USERPROFILE", &self.path)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .output();
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 /// Create a fresh HOME directory for test isolation.
-pub fn fresh_test_home_dir() -> PathBuf {
+pub fn fresh_test_home_dir() -> TestHome {
     static TEST_HOME_SEQ: AtomicU64 = AtomicU64::new(0);
     let n = TEST_HOME_SEQ.fetch_add(1, Ordering::SeqCst);
     // Keep path short to avoid Unix socket path length limits for daemon socket.
     let dir = PathBuf::from(format!("/tmp/uxcth-{}-{}", std::process::id(), n));
     fs::create_dir_all(&dir).expect("Failed to create test HOME");
-    dir
+    TestHome { path: dir }
 }
