@@ -1,6 +1,6 @@
 [package]
 name = "uxc"
-version = "0.15.6"
+version = "0.15.7"
 edition = "2021"
 authors = ["UXC Contributors"]
 description = "A unified CLI for discovering and invoking tools across OpenAPI, MCP, GraphQL, gRPC, and JSON-RPC"

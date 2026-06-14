@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-06-14
+
+### Fixed
+- Reconnect Feishu long-connection WebSocket sessions when heartbeat PONG responses time out, so stale connections recover instead of silently stopping event delivery.
+
 ## [0.15.6] - 2026-06-06
 
 ### Fixed

@@ -170,6 +170,7 @@ pub struct FeishuLongConnectionHandler {
     service_id: i32,
     ping_interval: Duration,
     next_ping_at: Option<Instant>,
+    pending_pong_since: Option<Instant>,
     event_cache: HashMap<String, FeishuEventAssembly>,
 }
 
@@ -179,8 +180,15 @@ impl FeishuLongConnectionHandler {
             service_id,
             ping_interval: Duration::from_secs(ping_interval_secs.max(1)),
             next_ping_at: None,
+            pending_pong_since: None,
             event_cache: HashMap::new(),
         }
+    }
+
+    fn pong_timeout(&self) -> Duration {
+        self.ping_interval
+            .checked_mul(2)
+            .unwrap_or(self.ping_interval)
     }
 
     fn make_control_frame(&self, message_type: &str, payload: Vec<u8>) -> Vec<u8> {
@@ -226,6 +234,7 @@ impl FeishuLongConnectionHandler {
                         }
                     }
                 }
+                self.pending_pong_since = None;
                 self.next_ping_at = Some(Instant::now() + self.ping_interval);
                 Ok(WebSocketHandlerOutput::continue_empty())
             }
@@ -330,6 +339,7 @@ impl FeishuLongConnectionHandler {
 #[async_trait]
 impl WebSocketSessionHandler for FeishuLongConnectionHandler {
     async fn on_open(&mut self, _meta: &WebSocketOpenMeta) -> Result<WebSocketHandlerAction> {
+        self.pending_pong_since = None;
         self.next_ping_at = Some(Instant::now() + self.ping_interval);
         Ok(WebSocketHandlerAction::Continue)
     }
@@ -408,7 +418,23 @@ impl WebSocketSessionHandler for FeishuLongConnectionHandler {
     }
 
     async fn on_wakeup(&mut self) -> Result<WebSocketHandlerOutput> {
-        self.next_ping_at = Some(Instant::now() + self.ping_interval);
+        if let Some(pending_since) = self.pending_pong_since {
+            return Ok(WebSocketHandlerOutput {
+                action: WebSocketHandlerAction::Reconnect,
+                data: None,
+                meta: Some(json!({
+                    "frame_type": "pong_timeout",
+                    "ping_interval_secs": self.ping_interval.as_secs(),
+                    "elapsed_secs": pending_since.elapsed().as_secs(),
+                })),
+                outbound_text_frames: Vec::new(),
+                outbound_binary_frames: Vec::new(),
+                stop_reason: Some("feishu_pong_timeout".to_string()),
+            });
+        }
+        let now = Instant::now();
+        self.pending_pong_since = Some(now);
+        self.next_ping_at = Some(now + self.pong_timeout());
         Ok(WebSocketHandlerOutput {
             action: WebSocketHandlerAction::Continue,
             data: None,
@@ -463,6 +489,24 @@ mod tests {
             payload_encoding: String::new(),
             payload_type: String::new(),
             payload: serde_json::to_vec(&payload).unwrap(),
+            log_id_new: String::new(),
+        }
+        .encode_to_vec()
+    }
+
+    fn pong_frame(payload: Vec<u8>) -> Vec<u8> {
+        FeishuPbFrame {
+            seq_id: 1,
+            log_id: 2,
+            service: 3,
+            method: FEISHU_FRAME_METHOD_CONTROL,
+            headers: vec![FeishuPbHeader {
+                key: FEISHU_HEADER_TYPE.to_string(),
+                value: FEISHU_TYPE_PONG.to_string(),
+            }],
+            payload_encoding: String::new(),
+            payload_type: String::new(),
+            payload,
             log_id_new: String::new(),
         }
         .encode_to_vec()
@@ -545,5 +589,48 @@ mod tests {
             .headers
             .iter()
             .any(|header| header.key == FEISHU_HEADER_TYPE && header.value == FEISHU_TYPE_PING));
+    }
+
+    #[tokio::test]
+    async fn handler_reconnects_when_pong_timeout_wakes() {
+        let mut handler = FeishuLongConnectionHandler::new(3, 90);
+        let _ = handler
+            .on_open(&WebSocketOpenMeta {
+                redacted_url: "wss://example.com".to_string(),
+                subprotocol: None,
+            })
+            .await
+            .unwrap();
+
+        let ping = handler.on_wakeup().await.unwrap();
+        assert_eq!(ping.action, WebSocketHandlerAction::Continue);
+        assert_eq!(ping.outbound_binary_frames.len(), 1);
+
+        let timeout = handler.on_wakeup().await.unwrap();
+        assert_eq!(timeout.action, WebSocketHandlerAction::Reconnect);
+        assert_eq!(timeout.stop_reason.as_deref(), Some("feishu_pong_timeout"));
+        assert_eq!(timeout.meta.as_ref().unwrap()["frame_type"], "pong_timeout");
+    }
+
+    #[tokio::test]
+    async fn handler_clears_pending_pong_after_pong_frame() {
+        let mut handler = FeishuLongConnectionHandler::new(3, 90);
+        let _ = handler
+            .on_open(&WebSocketOpenMeta {
+                redacted_url: "wss://example.com".to_string(),
+                subprotocol: None,
+            })
+            .await
+            .unwrap();
+
+        let _ = handler.on_wakeup().await.unwrap();
+        let _ = handler
+            .on_binary_frame(pong_frame(br#"{"PingInterval":1}"#.to_vec()))
+            .await
+            .unwrap();
+
+        let ping = handler.on_wakeup().await.unwrap();
+        assert_eq!(ping.action, WebSocketHandlerAction::Continue);
+        assert_eq!(ping.outbound_binary_frames.len(), 1);
     }
 }
