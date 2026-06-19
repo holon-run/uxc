@@ -361,6 +361,178 @@ impl GraphQLAdapter {
         "#
     }
 
+    /// Get an introspection query compatible with providers that limit repeated
+    /// introspection field usage, such as GitHub GraphQL.
+    fn get_limited_introspection_query() -> &'static str {
+        r#"
+            query IntrospectionQuery {
+                __schema {
+                    queryType {
+                        name
+                        description
+                    }
+                    mutationType {
+                        name
+                        description
+                    }
+                    subscriptionType {
+                        name
+                        description
+                    }
+                    types {
+                        name
+                        kind
+                        description
+                        enumValues {
+                            name
+                            description
+                        }
+                        inputFields {
+                            name
+                            description
+                            type {
+                                ...TypeRef
+                            }
+                        }
+                        fields {
+                            ...FieldInfo
+                        }
+                    }
+                }
+            }
+
+            fragment FieldInfo on __Field {
+                name
+                description
+                args {
+                    name
+                    description
+                    defaultValue
+                    type {
+                        ...TypeRef
+                    }
+                }
+                type {
+                    ...TypeRef
+                }
+            }
+
+            fragment TypeRef on __Type {
+                kind
+                name
+                ofType {
+                    kind
+                    name
+                    ofType {
+                        kind
+                        name
+                        ofType {
+                            kind
+                            name
+                            ofType {
+                                kind
+                                name
+                                ofType {
+                                    kind
+                                    name
+                                    ofType {
+                                        kind
+                                        name
+                                        ofType {
+                                            kind
+                                            name
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        "#
+    }
+
+    fn is_limited_introspection_error(errors: &Value) -> bool {
+        errors.as_array().is_some_and(|items| {
+            items.iter().any(|error| {
+                error.get("type").and_then(|t| t.as_str()) == Some("INTROSPECTION_LIMIT_EXCEEDED")
+                    || error
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .is_some_and(|message| {
+                            message.contains("Introspection fields may only be used")
+                                || message.contains("INTROSPECTION_LIMIT_EXCEEDED")
+                        })
+            })
+        })
+    }
+
+    fn normalize_root_type_fields(schema: &mut Value) {
+        let Some(schema_obj) = schema
+            .get_mut("data")
+            .and_then(|data| data.get_mut("__schema"))
+            .and_then(|schema| schema.as_object_mut())
+        else {
+            return;
+        };
+
+        let type_fields_by_name: HashMap<String, Value> = schema_obj
+            .get("types")
+            .and_then(|types| types.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|type_def| {
+                let name = type_def.get("name")?.as_str()?;
+                let fields = type_def.get("fields")?.clone();
+                Some((name.to_string(), fields))
+            })
+            .collect();
+
+        for root_key in ["queryType", "mutationType", "subscriptionType"] {
+            let Some(root_type) = schema_obj
+                .get_mut(root_key)
+                .and_then(|root| root.as_object_mut())
+            else {
+                continue;
+            };
+            if root_type.get("fields").is_some() {
+                continue;
+            }
+            let Some(root_name) = root_type.get("name").and_then(|name| name.as_str()) else {
+                continue;
+            };
+            if let Some(fields) = type_fields_by_name.get(root_name) {
+                root_type.insert("fields".to_string(), fields.clone());
+            }
+        }
+    }
+
+    async fn fetch_limited_schema(&self, url: &str) -> Result<Value> {
+        let payload = serde_json::json!({ "query": Self::get_limited_introspection_query() });
+        let resp = self
+            .send_graphql_request(
+                url,
+                &payload,
+                Some(self.request_timeout_or(Duration::from_secs(30))),
+            )
+            .await?;
+
+        if !resp.status().is_success() {
+            bail!("Failed to fetch GraphQL schema: HTTP {}", resp.status());
+        }
+
+        let mut body: Value = resp.json().await?;
+        if let Some(errors) = body.get("errors") {
+            bail!(
+                "GraphQL introspection failed: {}",
+                serde_json::to_string_pretty(errors)?
+            );
+        }
+
+        Self::normalize_root_type_fields(&mut body);
+        Ok(body)
+    }
+
     /// Extract type name from a GraphQL type structure
     #[allow(dead_code)]
     fn extract_type_name(type_info: &Value) -> Option<String> {
@@ -1222,14 +1394,21 @@ impl Adapter for GraphQLAdapter {
             bail!("Failed to fetch GraphQL schema: HTTP {}", resp.status());
         }
 
-        let body: Value = resp.json().await?;
+        let mut body: Value = resp.json().await?;
 
         // Check for GraphQL errors in introspection
         if let Some(errors) = body.get("errors") {
-            bail!(
-                "GraphQL introspection failed: {}",
-                serde_json::to_string_pretty(errors)?
-            );
+            if Self::is_limited_introspection_error(errors) {
+                debug!(
+                    "GraphQL full introspection was rejected by provider limits; retrying with limited query"
+                );
+                body = self.fetch_limited_schema(url).await?;
+            } else {
+                bail!(
+                    "GraphQL introspection failed: {}",
+                    serde_json::to_string_pretty(errors)?
+                );
+            }
         }
 
         // Store in cache if available
@@ -1433,6 +1612,63 @@ mod tests {
         let query = GraphQLAdapter::get_introspection_query();
         assert!(query.contains("fragment TypeRef on __Type"));
         assert!(query.matches("ofType").count() >= 6);
+    }
+
+    #[test]
+    fn test_limited_introspection_query_avoids_repeated_field_usage() {
+        let query = GraphQLAdapter::get_limited_introspection_query();
+        assert_eq!(query.matches("fields").count(), 1);
+        assert_eq!(query.matches("args").count(), 1);
+    }
+
+    #[test]
+    fn test_limited_introspection_error_detection() {
+        let errors = serde_json::json!([
+            {
+                "message": "Introspection fields may only be used 2 times",
+                "type": "INTROSPECTION_LIMIT_EXCEEDED"
+            }
+        ]);
+
+        assert!(GraphQLAdapter::is_limited_introspection_error(&errors));
+    }
+
+    #[test]
+    fn test_normalize_root_type_fields_from_types() {
+        let mut schema = serde_json::json!({
+            "data": {
+                "__schema": {
+                    "queryType": {
+                        "name": "Query"
+                    },
+                    "mutationType": null,
+                    "subscriptionType": null,
+                    "types": [
+                        {
+                            "name": "Query",
+                            "kind": "OBJECT",
+                            "fields": [
+                                {
+                                    "name": "viewer",
+                                    "args": [],
+                                    "type": {
+                                        "kind": "OBJECT",
+                                        "name": "User"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        GraphQLAdapter::normalize_root_type_fields(&mut schema);
+
+        assert_eq!(
+            schema["data"]["__schema"]["queryType"]["fields"][0]["name"],
+            "viewer"
+        );
     }
 
     #[test]
