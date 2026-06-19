@@ -90,6 +90,8 @@ const SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
 const SUBSCRIPTION_MAX_RECONNECT_DELAY_SECS: u64 = 30;
 const SUBSCRIPTION_MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const SUBSCRIPTION_EVENTS_MAX_LIMIT: usize = 500;
+const MANAGED_SOURCE_INITIAL_RESTART_DELAY_SECS: u64 = 1;
+const MANAGED_SOURCE_MAX_RESTART_DELAY_SECS: u64 = 30;
 const MANAGED_STREAM_EVENTS_DEFAULT_LIMIT: usize = 100;
 const MANAGED_STREAM_EVENTS_MAX_LIMIT: usize = 500;
 const MCP_NOTIFICATION_HISTORY_LIMIT: usize = 256;
@@ -2919,71 +2921,120 @@ impl ManagedSourceManager {
             return;
         }
 
-        let (event_tx, mut event_rx) = mpsc::channel(SUBSCRIPTION_EVENTS_MAX_LIMIT);
-        let runner_task = spawn_managed_source_stream_task(
-            runtime.clone(),
-            &record.run_id,
-            request,
-            runtime_view.clone(),
-            stop_rx.clone(),
-            event_tx,
-        );
-        let mut last_synced_state: Option<ManagedSourceRuntimeStateSnapshot> = None;
-
+        let mut restart_delay_secs = MANAGED_SOURCE_INITIAL_RESTART_DELAY_SECS;
         loop {
-            let should_sync = tokio::select! {
-                maybe_event = event_rx.recv() => {
-                    match maybe_event {
-                        Some(event) => {
-                            if matches!(event.event_kind.as_str(), "data" | "snapshot") {
-                                let payload = event.data.as_ref().or(event.meta.as_ref());
-                                if let Some(payload) = payload {
-                                    if let Err(err) = self.store.append_event(&entry.stream_id, event.timestamp_unix, payload).await {
-                                        self.fail_managed_source(&entry, err.to_string()).await;
-                                        let _ = entry.stop_tx.lock().await.send(true);
-                                        break;
+            let (event_tx, mut event_rx) = mpsc::channel(SUBSCRIPTION_EVENTS_MAX_LIMIT);
+            let runner_task = spawn_managed_source_stream_task(
+                runtime.clone(),
+                &record.run_id,
+                request.clone(),
+                runtime_view.clone(),
+                stop_rx.clone(),
+                event_tx,
+            );
+            let mut last_synced_state: Option<ManagedSourceRuntimeStateSnapshot> = None;
+
+            loop {
+                let should_sync = tokio::select! {
+                    maybe_event = event_rx.recv() => {
+                        match maybe_event {
+                            Some(event) => {
+                                if matches!(event.event_kind.as_str(), "data" | "snapshot") {
+                                    let payload = event.data.as_ref().or(event.meta.as_ref());
+                                    if let Some(payload) = payload {
+                                        if let Err(err) = self.store.append_event(&entry.stream_id, event.timestamp_unix, payload).await {
+                                            self.fail_managed_source(&entry, err.to_string()).await;
+                                            let _ = entry.stop_tx.lock().await.send(true);
+                                            break;
+                                        }
                                     }
                                 }
+                                true
                             }
-                            true
-                        }
-                        None => {
-                            let snapshot = runtime_view.lock().await.clone();
-                            let _ = sync_managed_source_state(&self.store, &entry, &runtime_view, &snapshot.status).await;
-                            break;
+                            None => break,
                         }
                     }
-                }
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    let fallback_status = runtime_view.lock().await.status.clone();
-                    let next_state =
-                        managed_source_runtime_state_snapshot(&runtime_view, &fallback_status)
-                            .await;
-                    last_synced_state.as_ref() != Some(&next_state)
-                }
-            };
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        let fallback_status = runtime_view.lock().await.status.clone();
+                        let next_state =
+                            managed_source_runtime_state_snapshot(&runtime_view, &fallback_status)
+                                .await;
+                        last_synced_state.as_ref() != Some(&next_state)
+                    }
+                };
 
-            if should_sync {
-                let fallback_status = runtime_view.lock().await.status.clone();
-                if let Err(err) =
-                    sync_managed_source_state(&self.store, &entry, &runtime_view, &fallback_status)
-                        .await
-                {
-                    self.fail_managed_source(&entry, err.to_string()).await;
-                    let _ = entry.stop_tx.lock().await.send(true);
-                    break;
+                if should_sync {
+                    let fallback_status = runtime_view.lock().await.status.clone();
+                    if let Err(err) = sync_managed_source_state(
+                        &self.store,
+                        &entry,
+                        &runtime_view,
+                        &fallback_status,
+                    )
+                    .await
+                    {
+                        self.fail_managed_source(&entry, err.to_string()).await;
+                        let _ = entry.stop_tx.lock().await.send(true);
+                        break;
+                    }
+                    last_synced_state = Some(
+                        managed_source_runtime_state_snapshot(&runtime_view, &fallback_status)
+                            .await,
+                    );
+                    if fallback_status == "running" {
+                        restart_delay_secs = MANAGED_SOURCE_INITIAL_RESTART_DELAY_SECS;
+                    }
                 }
-                last_synced_state = Some(
-                    managed_source_runtime_state_snapshot(&runtime_view, &fallback_status).await,
-                );
             }
 
-            if runner_task.is_finished() && event_rx.is_closed() {
+            let _ = runner_task.await;
+            let final_status = runtime_view.lock().await.status.clone();
+            if let Err(err) =
+                sync_managed_source_state(&self.store, &entry, &runtime_view, &final_status).await
+            {
+                self.fail_managed_source(&entry, err.to_string()).await;
+                let _ = entry.stop_tx.lock().await.send(true);
+            }
+
+            if *stop_rx.borrow() || final_status == "stopped" {
                 break;
             }
-        }
 
-        let _ = runner_task.await;
+            {
+                let mut guard = runtime_view.lock().await;
+                guard.status = "reconnecting".to_string();
+                guard.restart_count = guard.restart_count.saturating_add(1);
+                guard.stopped_at_unix = None;
+                guard.last_error.get_or_insert_with(|| {
+                    "managed source runner exited unexpectedly; restarting".to_string()
+                });
+            }
+            let fallback_status = runtime_view.lock().await.status.clone();
+            if let Err(err) =
+                sync_managed_source_state(&self.store, &entry, &runtime_view, &fallback_status)
+                    .await
+            {
+                self.fail_managed_source(&entry, err.to_string()).await;
+                let _ = entry.stop_tx.lock().await.send(true);
+                break;
+            }
+            let mut restart_stop_rx = stop_rx.clone();
+            if wait_for_stop_or_timeout(
+                &mut restart_stop_rx,
+                Duration::from_secs(restart_delay_secs),
+            )
+            .await
+            {
+                let mut guard = runtime_view.lock().await;
+                guard.status = "stopped".to_string();
+                guard.stopped_at_unix = Some(now_unix_secs());
+                let _ =
+                    sync_managed_source_state(&self.store, &entry, &runtime_view, "stopped").await;
+                break;
+            }
+            restart_delay_secs =
+                (restart_delay_secs.saturating_mul(2)).min(MANAGED_SOURCE_MAX_RESTART_DELAY_SECS);
+        }
         *entry.runtime_view.lock().await = None;
         self.entries.lock().await.remove(&identity_key);
     }
@@ -4996,6 +5047,9 @@ async fn run_http_subscription_job(
             Ok(()) => return Ok(()),
             Err(SubscriptionRunError::Fatal(err)) => return Err(err),
             Err(SubscriptionRunError::Retry(err)) => {
+                if view.lock().await.status == "running" {
+                    delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
+                }
                 let msg = err.to_string();
                 recorder
                     .emit("http", "error", None, Some(json!({ "message": msg })))
@@ -5745,6 +5799,9 @@ async fn run_feishu_long_connection_subscription_job(
                 return Err(err);
             }
             Err(WebSocketRunError::Retry(err)) => {
+                if view.lock().await.status == "running" {
+                    delay_secs = SUBSCRIPTION_INITIAL_RECONNECT_DELAY_SECS;
+                }
                 let message = err.to_string();
                 recorder
                     .emit(
@@ -9537,6 +9594,95 @@ mod tests {
             .unwrap();
         assert!(stopped.stopped);
 
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_source_stream_runner_restarts_after_remote_disconnect() {
+        let temp = tempdir().unwrap();
+        let (endpoint, connects, server_task) = start_test_websocket_server(vec![
+            TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":"first"}"#)],
+                hold_open_after_send: false,
+            },
+            TestWsConnectionPlan {
+                frames: vec![TestWsFrame::Text(r#"{"value":"second"}"#)],
+                hold_open_after_send: true,
+            },
+        ])
+        .await;
+
+        let runtime = test_runtime_with_store(&temp);
+        let ensured = runtime
+            .source_ensure(ManagedSourceEnsureRequest {
+                namespace: "test".to_string(),
+                source_key: "websocket:restart".to_string(),
+                spec: managed_source_spec(&endpoint),
+            })
+            .await
+            .unwrap();
+
+        let mut seen_second = false;
+        for _ in 0..50 {
+            let page = runtime
+                .stream_read(&ManagedStreamReadRequest {
+                    stream_id: ensured.stream_id.clone(),
+                    after_offset: 0,
+                    limit: 10,
+                })
+                .await
+                .unwrap();
+            if page
+                .events
+                .iter()
+                .any(|event| event.raw_payload == json!({"value":"second"}))
+            {
+                seen_second = true;
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(100)).await;
+        }
+
+        assert!(
+            seen_second,
+            "runner should reconnect and capture later events"
+        );
+        assert!(
+            connects.load(Ordering::SeqCst) >= 2,
+            "server should observe a reconnect"
+        );
+
+        let status = runtime
+            .source_status(&ManagedSourceStatusRequest {
+                namespace: "test".to_string(),
+                source_key: "websocket:restart".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_ne!(status.status, "failed");
+
+        let doctor = runtime
+            .source_doctor(&ManagedSourceStatusRequest {
+                namespace: "test".to_string(),
+                source_key: "websocket:restart".to_string(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            !doctor
+                .issues
+                .iter()
+                .any(|issue| issue.code == "runner_inactive"),
+            "active source must keep a registered runner after reconnect"
+        );
+
+        runtime
+            .source_stop(&ManagedSourceStatusRequest {
+                namespace: "test".to_string(),
+                source_key: "websocket:restart".to_string(),
+            })
+            .await
+            .unwrap();
         server_task.abort();
     }
 
