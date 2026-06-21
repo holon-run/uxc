@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.8] - 2026-06-21
+
+### Fixed
+- Added a GraphQL introspection fallback for providers such as GitHub that reject repeated introspection fields in a single query.
+- Restart managed-source stream runners after remote disconnects so daemon status and stream delivery recover automatically.
+- Cleaned up temporary daemon homes in tests to prevent leftover daemon processes from leaking between runs.
+
 ## [0.15.7] - 2026-06-14
 
 ### Fixed
@@ -482,7 +489,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.4...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.8...HEAD
+[0.15.8]: https://github.com/holon-run/uxc/releases/tag/v0.15.8
+[0.15.7]: https://github.com/holon-run/uxc/releases/tag/v0.15.7
+[0.15.6]: https://github.com/holon-run/uxc/releases/tag/v0.15.6
+[0.15.5]: https://github.com/holon-run/uxc/releases/tag/v0.15.5
 [0.15.4]: https://github.com/holon-run/uxc/releases/tag/v0.15.4
 [0.15.3]: https://github.com/holon-run/uxc/releases/tag/v0.15.3
 [0.15.2]: https://github.com/holon-run/uxc/releases/tag/v0.15.2
