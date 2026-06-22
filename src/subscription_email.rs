@@ -9,7 +9,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{
-    AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadHalf, WriteHalf,
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadHalf,
+    WriteHalf,
 };
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -196,7 +197,7 @@ where
         .await?;
     recorder.update_status(Some("running"), None, false).await?;
 
-    emit_recent_messages(config, &mut conn, recorder).await?;
+    let mut last_seen_uid = emit_recent_messages(config, &mut conn, recorder).await?;
 
     loop {
         if *stop_rx.borrow() {
@@ -204,12 +205,11 @@ where
             close_email_subscription(recorder, "stopped").await?;
             return Ok(());
         }
-        conn.write_line("IDLE").await?;
-        conn.read_idle_continuation().await?;
+        let idle_tag = conn.start_idle().await?;
         tokio::select! {
             changed = stop_rx.changed() => {
                 if changed.is_ok() && *stop_rx.borrow() {
-                    conn.done_idle().await?;
+                    conn.done_idle(&idle_tag).await?;
                     let _ = conn.logout().await;
                     close_email_subscription(recorder, "stopped").await?;
                     return Ok(());
@@ -218,8 +218,14 @@ where
             line = conn.read_line() => {
                 let line = line?;
                 if line.contains(" EXISTS") || line.contains(" RECENT") {
-                    conn.done_idle().await?;
-                    emit_recent_messages(config, &mut conn, recorder).await?;
+                    conn.done_idle(&idle_tag).await?;
+                    let messages = match last_seen_uid {
+                        Some(uid) => conn.fetch_since_uid(uid).await?,
+                        None => conn.fetch_recent(config.initial_fetch_limit).await?,
+                    };
+                    if let Some(uid) = emit_messages(config, messages, recorder).await? {
+                        last_seen_uid = Some(last_seen_uid.map_or(uid, |last| last.max(uid)));
+                    }
                 }
             }
         }
@@ -264,12 +270,27 @@ async fn emit_recent_messages<R>(
     config: &EmailImapIdleRuntimeConfig,
     conn: &mut ImapConnection,
     recorder: &mut R,
-) -> Result<()>
+) -> Result<Option<u64>>
 where
     R: SubscriptionEventRecorder,
 {
     let messages = conn.fetch_recent(config.initial_fetch_limit).await?;
+    emit_messages(config, messages, recorder).await
+}
+
+async fn emit_messages<R>(
+    config: &EmailImapIdleRuntimeConfig,
+    messages: Vec<ImapFetchedMessage>,
+    recorder: &mut R,
+) -> Result<Option<u64>>
+where
+    R: SubscriptionEventRecorder,
+{
+    let mut max_uid = None;
     for message in messages {
+        if let Some(uid) = parse_uid_number(&message.uid) {
+            max_uid = Some(max_uid.map_or(uid, |max: u64| max.max(uid)));
+        }
         recorder
             .emit(
                 "email_imap_idle",
@@ -279,7 +300,7 @@ where
             )
             .await?;
     }
-    Ok(())
+    Ok(max_uid)
 }
 
 fn build_email_event(config: &EmailImapIdleRuntimeConfig, message: &ImapFetchedMessage) -> Value {
@@ -473,7 +494,7 @@ impl ImapConnection {
         self.write_line(&format!("{tag} {command}")).await?;
         let mut lines = Vec::new();
         loop {
-            let line = self.read_line().await?;
+            let line = self.read_response_line_with_literals().await?;
             let done = line.starts_with(&format!("{tag} "));
             lines.push(line);
             if done {
@@ -481,6 +502,24 @@ impl ImapConnection {
             }
         }
         Ok(lines)
+    }
+
+    async fn read_response_line_with_literals(&mut self) -> Result<String> {
+        let mut line = self.read_line().await?;
+        while let Some(len) = trailing_literal_len(&line) {
+            let mut literal = vec![0u8; len];
+            tokio::time::timeout(
+                Duration::from_secs(IMAP_COMMAND_TIMEOUT_SECS),
+                self.reader.read_exact(&mut literal),
+            )
+            .await
+            .context("IMAP literal read timed out")??;
+            let suffix = self.read_line().await?;
+            line.push_str("\r\n");
+            line.push_str(&String::from_utf8_lossy(&literal));
+            line.push_str(&suffix);
+        }
+        Ok(line)
     }
 
     async fn command_ok(&mut self, command: &str) -> Result<Vec<String>> {
@@ -496,37 +535,55 @@ impl ImapConnection {
     }
 
     async fn fetch_recent(&mut self, limit: usize) -> Result<Vec<ImapFetchedMessage>> {
-        let range = if limit == 0 {
-            "*".to_string()
-        } else {
-            format!("{}:*", limit)
-        };
+        let search_lines = self.command_ok("UID SEARCH ALL").await?;
+        let mut uids = parse_uid_search_uids(&search_lines);
+        if limit > 0 && uids.len() > limit {
+            uids = uids.split_off(uids.len() - limit);
+        }
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.fetch_uid_set(&uids.join(",")).await
+    }
+
+    async fn fetch_since_uid(&mut self, last_uid: u64) -> Result<Vec<ImapFetchedMessage>> {
+        self.fetch_uid_set(&format!("{}:*", last_uid.saturating_add(1)))
+            .await
+    }
+
+    async fn fetch_uid_set(&mut self, uid_set: &str) -> Result<Vec<ImapFetchedMessage>> {
         let lines = self
-            .command_ok(&format!("UID FETCH {range} (UID FLAGS BODY.PEEK[])"))
+            .command_ok(&format!("UID FETCH {uid_set} (UID FLAGS BODY.PEEK[])"))
             .await?;
         Ok(parse_uid_fetch_messages(&lines))
     }
 
-    async fn read_idle_continuation(&mut self) -> Result<()> {
+    async fn start_idle(&mut self) -> Result<String> {
+        let tag = format!("A{:04}", self.next_tag);
+        self.next_tag = self.next_tag.saturating_add(1);
+        self.write_line(&format!("{tag} IDLE")).await?;
         let line = self.read_line().await?;
         if !line.starts_with('+') {
             bail!("IMAP IDLE expected continuation, got: {}", line);
         }
-        Ok(())
+        Ok(tag)
     }
 
-    async fn done_idle(&mut self) -> Result<()> {
+    async fn done_idle(&mut self, tag: &str) -> Result<()> {
         self.write_line("DONE").await?;
-        let _ = tokio::time::timeout(Duration::from_secs(IMAP_IDLE_DONE_TIMEOUT_SECS), async {
+        tokio::time::timeout(Duration::from_secs(IMAP_IDLE_DONE_TIMEOUT_SECS), async {
             loop {
                 let line = self.read_line().await?;
-                if line.contains(" IDLE") || line.contains(" OK") {
-                    return Ok::<_, anyhow::Error>(());
+                if line.starts_with(&format!("{tag} ")) {
+                    if line.contains(" OK") {
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                    bail!("IMAP IDLE DONE failed: {}", line);
                 }
             }
         })
-        .await;
-        Ok(())
+        .await
+        .context("IMAP IDLE DONE timed out")?
     }
 
     async fn logout(&mut self) -> Result<()> {
@@ -557,6 +614,29 @@ pub fn parse_uid_fetch_messages(lines: &[String]) -> Vec<ImapFetchedMessage> {
     out
 }
 
+fn parse_uid_search_uids(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter_map(|line| line.strip_prefix("* SEARCH "))
+        .flat_map(|line| line.split_whitespace())
+        .filter(|uid| uid.chars().all(|ch| ch.is_ascii_digit()))
+        .map(str::to_string)
+        .collect()
+}
+
+fn parse_uid_number(uid: &str) -> Option<u64> {
+    uid.parse().ok()
+}
+
+fn trailing_literal_len(line: &str) -> Option<usize> {
+    let open = line.rfind('{')?;
+    let len = line.get(open + 1..line.len().checked_sub(1)?)?;
+    if !line.ends_with('}') || len.is_empty() || !len.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    len.parse().ok()
+}
+
 fn extract_imap_atom_after(line: &str, marker: &str) -> Option<String> {
     let start = line.find(marker)? + marker.len();
     let tail = &line[start..];
@@ -581,10 +661,13 @@ fn extract_imap_literal_or_quoted_body(line: &str) -> Option<String> {
         return Some(tail[..end].replace("\\\"", "\"").replace("\\\\", "\\"));
     }
     if let Some(start) = line.find("BODY[] {") {
-        let tail = &line[start..];
-        if let Some(pos) = tail.find("}\r\n") {
-            return Some(tail[pos + 3..].trim_end_matches(')').to_string());
-        }
+        let len_start = start + "BODY[] {".len();
+        let len_end = line[len_start..].find('}')? + len_start;
+        let len: usize = line[len_start..len_end].parse().ok()?;
+        let raw_start = line[len_end..].find("\r\n")? + len_end + 2;
+        let raw_end = raw_start.checked_add(len)?;
+        let bytes = line.as_bytes().get(raw_start..raw_end)?;
+        return Some(String::from_utf8_lossy(bytes).to_string());
     }
     None
 }
@@ -639,5 +722,90 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].uid, "42");
         assert_eq!(messages[0].flags, vec!["\\Seen"]);
+    }
+
+    #[test]
+    fn parses_uid_fetch_literal_with_embedded_newlines() {
+        let raw = "Subject: Hi\r\n\r\nLine one\r\nLine two) end";
+        let lines = vec![
+            format!(
+                "* 1 FETCH (UID 42 FLAGS (\\Seen) BODY[] {{{}}}\r\n{})",
+                raw.len(),
+                raw
+            ),
+            "A0001 OK done".to_string(),
+        ];
+        let messages = parse_uid_fetch_messages(&lines);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].uid, "42");
+        assert_eq!(messages[0].raw, raw.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn imap_command_reads_literal_bytes_before_next_response_line() {
+        let raw = "Subject: Hi\r\n\r\nLine one\r\nLine two";
+        let (client, server) = tokio::io::duplex(2048);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "A0001 UID FETCH 42 (UID FLAGS BODY.PEEK[])\r\n");
+            writer
+                .write_all(
+                    format!(
+                        "* 1 FETCH (UID 42 FLAGS (\\Seen) BODY[] {{{}}}\r\n{})\r\nA0001 OK done\r\n",
+                        raw.len(),
+                        raw
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let messages = conn.fetch_uid_set("42").await.unwrap();
+        server.await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].raw, raw.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn fetch_recent_searches_all_uids_and_fetches_last_limit() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+
+            reader.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "A0001 UID SEARCH ALL\r\n");
+            writer
+                .write_all(b"* SEARCH 1 2 42 43\r\nA0001 OK search done\r\n")
+                .await
+                .unwrap();
+
+            command.clear();
+            reader.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "A0002 UID FETCH 42,43 (UID FLAGS BODY.PEEK[])\r\n");
+            writer
+                .write_all(
+                    b"* 3 FETCH (UID 42 FLAGS () BODY[] \"Subject: Old\r\n\r\nOld\")\r\n* 4 FETCH (UID 43 FLAGS () BODY[] \"Subject: New\r\n\r\nNew\")\r\nA0002 OK fetch done\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let messages = conn.fetch_recent(2).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.uid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["42", "43"]
+        );
     }
 }
