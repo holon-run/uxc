@@ -22,6 +22,7 @@ mod codegen;
 mod config_import;
 mod daemon;
 mod daemon_log;
+mod email;
 mod error;
 mod http_client;
 mod managed_source_streams;
@@ -228,9 +229,114 @@ enum Commands {
         stream_command: StreamCommands,
     },
 
+    /// Send and reply to email over SMTP
+    Email {
+        #[command(subcommand)]
+        email_command: EmailCommands,
+    },
+
     /// Dynamic operation execution: `uxc <url> <operation_id> [key=value ...] ['{...}']`
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum EmailCommands {
+    /// Send a new email over SMTP
+    Send(EmailSendArgs),
+
+    /// Reply to an email_event using SMTP reply headers
+    Reply(EmailReplyArgs),
+}
+
+#[derive(Parser)]
+struct EmailSendArgs {
+    /// SMTP endpoint, for example smtp://smtp.example.com:587
+    #[arg(long = "smtp", value_name = "URL")]
+    smtp_url: String,
+
+    /// Sender email address
+    #[arg(long)]
+    from: String,
+
+    /// Recipient email address (repeatable)
+    #[arg(long)]
+    to: Vec<String>,
+
+    /// CC recipient email address (repeatable)
+    #[arg(long)]
+    cc: Vec<String>,
+
+    /// BCC recipient email address (repeatable)
+    #[arg(long)]
+    bcc: Vec<String>,
+
+    /// Email subject
+    #[arg(long)]
+    subject: String,
+
+    /// Plain-text body
+    #[arg(long = "text-body")]
+    text_body: Option<String>,
+
+    /// HTML body
+    #[arg(long = "html-body")]
+    html: Option<String>,
+
+    /// Validate and render envelope without connecting to SMTP
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Parser)]
+struct EmailReplyArgs {
+    /// SMTP endpoint, for example smtp://smtp.example.com:587
+    #[arg(long = "smtp", value_name = "URL")]
+    smtp_url: String,
+
+    /// JSON reply_handle from an email_event envelope
+    #[arg(long = "reply-handle")]
+    reply_handle: Option<String>,
+
+    /// Explicit Message-ID to reply to; overrides reply_handle.message_id
+    #[arg(long = "in-reply-to")]
+    in_reply_to: Option<String>,
+
+    /// Existing References header value (repeatable)
+    #[arg(long = "reference")]
+    references: Vec<String>,
+
+    /// Sender email address
+    #[arg(long)]
+    from: String,
+
+    /// Recipient email address (repeatable)
+    #[arg(long)]
+    to: Vec<String>,
+
+    /// CC recipient email address (repeatable)
+    #[arg(long)]
+    cc: Vec<String>,
+
+    /// BCC recipient email address (repeatable)
+    #[arg(long)]
+    bcc: Vec<String>,
+
+    /// Email subject
+    #[arg(long)]
+    subject: String,
+
+    /// Plain-text body
+    #[arg(long = "text-body")]
+    text_body: Option<String>,
+
+    /// HTML body
+    #[arg(long = "html-body")]
+    html: Option<String>,
+
+    /// Validate and render envelope without connecting to SMTP
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -1396,7 +1502,7 @@ fn raw_has_help_token(raw_args: &[String]) -> bool {
 fn is_top_level_command_token(token: &str) -> bool {
     matches!(
         token,
-        "help" | "config" | "cache" | "auth" | "link" | "daemon" | "source" | "stream"
+        "help" | "config" | "cache" | "auth" | "link" | "daemon" | "source" | "stream" | "email"
     )
 }
 
@@ -1506,6 +1612,13 @@ fn infer_help_path_from_tokens(tokens: &[String]) -> Option<Vec<String>> {
         "stream" => {
             if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
                 if matches!(level1, "read" | "info" | "trim") {
+                    path.push(level1.to_string());
+                }
+            }
+        }
+        "email" => {
+            if let Some(level1) = tokens.get(idx).map(|s| s.as_str()) {
+                if matches!(level1, "send" | "reply") {
                     path.push(level1.to_string());
                 }
             }
@@ -1625,6 +1738,10 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
             StreamCommands::Read { .. } => Some(vec!["stream", "read"]),
             StreamCommands::Info { .. } => Some(vec!["stream", "info"]),
             StreamCommands::Trim { .. } => Some(vec!["stream", "trim"]),
+        },
+        Some(Commands::Email { email_command }) => match email_command {
+            EmailCommands::Send(_) => Some(vec!["email", "send"]),
+            EmailCommands::Reply(_) => Some(vec!["email", "reply"]),
         },
         Some(Commands::External(_)) | None => None,
     }
@@ -1845,6 +1962,10 @@ async fn execute_cli(cli: &Cli) -> Result<OutputEnvelope> {
         return handle_stream_command(stream_command).await;
     }
 
+    if let Some(Commands::Email { email_command }) = &cli.command {
+        return handle_email_command(email_command, cli).await;
+    }
+
     let url = cli
         .url
         .clone()
@@ -2027,6 +2148,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 ("daemon", "Manage local runtime daemon"),
                 ("source", "Manage daemon-backed source streams"),
                 ("stream", "Read and maintain durable source streams"),
+                ("email", "Send and reply to email over SMTP"),
             ]),
             notes: vec![
                 "Default output is JSON. Use --text for human-readable output.".to_string(),
@@ -2358,6 +2480,49 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
                 "Deletes all rows with offset less than the requested boundary.".to_string(),
             ],
             examples: vec!["uxc stream trim ms_123 --before-offset 1000".to_string()],
+        },
+        ["email"] => HelpData {
+            path: "uxc email".to_string(),
+            about: "Send and reply to email over SMTP".to_string(),
+            usage: "uxc email <send|reply> ...".to_string(),
+            commands: commands(&[
+                ("send", "Send a new email over SMTP"),
+                ("reply", "Reply to an email_event using SMTP reply headers"),
+            ]),
+            notes: vec![
+                "Use --auth with credentials containing username/user/account and password/secret fields when SMTP AUTH is required.".to_string(),
+                "SMTP sends are direct outbound commands; inbound email source streams remain under `uxc source ensure --transport email-imap-idle`.".to_string(),
+            ],
+            examples: vec![
+                "uxc email send --smtp smtp://smtp.example.com:587 --auth email-primary --from bot@example.com --to user@example.com --subject 'Hello' --text-body 'Hi'".to_string(),
+                "uxc email reply --smtp smtp://smtp.example.com:587 --auth email-primary --reply-handle '{\"message_id\":\"<msg@example.com>\"}' --from bot@example.com --to user@example.com --subject 'Re: Hello' --text-body 'Thanks'".to_string(),
+            ],
+        },
+        ["email", "send"] => HelpData {
+            path: "uxc email send".to_string(),
+            about: "Send a new email over SMTP".to_string(),
+            usage: "uxc email send --smtp <url> --from <addr> --to <addr> [--to <addr> ...] [--cc <addr> ...] [--bcc <addr> ...] --subject <text> [--text-body <text>] [--html-body <html>] [--dry-run]".to_string(),
+            commands: vec![],
+            notes: vec![
+                "At least one recipient and one body form are required.".to_string(),
+                "Use --dry-run to validate inputs and inspect the JSON envelope without contacting the SMTP server.".to_string(),
+            ],
+            examples: vec![
+                "uxc email send --smtp smtp://localhost:2525 --from bot@example.com --to user@example.com --subject 'Hello' --text-body 'Hi' --dry-run".to_string(),
+            ],
+        },
+        ["email", "reply"] => HelpData {
+            path: "uxc email reply".to_string(),
+            about: "Reply to an email_event using SMTP reply headers".to_string(),
+            usage: "uxc email reply --smtp <url> [--reply-handle <json>|--in-reply-to <message-id>] --from <addr> --to <addr> [--to <addr> ...] --subject <text> [--text-body <text>] [--html-body <html>] [--dry-run]".to_string(),
+            commands: vec![],
+            notes: vec![
+                "--reply-handle accepts the reply_handle object emitted by email_event source records and uses its message_id for In-Reply-To/References.".to_string(),
+                "--in-reply-to overrides reply_handle.message_id when both are provided.".to_string(),
+            ],
+            examples: vec![
+                "uxc email reply --smtp smtp://localhost:2525 --reply-handle '{\"message_id\":\"<msg@example.com>\"}' --from bot@example.com --to user@example.com --subject 'Re: Hello' --text-body 'Thanks' --dry-run".to_string(),
+            ],
         },
         ["cache"] => HelpData {
             path: "uxc cache".to_string(),
@@ -3254,7 +3419,8 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
             | Some(Commands::Link { .. })
             | Some(Commands::Daemon { .. })
             | Some(Commands::Source { .. })
-            | Some(Commands::Stream { .. }) => Err(UxcError::InvalidArguments(
+            | Some(Commands::Stream { .. })
+            | Some(Commands::Email { .. }) => Err(UxcError::InvalidArguments(
                 "--codegen-schema is only supported for endpoint invocations".to_string(),
             )
             .into()),
@@ -3270,7 +3436,8 @@ fn resolve_endpoint_command(cli: &Cli) -> Result<EndpointCommand> {
         | Some(Commands::Link { .. })
         | Some(Commands::Daemon { .. })
         | Some(Commands::Source { .. })
-        | Some(Commands::Stream { .. }) => Err(UxcError::InvalidArguments(
+        | Some(Commands::Stream { .. })
+        | Some(Commands::Email { .. }) => Err(UxcError::InvalidArguments(
             "Internal routing error for management command".to_string(),
         )
         .into()),
@@ -5865,6 +6032,66 @@ async fn handle_stream_command(command: &StreamCommands) -> Result<OutputEnvelop
         true,
         daemon_autostarted,
         daemon_restarted_for_version_mismatch,
+        None,
+    ))
+}
+
+async fn handle_email_command(command: &EmailCommands, cli: &Cli) -> Result<OutputEnvelope> {
+    if cli.schema_url.is_some() {
+        return Err(UxcError::InvalidArguments(
+            "--schema-url is not supported for email commands".to_string(),
+        )
+        .into());
+    }
+    let request = match command {
+        EmailCommands::Send(args) => email::EmailSendRequest {
+            smtp_url: args.smtp_url.clone(),
+            from: args.from.clone(),
+            to: args.to.clone(),
+            cc: args.cc.clone(),
+            bcc: args.bcc.clone(),
+            subject: args.subject.clone(),
+            text: args.text_body.clone(),
+            html: args.html.clone(),
+            in_reply_to: None,
+            references: vec![],
+            auth: cli.auth.clone(),
+            dry_run: args.dry_run,
+        },
+        EmailCommands::Reply(args) => {
+            let reply_handle = args
+                .reply_handle
+                .as_deref()
+                .map(email::parse_reply_handle_json)
+                .transpose()?;
+            let (in_reply_to, references) = email::references_with_reply_handle(
+                reply_handle.as_ref(),
+                args.in_reply_to.clone(),
+                args.references.clone(),
+            );
+            email::EmailSendRequest {
+                smtp_url: args.smtp_url.clone(),
+                from: args.from.clone(),
+                to: args.to.clone(),
+                cc: args.cc.clone(),
+                bcc: args.bcc.clone(),
+                subject: args.subject.clone(),
+                text: args.text_body.clone(),
+                html: args.html.clone(),
+                in_reply_to,
+                references,
+                auth: cli.auth.clone(),
+                dry_run: args.dry_run,
+            }
+        }
+    };
+    let data = serde_json::to_value(email::send_email(request).await?)?;
+    Ok(OutputEnvelope::success(
+        "email_send_result",
+        "email",
+        "uxc email",
+        None,
+        data,
         None,
     ))
 }

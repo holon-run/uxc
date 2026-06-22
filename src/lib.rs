@@ -14,6 +14,7 @@ pub mod config_import;
 pub mod daemon;
 pub mod daemon_client;
 pub mod daemon_log;
+pub mod email;
 pub mod error;
 pub mod http_client;
 pub mod managed_source_streams;

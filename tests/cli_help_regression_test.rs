@@ -120,6 +120,59 @@ fn daemon_doctor_help_outputs_json() {
 
 #[test]
 #[serial]
+fn email_send_help_outputs_json() {
+    let output = uxc_command()
+        .arg("email")
+        .arg("send")
+        .arg("-h")
+        .output()
+        .expect("failed to run uxc email send -h");
+
+    assert!(output.status.success(), "command should succeed");
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "subcommand_help");
+    assert_eq!(json["data"]["path"], "uxc email send");
+}
+
+#[test]
+#[serial]
+fn email_send_dry_run_outputs_json() {
+    let output = uxc_command()
+        .arg("email")
+        .arg("send")
+        .arg("--smtp")
+        .arg("smtp://localhost:2525")
+        .arg("--from")
+        .arg("bot@example.com")
+        .arg("--to")
+        .arg("user@example.com")
+        .arg("--subject")
+        .arg("Hello")
+        .arg("--text-body")
+        .arg("Hi")
+        .arg("--dry-run")
+        .output()
+        .expect("failed to run uxc email send --dry-run");
+
+    assert!(
+        output.status.success(),
+        "command should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["kind"], "email_send_result");
+    assert_eq!(json["protocol"], "email");
+    assert_eq!(json["data"]["dry_run"], true);
+    assert_eq!(json["data"]["accepted_recipients"], 1);
+}
+
+#[test]
+#[serial]
 fn help_subcommand_defaults_to_json() {
     let output = uxc_command()
         .arg("help")
