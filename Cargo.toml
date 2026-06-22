@@ -48,8 +48,11 @@ tokio = { version = "1.35", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-rustls = "0.26"
 async-trait = "0.1"
 futures = "0.3"
+rustls-pki-types = "1"
+webpki-roots = "0.26"
 
 # Web server for test servers
 axum = { version = "0.7", optional = true, features = ["ws"] }

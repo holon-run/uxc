@@ -22,6 +22,10 @@ use crate::subscription_discord::{
     DiscordGatewayBotResponse, DiscordGatewayHandler, DiscordGatewayRuntimeConfig,
     DiscordIdentifyProperties, DISCORD_DEFAULT_MESSAGE_INTENTS,
 };
+use crate::subscription_email::{
+    resolve_email_imap_idle_runtime_config, run_email_imap_idle_subscription_runtime,
+    EmailImapIdleRuntimeConfig,
+};
 use crate::subscription_feishu::{
     derive_feishu_ws_config_endpoint, parse_feishu_long_connection_open_response,
     resolve_feishu_long_connection_runtime_config, FeishuLongConnectionHandler,
@@ -236,6 +240,7 @@ pub enum SubscriptionTransportHint {
     DiscordGateway,
     SlackSocketMode,
     FeishuLongConnection,
+    EmailImapIdle,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2270,6 +2275,12 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
                     );
                 }
                 return Ok("feishu_long_connection".to_string());
+            }
+            SubscriptionTransportHint::EmailImapIdle => {
+                if !lower.starts_with("imap://") && !lower.starts_with("imaps://") {
+                    bail!("email-imap-idle transport requires an imap:// or imaps:// endpoint");
+                }
+                return Ok("email_imap_idle".to_string());
             }
         }
     }
@@ -4655,7 +4666,7 @@ async fn update_subscription_view(
 }
 
 #[async_trait::async_trait]
-trait SubscriptionEventRecorder: Send {
+pub(crate) trait SubscriptionEventRecorder: Send {
     async fn emit(
         &mut self,
         source_kind: &str,
@@ -5192,6 +5203,13 @@ async fn run_stream_subscription_job(
         )
         .await;
     }
+    if matches!(
+        request.transport_hint,
+        Some(SubscriptionTransportHint::EmailImapIdle)
+    ) {
+        return run_email_imap_idle_subscription_job(job_id, request, event_tx, view, stop_rx)
+            .await;
+    }
 
     if request.operation_id.is_some() {
         if request
@@ -5703,6 +5721,29 @@ async fn run_slack_socket_mode_subscription_job(
             }
         }
     }
+}
+
+async fn run_email_imap_idle_subscription_job(
+    _job_id: &str,
+    request: &SubscribeStartRequest,
+    event_tx: mpsc::Sender<SubscriptionEventEnvelope>,
+    view: Arc<Mutex<SubscriptionJobView>>,
+    mut stop_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    let auth_profile =
+        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?
+            .ok_or_else(|| {
+                anyhow!("email-imap-idle requires an auth profile with username/password fields")
+            })?;
+    let config: EmailImapIdleRuntimeConfig =
+        resolve_email_imap_idle_runtime_config(request, &auth_profile)?;
+    let mut seq = 0u64;
+    let mut recorder = ChannelSubscriptionRecorder {
+        tx: &event_tx,
+        view: &view,
+        seq: &mut seq,
+    };
+    run_email_imap_idle_subscription_runtime(config, &mut recorder, &mut stop_rx).await
 }
 
 async fn run_feishu_long_connection_subscription_job(
