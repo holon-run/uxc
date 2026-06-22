@@ -20,13 +20,11 @@ jobs:
     name: Run Holon (via holon-solve)
     uses: holon-run/holon/.github/workflows/holon-solve.yml@main
     with:
-      issue_number: ${{ github.event.issue.number || github.event.pull_request.number }}
-      label_name: ${{ github.event.label.name || '' }}
-      assignee_login: ${{ github.event.assignee.login || '' }}
-      comment_id: ${{ github.event.comment.id || 0 }}
-      review_id: ${{ github.event.review.id || 0 }}
+      trigger: auto
       auto_review: true
-      build_from_source: true
+      auto_review_on_push: ${{ vars.HOLON_AUTO_REVIEW_ON_PUSH || 'false' }}
+      model: bigmodel/glm-5.2
+      build_from_source: false
     secrets:
-      anthropic_auth_token: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-      anthropic_base_url: ${{ secrets.ANTHROPIC_BASE_URL }}
+      holon_github_token: ${{ secrets.HOLON_GITHUB_TOKEN }}
+      bigmodel_api_key: ${{ secrets.BIGMODEL_API_KEY }}
