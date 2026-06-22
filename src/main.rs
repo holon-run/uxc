@@ -283,6 +283,10 @@ struct EmailSendArgs {
     #[arg(long = "html-body")]
     html: Option<String>,
 
+    /// Allow AUTH over unencrypted smtp://; credentials are sent in cleartext
+    #[arg(long)]
+    allow_insecure_auth: bool,
+
     /// Validate and render envelope without connecting to SMTP
     #[arg(long)]
     dry_run: bool,
@@ -333,6 +337,10 @@ struct EmailReplyArgs {
     /// HTML body
     #[arg(long = "html-body")]
     html: Option<String>,
+
+    /// Allow AUTH over unencrypted smtp://; credentials are sent in cleartext
+    #[arg(long)]
+    allow_insecure_auth: bool,
 
     /// Validate and render envelope without connecting to SMTP
     #[arg(long)]
@@ -2491,11 +2499,12 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             ]),
             notes: vec![
                 "Use --auth with credentials containing username/user/account and password/secret fields when SMTP AUTH is required.".to_string(),
+                "SMTP AUTH over smtp:// sends credentials in cleartext and requires explicit --allow-insecure-auth; prefer a trusted local relay without credentials until STARTTLS/TLS is supported.".to_string(),
                 "SMTP sends are direct outbound commands; inbound email source streams remain under `uxc source ensure --transport email-imap-idle`.".to_string(),
             ],
             examples: vec![
-                "uxc email send --smtp smtp://smtp.example.com:587 --auth email-primary --from bot@example.com --to user@example.com --subject 'Hello' --text-body 'Hi'".to_string(),
-                "uxc email reply --smtp smtp://smtp.example.com:587 --auth email-primary --reply-handle '{\"message_id\":\"<msg@example.com>\"}' --from bot@example.com --to user@example.com --subject 'Re: Hello' --text-body 'Thanks'".to_string(),
+                "uxc email send --smtp smtp://localhost:2525 --from bot@example.com --to user@example.com --subject 'Hello' --text-body 'Hi'".to_string(),
+                "uxc email reply --smtp smtp://localhost:2525 --reply-handle '{\"message_id\":\"<msg@example.com>\"}' --from bot@example.com --to user@example.com --subject 'Re: Hello' --text-body 'Thanks'".to_string(),
             ],
         },
         ["email", "send"] => HelpData {
@@ -2506,6 +2515,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             notes: vec![
                 "At least one recipient and one body form are required.".to_string(),
                 "Use --dry-run to validate inputs and inspect the JSON envelope without contacting the SMTP server.".to_string(),
+                "Using --auth with smtp:// requires --allow-insecure-auth because credentials are sent in cleartext.".to_string(),
             ],
             examples: vec![
                 "uxc email send --smtp smtp://localhost:2525 --from bot@example.com --to user@example.com --subject 'Hello' --text-body 'Hi' --dry-run".to_string(),
@@ -2519,6 +2529,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             notes: vec![
                 "--reply-handle accepts the reply_handle object emitted by email_event source records and uses its message_id for In-Reply-To/References.".to_string(),
                 "--in-reply-to overrides reply_handle.message_id when both are provided.".to_string(),
+                "Using --auth with smtp:// requires --allow-insecure-auth because credentials are sent in cleartext.".to_string(),
             ],
             examples: vec![
                 "uxc email reply --smtp smtp://localhost:2525 --reply-handle '{\"message_id\":\"<msg@example.com>\"}' --from bot@example.com --to user@example.com --subject 'Re: Hello' --text-body 'Thanks' --dry-run".to_string(),
@@ -6056,6 +6067,7 @@ async fn handle_email_command(command: &EmailCommands, cli: &Cli) -> Result<Outp
             in_reply_to: None,
             references: vec![],
             auth: cli.auth.clone(),
+            allow_insecure_auth: args.allow_insecure_auth,
             dry_run: args.dry_run,
         },
         EmailCommands::Reply(args) => {
@@ -6081,6 +6093,7 @@ async fn handle_email_command(command: &EmailCommands, cli: &Cli) -> Result<Outp
                 in_reply_to,
                 references,
                 auth: cli.auth.clone(),
+                allow_insecure_auth: args.allow_insecure_auth,
                 dry_run: args.dry_run,
             }
         }

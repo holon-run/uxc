@@ -32,6 +32,7 @@ pub struct EmailSendRequest {
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub auth: Option<String>,
+    pub allow_insecure_auth: bool,
     pub dry_run: bool,
 }
 
@@ -76,6 +77,7 @@ pub async fn send_email(request: EmailSendRequest) -> Result<EmailSendResult> {
 
     if !request.dry_run {
         let auth = resolve_smtp_auth(&request.smtp_url, request.auth.clone()).await?;
+        validate_smtp_auth_transport(&smtp_url, auth.as_ref(), request.allow_insecure_auth)?;
         send_smtp(
             &smtp_url,
             auth.as_ref(),
@@ -146,6 +148,19 @@ fn parse_smtp_url(raw: &str) -> Result<Url> {
         "smtps" => bail!("smtps:// is not supported yet; use smtp:// with a trusted local relay"),
         other => bail!("unsupported SMTP URL scheme '{}'; expected smtp://", other),
     }
+}
+
+fn validate_smtp_auth_transport(
+    url: &Url,
+    auth: Option<&SmtpAuth>,
+    allow_insecure_auth: bool,
+) -> Result<()> {
+    if auth.is_some() && url.scheme() == "smtp" && !allow_insecure_auth {
+        bail!(
+            "refusing to send SMTP credentials over unencrypted smtp://; configure a trusted local relay without --auth, or pass --allow-insecure-auth to acknowledge the cleartext credential risk"
+        );
+    }
+    Ok(())
 }
 
 async fn resolve_smtp_auth(
@@ -289,7 +304,15 @@ async fn send_smtp(
 }
 
 fn local_hostname() -> String {
-    std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string())
+    sanitize_local_hostname(std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+fn sanitize_local_hostname(value: Option<String>) -> Option<String> {
+    value.filter(|value| {
+        let trimmed = value.trim();
+        !trimmed.is_empty() && !trimmed.contains('\r') && !trimmed.contains('\n')
+    })
 }
 
 fn dot_stuff(message: &str) -> String {
@@ -388,8 +411,35 @@ mod tests {
             in_reply_to: None,
             references: vec![],
             auth: None,
+            allow_insecure_auth: false,
             dry_run: true,
         };
         assert!(build_message(&request, "<id@example.com>").is_err());
+    }
+
+    #[test]
+    fn rejects_plaintext_smtp_auth_without_opt_in() {
+        let url = parse_smtp_url("smtp://localhost:2525").unwrap();
+        let auth = SmtpAuth {
+            username: "user".to_string(),
+            password: "password".to_string(),
+        };
+        assert!(validate_smtp_auth_transport(&url, Some(&auth), false).is_err());
+        assert!(validate_smtp_auth_transport(&url, Some(&auth), true).is_ok());
+        assert!(validate_smtp_auth_transport(&url, None, false).is_ok());
+    }
+
+    #[test]
+    fn local_hostname_rejects_newlines() {
+        assert_eq!(
+            sanitize_local_hostname(Some(
+                "localhost\r\nRCPT TO:<attacker@example.com>".to_string()
+            )),
+            None
+        );
+        assert_eq!(
+            sanitize_local_hostname(Some("smtp-client.example.com".to_string())).as_deref(),
+            Some("smtp-client.example.com")
+        );
     }
 }
