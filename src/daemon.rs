@@ -23,7 +23,8 @@ use crate::subscription_discord::{
     DiscordIdentifyProperties, DISCORD_DEFAULT_MESSAGE_INTENTS,
 };
 use crate::subscription_email::{
-    resolve_email_imap_idle_runtime_config, run_email_imap_idle_subscription_runtime,
+    fetch_email_provider_poll, resolve_email_imap_idle_runtime_config,
+    resolve_email_provider_poll_runtime_config, run_email_imap_idle_subscription_runtime,
     EmailImapIdleRuntimeConfig,
 };
 use crate::subscription_feishu::{
@@ -241,6 +242,7 @@ pub enum SubscriptionTransportHint {
     SlackSocketMode,
     FeishuLongConnection,
     EmailImapIdle,
+    EmailProviderPoll,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2282,6 +2284,12 @@ fn resolve_stream_subscription_protocol(request: &SubscribeStartRequest) -> Resu
                 }
                 return Ok("email_imap_idle".to_string());
             }
+            SubscriptionTransportHint::EmailProviderPoll => {
+                if !lower.starts_with("http://") && !lower.starts_with("https://") {
+                    bail!("email-provider-poll transport requires an http:// or https:// endpoint");
+                }
+                return Ok("email_provider_poll".to_string());
+            }
         }
     }
 
@@ -3116,7 +3124,8 @@ impl ManagedSourceManager {
             let args = runner.build_request_args(&base_args);
             let previous_checkpoint = runner.checkpoint().clone();
             let fetch =
-                fetch_managed_source_poll(runtime, request, args, runner.checkpoint()).await;
+                fetch_managed_source_poll_dispatch(runtime, request, args, runner.checkpoint())
+                    .await;
             let next_interval_secs;
 
             match fetch {
@@ -5910,7 +5919,12 @@ fn resolve_jsonrpc_subscription_config(
 fn resolve_poll_subscription_config(
     request: &SubscribeStartRequest,
 ) -> Result<PollSubscriptionConfig> {
-    if request.operation_id.is_none() {
+    if request.operation_id.is_none()
+        && !matches!(
+            request.transport_hint,
+            Some(SubscriptionTransportHint::EmailProviderPoll)
+        )
+    {
         bail!("poll subscriptions require an operation_id");
     }
     if request.resource_uri.is_some() {
@@ -5924,6 +5938,25 @@ fn resolve_poll_subscription_config(
         serde_json::from_value(raw).context("invalid poll subscription config")?;
     config.validate()?;
     Ok(config)
+}
+
+async fn fetch_managed_source_poll_dispatch(
+    runtime: &DaemonRuntime,
+    request: &SubscribeStartRequest,
+    args: HashMap<String, Value>,
+    checkpoint: &crate::subscription_poll::PollCheckpointState,
+) -> Result<crate::subscription_poll::PollFetchResult> {
+    if matches!(
+        request.transport_hint,
+        Some(SubscriptionTransportHint::EmailProviderPoll)
+    ) {
+        let auth_profile =
+            auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?;
+        let config = resolve_email_provider_poll_runtime_config(request, auth_profile.as_ref())?;
+        return fetch_email_provider_poll(&config, auth_profile.as_ref(), checkpoint).await;
+    }
+
+    fetch_managed_source_poll(runtime, request, args, checkpoint).await
 }
 
 async fn resolve_graphql_subscription_prepared_operation(

@@ -79,6 +79,7 @@ enum SubscribeTransportArg {
     SlackSocketMode,
     FeishuLongConnection,
     EmailImapIdle,
+    EmailProviderPoll,
 }
 
 #[derive(Parser)]
@@ -2385,19 +2386,20 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["source", "ensure"] => HelpData {
             path: "uxc source ensure".to_string(),
             about: "Ensure a managed source exists and is running".to_string(),
-            usage: "uxc source ensure <namespace> <source_key> <endpoint> [<operation_id> [key=value ... | '{...}']] [--transport websocket|discord-gateway|slack-socket-mode|feishu-long-connection|email-imap-idle] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>] [--read-resource]".to_string(),
+            usage: "uxc source ensure <namespace> <source_key> <endpoint> [<operation_id> [key=value ... | '{...}']] [--transport websocket|discord-gateway|slack-socket-mode|feishu-long-connection|email-imap-idle|email-provider-poll] [--subprotocol <value> ...] [--init-frame <text-or-json> ...] [--mode <stream|poll>] [--poll-config <json>] [--resource-uri <uri>] [--read-resource]".to_string(),
             commands: vec![],
             notes: vec![
                 "Managed source identity is (namespace, source_key); the durable stream stays stable across spec replacements for the same identity.".to_string(),
                 "Spec changes replace the current run and reset checkpoint state by default, while preserving the managed stream.".to_string(),
                 "Managed source streams persist only raw payload rows. Lifecycle/runtime events remain visible through source status rather than stream rows.".to_string(),
-                "Supports raw websocket, GraphQL subscription, JSON-RPC pubsub, MCP resource subscriptions, Discord Gateway, Slack Socket Mode, Feishu long connection, email IMAP IDLE, and poll mode.".to_string(),
+                "Supports raw websocket, GraphQL subscription, JSON-RPC pubsub, MCP resource subscriptions, Discord Gateway, Slack Socket Mode, Feishu long connection, email IMAP IDLE, email provider polling, and poll mode.".to_string(),
             ],
             examples: vec![
                 "uxc source ensure agentinbox github_repo:holon-run/uxc https://api.github.com get:/repos/{owner}/{repo}/events owner=holon-run repo=uxc --mode poll --poll-config '{\"interval_secs\":30,\"extract_items_pointer\":\"\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/id\"}}'".to_string(),
                 "uxc source ensure market okx:btc-usdt wss://ws.okx.com:8443/ws/v5/public --transport websocket --init-frame '{\"op\":\"subscribe\",\"args\":[{\"channel\":\"tickers\",\"instId\":\"BTC-USDT\"}]}'".to_string(),
                 "uxc source ensure team discord-gateway https://discord.com/api/v10 --transport discord-gateway --auth discord-bot '{\"intents\":37377}'".to_string(),
                 "uxc source ensure agentinbox email:primary imaps://imap.example.com:993 --transport email-imap-idle --auth email-primary mailbox=INBOX".to_string(),
+                "uxc source ensure agentinbox email:gmail https://gmail.googleapis.com/gmail/v1/users/me/messages --transport email-provider-poll --mode poll --auth gmail-oauth provider=gmail mailbox=INBOX --poll-config '{\"interval_secs\":60,\"extract_items_pointer\":\"/items\",\"checkpoint_strategy\":{\"type\":\"item_key\",\"item_key_pointer\":\"/message/uid\"}}'".to_string(),
             ],
         },
         ["source", "status"] => HelpData {
@@ -5578,6 +5580,9 @@ fn build_managed_source_spec(
             daemon::SubscriptionTransportHint::FeishuLongConnection
         }
         SubscribeTransportArg::EmailImapIdle => daemon::SubscriptionTransportHint::EmailImapIdle,
+        SubscribeTransportArg::EmailProviderPoll => {
+            daemon::SubscriptionTransportHint::EmailProviderPoll
+        }
     });
     let mut transport_operation_id = input.operation_id.clone();
     let mut transport_input_json = input.input_json.clone();
@@ -5728,6 +5733,31 @@ fn build_managed_source_spec(
             .into());
         }
     }
+    if matches!(
+        transport_hint,
+        Some(daemon::SubscriptionTransportHint::EmailProviderPoll)
+    ) {
+        if transport_operation_id.is_some() {
+            return Err(UxcError::InvalidArguments(
+                "--transport email-provider-poll cannot be combined with an operation_id"
+                    .to_string(),
+            )
+            .into());
+        }
+        if input.resource_uri.is_some() {
+            return Err(UxcError::InvalidArguments(
+                "--transport email-provider-poll cannot be combined with --resource-uri"
+                    .to_string(),
+            )
+            .into());
+        }
+        if !matches!(input.mode, SubscribeModeArg::Poll) {
+            return Err(UxcError::InvalidArguments(
+                "--transport email-provider-poll is only valid with --mode poll".to_string(),
+            )
+            .into());
+        }
+    }
     if input.read_resource && input.resource_uri.is_none() {
         return Err(UxcError::InvalidArguments(
             "--read-resource requires --resource-uri".to_string(),
@@ -5769,6 +5799,9 @@ fn build_managed_source_spec(
             ) || matches!(
                 transport_hint,
                 Some(daemon::SubscriptionTransportHint::EmailImapIdle)
+            ) || matches!(
+                transport_hint,
+                Some(daemon::SubscriptionTransportHint::EmailProviderPoll)
             ) {
                 let fallback_op = if matches!(
                     transport_hint,
@@ -5780,8 +5813,13 @@ fn build_managed_source_spec(
                     Some(daemon::SubscriptionTransportHint::FeishuLongConnection)
                 ) {
                     "feishu-long-connection"
-                } else {
+                } else if matches!(
+                    transport_hint,
+                    Some(daemon::SubscriptionTransportHint::EmailImapIdle)
+                ) {
                     "email-imap-idle"
+                } else {
+                    "email-provider-poll"
                 };
                 let mut explicit_args = Vec::new();
                 let mut positional = Vec::new();

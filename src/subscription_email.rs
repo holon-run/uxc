@@ -1,9 +1,12 @@
 use crate::auth::Profile;
 use crate::daemon::{SubscribeStartRequest, SubscriptionEventRecorder};
 use crate::daemon_log::redact_endpoint;
+use crate::subscription_poll::{PollCheckpointState, PollFetchResult};
 use anyhow::{anyhow, bail, Context, Result};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rustls_pki_types::ServerName;
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -42,6 +45,21 @@ pub struct EmailImapIdleRuntimeConfig {
     pub mailbox: String,
     pub account: Option<String>,
     pub initial_fetch_limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmailProviderKind {
+    Gmail,
+    Graph,
+    Jmap,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmailProviderPollRuntimeConfig {
+    pub endpoint: String,
+    pub provider: EmailProviderKind,
+    pub account: Option<String>,
+    pub mailbox: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +366,315 @@ fn build_email_event(config: &EmailImapIdleRuntimeConfig, message: &ImapFetchedM
             "uid": message.uid,
         }
     })
+}
+
+pub fn resolve_email_provider_poll_runtime_config(
+    request: &SubscribeStartRequest,
+    auth_profile: Option<&Profile>,
+) -> Result<EmailProviderPollRuntimeConfig> {
+    let url = Url::parse(&request.endpoint).context("invalid email provider endpoint")?;
+    match url.scheme() {
+        "http" | "https" => {}
+        other => bail!(
+            "email-provider-poll transport requires http:// or https:// endpoint, got '{}'",
+            other
+        ),
+    }
+    let args = request.args.as_ref();
+    let provider = args
+        .and_then(|args| args.get("provider"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("email-provider-poll requires provider=gmail|graph|jmap"))?;
+    let provider = match provider.to_ascii_lowercase().as_str() {
+        "gmail" => EmailProviderKind::Gmail,
+        "graph" | "microsoft_graph" | "msgraph" => EmailProviderKind::Graph,
+        "jmap" => EmailProviderKind::Jmap,
+        other => bail!(
+            "unsupported email provider '{}'; expected gmail, graph, or jmap",
+            other
+        ),
+    };
+    let mailbox = args
+        .and_then(|args| args.get("mailbox"))
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_MAILBOX)
+        .to_string();
+    let account = args
+        .and_then(|args| args.get("account"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            auth_profile.and_then(|profile| profile.resolve_field_value("account").ok().flatten())
+        });
+
+    Ok(EmailProviderPollRuntimeConfig {
+        endpoint: request.endpoint.clone(),
+        provider,
+        account,
+        mailbox,
+    })
+}
+
+pub async fn fetch_email_provider_poll(
+    config: &EmailProviderPollRuntimeConfig,
+    auth_profile: Option<&Profile>,
+    checkpoint: &PollCheckpointState,
+) -> Result<PollFetchResult> {
+    let started = std::time::Instant::now();
+    let client = reqwest::Client::new();
+    let request_context = crate::auth::AuthRequestContext::new("GET", &config.endpoint);
+    let resolved_auth = match auth_profile {
+        Some(profile) => Some(crate::auth::resolve_profile_request_auth_with_context(
+            &request_context,
+            profile,
+        )?),
+        None => None,
+    };
+    let url = resolved_auth
+        .as_ref()
+        .map(|auth| auth.url.as_str())
+        .unwrap_or(config.endpoint.as_str());
+    let mut builder = client.get(url);
+    if let Some(auth) = resolved_auth.as_ref() {
+        builder = builder.headers(header_map_from_pairs(&auth.headers)?);
+    }
+    if let Some(etag) = checkpoint.etag.as_ref() {
+        builder = builder.header("if-none-match", etag);
+    }
+    let response = builder
+        .send()
+        .await
+        .context("email provider poll request failed")?;
+    let status = response.status();
+    let response_headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
+    if status.as_u16() == 304 {
+        return Ok(PollFetchResult {
+            data: json!({ "items": [] }),
+            duration_ms: Some(started.elapsed().as_millis() as u64),
+            status_code: Some(status.as_u16()),
+            response_headers,
+        });
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "email provider poll request failed with HTTP {}: {}",
+            status.as_u16(),
+            body
+        );
+    }
+    let raw = response
+        .json::<Value>()
+        .await
+        .context("email provider poll response was not JSON")?;
+    let items = normalize_email_provider_items(config, &raw)?;
+    Ok(PollFetchResult {
+        data: json!({ "items": items }),
+        duration_ms: Some(started.elapsed().as_millis() as u64),
+        status_code: Some(status.as_u16()),
+        response_headers,
+    })
+}
+
+fn header_map_from_pairs(headers: &[(String, String)]) -> Result<HeaderMap> {
+    let mut out = HeaderMap::new();
+    for (name, value) in headers {
+        out.insert(
+            HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| format!("invalid auth header name '{}'", name))?,
+            HeaderValue::from_str(value)
+                .with_context(|| format!("invalid auth header value for '{}'", name))?,
+        );
+    }
+    Ok(out)
+}
+
+pub fn normalize_email_provider_items(
+    config: &EmailProviderPollRuntimeConfig,
+    raw: &Value,
+) -> Result<Vec<Value>> {
+    let items = match config.provider {
+        EmailProviderKind::Gmail => raw
+            .get("messages")
+            .or_else(|| raw.get("items"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("Gmail provider response requires messages/items array"))?,
+        EmailProviderKind::Graph => raw
+            .get("value")
+            .or_else(|| raw.get("items"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                anyhow!("Microsoft Graph provider response requires value/items array")
+            })?,
+        EmailProviderKind::Jmap => raw
+            .get("list")
+            .or_else(|| raw.get("items"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("JMAP provider response requires list/items array"))?,
+    };
+    Ok(items
+        .iter()
+        .map(|item| build_provider_email_event(config, item))
+        .collect())
+}
+
+fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Value) -> Value {
+    let account = config.account.as_deref().unwrap_or("default");
+    let provider = match config.provider {
+        EmailProviderKind::Gmail => "gmail",
+        EmailProviderKind::Graph => "graph",
+        EmailProviderKind::Jmap => "jmap",
+    };
+    let uid = first_string(item, &["id", "blobId"]).unwrap_or_else(|| item.to_string());
+    let message_id = match config.provider {
+        EmailProviderKind::Gmail => gmail_header(item, "Message-ID").unwrap_or_else(|| uid.clone()),
+        EmailProviderKind::Graph => {
+            first_string(item, &["internetMessageId"]).unwrap_or_else(|| uid.clone())
+        }
+        EmailProviderKind::Jmap => {
+            first_string(item, &["messageId"]).unwrap_or_else(|| uid.clone())
+        }
+    };
+    let subject = match config.provider {
+        EmailProviderKind::Gmail => {
+            gmail_header(item, "Subject").or_else(|| first_string(item, &["subject"]))
+        }
+        _ => first_string(item, &["subject"]),
+    };
+    json!({
+        "type": "email_event",
+        "version": "v1",
+        "provider": provider,
+        "account": account,
+        "mailbox": config.mailbox,
+        "event_kind": "message_received",
+        "message": {
+            "uid": uid,
+            "message_id": message_id,
+            "thread_id": first_string(item, &["threadId", "thread_id", "inReplyTo"]),
+            "conversation_id": first_string(item, &["conversationId", "emailId"]),
+            "from": provider_from_address(config.provider, item),
+            "to": provider_address_list(config.provider, item, "to"),
+            "cc": provider_address_list(config.provider, item, "cc"),
+            "bcc": provider_address_list(config.provider, item, "bcc"),
+            "subject": subject,
+            "date": first_string(item, &["receivedDateTime", "receivedAt", "internalDate", "date"]),
+            "snippet": first_string(item, &["snippet", "bodyPreview", "preview"]),
+            "attachments": [],
+            "flags": provider_flags(config.provider, item),
+        },
+        "raw": {
+            "provider_payload": item,
+        },
+        "reply_handle": {
+            "type": "email_provider",
+            "provider": provider,
+            "account": account,
+            "mailbox": config.mailbox,
+            "message_id": message_id,
+            "uid": uid,
+        }
+    })
+}
+
+fn first_string(value: &Value, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn gmail_header(item: &Value, name: &str) -> Option<String> {
+    item.pointer("/payload/headers")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|header| {
+            header
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
+        .and_then(|header| header.get("value").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn provider_from_address(provider: EmailProviderKind, item: &Value) -> Option<Value> {
+    match provider {
+        EmailProviderKind::Gmail => gmail_header(item, "From").map(|raw| json!({ "raw": raw })),
+        EmailProviderKind::Graph => item
+            .pointer("/from/emailAddress")
+            .cloned()
+            .or_else(|| first_string(item, &["from"]).map(|raw| json!({ "raw": raw }))),
+        EmailProviderKind::Jmap => item
+            .get("from")
+            .and_then(Value::as_array)
+            .and_then(|values| values.first())
+            .cloned()
+            .or_else(|| first_string(item, &["from"]).map(|raw| json!({ "raw": raw }))),
+    }
+}
+
+fn provider_address_list(provider: EmailProviderKind, item: &Value, field: &str) -> Vec<Value> {
+    match provider {
+        EmailProviderKind::Gmail => {
+            let header = match field {
+                "to" => "To",
+                "cc" => "Cc",
+                "bcc" => "Bcc",
+                _ => field,
+            };
+            split_address_header(gmail_header(item, header).as_deref())
+        }
+        EmailProviderKind::Graph => item
+            .get(format!("{field}Recipients"))
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.get("emailAddress").cloned())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        EmailProviderKind::Jmap => item
+            .get(field)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+fn provider_flags(provider: EmailProviderKind, item: &Value) -> Vec<Value> {
+    match provider {
+        EmailProviderKind::Gmail => item
+            .get("labelIds")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+        EmailProviderKind::Graph => {
+            let mut flags = Vec::new();
+            if item.get("isRead").and_then(Value::as_bool) == Some(true) {
+                flags.push(Value::String("read".to_string()));
+            }
+            if item.get("hasAttachments").and_then(Value::as_bool) == Some(true) {
+                flags.push(Value::String("has_attachments".to_string()));
+            }
+            flags
+        }
+        EmailProviderKind::Jmap => item
+            .get("keywords")
+            .and_then(Value::as_object)
+            .map(|keywords| keywords.keys().cloned().map(Value::String).collect())
+            .unwrap_or_default(),
+    }
 }
 
 fn parse_email_headers(raw: &str) -> Map<String, Value> {
@@ -710,6 +1037,96 @@ mod tests {
         assert_eq!(event["message"]["subject"], "Hi");
         assert_eq!(event["raw"]["mime_truncated"], false);
         assert_eq!(event["reply_handle"]["message_id"], "<m1@example.com>");
+    }
+
+    #[test]
+    fn normalizes_gmail_provider_messages_to_email_events() {
+        let config = EmailProviderPollRuntimeConfig {
+            endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages".to_string(),
+            provider: EmailProviderKind::Gmail,
+            account: Some("gmail-primary".to_string()),
+            mailbox: "INBOX".to_string(),
+        };
+        let raw = json!({
+            "messages": [{
+                "id": "msg-1",
+                "threadId": "thread-1",
+                "labelIds": ["INBOX", "UNREAD"],
+                "snippet": "hello",
+                "payload": {"headers": [
+                    {"name": "Message-ID", "value": "<m1@example.com>"},
+                    {"name": "Subject", "value": "Hi"},
+                    {"name": "From", "value": "Sender <sender@example.com>"},
+                    {"name": "To", "value": "agent@example.com"}
+                ]}
+            }]
+        });
+
+        let events = normalize_email_provider_items(&config, &raw).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "email_event");
+        assert_eq!(events[0]["provider"], "gmail");
+        assert_eq!(events[0]["account"], "gmail-primary");
+        assert_eq!(events[0]["message"]["uid"], "msg-1");
+        assert_eq!(events[0]["message"]["message_id"], "<m1@example.com>");
+        assert_eq!(events[0]["message"]["subject"], "Hi");
+        assert_eq!(events[0]["reply_handle"]["type"], "email_provider");
+    }
+
+    #[test]
+    fn normalizes_graph_and_jmap_provider_messages_to_email_events() {
+        let graph_config = EmailProviderPollRuntimeConfig {
+            endpoint: "https://graph.microsoft.com/v1.0/me/messages".to_string(),
+            provider: EmailProviderKind::Graph,
+            account: None,
+            mailbox: "Inbox".to_string(),
+        };
+        let graph_raw = json!({
+            "value": [{
+                "id": "graph-1",
+                "conversationId": "conv-1",
+                "internetMessageId": "<graph@example.com>",
+                "subject": "Graph",
+                "bodyPreview": "preview",
+                "from": {"emailAddress": {"address": "sender@example.com"}},
+                "toRecipients": [{"emailAddress": {"address": "agent@example.com"}}],
+                "isRead": true
+            }]
+        });
+        let graph_events = normalize_email_provider_items(&graph_config, &graph_raw).unwrap();
+        assert_eq!(graph_events[0]["provider"], "graph");
+        assert_eq!(graph_events[0]["message"]["uid"], "graph-1");
+        assert_eq!(
+            graph_events[0]["message"]["message_id"],
+            "<graph@example.com>"
+        );
+        assert_eq!(graph_events[0]["message"]["flags"], json!(["read"]));
+
+        let jmap_config = EmailProviderPollRuntimeConfig {
+            endpoint: "https://api.fastmail.com/jmap/session".to_string(),
+            provider: EmailProviderKind::Jmap,
+            account: Some("jmap-primary".to_string()),
+            mailbox: "Inbox".to_string(),
+        };
+        let jmap_raw = json!({
+            "list": [{
+                "id": "email-1",
+                "messageId": "<jmap@example.com>",
+                "subject": "JMAP",
+                "preview": "preview",
+                "from": [{"email": "sender@example.com"}],
+                "to": [{"email": "agent@example.com"}],
+                "keywords": {"$seen": true}
+            }]
+        });
+        let jmap_events = normalize_email_provider_items(&jmap_config, &jmap_raw).unwrap();
+        assert_eq!(jmap_events[0]["provider"], "jmap");
+        assert_eq!(jmap_events[0]["message"]["uid"], "email-1");
+        assert_eq!(
+            jmap_events[0]["message"]["message_id"],
+            "<jmap@example.com>"
+        );
+        assert_eq!(jmap_events[0]["message"]["flags"], json!(["$seen"]));
     }
 
     #[test]

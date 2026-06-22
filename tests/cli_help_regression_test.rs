@@ -973,6 +973,10 @@ fn source_ensure_help_flag_outputs_subcommand_help_json() {
         .as_str()
         .unwrap_or_default()
         .contains("<namespace> <source_key> <endpoint>"));
+    assert!(json["data"]["usage"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("email-provider-poll"));
 }
 
 #[test]
