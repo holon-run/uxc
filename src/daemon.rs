@@ -79,6 +79,8 @@ const STOP_POLL_TRIES: usize = 50;
 const STOP_POLL_INTERVAL_MS: u64 = 100;
 const START_LOCK_STALE_SECS: u64 = 30;
 const DAEMON_OWNER_TERM_SIGNAL: i32 = 15;
+const DAEMON_OWNER_KILL_SIGNAL: i32 = 9;
+const KILL_POLL_TRIES: usize = 20;
 const STDIO_INIT_LOCK_STALE_SECS: u64 = 30;
 const MCP_IDLE_TTL_DEFAULT_SECS: u64 = 3600;
 const MCP_IDLE_TTL_ENV: &str = "UXC_DAEMON_MCP_IDLE_TTL_SECS";
@@ -7693,10 +7695,29 @@ pub async fn daemon_stop_local() -> Result<bool> {
                 }
             }
 
+            // Escalate to SIGKILL when SIGTERM does not produce a clean shutdown.
+            // SAFETY: kill with SIGKILL forcefully terminates the owner pid that
+            // did not respond to SIGTERM within the polling window.
+            if unsafe { kill(pid as i32, DAEMON_OWNER_KILL_SIGNAL) } == -1 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+
+            for _ in 0..KILL_POLL_TRIES {
+                tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
+                let diagnostics = inspect_daemon_local_diagnostics()?;
+                if !diagnostics.owner_lock_held {
+                    let _ = clear_daemon_owner_metadata_path(&daemon_lock_path());
+                    if socket_path().exists() {
+                        let _ = fs::remove_file(socket_path());
+                    }
+                    return Ok(true);
+                }
+            }
+
             return Err(StructuredError::new(
                 "DAEMON_STOP_TIMEOUT",
                 format!(
-                    "Daemon owner pid {} did not stop in time. Run `uxc daemon doctor`.",
+                    "Daemon owner pid {} did not stop after SIGTERM and SIGKILL. Run `uxc daemon doctor`.",
                     pid
                 ),
                 Some(serde_json::to_value(diagnostics)?),

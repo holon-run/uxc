@@ -41,7 +41,12 @@ fn benchmark_mcp_stdio_cold_vs_warm_latency() {
         .arg("start")
         .output()
         .expect("daemon start should run");
-    assert!(start.status.success());
+    assert!(
+        start.status.success(),
+        "daemon start failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&start.stdout),
+        String::from_utf8_lossy(&start.stderr)
+    );
 
     let cold_t0 = Instant::now();
     let cold_output = uxc_command()
@@ -103,7 +108,12 @@ fn benchmark_openapi_http_cold_vs_warm_latency() {
         .arg("start")
         .output()
         .expect("daemon start should run");
-    assert!(start.status.success());
+    assert!(
+        start.status.success(),
+        "daemon start failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&start.stdout),
+        String::from_utf8_lossy(&start.stderr)
+    );
 
     let cold_t0 = Instant::now();
     let cold_output = uxc_command()
