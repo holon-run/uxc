@@ -7664,7 +7664,19 @@ pub async fn daemon_stop_local() -> Result<bool> {
         // Graceful stop did not produce shutdown within the polling window.
         // Fall through to the force-kill path below.
     }
-    force_kill_daemon_owner().await
+    match force_kill_daemon_owner().await {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            // No owner lock held. If the socket is still reachable, the
+            // daemon is running without an owner lock (e.g., a third-party
+            // process on the socket). Return an error since we cannot stop it.
+            if daemon_status_client().await.is_ok() {
+                bail!("Daemon did not stop in time. Run `uxc daemon status` for diagnostics.");
+            }
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(unix)]
