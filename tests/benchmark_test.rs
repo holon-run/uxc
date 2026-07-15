@@ -162,7 +162,12 @@ fn benchmark_repeated_call_latency_p95() {
         .arg("start")
         .output()
         .expect("daemon start should run");
-    assert!(start.status.success());
+    assert!(
+        start.status.success(),
+        "daemon start failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&start.stdout),
+        String::from_utf8_lossy(&start.stderr)
+    );
 
     let sample_count = benchmark_sample_count();
     let mut latencies_ms = Vec::with_capacity(sample_count);

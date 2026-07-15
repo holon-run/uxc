@@ -6973,6 +6973,11 @@ pub async fn ensure_compatible_daemon_running() -> Result<EnsureDaemonOutcome> {
             })
         }
         Err(_) => {
+            // Clean up any stale daemon (unreachable socket, lingering owner
+            // lock) before spawning a new one. daemon_stop_local handles the
+            // "no daemon" case (Ok(false)) and the stale-daemon case
+            // (SIGTERM → SIGKILL → lock release + artifact cleanup).
+            let _ = daemon_stop_local().await;
             start_daemon_process().await?;
             Ok(EnsureDaemonOutcome {
                 started_now: true,
@@ -7652,100 +7657,102 @@ pub async fn daemon_start_local() -> Result<EnsureDaemonOutcome> {
 }
 
 pub async fn daemon_stop_local() -> Result<bool> {
-    if daemon_status_client().await.is_err() {
-        let diagnostics = inspect_daemon_local_diagnostics()?;
-        if !diagnostics.owner_lock_held {
-            return Ok(false);
-        }
-
-        let pid = diagnostics.owner_pid.ok_or_else(|| {
-            StructuredError::new(
-                "DAEMON_OWNER_METADATA_MISSING",
-                "Daemon owner lock is held but owner pid metadata is missing. Run `uxc daemon doctor`."
-                    .to_string(),
-                Some(serde_json::to_value(&diagnostics).unwrap_or(Value::Null)),
-            )
-        })?;
-
-        if !diagnostics.owner_pid_alive {
-            return Err(StructuredError::new(
-                "DAEMON_OWNER_STALE",
-                "Daemon owner metadata is stale. Run `uxc daemon doctor`.".to_string(),
-                Some(serde_json::to_value(&diagnostics)?),
-            )
-            .into());
-        }
-
-        #[cfg(unix)]
-        {
-            // SAFETY: kill with SIGTERM targets the owner pid discovered from local metadata.
-            if unsafe { kill(pid as i32, DAEMON_OWNER_TERM_SIGNAL) } == -1 {
-                return Err(std::io::Error::last_os_error().into());
+    // Try graceful stop via the daemon socket when it is reachable.
+    if daemon_status_client().await.is_ok() {
+        let _ = daemon_stop_client().await;
+        for _ in 0..STOP_POLL_TRIES {
+            tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
+            if daemon_status_client().await.is_err() {
+                return Ok(true);
             }
-
-            for _ in 0..STOP_POLL_TRIES {
-                tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
-                let diagnostics = inspect_daemon_local_diagnostics()?;
-                if !diagnostics.owner_lock_held {
-                    let _ = clear_daemon_owner_metadata_path(&daemon_lock_path());
-                    if socket_path().exists() {
-                        let _ = fs::remove_file(socket_path());
-                    }
-                    return Ok(true);
-                }
-            }
-
-            // Escalate to SIGKILL when SIGTERM does not produce a clean shutdown.
-            // SAFETY: kill with SIGKILL forcefully terminates the owner pid that
-            // did not respond to SIGTERM within the polling window.
-            if unsafe { kill(pid as i32, DAEMON_OWNER_KILL_SIGNAL) } == -1 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-
-            for _ in 0..KILL_POLL_TRIES {
-                tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
-                let diagnostics = inspect_daemon_local_diagnostics()?;
-                if !diagnostics.owner_lock_held {
-                    let _ = clear_daemon_owner_metadata_path(&daemon_lock_path());
-                    if socket_path().exists() {
-                        let _ = fs::remove_file(socket_path());
-                    }
-                    return Ok(true);
-                }
-            }
-
-            return Err(StructuredError::new(
-                "DAEMON_STOP_TIMEOUT",
-                format!(
-                    "Daemon owner pid {} did not stop after SIGTERM and SIGKILL. Run `uxc daemon doctor`.",
-                    pid
-                ),
-                Some(serde_json::to_value(diagnostics)?),
-            )
-            .into());
         }
-
-        #[cfg(not(unix))]
-        {
-            return Err(StructuredError::new(
-                "DAEMON_STOP_UNSUPPORTED_PLATFORM",
-                format!(
-                    "Daemon owner pid {} cannot be stopped via Unix signals on this platform.",
-                    pid
-                ),
-                Some(serde_json::to_value(&diagnostics)?),
-            )
-            .into());
-        }
+        // Graceful stop did not produce shutdown within the polling window.
+        // Fall through to the force-kill path below.
     }
-    daemon_stop_client().await?;
+    force_kill_daemon_owner().await
+}
+
+#[cfg(unix)]
+async fn force_kill_daemon_owner() -> Result<bool> {
+    let diagnostics = inspect_daemon_local_diagnostics()?;
+    if !diagnostics.owner_lock_held {
+        return Ok(false);
+    }
+
+    let pid = diagnostics.owner_pid.ok_or_else(|| {
+        StructuredError::new(
+            "DAEMON_OWNER_METADATA_MISSING",
+            "Daemon owner lock is held but owner pid metadata is missing. Run `uxc daemon doctor`."
+                .to_string(),
+            Some(serde_json::to_value(&diagnostics).unwrap_or(Value::Null)),
+        )
+    })?;
+
+    if !diagnostics.owner_pid_alive {
+        return Err(StructuredError::new(
+            "DAEMON_OWNER_STALE",
+            "Daemon owner metadata is stale. Run `uxc daemon doctor`.".to_string(),
+            Some(serde_json::to_value(&diagnostics)?),
+        )
+        .into());
+    }
+
+    // SAFETY: kill with SIGTERM targets the owner pid discovered from local metadata.
+    if unsafe { kill(pid as i32, DAEMON_OWNER_TERM_SIGNAL) } == -1 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
     for _ in 0..STOP_POLL_TRIES {
         tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
-        if daemon_status_client().await.is_err() {
+        let diagnostics = inspect_daemon_local_diagnostics()?;
+        if !diagnostics.owner_lock_held {
+            let _ = clear_daemon_owner_metadata_path(&daemon_lock_path());
+            if socket_path().exists() {
+                let _ = fs::remove_file(socket_path());
+            }
             return Ok(true);
         }
     }
-    bail!("Daemon did not stop in time. Run `uxc daemon status` for diagnostics.")
+
+    // Escalate to SIGKILL when SIGTERM does not produce a clean shutdown.
+    // SAFETY: kill with SIGKILL forcefully terminates the owner pid that
+    // did not respond to SIGTERM within the polling window.
+    if unsafe { kill(pid as i32, DAEMON_OWNER_KILL_SIGNAL) } == -1 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    for _ in 0..KILL_POLL_TRIES {
+        tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
+        let diagnostics = inspect_daemon_local_diagnostics()?;
+        if !diagnostics.owner_lock_held {
+            let _ = clear_daemon_owner_metadata_path(&daemon_lock_path());
+            if socket_path().exists() {
+                let _ = fs::remove_file(socket_path());
+            }
+            return Ok(true);
+        }
+    }
+
+    Err(StructuredError::new(
+        "DAEMON_STOP_TIMEOUT",
+        format!(
+            "Daemon owner pid {} did not stop after SIGTERM and SIGKILL. Run `uxc daemon doctor`.",
+            pid
+        ),
+        Some(serde_json::to_value(diagnostics)?),
+    )
+    .into())
+}
+
+#[cfg(not(unix))]
+async fn force_kill_daemon_owner() -> Result<bool> {
+    Err(StructuredError::new(
+        "DAEMON_STOP_UNSUPPORTED_PLATFORM",
+        "Cannot force-kill daemon owner on non-Unix platforms. Run `uxc daemon doctor`."
+            .to_string(),
+        None,
+    )
+    .into())
 }
 
 #[cfg(unix)]
