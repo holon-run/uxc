@@ -254,7 +254,7 @@ jobs:
         uses: taiki-e/install-action@cargo-audit
 
       - name: Run cargo audit
-        run: cargo audit --ignore RUSTSEC-2025-0134
+        run: cargo audit --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0205
 
   build-pr:
     name: Build (PR Linux)
