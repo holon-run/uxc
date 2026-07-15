@@ -710,10 +710,9 @@ impl GraphQLAdapter {
             ("queryType", name)
         } else if let Some(name) = operation.strip_prefix("mutation/") {
             ("mutationType", name)
-        } else if let Some(name) = operation.strip_prefix("subscription/") {
-            ("subscriptionType", name)
         } else {
-            return None;
+            let name = operation.strip_prefix("subscription/")?;
+            ("subscriptionType", name)
         };
 
         let fields = schema

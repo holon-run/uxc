@@ -62,6 +62,10 @@ pub struct PollCheckpointState {
     pub seen_keys: VecDeque<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag_set_at_unix: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub consecutive_304_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -538,6 +542,47 @@ pub(crate) fn parse_poll_interval_secs(headers: &HashMap<String, String>) -> Opt
     let raw = extract_header_value(headers, "x-poll-interval")?;
     let parsed = raw.trim().parse::<u64>().ok()?;
     Some(parsed.clamp(1, 3600))
+}
+
+/// Maximum age (in seconds) after which a stored ETag is considered stale.
+/// Once exceeded, the ETag is cleared so the next poll performs an unconditional fetch.
+pub const MANAGED_SOURCE_ETAG_TTL_SECS: u64 = 600;
+
+/// Number of consecutive HTTP 304 responses after which the stored ETag is considered
+/// stale and cleared, forcing the next poll to be unconditional.
+pub const MANAGED_SOURCE_ETAG_MAX_CONSECUTIVE_304: u32 = 3;
+
+/// Reason the ETag should be invalidated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EtagInvalidationReason {
+    /// ETag has lived longer than [`MANAGED_SOURCE_ETAG_TTL_SECS`].
+    TtlExpired,
+    /// Server returned `MANAGED_SOURCE_ETAG_MAX_CONSECUTIVE_304` consecutive 304 responses.
+    Consecutive304Exceeded,
+}
+
+/// Returns `Some(reason)` when the checkpoint's ETag should be cleared before the next fetch.
+pub fn should_invalidate_etag(
+    checkpoint: &PollCheckpointState,
+    now: u64,
+) -> Option<EtagInvalidationReason> {
+    checkpoint.etag.as_ref()?;
+    if let Some(set_at) = checkpoint.etag_set_at_unix {
+        if now.saturating_sub(set_at) >= MANAGED_SOURCE_ETAG_TTL_SECS {
+            return Some(EtagInvalidationReason::TtlExpired);
+        }
+    } else {
+        // ETag exists but no timestamp — treat as stale (pre-existing data without the field).
+        return Some(EtagInvalidationReason::TtlExpired);
+    }
+    if checkpoint.consecutive_304_count >= MANAGED_SOURCE_ETAG_MAX_CONSECUTIVE_304 {
+        return Some(EtagInvalidationReason::Consecutive304Exceeded);
+    }
+    None
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 trait ResultExt<T> {
@@ -1020,5 +1065,69 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("ETag".to_string(), "\"abc\"".to_string());
         assert_eq!(extract_header_value(&headers, "etag"), Some("\"abc\""));
+    }
+
+    #[test]
+    fn should_invalidate_etag_returns_none_when_no_etag() {
+        let checkpoint = PollCheckpointState::default();
+        assert_eq!(should_invalidate_etag(&checkpoint, 1000), None);
+    }
+
+    #[test]
+    fn should_invalidate_etag_returns_ttl_expired() {
+        let checkpoint = PollCheckpointState {
+            etag: Some("\"v1\"".to_string()),
+            etag_set_at_unix: Some(1000),
+            consecutive_304_count: 0,
+            ..Default::default()
+        };
+        // TTL is 600 seconds; at 1599 it's still valid, at 1600 it's expired
+        assert_eq!(should_invalidate_etag(&checkpoint, 1599), None);
+        assert_eq!(
+            should_invalidate_etag(&checkpoint, 1600),
+            Some(EtagInvalidationReason::TtlExpired)
+        );
+    }
+
+    #[test]
+    fn should_invalidate_etag_returns_ttl_expired_when_no_timestamp() {
+        // Pre-existing checkpoints that have an ETag but no etag_set_at_unix
+        // should be treated as stale so the field gets populated on the next poll.
+        let checkpoint = PollCheckpointState {
+            etag: Some("\"v1\"".to_string()),
+            etag_set_at_unix: None,
+            consecutive_304_count: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            should_invalidate_etag(&checkpoint, 100),
+            Some(EtagInvalidationReason::TtlExpired)
+        );
+    }
+
+    #[test]
+    fn should_invalidate_etag_returns_consecutive_304_exceeded() {
+        let checkpoint = PollCheckpointState {
+            etag: Some("\"v1\"".to_string()),
+            etag_set_at_unix: Some(1000),
+            consecutive_304_count: MANAGED_SOURCE_ETAG_MAX_CONSECUTIVE_304,
+            ..Default::default()
+        };
+        // Within TTL but consecutive 304 count at threshold
+        assert_eq!(
+            should_invalidate_etag(&checkpoint, 1100),
+            Some(EtagInvalidationReason::Consecutive304Exceeded)
+        );
+    }
+
+    #[test]
+    fn should_invalidate_etag_returns_none_when_within_ttl_and_below_304_threshold() {
+        let checkpoint = PollCheckpointState {
+            etag: Some("\"v1\"".to_string()),
+            etag_set_at_unix: Some(1000),
+            consecutive_304_count: MANAGED_SOURCE_ETAG_MAX_CONSECUTIVE_304 - 1,
+            ..Default::default()
+        };
+        assert_eq!(should_invalidate_etag(&checkpoint, 1100), None);
     }
 }

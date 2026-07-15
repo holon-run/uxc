@@ -358,6 +358,10 @@ pub struct ManagedSourceCheckpointSummary {
     pub seen_window_len: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag_set_at_unix: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub consecutive_304_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3122,6 +3126,20 @@ impl ManagedSourceManager {
             }
 
             let args = runner.build_request_args(&base_args);
+
+            // ETag invalidation: clear stale ETag before fetch so the poll is unconditional.
+            if crate::subscription_poll::should_invalidate_etag(
+                runner.checkpoint(),
+                now_unix_secs(),
+            )
+            .is_some()
+            {
+                let mut checkpoint = runner.checkpoint().clone();
+                checkpoint.etag = None;
+                checkpoint.etag_set_at_unix = None;
+                runner.restore_checkpoint(checkpoint);
+            }
+
             let previous_checkpoint = runner.checkpoint().clone();
             let fetch =
                 fetch_managed_source_poll_dispatch(runtime, request, args, runner.checkpoint())
@@ -3132,20 +3150,19 @@ impl ManagedSourceManager {
                 Ok(result) => {
                     let fetch_duration_ms = result.duration_ms;
                     let status_code = result.status_code;
-                    if let Some(etag) = crate::subscription_poll::extract_header_value(
-                        &result.response_headers,
-                        "etag",
-                    ) {
-                        let mut checkpoint = runner.checkpoint().clone();
-                        checkpoint.etag = Some(etag.to_string());
-                        runner.restore_checkpoint(checkpoint);
-                    }
                     next_interval_secs = crate::subscription_poll::parse_poll_interval_secs(
                         &result.response_headers,
                     )
                     .unwrap_or(default_interval_secs);
 
                     if result.status_code == Some(304) {
+                        {
+                            let mut checkpoint = runner.checkpoint().clone();
+                            checkpoint.consecutive_304_count =
+                                checkpoint.consecutive_304_count.saturating_add(1);
+                            runner.restore_checkpoint(checkpoint);
+                        }
+                        let consecutive_304_count = runner.checkpoint().consecutive_304_count;
                         note_subscription_success(runtime_view, now_unix_secs()).await;
                         update_subscription_view(runtime_view, Some("running"), None, false).await;
                         let mut db_write_duration_ms = 0;
@@ -3179,10 +3196,27 @@ impl ManagedSourceManager {
                                 event_count: 0,
                                 total_duration_ms: poll_started.elapsed().as_millis() as u64,
                                 error: None,
+                                consecutive_304_count,
                             },
                         )
                         .await;
                     } else {
+                        {
+                            let now = now_unix_secs();
+                            let mut checkpoint = runner.checkpoint().clone();
+                            checkpoint.consecutive_304_count = 0;
+                            if let Some(etag) = crate::subscription_poll::extract_header_value(
+                                &result.response_headers,
+                                "etag",
+                            ) {
+                                checkpoint.etag = Some(etag.to_string());
+                                checkpoint.etag_set_at_unix = Some(now);
+                            } else {
+                                checkpoint.etag = None;
+                                checkpoint.etag_set_at_unix = None;
+                            }
+                            runner.restore_checkpoint(checkpoint);
+                        }
                         let process_started = Instant::now();
                         let output = match runner.process_response(result.data, result.duration_ms)
                         {
@@ -3244,6 +3278,7 @@ impl ManagedSourceManager {
                                 event_count,
                                 total_duration_ms: poll_started.elapsed().as_millis() as u64,
                                 error: None,
+                                consecutive_304_count: 0,
                             },
                         )
                         .await;
@@ -3262,6 +3297,7 @@ impl ManagedSourceManager {
                             event_count: 0,
                             total_duration_ms: poll_started.elapsed().as_millis() as u64,
                             error: Some(message.clone()),
+                            consecutive_304_count: runner.checkpoint().consecutive_304_count,
                         },
                     )
                     .await;
@@ -3452,8 +3488,13 @@ struct ManagedSourcePollSummaryLog {
     process_duration_ms: u64,
     db_write_duration_ms: u64,
     event_count: usize,
+    consecutive_304_count: u32,
     total_duration_ms: u64,
     error: Option<String>,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 async fn log_managed_source_poll_summary(
@@ -3476,7 +3517,17 @@ async fn log_managed_source_poll_summary(
             "db_write_duration_ms": summary.db_write_duration_ms,
             "event_count": summary.event_count,
             "total_duration_ms": summary.total_duration_ms,
+            "consecutive_304_count": summary.consecutive_304_count,
         }));
+    if summary.consecutive_304_count
+        >= crate::subscription_poll::MANAGED_SOURCE_ETAG_MAX_CONSECUTIVE_304
+        && summary.error.is_none()
+    {
+        log_entry = log_entry.with_error(format!(
+            "consecutive 304 count {} exceeded threshold; ETag will be cleared on next poll",
+            summary.consecutive_304_count
+        ));
+    }
     if let Some(error) = summary.error {
         log_entry = log_entry.with_error(error);
     }
@@ -3532,6 +3583,8 @@ fn checkpoint_summary_from_state(
         tie_breaker: checkpoint.tie_breaker,
         seen_window_len: checkpoint.seen_keys.len(),
         etag: checkpoint.etag,
+        etag_set_at_unix: checkpoint.etag_set_at_unix,
+        consecutive_304_count: checkpoint.consecutive_304_count,
     }
 }
 
@@ -9960,6 +10013,8 @@ mod tests {
             tie_breaker: None,
             seen_keys: VecDeque::from([json!("event-123").to_string()]),
             etag: Some("\"etag-v1\"".to_string()),
+            etag_set_at_unix: None,
+            consecutive_304_count: 0,
         };
         let checkpoint_path = runtime.managed_source_checkpoint_path(&record.run_id);
         fs::create_dir_all(checkpoint_path.parent().unwrap()).unwrap();
@@ -10001,6 +10056,8 @@ mod tests {
             tie_breaker: Some(json!("event-789")),
             seen_keys: VecDeque::from([json!("event-789").to_string()]),
             etag: Some("\"etag-v2\"".to_string()),
+            etag_set_at_unix: None,
+            consecutive_304_count: 0,
         };
         let offsets = runtime
             .managed_sources
