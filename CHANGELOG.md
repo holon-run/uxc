@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-15
+
+### Added
+- Email support: IMAP IDLE source for real-time email event notifications (#421).
+- Email support: SMTP send and reply commands (#422).
+- Email support: Provider poll source transport for periodic email checking (#423).
+
+### Fixed
+- Invalidated stale ETag in managed source poll to prevent silent event loss during GitHub Events polling (#425).
+
 ## [0.15.8] - 2026-06-21
 
 ### Fixed
