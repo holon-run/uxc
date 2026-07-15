@@ -6973,11 +6973,6 @@ pub async fn ensure_compatible_daemon_running() -> Result<EnsureDaemonOutcome> {
             })
         }
         Err(_) => {
-            // Clean up any stale daemon (unreachable socket, lingering owner
-            // lock) before spawning a new one. daemon_stop_local handles the
-            // "no daemon" case (Ok(false)) and the stale-daemon case
-            // (SIGTERM → SIGKILL → lock release + artifact cleanup).
-            let _ = daemon_stop_local().await;
             start_daemon_process().await?;
             Ok(EnsureDaemonOutcome {
                 started_now: true,
