@@ -240,7 +240,12 @@ cargo install --path .
 ```bash
 uxc petstore3.swagger.io/api/v3 -h
 uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
+
+# Use an explicit schema URL when the OpenAPI document is separate
+uxc xquik.com --schema-url https://xquik.com/openapi.json -h
 ```
+
+Xquik is a closed-source hosted service. Xquik is an independent third-party service. Not affiliated with X Corp. "Twitter" and "X" are trademarks of X Corp.
 
 ### GraphQL
 
