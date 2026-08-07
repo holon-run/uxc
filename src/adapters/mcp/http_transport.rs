@@ -3422,10 +3422,8 @@ data: invalid json
 
         let result = transport.call_tool("legacy_tool", None).await.unwrap();
         assert_eq!(result.content.len(), 1);
-        match &result.content[0] {
-            ToolContent::Text { text } => assert_eq!(text, "legacy-ok"),
-            other => panic!("expected text tool content, got {:?}", other),
-        }
+        assert_eq!(result.content[0].content_type(), Some("text"));
+        assert_eq!(result.content[0].as_value()["text"], "legacy-ok");
     }
 
     #[tokio::test]

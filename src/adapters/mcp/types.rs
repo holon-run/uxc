@@ -5,6 +5,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 
 /// JSON-RPC 2.0 Request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,8 +54,57 @@ pub struct JsonRpcError {
     pub data: Option<JsonValue>,
 }
 
-/// MCP Protocol Version
+/// Legacy MCP protocol version currently supported by UXC.
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+/// Latest stateless MCP protocol version supported by UXC.
+pub const MCP_MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpProtocolEra {
+    Legacy,
+    Modern,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpProtocolContext {
+    pub era: McpProtocolEra,
+    pub version: String,
+    pub client_capabilities: ClientCapabilities,
+    pub server_capabilities: ServerCapabilities,
+    pub client_info: ClientInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_info: Option<ServerInfo>,
+}
+
+impl McpProtocolContext {
+    pub fn modern_request_params(&self, params: Option<JsonValue>) -> Result<JsonValue> {
+        let mut params = match params {
+            Some(JsonValue::Object(params)) => params,
+            Some(_) => return Err(anyhow!("MCP request params must be a JSON object")),
+            None => serde_json::Map::new(),
+        };
+        let mut meta = match params.remove("_meta") {
+            Some(JsonValue::Object(meta)) => meta,
+            Some(_) => return Err(anyhow!("MCP request params._meta must be a JSON object")),
+            None => serde_json::Map::new(),
+        };
+        meta.insert(
+            "io.modelcontextprotocol/protocolVersion".to_string(),
+            JsonValue::String(self.version.clone()),
+        );
+        meta.insert(
+            "io.modelcontextprotocol/clientInfo".to_string(),
+            serde_json::to_value(&self.client_info)?,
+        );
+        meta.insert(
+            "io.modelcontextprotocol/clientCapabilities".to_string(),
+            serde_json::to_value(&self.client_capabilities)?,
+        );
+        params.insert("_meta".to_string(), JsonValue::Object(meta));
+        Ok(JsonValue::Object(params))
+    }
+}
 
 /// Initialize request parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +121,14 @@ pub struct ClientCapabilities {
     pub roots: Option<RootsCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling: Option<SamplingCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elicitation: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experimental: Option<HashMap<String, JsonValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<HashMap<String, JsonValue>>,
+    #[serde(flatten)]
+    pub additional: HashMap<String, JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -90,6 +148,14 @@ pub struct SamplingCapability {
 pub struct ClientInfo {
     pub name: String,
     pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub websiteUrl: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<JsonValue>>,
 }
 
 /// Initialize response
@@ -112,6 +178,10 @@ pub struct ServerCapabilities {
     pub resources: Option<ResourcesCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompts: Option<PromptsCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<HashMap<String, JsonValue>>,
+    #[serde(flatten)]
+    pub additional: HashMap<String, JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -139,15 +209,73 @@ pub struct PromptsCapability {
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub websiteUrl: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<JsonValue>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoverResult {
+    pub supportedVersions: Vec<String>,
+    pub capabilities: ServerCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default = "complete_result_type")]
+    pub resultType: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttlMs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cacheScope: Option<String>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonValue>,
+}
+
+impl DiscoverResult {
+    pub fn server_info(&self) -> Option<ServerInfo> {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.get("io.modelcontextprotocol/serverInfo"))
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
 }
 
 /// Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
     pub name: String,
-    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inputSchema: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outputSchema: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<Vec<JsonValue>>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonValue>,
+}
+
+impl Tool {
+    pub fn display_name(&self) -> &str {
+        self.title
+            .as_deref()
+            .or_else(|| {
+                self.annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.get("title"))
+                    .and_then(JsonValue::as_str)
+            })
+            .unwrap_or(&self.name)
+    }
 }
 
 /// Tool call parameters
@@ -161,30 +289,39 @@ pub struct CallToolParams {
 /// Tool call result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallToolResult {
+    #[serde(default = "complete_result_type")]
+    pub resultType: String,
+    #[serde(default)]
     pub content: Vec<ToolContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isError: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structuredContent: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inputRequests: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requestState: Option<String>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonValue>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ToolContent {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "image")]
-    Image { data: String, mimeType: String },
-    #[serde(rename = "resource")]
-    Resource {
-        uri: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        mimeType: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        text: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        blob: Option<String>,
-    },
+fn complete_result_type() -> String {
+    "complete".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct ToolContent(pub JsonValue);
+
+impl ToolContent {
+    #[cfg(test)]
+    pub fn content_type(&self) -> Option<&str> {
+        self.0.get("type").and_then(JsonValue::as_str)
+    }
+
+    pub fn as_value(&self) -> &JsonValue {
+        &self.0
+    }
 }
 
 /// Resource definition
@@ -286,4 +423,72 @@ pub struct ResourcesListResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptsListResponse {
     pub prompts: Vec<Prompt>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn modern_context() -> McpProtocolContext {
+        McpProtocolContext {
+            era: McpProtocolEra::Modern,
+            version: MCP_MODERN_PROTOCOL_VERSION.to_string(),
+            client_capabilities: ClientCapabilities::default(),
+            server_capabilities: ServerCapabilities::default(),
+            client_info: ClientInfo {
+                name: "uxc".to_string(),
+                version: "1.0.0".to_string(),
+                title: None,
+                description: None,
+                websiteUrl: None,
+                icons: None,
+            },
+            server_info: None,
+        }
+    }
+
+    #[test]
+    fn modern_request_params_add_required_metadata_and_preserve_existing_meta() {
+        let params = modern_context()
+            .modern_request_params(Some(json!({
+                "name": "ping",
+                "_meta": {
+                    "progressToken": "token-1",
+                    "com.example/custom": true
+                }
+            })))
+            .unwrap();
+
+        assert_eq!(params["name"], "ping");
+        assert_eq!(params["_meta"]["progressToken"], "token-1");
+        assert_eq!(params["_meta"]["com.example/custom"], true);
+        assert_eq!(
+            params["_meta"]["io.modelcontextprotocol/protocolVersion"],
+            MCP_MODERN_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            params["_meta"]["io.modelcontextprotocol/clientCapabilities"],
+            json!({})
+        );
+        assert_eq!(
+            params["_meta"]["io.modelcontextprotocol/clientInfo"]["name"],
+            "uxc"
+        );
+    }
+
+    #[test]
+    fn legacy_tool_result_defaults_to_complete_and_preserves_unknown_content() {
+        let result: CallToolResult = serde_json::from_value(json!({
+            "content": [{
+                "type": "future-content",
+                "nested": {"value": 1}
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(result.resultType, "complete");
+        assert_eq!(result.content[0].content_type(), Some("future-content"));
+        assert_eq!(result.content[0].as_value()["nested"]["value"], 1);
+    }
 }

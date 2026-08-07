@@ -350,6 +350,8 @@ impl McpAdapter {
                 self.request_timeout_or_default(),
             )
             .await?;
+            let protocol_version = client.protocol_version().to_string();
+            let protocol_era = client.protocol_era();
             let server_info = client.server_info().cloned();
             let instructions = client.instructions().map(ToString::to_string);
             let tools = match client
@@ -366,7 +368,8 @@ impl McpAdapter {
             // Build schema from server capabilities
             let mut schema = serde_json::json!({
                 "protocol": "MCP",
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": protocol_version,
+                "protocolEra": protocol_era,
                 "transport": "stdio",
                 "command": cmd,
                 "serverInfo": server_info,
@@ -488,16 +491,16 @@ impl Adapter for McpAdapter {
         let operations = tools
             .into_iter()
             .map(|tool| {
-                let parameters = if let Some(schema) = tool.inputSchema {
-                    parse_schema_to_parameters_for_daemon(&schema)
+                let parameters = if let Some(schema) = tool.inputSchema.as_ref() {
+                    parse_schema_to_parameters_for_daemon(schema)
                 } else {
                     Vec::new()
                 };
 
                 Operation {
                     operation_id: tool.name.clone(),
-                    display_name: tool.name.clone(),
-                    description: Some(tool.description),
+                    display_name: tool.display_name().to_string(),
+                    description: tool.description,
                     parameters,
                     return_type: Some("ToolContent".to_string()),
                 }
@@ -513,8 +516,8 @@ impl Adapter for McpAdapter {
             if tool.name == operation {
                 return Ok(OperationDetail {
                     operation_id: tool.name.clone(),
-                    display_name: tool.name,
-                    description: Some(tool.description),
+                    display_name: tool.display_name().to_string(),
+                    description: tool.description,
                     parameters: tool
                         .inputSchema
                         .as_ref()
@@ -646,6 +649,7 @@ pub(crate) fn parse_schema_to_parameters_for_daemon(schema: &Value) -> Vec<super
 /// Convert MCP tool call result to a JSON value for output.
 pub(crate) fn convert_tool_result_to_value(result: &types::ToolCallResult) -> Value {
     let mut output = serde_json::json!({
+        "resultType": result.resultType,
         "content": convert_tool_content_to_json(&result.content)
     });
 
@@ -655,50 +659,21 @@ pub(crate) fn convert_tool_result_to_value(result: &types::ToolCallResult) -> Va
     if let Some(structured) = &result.structuredContent {
         output["structuredContent"] = structured.clone();
     }
+    if let Some(input_requests) = &result.inputRequests {
+        output["inputRequests"] = input_requests.clone();
+    }
+    if let Some(request_state) = &result.requestState {
+        output["requestState"] = serde_json::json!(request_state);
+    }
+    if let Some(meta) = &result.meta {
+        output["_meta"] = meta.clone();
+    }
 
     output
 }
 
 fn convert_tool_content_to_json(content: &[types::ToolContent]) -> Value {
-    let mut results = Vec::new();
-
-    for item in content {
-        let value = match item {
-            types::ToolContent::Text { text } => serde_json::json!({
-                "type": "text",
-                "text": text
-            }),
-            types::ToolContent::Image { data, mimeType } => serde_json::json!({
-                "type": "image",
-                "data": data,
-                "mimeType": mimeType
-            }),
-            types::ToolContent::Resource {
-                uri,
-                mimeType,
-                text,
-                blob,
-            } => {
-                let mut obj = serde_json::json!({
-                    "type": "resource",
-                    "uri": uri
-                });
-                if let Some(mt) = mimeType {
-                    obj["mimeType"] = serde_json::json!(mt);
-                }
-                if let Some(t) = text {
-                    obj["text"] = serde_json::json!(t);
-                }
-                if let Some(b) = blob {
-                    obj["blob"] = serde_json::json!(b);
-                }
-                obj
-            }
-        };
-        results.push(value);
-    }
-
-    Value::Array(results)
+    Value::Array(content.iter().map(|item| item.as_value().clone()).collect())
 }
 
 #[cfg(test)]
@@ -770,16 +745,22 @@ mod tests {
     #[test]
     fn convert_tool_result_includes_structured_content_and_error_flag() {
         let result = types::ToolCallResult {
-            content: vec![types::ToolContent::Text {
-                text: "hello".to_string(),
-            }],
+            resultType: "complete".to_string(),
+            content: vec![types::ToolContent(json!({
+                "type": "text",
+                "text": "hello"
+            }))],
             isError: Some(true),
             structuredContent: Some(json!({ "message": "hello", "count": 1 })),
+            inputRequests: None,
+            requestState: None,
+            meta: None,
         };
 
         let output = convert_tool_result_to_value(&result);
         assert_eq!(output["content"][0]["type"], "text");
         assert_eq!(output["content"][0]["text"], "hello");
+        assert_eq!(output["resultType"], "complete");
         assert_eq!(output["isError"], true);
         assert_eq!(output["structuredContent"]["message"], "hello");
         assert_eq!(output["structuredContent"]["count"], 1);
@@ -788,6 +769,7 @@ mod tests {
     #[test]
     fn convert_tool_result_preserves_local_artifact_paths() {
         let result = types::ToolCallResult {
+            resultType: "complete".to_string(),
             content: vec![],
             isError: Some(false),
             structuredContent: Some(json!({
@@ -800,6 +782,9 @@ mod tests {
                     }
                 ]
             })),
+            inputRequests: None,
+            requestState: None,
+            meta: None,
         };
 
         let output = convert_tool_result_to_value(&result);
