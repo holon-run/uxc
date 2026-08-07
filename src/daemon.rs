@@ -1021,7 +1021,7 @@ impl McpStdioSession {
             if notification.method == "notifications/tools/list_changed" {
                 self.tools_dirty = true;
                 if let Some(cache) = cache {
-                    let _ = cache.invalidate(&self.schema_cache_key);
+                    invalidate_mcp_schema_cache(cache.as_ref(), &self.schema_cache_key, endpoint);
                 }
             }
             public_notifications.push(notification);
@@ -8822,22 +8822,10 @@ async fn prepare_runtime_execute_args(
         .ok_or_else(|| anyhow!("operation_id is required"))?;
 
     let mut raw_args = request.args.clone().unwrap_or_default();
-    let mcp_options = if matches!(adapter.protocol_type(), ProtocolType::Mcp) {
-        let capabilities = raw_args.remove(adapters::mcp::MCP_CAPABILITIES_ARG);
-        let continuation = raw_args.remove(adapters::mcp::MCP_CONTINUATION_ARG);
-        let (_, options) = adapters::mcp::McpAdapter::split_execution_options(HashMap::from_iter(
-            capabilities
-                .map(|value| (adapters::mcp::MCP_CAPABILITIES_ARG.to_string(), value))
-                .into_iter()
-                .chain(
-                    continuation
-                        .map(|value| (adapters::mcp::MCP_CONTINUATION_ARG.to_string(), value)),
-                ),
-        ))?;
-        Some(options)
-    } else {
-        None
-    };
+    let mcp_options = split_runtime_mcp_controls(
+        &mut raw_args,
+        matches!(adapter.protocol_type(), ProtocolType::Mcp),
+    )?;
     let mut args = prepare_execute_args(adapter, &request.endpoint, op, raw_args).await?;
     if let Some(options) = mcp_options {
         if let Some(value) = options.capabilities {
@@ -8848,6 +8836,35 @@ async fn prepare_runtime_execute_args(
         }
     }
     Ok(args)
+}
+
+fn split_runtime_mcp_controls(
+    raw_args: &mut HashMap<String, Value>,
+    is_mcp: bool,
+) -> Result<Option<adapters::mcp::McpExecutionOptions>> {
+    let capabilities = raw_args.remove(adapters::mcp::MCP_CAPABILITIES_ARG);
+    let continuation = raw_args.remove(adapters::mcp::MCP_CONTINUATION_ARG);
+    if is_mcp {
+        let (_, options) = adapters::mcp::McpAdapter::split_execution_options(HashMap::from_iter(
+            capabilities
+                .map(|value| (adapters::mcp::MCP_CAPABILITIES_ARG.to_string(), value))
+                .into_iter()
+                .chain(
+                    continuation
+                        .map(|value| (adapters::mcp::MCP_CONTINUATION_ARG.to_string(), value)),
+                ),
+        ))?;
+        Ok(Some(options))
+    } else {
+        Ok(None)
+    }
+}
+
+fn invalidate_mcp_schema_cache(cache: &dyn Cache, scoped_key: &str, endpoint: &str) {
+    let _ = cache.invalidate(scoped_key);
+    if scoped_key != endpoint {
+        let _ = cache.invalidate(endpoint);
+    }
 }
 
 async fn host_help_service_summary(
@@ -9155,17 +9172,104 @@ impl Default for DaemonRuntime {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use crate::cache::{CacheLookup, CacheReadPolicy, CacheResult, CacheStats};
     use futures::SinkExt;
     use rusqlite::Connection;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc as StdArc;
+    use std::sync::Mutex as StdMutex;
     use std::time::Duration as StdDuration;
     use tempfile::tempdir;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_hdr_async;
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[derive(Default)]
+    struct RecordingCache {
+        invalidated: StdMutex<Vec<String>>,
+    }
+
+    impl Cache for RecordingCache {
+        fn get(&self, _url: &str) -> Result<CacheResult> {
+            Ok(CacheResult::Miss)
+        }
+
+        fn get_with_policy(&self, _url: &str, _policy: CacheReadPolicy) -> Result<CacheLookup> {
+            Ok(CacheLookup::Miss)
+        }
+
+        fn put(&self, _url: &str, _schema: &Value) -> Result<()> {
+            Ok(())
+        }
+
+        fn invalidate(&self, url: &str) -> Result<()> {
+            self.invalidated.lock().unwrap().push(url.to_string());
+            Ok(())
+        }
+
+        fn invalidate_by_key(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn list_entries(&self) -> Result<Vec<crate::cache::CacheListEntry>> {
+            Ok(Vec::new())
+        }
+
+        fn stats(&self) -> Result<CacheStats> {
+            Ok(CacheStats::default())
+        }
+
+        fn is_enabled(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn list_change_invalidates_scoped_and_legacy_mcp_schema_cache_keys() {
+        let cache = RecordingCache::default();
+        invalidate_mcp_schema_cache(
+            &cache,
+            "https://example.com/mcp#uxc-mcp-schema=scoped",
+            "https://example.com/mcp",
+        );
+
+        assert_eq!(
+            *cache.invalidated.lock().unwrap(),
+            vec![
+                "https://example.com/mcp#uxc-mcp-schema=scoped".to_string(),
+                "https://example.com/mcp".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn non_mcp_runtime_args_strip_mcp_control_fields() {
+        let mut args = HashMap::from([
+            ("message".to_string(), json!("hello")),
+            (
+                adapters::mcp::MCP_CAPABILITIES_ARG.to_string(),
+                json!({"elicitation": {}}),
+            ),
+            (
+                adapters::mcp::MCP_CONTINUATION_ARG.to_string(),
+                json!({"requestState": "opaque"}),
+            ),
+        ]);
+
+        assert!(split_runtime_mcp_controls(&mut args, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            args,
+            HashMap::from([("message".to_string(), json!("hello"))])
+        );
+    }
 
     #[test]
     fn managed_source_poll_jitter_preserves_interval_cadence() {

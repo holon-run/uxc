@@ -118,8 +118,12 @@ impl McpAdapter {
     pub(crate) fn schema_cache_key_for(url: &str, auth_profile: Option<&Profile>) -> String {
         let mut hasher = Sha256::new();
         if let Some(profile) = auth_profile {
-            if let Ok(serialized) = serde_json::to_vec(profile) {
-                hasher.update(serialized);
+            match serde_json::to_value(profile) {
+                Ok(value) => hash_canonical_json(&mut hasher, &value),
+                Err(err) => {
+                    debug!(error = %err, "Failed to serialize auth profile for MCP cache key");
+                    hasher.update(b"serialization-error");
+                }
             }
         } else {
             hasher.update(b"anonymous");
@@ -773,6 +777,43 @@ fn convert_tool_content_to_json(content: &[types::ToolContent]) -> Value {
     Value::Array(content.iter().map(|item| item.as_value().clone()).collect())
 }
 
+fn hash_canonical_json(hasher: &mut Sha256, value: &Value) {
+    match value {
+        Value::Null => hasher.update(b"null"),
+        Value::Bool(value) => hasher.update(if *value {
+            b"true".as_slice()
+        } else {
+            b"false".as_slice()
+        }),
+        Value::Number(value) => hasher.update(value.to_string().as_bytes()),
+        Value::String(value) => {
+            hasher.update(b"\"");
+            hasher.update(value.as_bytes());
+            hasher.update(b"\"");
+        }
+        Value::Array(values) => {
+            hasher.update(b"[");
+            for value in values {
+                hash_canonical_json(hasher, value);
+                hasher.update(b",");
+            }
+            hasher.update(b"]");
+        }
+        Value::Object(values) => {
+            hasher.update(b"{");
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for key in keys {
+                hasher.update(key.as_bytes());
+                hasher.update(b":");
+                hash_canonical_json(hasher, &values[key]);
+                hasher.update(b",");
+            }
+            hasher.update(b"}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,6 +930,44 @@ mod tests {
                 "inputResponses": {"request-1": {"action": "accept"}},
                 "requestState": "opaque"
             }))
+        );
+    }
+
+    #[test]
+    fn schema_cache_key_is_stable_across_auth_field_insertion_order() {
+        use crate::auth::{AuthType, SecretSource};
+
+        let mut first = Profile::new("secret".to_string(), AuthType::Bearer);
+        first.fields.insert(
+            "alpha".to_string(),
+            SecretSource::Literal {
+                value: "one".to_string(),
+            },
+        );
+        first.fields.insert(
+            "beta".to_string(),
+            SecretSource::Literal {
+                value: "two".to_string(),
+            },
+        );
+
+        let mut second = Profile::new("secret".to_string(), AuthType::Bearer);
+        second.fields.insert(
+            "beta".to_string(),
+            SecretSource::Literal {
+                value: "two".to_string(),
+            },
+        );
+        second.fields.insert(
+            "alpha".to_string(),
+            SecretSource::Literal {
+                value: "one".to_string(),
+            },
+        );
+
+        assert_eq!(
+            McpAdapter::schema_cache_key_for("https://example.com/mcp", Some(&first)),
+            McpAdapter::schema_cache_key_for("https://example.com/mcp", Some(&second))
         );
     }
 
