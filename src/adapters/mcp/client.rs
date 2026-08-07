@@ -303,6 +303,7 @@ impl McpStdioClient {
             .await
     }
 
+    #[allow(dead_code)]
     pub async fn list_tools_catalog(&mut self) -> Result<ToolsCatalog> {
         self.list_tools_catalog_with_timeout(McpStdioTransport::default_request_timeout())
             .await
