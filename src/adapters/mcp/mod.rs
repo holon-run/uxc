@@ -15,12 +15,22 @@ use async_trait::async_trait;
 pub use client::{LifecycleReapPolicy, McpStdioClient};
 pub use http_transport::{McpHttpTransport, McpRemoteTransport, ResolvedMcpHttpTransport};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 pub use transport::StdioSpawnOptions;
+
+pub const MCP_CAPABILITIES_ARG: &str = "__uxc_mcp_capabilities";
+pub const MCP_CONTINUATION_ARG: &str = "__uxc_mcp_continuation";
+
+#[derive(Debug, Clone, Default)]
+pub struct McpExecutionOptions {
+    pub capabilities: Option<Value>,
+    pub continuation: Option<Value>,
+}
 
 pub struct McpAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,
@@ -33,6 +43,32 @@ pub struct McpAdapter {
 }
 
 impl McpAdapter {
+    pub fn split_execution_options(
+        mut args: HashMap<String, Value>,
+    ) -> Result<(HashMap<String, Value>, McpExecutionOptions)> {
+        let capabilities = args.remove(MCP_CAPABILITIES_ARG);
+        if capabilities
+            .as_ref()
+            .is_some_and(|value| !value.is_object())
+        {
+            bail!("--mcp-capabilities must resolve to a JSON object");
+        }
+        let continuation = args.remove(MCP_CONTINUATION_ARG);
+        if continuation
+            .as_ref()
+            .is_some_and(|value| !value.is_object())
+        {
+            bail!("--mcp-continuation must resolve to a JSON object");
+        }
+        Ok((
+            args,
+            McpExecutionOptions {
+                capabilities,
+                continuation,
+            },
+        ))
+    }
+
     fn build_tool_arguments(args: HashMap<String, Value>) -> Option<Value> {
         Some(Value::Object(args.into_iter().collect()))
     }
@@ -77,6 +113,57 @@ impl McpAdapter {
     fn request_timeout_or_default(&self) -> Duration {
         self.request_timeout
             .unwrap_or_else(transport::McpStdioTransport::default_request_timeout)
+    }
+
+    pub(crate) fn schema_cache_key_for(url: &str, auth_profile: Option<&Profile>) -> String {
+        let mut hasher = Sha256::new();
+        if let Some(profile) = auth_profile {
+            match serde_json::to_value(profile) {
+                Ok(value) => hash_canonical_json(&mut hasher, &value),
+                Err(err) => {
+                    debug!(error = %err, "Failed to serialize auth profile for MCP cache key");
+                    hasher.update(b"serialization-error");
+                }
+            }
+        } else {
+            hasher.update(b"anonymous");
+        }
+        format!(
+            "{}#uxc-mcp-schema=dual-era-2026&auth={:x}",
+            url,
+            hasher.finalize()
+        )
+    }
+
+    fn schema_cache_key(&self, url: &str) -> String {
+        Self::schema_cache_key_for(url, self.auth_profile.as_ref())
+    }
+
+    fn catalog_ttl_seconds(metadata: &types::McpListCatalogMetadata) -> Option<u64> {
+        metadata
+            .ttlMs
+            .map(|ttl_ms| ttl_ms.saturating_add(999) / 1000)
+    }
+
+    fn cache_schema(
+        &self,
+        url: &str,
+        schema: &Value,
+        metadata: Option<&types::McpListCatalogMetadata>,
+    ) {
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        let cache_key = self.schema_cache_key(url);
+        let result = match metadata.and_then(Self::catalog_ttl_seconds) {
+            Some(ttl_seconds) => cache.put_with_ttl(&cache_key, schema, ttl_seconds),
+            None => cache.put(&cache_key, schema),
+        };
+        if let Err(err) = result {
+            debug!("Failed to cache MCP schema: {}", err);
+        } else {
+            info!("Cached MCP schema for: {}", url);
+        }
     }
 
     /// Check if a URL/command looks like an MCP stdio command
@@ -162,7 +249,9 @@ impl McpAdapter {
         }
         if !self.force_refresh_schema {
             if let Some(cache) = &self.cache {
-                if let crate::cache::CacheResult::Hit(schema) = cache.get(url)? {
+                if let crate::cache::CacheResult::Hit(schema) =
+                    cache.get(&self.schema_cache_key(url))?
+                {
                     if let Some(resolved) = Self::resolved_transport_from_schema(&schema) {
                         let mut discovered = self.discovered_http_endpoints.write().await;
                         discovered.insert(normalized, resolved.clone());
@@ -329,7 +418,7 @@ impl McpAdapter {
     async fn fetch_schema_internal(&self, url: &str, allow_cache_read: bool) -> Result<Value> {
         if allow_cache_read {
             if let Some(cache) = &self.cache {
-                match cache.get(url)? {
+                match cache.get(&self.schema_cache_key(url))? {
                     crate::cache::CacheResult::Hit(schema) => {
                         debug!("MCP cache hit for: {}", url);
                         return Ok(schema);
@@ -359,10 +448,10 @@ impl McpAdapter {
             let server_info = client.server_info().cloned();
             let instructions = client.instructions().map(ToString::to_string);
             let tools = match client
-                .list_tools_with_timeout(self.request_timeout_or_default())
+                .list_tools_catalog_with_timeout(self.request_timeout_or_default())
                 .await
             {
-                Ok(tools) => Some(tools),
+                Ok(catalog) => Some(catalog),
                 Err(err) => {
                     debug!("MCP stdio list_tools failed while building schema: {}", err);
                     None
@@ -384,18 +473,16 @@ impl McpAdapter {
                     "prompts": client.supports_prompts(),
                 }
             });
-            if let Some(tools) = tools {
-                schema["tools"] = serde_json::json!(tools);
+            if let Some(catalog) = &tools {
+                schema["tools"] = serde_json::json!(catalog.items);
+                schema["cacheMetadata"] = serde_json::to_value(&catalog.metadata)?;
             }
 
-            // Store in cache if available
-            if let Some(cache) = &self.cache {
-                if let Err(e) = cache.put(url, &schema) {
-                    debug!("Failed to cache MCP schema: {}", e);
-                } else {
-                    info!("Cached MCP schema for: {}", url);
-                }
-            }
+            self.cache_schema(
+                url,
+                &schema,
+                tools.as_ref().map(|catalog| &catalog.metadata),
+            );
 
             return Ok(schema);
         }
@@ -416,8 +503,8 @@ impl McpAdapter {
             // subsequent requests on the session. Spec-compliant servers
             // (e.g., rmcp 0.15) otherwise hang on follow-up requests.
             transport.initialized().await?;
-            let tools = match transport.list_tools().await {
-                Ok(tools) => Some(tools),
+            let tools = match transport.list_tools_catalog().await {
+                Ok(catalog) => Some(catalog),
                 Err(err) => {
                     debug!("MCP HTTP list_tools failed while building schema: {}", err);
                     None
@@ -438,18 +525,16 @@ impl McpAdapter {
                 "instructions": init_result.instructions,
                 "capabilities": init_result.capabilities
             });
-            if let Some(tools) = tools {
-                schema["tools"] = serde_json::json!(tools);
+            if let Some(catalog) = &tools {
+                schema["tools"] = serde_json::json!(catalog.items);
+                schema["cacheMetadata"] = serde_json::to_value(&catalog.metadata)?;
             }
 
-            // Store in cache if available
-            if let Some(cache) = &self.cache {
-                if let Err(e) = cache.put(url, &schema) {
-                    debug!("Failed to cache MCP schema: {}", e);
-                } else {
-                    info!("Cached MCP schema for: {}", url);
-                }
-            }
+            self.cache_schema(
+                url,
+                &schema,
+                tools.as_ref().map(|catalog| &catalog.metadata),
+            );
 
             return Ok(schema);
         }
@@ -547,6 +632,7 @@ impl Adapter for McpAdapter {
         args: HashMap<String, Value>,
     ) -> Result<ExecutionResult> {
         let start = std::time::Instant::now();
+        let (args, execution_options) = Self::split_execution_options(args)?;
         self.validate_tool_call(url, operation, &args).await?;
 
         if Self::is_stdio_command(url) {
@@ -562,7 +648,12 @@ impl Adapter for McpAdapter {
             let arguments = Self::build_tool_arguments(args);
 
             let result = client
-                .call_tool_with_timeout(operation, arguments, self.request_timeout_or_default())
+                .call_tool_with_options_and_timeout(
+                    operation,
+                    arguments,
+                    &execution_options,
+                    self.request_timeout_or_default(),
+                )
                 .await?;
 
             let output = convert_tool_result_to_value(&result);
@@ -594,7 +685,9 @@ impl Adapter for McpAdapter {
 
             let arguments = Self::build_tool_arguments(args);
 
-            let result = transport.call_tool(operation, arguments).await?;
+            let result = transport
+                .call_tool_with_options(operation, arguments, &execution_options)
+                .await?;
 
             let output = convert_tool_result_to_value(&result);
 
@@ -682,6 +775,43 @@ pub(crate) fn convert_tool_result_to_value(result: &types::ToolCallResult) -> Va
 
 fn convert_tool_content_to_json(content: &[types::ToolContent]) -> Value {
     Value::Array(content.iter().map(|item| item.as_value().clone()).collect())
+}
+
+fn hash_canonical_json(hasher: &mut Sha256, value: &Value) {
+    match value {
+        Value::Null => hasher.update(b"null"),
+        Value::Bool(value) => hasher.update(if *value {
+            b"true".as_slice()
+        } else {
+            b"false".as_slice()
+        }),
+        Value::Number(value) => hasher.update(value.to_string().as_bytes()),
+        Value::String(value) => {
+            hasher.update(b"\"");
+            hasher.update(value.as_bytes());
+            hasher.update(b"\"");
+        }
+        Value::Array(values) => {
+            hasher.update(b"[");
+            for value in values {
+                hash_canonical_json(hasher, value);
+                hasher.update(b",");
+            }
+            hasher.update(b"]");
+        }
+        Value::Object(values) => {
+            hasher.update(b"{");
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for key in keys {
+                hasher.update(key.as_bytes());
+                hasher.update(b":");
+                hash_canonical_json(hasher, &values[key]);
+                hasher.update(b",");
+            }
+            hasher.update(b"}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -775,6 +905,73 @@ mod tests {
     }
 
     #[test]
+    fn split_execution_options_keeps_control_fields_out_of_tool_arguments() {
+        let (args, options) = McpAdapter::split_execution_options(StdHashMap::from([
+            ("message".to_string(), json!("hello")),
+            (MCP_CAPABILITIES_ARG.to_string(), json!({"elicitation": {}})),
+            (
+                MCP_CONTINUATION_ARG.to_string(),
+                json!({
+                    "inputResponses": {"request-1": {"action": "accept"}},
+                    "requestState": "opaque"
+                }),
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            args,
+            StdHashMap::from([("message".to_string(), json!("hello"))])
+        );
+        assert_eq!(options.capabilities, Some(json!({"elicitation": {}})));
+        assert_eq!(
+            options.continuation,
+            Some(json!({
+                "inputResponses": {"request-1": {"action": "accept"}},
+                "requestState": "opaque"
+            }))
+        );
+    }
+
+    #[test]
+    fn schema_cache_key_is_stable_across_auth_field_insertion_order() {
+        use crate::auth::{AuthType, SecretSource};
+
+        let mut first = Profile::new("secret".to_string(), AuthType::Bearer);
+        first.fields.insert(
+            "alpha".to_string(),
+            SecretSource::Literal {
+                value: "one".to_string(),
+            },
+        );
+        first.fields.insert(
+            "beta".to_string(),
+            SecretSource::Literal {
+                value: "two".to_string(),
+            },
+        );
+
+        let mut second = Profile::new("secret".to_string(), AuthType::Bearer);
+        second.fields.insert(
+            "beta".to_string(),
+            SecretSource::Literal {
+                value: "two".to_string(),
+            },
+        );
+        second.fields.insert(
+            "alpha".to_string(),
+            SecretSource::Literal {
+                value: "one".to_string(),
+            },
+        );
+
+        assert_eq!(
+            McpAdapter::schema_cache_key_for("https://example.com/mcp", Some(&first)),
+            McpAdapter::schema_cache_key_for("https://example.com/mcp", Some(&second))
+        );
+    }
+
+    #[test]
     fn convert_tool_result_preserves_local_artifact_paths() {
         let result = types::ToolCallResult {
             resultType: "complete".to_string(),
@@ -855,9 +1052,10 @@ mod tests {
     async fn resolve_http_transport_reuses_cached_resolved_transport() {
         let cache = Arc::new(TestCache::default());
         let url = "https://example.com";
+        let adapter = McpAdapter::new().with_cache(cache.clone());
         cache
             .put(
-                url,
+                &adapter.schema_cache_key(url),
                 &json!({
                     "protocol": "MCP",
                     "transport": "http",
@@ -869,7 +1067,6 @@ mod tests {
             )
             .unwrap();
 
-        let adapter = McpAdapter::new().with_cache(cache);
         let resolved = adapter.resolve_http_transport(url).await.unwrap().unwrap();
 
         assert_eq!(resolved.mode, http_transport::McpHttpMode::LegacySse);

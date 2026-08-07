@@ -803,6 +803,7 @@ struct InitLockEntry {
 
 struct McpStdioSession {
     client: adapters::mcp::McpStdioClient,
+    schema_cache_key: String,
     tools: Option<Vec<adapters::mcp::types::Tool>>,
     tools_dirty: bool,
     notifications: SessionNotificationFanout,
@@ -870,6 +871,7 @@ struct SessionNotificationFanout {
 }
 
 struct StdioSessionRequestMetadata<'a> {
+    schema_cache_key: String,
     idle_ttl_secs: Option<u64>,
     link_name: Option<&'a str>,
     link_skill: Option<&'a str>,
@@ -1019,7 +1021,7 @@ impl McpStdioSession {
             if notification.method == "notifications/tools/list_changed" {
                 self.tools_dirty = true;
                 if let Some(cache) = cache {
-                    let _ = cache.invalidate(endpoint);
+                    invalidate_mcp_schema_cache(cache.as_ref(), &self.schema_cache_key, endpoint);
                 }
             }
             public_notifications.push(notification);
@@ -1527,6 +1529,7 @@ impl McpSessionManager {
     ) -> Result<(Arc<Mutex<McpStdioSession>>, bool)> {
         let exclusive_keys = normalize_exclusive_keys(metadata.exclusive_keys);
         let metadata = StdioSessionRequestMetadata {
+            schema_cache_key: metadata.schema_cache_key,
             idle_ttl_secs: metadata.idle_ttl_secs,
             link_name: metadata.link_name,
             link_skill: metadata.link_skill,
@@ -1639,6 +1642,7 @@ impl McpSessionManager {
         let session = Arc::new(Mutex::new(McpStdioSession {
             child_pid,
             client,
+            schema_cache_key: metadata.schema_cache_key.clone(),
             tools: None,
             tools_dirty: false,
             notifications: SessionNotificationFanout::default(),
@@ -4249,13 +4253,16 @@ impl DaemonRuntime {
         // succeeded without network access. This keeps `-h` flows resilient when the cached
         // schema is expired but still useful.
         if result.is_err() && !request.options.no_cache && !request.options.refresh_schema {
-            if let cache::CacheLookup::Hit(hit) = cache_for_fallback
-                .get_with_policy(&request.endpoint, cache::CacheReadPolicy::AllowStale)?
-            {
+            if let Some((hit, cache_key)) = lookup_schema_cache(
+                cache_for_fallback.as_ref(),
+                &request.endpoint,
+                root_auth_profile.as_ref(),
+                cache::CacheReadPolicy::AllowStale,
+            )? {
                 if hit.stale {
                     if let Some(fallback_protocol) = protocol_from_cached_schema(&hit.schema) {
                         // Refresh TTL so adapters using normal cache reads can consume this schema.
-                        let _ = cache_for_fallback.put(&request.endpoint, &hit.schema);
+                        let _ = cache_for_fallback.put(&cache_key, &hit.schema);
                         let mut adapter =
                             adapter_from_protocol(fallback_protocol, &detection_options);
                         adapter = inject_cache_if_supported(adapter, cache_for_fallback.clone());
@@ -4587,6 +4594,8 @@ impl DaemonRuntime {
             .operation_id
             .as_ref()
             .ok_or_else(|| anyhow!("operation_id is required"))?;
+        let (raw_args, execution_options) =
+            adapters::mcp::McpAdapter::split_execution_options(raw_args)?;
 
         if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
             let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;
@@ -4614,6 +4623,10 @@ impl DaemonRuntime {
                     &spawn_options,
                     request_timeout_duration(request.options.timeout_ms),
                     StdioSessionRequestMetadata {
+                        schema_cache_key: adapters::mcp::McpAdapter::schema_cache_key_for(
+                            endpoint,
+                            auth_profile.as_ref(),
+                        ),
                         idle_ttl_secs: request.options.daemon_idle_ttl,
                         link_name: request.options.link_name.as_deref(),
                         link_skill: request.options.link_skill.as_deref(),
@@ -4638,7 +4651,7 @@ impl DaemonRuntime {
             let arguments = Some(Value::Object(args.into_iter().collect()));
             let result = guard
                 .client
-                .call_tool_with_timeout(op, arguments, timeout)
+                .call_tool_with_options_and_timeout(op, arguments, &execution_options, timeout)
                 .await;
             let _ = guard
                 .mark_tools_dirty_from_notifications(endpoint, &cache)
@@ -4692,7 +4705,10 @@ impl DaemonRuntime {
             };
             session.mark_used().await;
             let arguments = Some(Value::Object(raw_args.into_iter().collect()));
-            let result = session.transport.call_tool(op, arguments).await?;
+            let result = session
+                .transport
+                .call_tool_with_options(op, arguments, &execution_options)
+                .await?;
             let _ = session.collect_pending_notifications().await;
             Ok((
                 "call_result".to_string(),
@@ -6376,6 +6392,10 @@ async fn run_mcp_subscription_job(
             &spawn_options,
             request_timeout_duration(request.options.timeout_ms),
             StdioSessionRequestMetadata {
+                schema_cache_key: adapters::mcp::McpAdapter::schema_cache_key_for(
+                    &request.endpoint,
+                    auth_profile.as_ref(),
+                ),
                 idle_ttl_secs: request.options.daemon_idle_ttl,
                 link_name: request.options.link_name.as_deref(),
                 link_skill: request.options.link_skill.as_deref(),
@@ -8468,24 +8488,26 @@ async fn resolve_adapter_with_schema_cache(
     refresh_schema: bool,
 ) -> Result<ResolveAdapterResult> {
     if !no_cache && !refresh_schema {
-        match cache.get_with_policy(url, cache::CacheReadPolicy::NormalTtl)? {
-            cache::CacheLookup::Hit(hit) => {
-                if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
-                    let mut adapter = adapter_from_protocol(protocol, detection_options);
-                    adapter = inject_cache_if_supported(adapter, cache.clone());
-                    adapter = inject_auth_if_supported(adapter, auth_profile.clone());
-                    adapter = inject_refresh_if_supported(adapter, refresh_schema);
-                    return Ok(ResolveAdapterResult {
-                        adapter,
-                        cache_meta: Some(SchemaCacheMeta {
-                            age_ms: cache_age_ms(hit.fetched_at),
-                            stale: hit.stale,
-                            fallback: false,
-                        }),
-                    });
-                }
+        if let Some((hit, _)) = lookup_schema_cache(
+            cache.as_ref(),
+            url,
+            auth_profile.as_ref(),
+            cache::CacheReadPolicy::NormalTtl,
+        )? {
+            if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
+                let mut adapter = adapter_from_protocol(protocol, detection_options);
+                adapter = inject_cache_if_supported(adapter, cache.clone());
+                adapter = inject_auth_if_supported(adapter, auth_profile.clone());
+                adapter = inject_refresh_if_supported(adapter, refresh_schema);
+                return Ok(ResolveAdapterResult {
+                    adapter,
+                    cache_meta: Some(SchemaCacheMeta {
+                        age_ms: cache_age_ms(hit.fetched_at),
+                        stale: hit.stale,
+                        fallback: false,
+                    }),
+                });
             }
-            cache::CacheLookup::Miss | cache::CacheLookup::Bypassed => {}
         }
     }
 
@@ -8505,11 +8527,14 @@ async fn resolve_adapter_with_schema_cache(
         }
         Err(err) => {
             if !no_cache && !refresh_schema {
-                if let cache::CacheLookup::Hit(hit) =
-                    cache.get_with_policy(url, cache::CacheReadPolicy::AllowStale)?
-                {
+                if let Some((hit, cache_key)) = lookup_schema_cache(
+                    cache.as_ref(),
+                    url,
+                    auth_profile.as_ref(),
+                    cache::CacheReadPolicy::AllowStale,
+                )? {
                     if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
-                        let _ = cache.put(url, &hit.schema);
+                        let _ = cache.put(&cache_key, &hit.schema);
                         let mut adapter = adapter_from_protocol(protocol, detection_options);
                         adapter = inject_cache_if_supported(adapter, cache.clone());
                         adapter = inject_auth_if_supported(adapter, auth_profile.clone());
@@ -8528,6 +8553,21 @@ async fn resolve_adapter_with_schema_cache(
             Err(err)
         }
     }
+}
+
+fn lookup_schema_cache(
+    cache: &dyn cache::Cache,
+    url: &str,
+    auth_profile: Option<&Profile>,
+    policy: cache::CacheReadPolicy,
+) -> Result<Option<(cache::CacheHit, String)>> {
+    let mcp_cache_key = adapters::mcp::McpAdapter::schema_cache_key_for(url, auth_profile);
+    for cache_key in [mcp_cache_key, url.to_string()] {
+        if let cache::CacheLookup::Hit(hit) = cache.get_with_policy(&cache_key, policy)? {
+            return Ok(Some((hit, cache_key)));
+        }
+    }
+    Ok(None)
 }
 
 async fn invoke_with_adapter(
@@ -8654,6 +8694,10 @@ async fn invoke_live_stdio_mcp_help(
     runtime.mcp.mark_stdio_request_started(&session_key).await;
     let mut guard = session.lock().await;
     guard.apply_request_metadata(&StdioSessionRequestMetadata {
+        schema_cache_key: adapters::mcp::McpAdapter::schema_cache_key_for(
+            &request.endpoint,
+            auth_profile,
+        ),
         idle_ttl_secs: request.options.daemon_idle_ttl,
         link_name: request.options.link_name.as_deref(),
         link_skill: request.options.link_skill.as_deref(),
@@ -8777,13 +8821,50 @@ async fn prepare_runtime_execute_args(
         .as_ref()
         .ok_or_else(|| anyhow!("operation_id is required"))?;
 
-    prepare_execute_args(
-        adapter,
-        &request.endpoint,
-        op,
-        request.args.clone().unwrap_or_default(),
-    )
-    .await
+    let mut raw_args = request.args.clone().unwrap_or_default();
+    let mcp_options = split_runtime_mcp_controls(
+        &mut raw_args,
+        matches!(adapter.protocol_type(), ProtocolType::Mcp),
+    )?;
+    let mut args = prepare_execute_args(adapter, &request.endpoint, op, raw_args).await?;
+    if let Some(options) = mcp_options {
+        if let Some(value) = options.capabilities {
+            args.insert(adapters::mcp::MCP_CAPABILITIES_ARG.to_string(), value);
+        }
+        if let Some(value) = options.continuation {
+            args.insert(adapters::mcp::MCP_CONTINUATION_ARG.to_string(), value);
+        }
+    }
+    Ok(args)
+}
+
+fn split_runtime_mcp_controls(
+    raw_args: &mut HashMap<String, Value>,
+    is_mcp: bool,
+) -> Result<Option<adapters::mcp::McpExecutionOptions>> {
+    let capabilities = raw_args.remove(adapters::mcp::MCP_CAPABILITIES_ARG);
+    let continuation = raw_args.remove(adapters::mcp::MCP_CONTINUATION_ARG);
+    if is_mcp {
+        let (_, options) = adapters::mcp::McpAdapter::split_execution_options(HashMap::from_iter(
+            capabilities
+                .map(|value| (adapters::mcp::MCP_CAPABILITIES_ARG.to_string(), value))
+                .into_iter()
+                .chain(
+                    continuation
+                        .map(|value| (adapters::mcp::MCP_CONTINUATION_ARG.to_string(), value)),
+                ),
+        ))?;
+        Ok(Some(options))
+    } else {
+        Ok(None)
+    }
+}
+
+fn invalidate_mcp_schema_cache(cache: &dyn Cache, scoped_key: &str, endpoint: &str) {
+    let _ = cache.invalidate(scoped_key);
+    if scoped_key != endpoint {
+        let _ = cache.invalidate(endpoint);
+    }
 }
 
 async fn host_help_service_summary(
@@ -9091,17 +9172,104 @@ impl Default for DaemonRuntime {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use crate::cache::{CacheLookup, CacheReadPolicy, CacheResult, CacheStats};
     use futures::SinkExt;
     use rusqlite::Connection;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc as StdArc;
+    use std::sync::Mutex as StdMutex;
     use std::time::Duration as StdDuration;
     use tempfile::tempdir;
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_hdr_async;
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[derive(Default)]
+    struct RecordingCache {
+        invalidated: StdMutex<Vec<String>>,
+    }
+
+    impl Cache for RecordingCache {
+        fn get(&self, _url: &str) -> Result<CacheResult> {
+            Ok(CacheResult::Miss)
+        }
+
+        fn get_with_policy(&self, _url: &str, _policy: CacheReadPolicy) -> Result<CacheLookup> {
+            Ok(CacheLookup::Miss)
+        }
+
+        fn put(&self, _url: &str, _schema: &Value) -> Result<()> {
+            Ok(())
+        }
+
+        fn invalidate(&self, url: &str) -> Result<()> {
+            self.invalidated.lock().unwrap().push(url.to_string());
+            Ok(())
+        }
+
+        fn invalidate_by_key(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn list_entries(&self) -> Result<Vec<crate::cache::CacheListEntry>> {
+            Ok(Vec::new())
+        }
+
+        fn stats(&self) -> Result<CacheStats> {
+            Ok(CacheStats::default())
+        }
+
+        fn is_enabled(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn list_change_invalidates_scoped_and_legacy_mcp_schema_cache_keys() {
+        let cache = RecordingCache::default();
+        invalidate_mcp_schema_cache(
+            &cache,
+            "https://example.com/mcp#uxc-mcp-schema=scoped",
+            "https://example.com/mcp",
+        );
+
+        assert_eq!(
+            *cache.invalidated.lock().unwrap(),
+            vec![
+                "https://example.com/mcp#uxc-mcp-schema=scoped".to_string(),
+                "https://example.com/mcp".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn non_mcp_runtime_args_strip_mcp_control_fields() {
+        let mut args = HashMap::from([
+            ("message".to_string(), json!("hello")),
+            (
+                adapters::mcp::MCP_CAPABILITIES_ARG.to_string(),
+                json!({"elicitation": {}}),
+            ),
+            (
+                adapters::mcp::MCP_CONTINUATION_ARG.to_string(),
+                json!({"requestState": "opaque"}),
+            ),
+        ]);
+
+        assert!(split_runtime_mcp_controls(&mut args, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            args,
+            HashMap::from([("message".to_string(), json!("hello"))])
+        );
+    }
 
     #[test]
     fn managed_source_poll_jitter_preserves_interval_cadence() {
@@ -9348,6 +9516,10 @@ mod tests {
         with_mcp_idle_ttl_env(None, || {
             let resolved = resolve_stdio_request_metadata(
                 &StdioSessionRequestMetadata {
+                    schema_cache_key: adapters::mcp::McpAdapter::schema_cache_key_for(
+                        "https://new.example.com",
+                        None,
+                    ),
                     idle_ttl_secs: None,
                     link_name: None,
                     link_skill: None,
@@ -9373,6 +9545,10 @@ mod tests {
     fn resolve_stdio_request_metadata_accepts_zero_ttl_override() {
         let resolved = resolve_stdio_request_metadata(
             &StdioSessionRequestMetadata {
+                schema_cache_key: adapters::mcp::McpAdapter::schema_cache_key_for(
+                    "https://new.example.com",
+                    None,
+                ),
                 idle_ttl_secs: Some(0),
                 link_name: Some("board-link"),
                 link_skill: Some("board-webmcp"),

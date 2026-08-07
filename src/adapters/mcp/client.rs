@@ -4,6 +4,7 @@ use super::transport::{
     DefaultStdioProcessExecutor, McpStdioTransport, StdioProcessExecutor, StdioSpawnOptions,
 };
 use super::types::*;
+use super::McpExecutionOptions;
 use crate::error::{structured_error_from_anyhow, StructuredError};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -301,31 +302,27 @@ impl McpStdioClient {
             .await
     }
 
+    #[allow(dead_code)]
+    pub async fn list_tools_catalog(&mut self) -> Result<ToolsCatalog> {
+        self.list_tools_catalog_with_timeout(McpStdioTransport::default_request_timeout())
+            .await
+    }
+
     pub async fn list_tools_with_timeout(&mut self, timeout: Duration) -> Result<Vec<Tool>> {
+        Ok(self.list_tools_catalog_with_timeout(timeout).await?.items)
+    }
+
+    pub async fn list_tools_catalog_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<ToolsCatalog> {
         if !self.supports_tools() {
             bail!("Server does not support tools");
         }
 
-        let result = self
-            .send_request_with_timeout("tools/list", None, timeout)
+        self.list_catalog_with_timeout::<Tool, ToolsListResponse>("tools/list", timeout)
             .await
-            .context("Failed to list tools")?;
-
-        // Parse the response - tools are in result.tools
-        let tools_value = result
-            .get("tools")
-            .context("Response missing 'tools' field")?
-            .as_array()
-            .context("'tools' is not an array")?;
-
-        let mut tools = Vec::new();
-        for tool_value in tools_value {
-            let tool: Tool =
-                serde_json::from_value(tool_value.clone()).context("Failed to parse tool")?;
-            tools.push(tool);
-        }
-
-        Ok(tools)
+            .context("Failed to list tools")
     }
 
     /// Call a tool
@@ -349,17 +346,51 @@ impl McpStdioClient {
         arguments: Option<JsonValue>,
         timeout: Duration,
     ) -> Result<CallToolResult> {
+        self.call_tool_with_options_and_timeout(
+            name,
+            arguments,
+            &McpExecutionOptions::default(),
+            timeout,
+        )
+        .await
+    }
+
+    pub async fn call_tool_with_options_and_timeout(
+        &mut self,
+        name: &str,
+        arguments: Option<JsonValue>,
+        options: &McpExecutionOptions,
+        timeout: Duration,
+    ) -> Result<CallToolResult> {
         if !self.supports_tools() {
             bail!("Server does not support tools");
         }
 
-        let params = CallToolParams {
-            name: name.to_string(),
-            arguments,
-        };
+        let mut params = serde_json::Map::new();
+        params.insert("name".to_string(), JsonValue::String(name.to_string()));
+        params.insert(
+            "arguments".to_string(),
+            arguments.unwrap_or_else(|| json!({})),
+        );
+        if let Some(continuation) = &options.continuation {
+            let continuation = continuation
+                .as_object()
+                .context("MCP continuation must be a JSON object")?;
+            for (key, value) in continuation {
+                if matches!(key.as_str(), "name" | "arguments" | "_meta") {
+                    bail!("MCP continuation must not override '{}'", key);
+                }
+                params.insert(key.clone(), value.clone());
+            }
+        }
 
         let result = self
-            .send_request_with_timeout("tools/call", Some(serde_json::to_value(params)?), timeout)
+            .send_request_with_timeout_and_capabilities(
+                "tools/call",
+                Some(JsonValue::Object(params)),
+                options.capabilities.as_ref(),
+                timeout,
+            )
             .await
             .context(format!("Failed to call tool '{}'", name))?;
 
@@ -372,29 +403,17 @@ impl McpStdioClient {
     /// List available resources
     #[allow(dead_code)]
     pub async fn list_resources(&mut self) -> Result<Vec<Resource>> {
+        Ok(self.list_resources_catalog().await?.items)
+    }
+
+    pub async fn list_resources_catalog(&mut self) -> Result<ResourcesCatalog> {
         if !self.supports_resources() {
             bail!("Server does not support resources");
         }
 
-        let result = self
-            .send_request("resources/list", None)
+        self.list_catalog::<Resource, ResourcesListResponse>("resources/list")
             .await
-            .context("Failed to list resources")?;
-
-        let resources_value = result
-            .get("resources")
-            .context("Response missing 'resources' field")?
-            .as_array()
-            .context("'resources' is not an array")?;
-
-        let mut resources = Vec::new();
-        for resource_value in resources_value {
-            let resource: Resource = serde_json::from_value(resource_value.clone())
-                .context("Failed to parse resource")?;
-            resources.push(resource);
-        }
-
-        Ok(resources)
+            .context("Failed to list resources")
     }
 
     /// Read a resource
@@ -450,29 +469,17 @@ impl McpStdioClient {
     /// List available prompts
     #[allow(dead_code)]
     pub async fn list_prompts(&mut self) -> Result<Vec<Prompt>> {
+        Ok(self.list_prompts_catalog().await?.items)
+    }
+
+    pub async fn list_prompts_catalog(&mut self) -> Result<PromptsCatalog> {
         if !self.supports_prompts() {
             bail!("Server does not support prompts");
         }
 
-        let result = self
-            .send_request("prompts/list", None)
+        self.list_catalog::<Prompt, PromptsListResponse>("prompts/list")
             .await
-            .context("Failed to list prompts")?;
-
-        let prompts_value = result
-            .get("prompts")
-            .context("Response missing 'prompts' field")?
-            .as_array()
-            .context("'prompts' is not an array")?;
-
-        let mut prompts = Vec::new();
-        for prompt_value in prompts_value {
-            let prompt: Prompt =
-                serde_json::from_value(prompt_value.clone()).context("Failed to parse prompt")?;
-            prompts.push(prompt);
-        }
-
-        Ok(prompts)
+            .context("Failed to list prompts")
     }
 
     /// Get a prompt
@@ -516,13 +523,65 @@ impl McpStdioClient {
         params: Option<JsonValue>,
         timeout: Duration,
     ) -> Result<JsonValue> {
+        self.send_request_with_timeout_and_capabilities(method, params, None, timeout)
+            .await
+    }
+
+    async fn send_request_with_timeout_and_capabilities(
+        &mut self,
+        method: &str,
+        params: Option<JsonValue>,
+        capabilities: Option<&JsonValue>,
+        timeout: Duration,
+    ) -> Result<JsonValue> {
         let params = match self.protocol_context.era {
-            McpProtocolEra::Modern => Some(self.protocol_context.modern_request_params(params)?),
+            McpProtocolEra::Modern => Some(
+                self.protocol_context
+                    .modern_request_params_with_capabilities(params, capabilities)?,
+            ),
             McpProtocolEra::Legacy => params,
         };
         self.transport
             .send_request_with_timeout(method, params, timeout)
             .await
+    }
+
+    async fn list_catalog<T, R>(&mut self, method: &str) -> Result<McpListCatalog<T>>
+    where
+        R: serde::de::DeserializeOwned + McpListPage<Item = T>,
+    {
+        let mut paginator = McpCatalogPaginator::new(method);
+        loop {
+            let params = paginator.next_request_params()?;
+            let result = self
+                .send_request(method, params)
+                .await
+                .with_context(|| format!("Failed to fetch {}", method))?;
+            if !paginator.absorb_response::<R>(result)? {
+                return Ok(paginator.finish());
+            }
+        }
+    }
+
+    async fn list_catalog_with_timeout<T, R>(
+        &mut self,
+        method: &str,
+        timeout: Duration,
+    ) -> Result<McpListCatalog<T>>
+    where
+        R: serde::de::DeserializeOwned + McpListPage<Item = T>,
+    {
+        let mut paginator = McpCatalogPaginator::new(method);
+        loop {
+            let params = paginator.next_request_params()?;
+            let result = self
+                .send_request_with_timeout(method, params, timeout)
+                .await
+                .with_context(|| format!("Failed to fetch {}", method))?;
+            if !paginator.absorb_response::<R>(result)? {
+                return Ok(paginator.finish());
+            }
+        }
     }
 }
 
@@ -716,6 +775,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_tools_catalog_paginates_and_aggregates_metadata() {
+        let script = r#"
+            read line
+            echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 29
+            read page1
+            echo "$page1" | grep -q '"method":"tools/list"' || exit 30
+            echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"tool-1"},{"name":"tool-2"}],"nextCursor":"cursor-2","ttlMs":30,"cacheScope":"public"}}'
+            read page2
+            echo "$page2" | grep -q '"cursor":"cursor-2"' || exit 31
+            echo '{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"tool-3"}],"ttlMs":10,"cacheScope":"private"}}'
+        "#;
+
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
+
+        let catalog = client.list_tools_catalog().await.unwrap();
+        assert_eq!(catalog.items.len(), 3);
+        assert_eq!(catalog.items[0].name, "tool-1");
+        assert_eq!(catalog.items[2].name, "tool-3");
+        assert_eq!(catalog.metadata.ttlMs, Some(10));
+        assert_eq!(catalog.metadata.cacheScope.as_deref(), Some("private"));
+        assert_eq!(catalog.metadata.pageCount, 2);
+        assert_eq!(catalog.metadata.itemCount, 3);
+    }
+
+    #[tokio::test]
+    async fn list_tools_catalog_enforces_page_limit() {
+        let script = r#"
+            read line
+            echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 59
+            count=0
+            while read request; do
+                count=$((count + 1))
+                response_id=$((count + 1))
+                if [ "$count" -lt 100 ]; then
+                    next=",\"nextCursor\":\"cursor-$((count + 1))\""
+                else
+                    next=",\"nextCursor\":\"cursor-overflow\""
+                fi
+                echo "{\"jsonrpc\":\"2.0\",\"id\":$response_id,\"result\":{\"tools\":[{\"name\":\"tool-$count\"}]$next}}"
+            done
+        "#;
+
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
+
+        let err = client.list_tools_catalog().await.unwrap_err();
+        assert!(format!("{err:#}").contains("maximum of 100 pages"));
+    }
+
+    #[tokio::test]
     async fn call_tool_executes_tool_with_arguments() {
         let script = r#"
             read line
@@ -802,6 +918,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_resources_paginates() {
+        let script = r#"
+            read line
+            echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"resources":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 39
+            read page1
+            echo "$page1" | grep -q '"method":"resources/list"' || exit 40
+            echo '{"jsonrpc":"2.0","id":2,"result":{"resources":[{"name":"r1","uri":"test://r1","description":"R1"}],"nextCursor":"cursor-2"}}'
+            read page2
+            echo "$page2" | grep -q '"cursor":"cursor-2"' || exit 41
+            echo '{"jsonrpc":"2.0","id":3,"result":{"resources":[{"name":"r2","uri":"test://r2","description":"R2"}]}}'
+        "#;
+
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
+
+        let resources = client.list_resources().await.unwrap();
+        assert_eq!(resources.len(), 2);
+        assert_eq!(resources[1].uri, "test://r2");
+    }
+
+    #[tokio::test]
     async fn read_resource_returns_resource_contents() {
         let script = r#"
             read line
@@ -854,6 +994,29 @@ mod tests {
         let prompts = client.list_prompts().await.unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].name, "test_prompt");
+    }
+
+    #[tokio::test]
+    async fn list_prompts_detects_cursor_cycle() {
+        let script = r#"
+            read line
+            echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"prompts":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 49
+            read page1
+            echo "$page1" | grep -q '"method":"prompts/list"' || exit 50
+            echo '{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"p1","description":"P1"}],"nextCursor":"loop"}}'
+            read page2
+            echo "$page2" | grep -q '"cursor":"loop"' || exit 51
+            echo '{"jsonrpc":"2.0","id":3,"result":{"prompts":[{"name":"p2","description":"P2"}],"nextCursor":"loop"}}'
+        "#;
+
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
+
+        let err = client.list_prompts().await.unwrap_err();
+        assert!(format!("{err:#}").contains("cursor cycle"));
     }
 
     #[tokio::test]

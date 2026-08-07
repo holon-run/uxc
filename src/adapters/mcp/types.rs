@@ -2,10 +2,14 @@
 
 #![allow(non_snake_case)]
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+pub const MCP_LIST_MAX_PAGES: usize = 100;
+pub const MCP_LIST_MAX_ITEMS: usize = 10_000;
 
 /// JSON-RPC 2.0 Request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +83,14 @@ pub struct McpProtocolContext {
 
 impl McpProtocolContext {
     pub fn modern_request_params(&self, params: Option<JsonValue>) -> Result<JsonValue> {
+        self.modern_request_params_with_capabilities(params, None)
+    }
+
+    pub fn modern_request_params_with_capabilities(
+        &self,
+        params: Option<JsonValue>,
+        client_capabilities: Option<&JsonValue>,
+    ) -> Result<JsonValue> {
         let mut params = match params {
             Some(JsonValue::Object(params)) => params,
             Some(_) => return Err(anyhow!("MCP request params must be a JSON object")),
@@ -99,7 +111,11 @@ impl McpProtocolContext {
         );
         meta.insert(
             "io.modelcontextprotocol/clientCapabilities".to_string(),
-            serde_json::to_value(&self.client_capabilities)?,
+            match client_capabilities {
+                Some(JsonValue::Object(_)) => client_capabilities.cloned().unwrap(),
+                Some(_) => return Err(anyhow!("MCP client capabilities must be a JSON object")),
+                None => serde_json::to_value(&self.client_capabilities)?,
+            },
         );
         params.insert("_meta".to_string(), JsonValue::Object(meta));
         Ok(JsonValue::Object(params))
@@ -278,14 +294,6 @@ impl Tool {
     }
 }
 
-/// Tool call parameters
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CallToolParams {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<JsonValue>,
-}
-
 /// Tool call result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallToolResult {
@@ -408,6 +416,14 @@ pub struct GetPromptResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsListResponse {
     pub tools: Vec<Tool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nextCursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttlMs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cacheScope: Option<String>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonValue>,
 }
 
 /// Tool call result (alias for CallToolResult)
@@ -417,12 +433,221 @@ pub type ToolCallResult = CallToolResult;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourcesListResponse {
     pub resources: Vec<Resource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nextCursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttlMs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cacheScope: Option<String>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonValue>,
 }
 
 /// Prompts list response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptsListResponse {
     pub prompts: Vec<Prompt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nextCursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttlMs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cacheScope: Option<String>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpListPageMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nextCursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttlMs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cacheScope: Option<String>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpListCatalogMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttlMs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cacheScope: Option<String>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonValue>,
+    pub pageCount: usize,
+    pub itemCount: usize,
+}
+
+impl McpListCatalogMetadata {
+    pub fn absorb_page(&mut self, page: &McpListPageMetadata, item_count: usize) {
+        self.pageCount += 1;
+        self.itemCount += item_count;
+        self.ttlMs = match (self.ttlMs, page.ttlMs) {
+            (Some(current), Some(next)) => Some(current.min(next)),
+            (None, Some(next)) => Some(next),
+            (current, None) => current,
+        };
+        self.cacheScope = merge_cache_scope(self.cacheScope.take(), page.cacheScope.clone());
+        if self.meta.is_none() {
+            self.meta = page.meta.clone();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpListCatalog<T> {
+    pub items: Vec<T>,
+    pub metadata: McpListCatalogMetadata,
+}
+
+pub type ToolsCatalog = McpListCatalog<Tool>;
+pub type ResourcesCatalog = McpListCatalog<Resource>;
+pub type PromptsCatalog = McpListCatalog<Prompt>;
+
+pub trait McpListPage {
+    type Item;
+
+    fn into_parts(self) -> (Vec<Self::Item>, McpListPageMetadata);
+}
+
+pub struct McpCatalogPaginator<T> {
+    method: String,
+    items: Vec<T>,
+    metadata: McpListCatalogMetadata,
+    next_cursor: Option<String>,
+    seen_cursors: HashSet<String>,
+}
+
+impl<T> McpCatalogPaginator<T> {
+    pub fn new(method: &str) -> Self {
+        Self {
+            method: method.to_string(),
+            items: Vec::new(),
+            metadata: McpListCatalogMetadata::default(),
+            next_cursor: None,
+            seen_cursors: HashSet::new(),
+        }
+    }
+
+    pub fn next_request_params(&self) -> Result<Option<JsonValue>> {
+        if self.metadata.pageCount >= MCP_LIST_MAX_PAGES {
+            bail!(
+                "MCP {} pagination exceeded maximum of {} pages",
+                self.method,
+                MCP_LIST_MAX_PAGES
+            );
+        }
+        Ok(self
+            .next_cursor
+            .as_ref()
+            .map(|cursor| serde_json::json!({ "cursor": cursor })))
+    }
+
+    pub fn absorb_response<R>(&mut self, result: JsonValue) -> Result<bool>
+    where
+        R: DeserializeOwned + McpListPage<Item = T>,
+    {
+        let response: R = serde_json::from_value(result)
+            .with_context(|| format!("Failed to parse {} response", self.method))?;
+        let (page_items, page_metadata) = response.into_parts();
+        self.metadata.absorb_page(&page_metadata, page_items.len());
+        if self.metadata.itemCount > MCP_LIST_MAX_ITEMS {
+            bail!(
+                "MCP {} pagination exceeded maximum of {} items",
+                self.method,
+                MCP_LIST_MAX_ITEMS
+            );
+        }
+        self.items.extend(page_items);
+
+        match page_metadata.nextCursor {
+            Some(cursor) => {
+                if !self.seen_cursors.insert(cursor.clone()) {
+                    bail!(
+                        "MCP {} pagination detected cursor cycle at '{}'",
+                        self.method,
+                        cursor
+                    );
+                }
+                self.next_cursor = Some(cursor);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub fn finish(self) -> McpListCatalog<T> {
+        McpListCatalog {
+            items: self.items,
+            metadata: self.metadata,
+        }
+    }
+}
+
+fn merge_cache_scope(current: Option<String>, next: Option<String>) -> Option<String> {
+    match (current, next) {
+        (Some(current), Some(_next)) if is_private_cache_scope(&current) => Some(current),
+        (_, Some(next)) if is_private_cache_scope(&next) => Some(next),
+        (Some(current), Some(_)) => Some(current),
+        (None, Some(next)) => Some(next),
+        (Some(current), None) => Some(current),
+        (None, None) => None,
+    }
+}
+
+fn is_private_cache_scope(scope: &str) -> bool {
+    scope.eq_ignore_ascii_case("private")
+}
+
+impl McpListPage for ToolsListResponse {
+    type Item = Tool;
+
+    fn into_parts(self) -> (Vec<Self::Item>, McpListPageMetadata) {
+        (
+            self.tools,
+            McpListPageMetadata {
+                nextCursor: self.nextCursor,
+                ttlMs: self.ttlMs,
+                cacheScope: self.cacheScope,
+                meta: self.meta,
+            },
+        )
+    }
+}
+
+impl McpListPage for ResourcesListResponse {
+    type Item = Resource;
+
+    fn into_parts(self) -> (Vec<Self::Item>, McpListPageMetadata) {
+        (
+            self.resources,
+            McpListPageMetadata {
+                nextCursor: self.nextCursor,
+                ttlMs: self.ttlMs,
+                cacheScope: self.cacheScope,
+                meta: self.meta,
+            },
+        )
+    }
+}
+
+impl McpListPage for PromptsListResponse {
+    type Item = Prompt;
+
+    fn into_parts(self) -> (Vec<Self::Item>, McpListPageMetadata) {
+        (
+            self.prompts,
+            McpListPageMetadata {
+                nextCursor: self.nextCursor,
+                ttlMs: self.ttlMs,
+                cacheScope: self.cacheScope,
+                meta: self.meta,
+            },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -478,6 +703,22 @@ mod tests {
     }
 
     #[test]
+    fn modern_request_params_accept_explicit_client_capabilities() {
+        let capabilities = json!({
+            "elicitation": {},
+            "sampling": {}
+        });
+        let params = modern_context()
+            .modern_request_params_with_capabilities(None, Some(&capabilities))
+            .unwrap();
+
+        assert_eq!(
+            params["_meta"]["io.modelcontextprotocol/clientCapabilities"],
+            capabilities
+        );
+    }
+
+    #[test]
     fn legacy_tool_result_defaults_to_complete_and_preserves_unknown_content() {
         let result: CallToolResult = serde_json::from_value(json!({
             "content": [{
@@ -490,5 +731,50 @@ mod tests {
         assert_eq!(result.resultType, "complete");
         assert_eq!(result.content[0].content_type(), Some("future-content"));
         assert_eq!(result.content[0].as_value()["nested"]["value"], 1);
+    }
+
+    #[test]
+    fn list_catalog_metadata_aggregates_min_ttl_and_private_cache_scope() {
+        let mut metadata = McpListCatalogMetadata::default();
+        metadata.absorb_page(
+            &McpListPageMetadata {
+                ttlMs: Some(30),
+                cacheScope: Some("public".to_string()),
+                ..Default::default()
+            },
+            2,
+        );
+        metadata.absorb_page(
+            &McpListPageMetadata {
+                ttlMs: Some(10),
+                cacheScope: Some("private".to_string()),
+                ..Default::default()
+            },
+            3,
+        );
+
+        assert_eq!(metadata.ttlMs, Some(10));
+        assert_eq!(metadata.cacheScope.as_deref(), Some("private"));
+        assert_eq!(metadata.pageCount, 2);
+        assert_eq!(metadata.itemCount, 5);
+    }
+
+    #[test]
+    fn list_responses_parse_cursor_and_metadata() {
+        let response: ToolsListResponse = serde_json::from_value(json!({
+            "tools": [{"name": "ping"}],
+            "nextCursor": "cursor-2",
+            "ttlMs": 50,
+            "cacheScope": "public",
+            "_meta": {"page": 1}
+        }))
+        .unwrap();
+
+        let (tools, metadata) = response.into_parts();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(metadata.nextCursor.as_deref(), Some("cursor-2"));
+        assert_eq!(metadata.ttlMs, Some(50));
+        assert_eq!(metadata.cacheScope.as_deref(), Some("public"));
+        assert_eq!(metadata.meta, Some(json!({"page": 1})));
     }
 }

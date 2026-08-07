@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::{error::ErrorKind, Parser, Subcommand, ValueEnum};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -127,6 +127,14 @@ struct Cli {
     /// Force online schema discovery and refresh cache.
     #[arg(long, global = true, conflicts_with = "no_cache")]
     refresh_schema: bool,
+
+    /// MCP client capabilities JSON, @FILE, or - for stdin
+    #[arg(long, global = true, value_name = "JSON|@FILE|-")]
+    mcp_capabilities: Option<String>,
+
+    /// MCP MRTR continuation JSON, @FILE, or - for stdin
+    #[arg(long, global = true, value_name = "JSON|@FILE|-")]
+    mcp_continuation: Option<String>,
 
     /// Explicit OpenAPI schema URL (for schema-discovery separated services)
     #[arg(long, global = true)]
@@ -1404,6 +1412,8 @@ fn normalize_global_args(raw_args: Vec<String>) -> Vec<String> {
                 | "--daemon-exclusive"
                 | "--daemon-idle-ttl"
                 | "--inject-env"
+                | "--mcp-capabilities"
+                | "--mcp-continuation"
         );
         let is_global_inline = arg.starts_with("--format=")
             || arg.starts_with("--auth=")
@@ -1411,7 +1421,9 @@ fn normalize_global_args(raw_args: Vec<String>) -> Vec<String> {
             || arg.starts_with("--schema-url=")
             || arg.starts_with("--daemon-exclusive=")
             || arg.starts_with("--daemon-idle-ttl=")
-            || arg.starts_with("--inject-env=");
+            || arg.starts_with("--inject-env=")
+            || arg.starts_with("--mcp-capabilities=")
+            || arg.starts_with("--mcp-continuation=");
 
         if is_global_bool || is_global_inline {
             global_args.push(arg.clone());
@@ -1460,6 +1472,8 @@ fn is_global_kv_arg(arg: &str) -> bool {
             | "--daemon-exclusive"
             | "--daemon-idle-ttl"
             | "--inject-env"
+            | "--mcp-capabilities"
+            | "--mcp-continuation"
     )
 }
 
@@ -2004,7 +2018,7 @@ async fn execute_endpoint_via_daemon(
     let daemon_restarted_for_version_mismatch = daemon_ensure
         .as_ref()
         .map(|outcome| outcome.restarted_for_version_mismatch);
-    let (action, operation_id, args_map) = match endpoint_command {
+    let (action, operation_id, mut args_map) = match endpoint_command {
         EndpointCommand::HostHelp => (daemon::RuntimeAction::HostHelp, None, None),
         EndpointCommand::CodegenSchema => (daemon::RuntimeAction::CodegenSchema, None, None),
         EndpointCommand::Describe { operation_id } => (
@@ -2022,6 +2036,21 @@ async fn execute_endpoint_via_daemon(
             Some(parse_arguments(args.clone(), input_json.clone())?),
         ),
     };
+    if matches!(action, daemon::RuntimeAction::Execute) {
+        let args = args_map.get_or_insert_with(HashMap::new);
+        if let Some(input) = cli.mcp_capabilities.as_deref() {
+            args.insert(
+                adapters::mcp::MCP_CAPABILITIES_ARG.to_string(),
+                parse_json_control_input("--mcp-capabilities", input)?,
+            );
+        }
+        if let Some(input) = cli.mcp_continuation.as_deref() {
+            args.insert(
+                adapters::mcp::MCP_CONTINUATION_ARG.to_string(),
+                parse_json_control_input("--mcp-continuation", input)?,
+            );
+        }
+    }
 
     let request = daemon::RuntimeInvokeRequest {
         request_id: format!(
@@ -3607,6 +3636,27 @@ fn parse_arguments(
     input_json: Option<String>,
 ) -> Result<HashMap<String, Value>> {
     crate::cli::ArgumentParser::parse_arguments(args, input_json)
+}
+
+fn parse_json_control_input(flag: &str, input: &str) -> Result<Value> {
+    let raw = if let Some(path) = input.strip_prefix('@') {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {} file '{}'", flag, path))?
+    } else if input == "-" {
+        let mut raw = String::new();
+        std::io::stdin()
+            .read_to_string(&mut raw)
+            .with_context(|| format!("Failed to read {} from stdin", flag))?;
+        raw
+    } else {
+        input.to_string()
+    };
+    let value: Value =
+        serde_json::from_str(&raw).with_context(|| format!("Invalid JSON for {}", flag))?;
+    if !value.is_object() {
+        bail!("{} must resolve to a JSON object", flag);
+    }
+    Ok(value)
 }
 
 fn enrich_operation_detail_payload(data: Value, command_head: &str, operation_id: &str) -> Value {
@@ -7564,9 +7614,9 @@ fn parse_oauth_flow(value: &str) -> Result<OAuthFlow> {
 mod tests {
     use super::{
         build_link_launcher, collect_daemon_idle_ttl, enrich_operation_detail_payload,
-        infer_scheme_for_endpoint, link_target_path, normalize_endpoint_url, parse_arguments,
-        resolve_home_dir, resolve_link_dir, shell_single_quote, validate_link_name, Cli,
-        LinkLauncherConfig,
+        infer_scheme_for_endpoint, link_target_path, normalize_endpoint_url, normalize_global_args,
+        parse_arguments, parse_json_control_input, resolve_home_dir, resolve_link_dir,
+        shell_single_quote, validate_link_name, Cli, LinkLauncherConfig,
     };
     use clap::Parser;
     use serde_json::json;
@@ -7770,6 +7820,31 @@ mod tests {
         assert_eq!(parsed["filter"]["status"], "active");
         assert_eq!(parsed["tags"][0], "rust");
         assert_eq!(parsed["tags"][1], "cli");
+    }
+
+    #[test]
+    fn normalize_global_args_moves_mcp_control_flags_before_endpoint() {
+        let normalized = normalize_global_args(vec![
+            "uxc".to_string(),
+            "https://example.com/mcp".to_string(),
+            "search".to_string(),
+            "--mcp-capabilities".to_string(),
+            r#"{"elicitation":{}}"#.to_string(),
+            "--mcp-continuation=@continuation.json".to_string(),
+        ]);
+
+        assert_eq!(normalized[1], "--mcp-capabilities");
+        assert_eq!(normalized[2], r#"{"elicitation":{}}"#);
+        assert_eq!(normalized[3], "--mcp-continuation=@continuation.json");
+    }
+
+    #[test]
+    fn parse_json_control_input_requires_object() {
+        assert_eq!(
+            parse_json_control_input("--mcp-capabilities", r#"{"sampling":{}}"#).unwrap(),
+            json!({"sampling": {}})
+        );
+        assert!(parse_json_control_input("--mcp-continuation", "[]").is_err());
     }
 
     #[test]

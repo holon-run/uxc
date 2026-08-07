@@ -356,14 +356,17 @@ impl Cache for SchemaCache {
             return Ok(());
         }
 
+        self.put_with_ttl(url, schema, self.storage.config.ttl)
+    }
+
+    fn put_with_ttl(&self, url: &str, schema: &Value, ttl_seconds: u64) -> Result<()> {
+        if !self.storage.config.enabled {
+            return Ok(());
+        }
+
         let key = self.storage.generate_cache_key(url);
         let protocol = self.detect_protocol(url);
-        let entry = CacheEntry::new(
-            url.to_string(),
-            schema.clone(),
-            self.storage.config.ttl,
-            protocol,
-        );
+        let entry = CacheEntry::new(url.to_string(), schema.clone(), ttl_seconds, protocol);
 
         self.storage.save_entry(&key, &entry)?;
         info!("Cached schema for: {}", url);
@@ -474,6 +477,8 @@ impl Cache for SchemaCache {
 mod tests {
     use super::*;
     use std::fs;
+    use std::thread::sleep;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn create_test_cache() -> (SchemaCache, TempDir) {
@@ -535,6 +540,28 @@ mod tests {
             }
             _ => panic!("Expected cache hit"),
         }
+    }
+
+    #[test]
+    fn test_cache_put_with_short_ttl_expires_after_delay() {
+        let (cache, _temp) = create_test_cache();
+        let url = "https://api.example.com/openapi.json";
+        let schema = serde_json::json!({"openapi": "3.0"});
+
+        cache.put_with_ttl(url, &schema, 1).unwrap();
+        assert!(matches!(cache.get(url).unwrap(), CacheResult::Hit(_)));
+        sleep(Duration::from_secs(2));
+        assert!(matches!(cache.get(url).unwrap(), CacheResult::Miss));
+    }
+
+    #[test]
+    fn test_cache_put_with_zero_ttl_expires_immediately() {
+        let (cache, _temp) = create_test_cache();
+        let url = "https://api.example.com/openapi.json";
+        let schema = serde_json::json!({"openapi": "3.0"});
+
+        cache.put_with_ttl(url, &schema, 0).unwrap();
+        assert!(matches!(cache.get(url).unwrap(), CacheResult::Miss));
     }
 
     #[test]

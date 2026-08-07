@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use super::types::*;
+use super::McpExecutionOptions;
 use crate::auth::{self, oauth, AuthType, Profile, Profiles};
 use crate::error::UxcError;
 use crate::error::{
@@ -275,9 +276,23 @@ impl McpHttpTransport {
         params: Option<JsonValue>,
         custom_headers: &[(HeaderName, HeaderValue)],
     ) -> Result<JsonValue> {
+        self.send_request_with_custom_headers_and_capabilities(method, params, custom_headers, None)
+            .await
+    }
+
+    async fn send_request_with_custom_headers_and_capabilities(
+        &self,
+        method: &str,
+        params: Option<JsonValue>,
+        custom_headers: &[(HeaderName, HeaderValue)],
+        capabilities: Option<&JsonValue>,
+    ) -> Result<JsonValue> {
         self.maybe_refresh_auth_token().await?;
         let params = match self.protocol_context.era {
-            McpProtocolEra::Modern => Some(self.protocol_context.modern_request_params(params)?),
+            McpProtocolEra::Modern => Some(
+                self.protocol_context
+                    .modern_request_params_with_capabilities(params, capabilities)?,
+            ),
             McpProtocolEra::Legacy => params,
         };
 
@@ -1396,18 +1411,20 @@ impl McpHttpTransport {
 
     /// List available tools
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {
-        let result = self.send_request("tools/list", None).await?;
+        Ok(self.list_tools_catalog().await?.items)
+    }
 
-        let response: ToolsListResponse =
-            serde_json::from_value(result).context("Failed to parse tools/list response")?;
-
+    pub async fn list_tools_catalog(&self) -> Result<ToolsCatalog> {
+        let mut catalog = self
+            .list_catalog::<Tool, ToolsListResponse>("tools/list")
+            .await?;
         if self.protocol_context.era == McpProtocolEra::Legacy {
-            return Ok(response.tools);
+            return Ok(catalog);
         }
 
         let mut headers_by_tool = HashMap::new();
-        let mut valid_tools = Vec::with_capacity(response.tools.len());
-        for tool in response.tools {
+        let mut valid_tools = Vec::with_capacity(catalog.items.len());
+        for tool in catalog.items {
             match Self::tool_header_mappings(&tool) {
                 Ok(mappings) => {
                     headers_by_tool.insert(tool.name.clone(), mappings);
@@ -1424,7 +1441,9 @@ impl McpHttpTransport {
         }
         *self.tool_headers.lock().await = headers_by_tool;
         *self.tool_catalog_loaded.lock().await = true;
-        Ok(valid_tools)
+        catalog.metadata.itemCount = valid_tools.len();
+        catalog.items = valid_tools;
+        Ok(catalog)
     }
 
     /// Call a tool
@@ -1433,29 +1452,52 @@ impl McpHttpTransport {
         name: &str,
         arguments: Option<JsonValue>,
     ) -> Result<ToolCallResult> {
+        self.call_tool_with_options(name, arguments, &McpExecutionOptions::default())
+            .await
+    }
+
+    pub async fn call_tool_with_options(
+        &self,
+        name: &str,
+        arguments: Option<JsonValue>,
+        options: &McpExecutionOptions,
+    ) -> Result<ToolCallResult> {
         if self.protocol_context.era == McpProtocolEra::Modern
             && !*self.tool_catalog_loaded.lock().await
         {
             let _ = self.list_tools().await?;
         }
 
-        let params = match arguments.clone() {
-            Some(arguments) => serde_json::json!({
-                "name": name,
-                "arguments": arguments
-            }),
-            None => serde_json::json!({
-                "name": name,
-                "arguments": {}
-            }),
-        };
+        let mut params = serde_json::Map::new();
+        params.insert("name".to_string(), JsonValue::String(name.to_string()));
+        params.insert(
+            "arguments".to_string(),
+            arguments.clone().unwrap_or_else(|| serde_json::json!({})),
+        );
+        if let Some(continuation) = &options.continuation {
+            let continuation = continuation
+                .as_object()
+                .context("MCP continuation must be a JSON object")?;
+            for (key, value) in continuation {
+                if matches!(key.as_str(), "name" | "arguments" | "_meta") {
+                    bail!("MCP continuation must not override '{}'", key);
+                }
+                params.insert(key.clone(), value.clone());
+            }
+        }
+        let params = JsonValue::Object(params);
 
         let headers = self
             .custom_tool_headers(name, arguments.as_ref())
             .await
             .with_context(|| format!("Failed to build custom headers for tool '{}'", name))?;
         let result = match self
-            .send_request_with_custom_headers("tools/call", Some(params.clone()), &headers)
+            .send_request_with_custom_headers_and_capabilities(
+                "tools/call",
+                Some(params.clone()),
+                &headers,
+                options.capabilities.as_ref(),
+            )
             .await
         {
             Err(err)
@@ -1469,10 +1511,11 @@ impl McpHttpTransport {
                     .with_context(|| {
                         format!("Failed to rebuild custom headers for tool '{}'", name)
                     })?;
-                self.send_request_with_custom_headers(
+                self.send_request_with_custom_headers_and_capabilities(
                     "tools/call",
                     Some(params),
                     &refreshed_headers,
+                    options.capabilities.as_ref(),
                 )
                 .await?
             }
@@ -1639,12 +1682,12 @@ impl McpHttpTransport {
 
     /// List available resources
     pub async fn list_resources(&self) -> Result<Vec<Resource>> {
-        let result = self.send_request("resources/list", None).await?;
+        Ok(self.list_resources_catalog().await?.items)
+    }
 
-        let response: ResourcesListResponse =
-            serde_json::from_value(result).context("Failed to parse resources/list response")?;
-
-        Ok(response.resources)
+    pub async fn list_resources_catalog(&self) -> Result<ResourcesCatalog> {
+        self.list_catalog::<Resource, ResourcesListResponse>("resources/list")
+            .await
     }
 
     /// Read a resource
@@ -1707,12 +1750,12 @@ impl McpHttpTransport {
 
     /// List available prompts
     pub async fn list_prompts(&self) -> Result<Vec<Prompt>> {
-        let result = self.send_request("prompts/list", None).await?;
+        Ok(self.list_prompts_catalog().await?.items)
+    }
 
-        let response: PromptsListResponse =
-            serde_json::from_value(result).context("Failed to parse prompts/list response")?;
-
-        Ok(response.prompts)
+    pub async fn list_prompts_catalog(&self) -> Result<PromptsCatalog> {
+        self.list_catalog::<Prompt, PromptsListResponse>("prompts/list")
+            .await
     }
 
     /// Get a prompt
@@ -1762,6 +1805,23 @@ impl McpHttpTransport {
             Self::run_streamable_event_reader(response, notifications, stream_error).await;
         }));
         Ok(())
+    }
+
+    async fn list_catalog<T, R>(&self, method: &str) -> Result<McpListCatalog<T>>
+    where
+        R: serde::de::DeserializeOwned + McpListPage<Item = T>,
+    {
+        let mut paginator = McpCatalogPaginator::new(method);
+        loop {
+            let params = paginator.next_request_params()?;
+            let result = self
+                .send_request(method, params)
+                .await
+                .with_context(|| format!("Failed to fetch {}", method))?;
+            if !paginator.absorb_response::<R>(result)? {
+                return Ok(paginator.finish());
+            }
+        }
     }
 
     async fn open_event_stream(&self) -> Result<reqwest::Response> {
@@ -2225,10 +2285,12 @@ impl LegacySseTransport {
     }
 
     async fn list_tools(&self) -> Result<Vec<Tool>> {
-        let result = self.send_request("tools/list", None).await?;
-        let response: ToolsListResponse =
-            serde_json::from_value(result).context("Failed to parse tools/list response")?;
-        Ok(response.tools)
+        Ok(self.list_tools_catalog().await?.items)
+    }
+
+    async fn list_tools_catalog(&self) -> Result<ToolsCatalog> {
+        self.list_catalog::<Tool, ToolsListResponse>("tools/list")
+            .await
     }
 
     async fn read_resource(&self, uri: &str) -> Result<ResourceContents> {
@@ -2282,6 +2344,41 @@ impl LegacySseTransport {
 
     async fn take_stream_error(&self) -> Option<String> {
         self.event_stream_error.lock().await.take()
+    }
+
+    async fn list_resources(&self) -> Result<Vec<Resource>> {
+        Ok(self.list_resources_catalog().await?.items)
+    }
+
+    async fn list_resources_catalog(&self) -> Result<ResourcesCatalog> {
+        self.list_catalog::<Resource, ResourcesListResponse>("resources/list")
+            .await
+    }
+
+    async fn list_prompts(&self) -> Result<Vec<Prompt>> {
+        Ok(self.list_prompts_catalog().await?.items)
+    }
+
+    async fn list_prompts_catalog(&self) -> Result<PromptsCatalog> {
+        self.list_catalog::<Prompt, PromptsListResponse>("prompts/list")
+            .await
+    }
+
+    async fn list_catalog<T, R>(&self, method: &str) -> Result<McpListCatalog<T>>
+    where
+        R: serde::de::DeserializeOwned + McpListPage<Item = T>,
+    {
+        let mut paginator = McpCatalogPaginator::new(method);
+        loop {
+            let params = paginator.next_request_params()?;
+            let result = self
+                .send_request(method, params)
+                .await
+                .with_context(|| format!("Failed to fetch {}", method))?;
+            if !paginator.absorb_response::<R>(result)? {
+                return Ok(paginator.finish());
+            }
+        }
     }
 
     async fn run_sse_reader(
@@ -2549,6 +2646,13 @@ impl McpRemoteTransport {
         }
     }
 
+    pub async fn list_tools_catalog(&self) -> Result<ToolsCatalog> {
+        match self {
+            Self::Streamable(transport) => transport.list_tools_catalog().await,
+            Self::Legacy(transport) => transport.list_tools_catalog().await,
+        }
+    }
+
     pub async fn call_tool(
         &self,
         name: &str,
@@ -2556,6 +2660,22 @@ impl McpRemoteTransport {
     ) -> Result<ToolCallResult> {
         match self {
             Self::Streamable(transport) => transport.call_tool(name, arguments).await,
+            Self::Legacy(transport) => transport.call_tool(name, arguments).await,
+        }
+    }
+
+    pub async fn call_tool_with_options(
+        &self,
+        name: &str,
+        arguments: Option<JsonValue>,
+        options: &McpExecutionOptions,
+    ) -> Result<ToolCallResult> {
+        match self {
+            Self::Streamable(transport) => {
+                transport
+                    .call_tool_with_options(name, arguments, options)
+                    .await
+            }
             Self::Legacy(transport) => transport.call_tool(name, arguments).await,
         }
     }
@@ -2585,6 +2705,20 @@ impl McpRemoteTransport {
         match self {
             Self::Streamable(transport) => transport.unsubscribe_resource(uri).await,
             Self::Legacy(transport) => transport.unsubscribe_resource(uri).await,
+        }
+    }
+
+    pub async fn list_resources_catalog(&self) -> Result<ResourcesCatalog> {
+        match self {
+            Self::Streamable(transport) => transport.list_resources_catalog().await,
+            Self::Legacy(transport) => transport.list_resources_catalog().await,
+        }
+    }
+
+    pub async fn list_prompts_catalog(&self) -> Result<PromptsCatalog> {
+        match self {
+            Self::Streamable(transport) => transport.list_prompts_catalog().await,
+            Self::Legacy(transport) => transport.list_prompts_catalog().await,
         }
     }
 
@@ -2984,6 +3118,72 @@ mod tests {
             .await
             .unwrap();
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn modern_tool_call_keeps_mrtr_controls_out_of_arguments() {
+        let mut server = mockito::Server::new_async().await;
+        let list = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"execute","inputSchema":{"type":"object"}}]}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let call = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "tools/call",
+                "params": {
+                    "name": "execute",
+                    "arguments": {"query": "rust"},
+                    "inputResponses": {
+                        "request-1": {"action": "accept"}
+                    },
+                    "requestState": "opaque-state",
+                    "_meta": {
+                        "io.modelcontextprotocol/clientCapabilities": {
+                            "elicitation": {}
+                        }
+                    }
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"input_required","inputRequests":{"request-2":{"method":"elicitation/create"}},"requestState":"next-opaque"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::with_auth_timeout_and_era(
+            server.url(),
+            None,
+            Duration::from_secs(5),
+            McpProtocolEra::Modern,
+        )
+        .unwrap();
+        let result = transport
+            .call_tool_with_options(
+                "execute",
+                Some(json!({"query": "rust"})),
+                &McpExecutionOptions {
+                    capabilities: Some(json!({"elicitation": {}})),
+                    continuation: Some(json!({
+                        "inputResponses": {
+                            "request-1": {"action": "accept"}
+                        },
+                        "requestState": "opaque-state"
+                    })),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.resultType, "input_required");
+        assert_eq!(result.requestState.as_deref(), Some("next-opaque"));
+        list.assert_async().await;
+        call.assert_async().await;
     }
 
     #[tokio::test]
@@ -3722,6 +3922,71 @@ data: invalid json
     }
 
     #[tokio::test]
+    async fn list_tools_catalog_paginates_and_aggregates_metadata() {
+        let mut server = mockito::Server::new_async().await;
+
+        let page1 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 1,
+                "method": "tools/list"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":1,
+                "result":{
+                    "tools":[{"name":"tool1","description":"First tool","inputSchema":{"type":"object"}}],
+                    "nextCursor":"cursor-2",
+                    "ttlMs":30,
+                    "cacheScope":"public"
+                }
+            }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let page2 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 2,
+                "method": "tools/list",
+                "params": { "cursor": "cursor-2" }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":2,
+                "result":{
+                    "tools":[{"name":"tool2","description":"Second tool","inputSchema":{"type":"object"}}],
+                    "ttlMs":10,
+                    "cacheScope":"private"
+                }
+            }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::new(server.url()).unwrap();
+
+        let catalog = transport.list_tools_catalog().await.unwrap();
+        assert_eq!(catalog.items.len(), 2);
+        assert_eq!(catalog.items[0].name, "tool1");
+        assert_eq!(catalog.items[1].name, "tool2");
+        assert_eq!(catalog.metadata.ttlMs, Some(10));
+        assert_eq!(catalog.metadata.cacheScope.as_deref(), Some("private"));
+        assert_eq!(catalog.metadata.pageCount, 2);
+        assert_eq!(catalog.metadata.itemCount, 2);
+        page1.assert_async().await;
+        page2.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn list_tools_with_sse_response_succeeds() {
         let mut server = mockito::Server::new_async().await;
 
@@ -3935,6 +4200,62 @@ data: invalid json
     }
 
     #[tokio::test]
+    async fn list_resources_detects_cursor_cycle() {
+        let mut server = mockito::Server::new_async().await;
+
+        let page1 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 1,
+                "method": "resources/list"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":1,
+                "result":{
+                    "resources":[{"uri":"file:///r1","name":"r1","description":"R1"}],
+                    "nextCursor":"loop"
+                }
+            }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let page2 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 2,
+                "method": "resources/list",
+                "params": { "cursor": "loop" }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":2,
+                "result":{
+                    "resources":[{"uri":"file:///r2","name":"r2","description":"R2"}],
+                    "nextCursor":"loop"
+                }
+            }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::new(server.url()).unwrap();
+
+        let err = transport.list_resources().await.unwrap_err();
+        assert!(err.to_string().contains("cursor cycle"));
+        page1.assert_async().await;
+        page2.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn read_resource_succeeds() {
         let mut server = mockito::Server::new_async().await;
 
@@ -4028,6 +4349,69 @@ data: invalid json
         let prompts = result.unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].name, "prompt1");
+    }
+
+    #[tokio::test]
+    async fn list_prompts_enforces_item_limit() {
+        let mut server = mockito::Server::new_async().await;
+        let first_page_prompts: Vec<_> = (0..MCP_LIST_MAX_ITEMS)
+            .map(|idx| {
+                serde_json::json!({
+                    "name": format!("prompt-{idx}"),
+                    "description": "prompt"
+                })
+            })
+            .collect();
+        let first_page_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "prompts": first_page_prompts,
+                "nextCursor": "cursor-2"
+            }
+        })
+        .to_string();
+
+        let page1 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 1,
+                "method": "prompts/list"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(first_page_body)
+            .expect(1)
+            .create_async()
+            .await;
+        let page2 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 2,
+                "method": "prompts/list",
+                "params": { "cursor": "cursor-2" }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":2,
+                "result":{
+                    "prompts":[{"name":"overflow","description":"overflow"}]
+                }
+            }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::new(server.url()).unwrap();
+
+        let err = transport.list_prompts().await.unwrap_err();
+        assert!(err.to_string().contains("maximum of 10000 items"));
+        page1.assert_async().await;
+        page2.assert_async().await;
     }
 
     #[tokio::test]
