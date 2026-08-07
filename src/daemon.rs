@@ -1866,7 +1866,13 @@ impl McpSessionManager {
             last_lifecycle_update_at_unix: None,
             last_lifecycle_snapshot: None,
         };
-        session.restart_modern_subscription().await?;
+        if let Err(err) = session.restart_modern_subscription().await {
+            tracing::warn!(
+                endpoint = %session.endpoint,
+                error = %err,
+                "Initial modern MCP stdio subscription failed; will retry"
+            );
+        }
         let session = Arc::new(Mutex::new(session));
 
         {
@@ -2305,7 +2311,13 @@ impl McpSessionManager {
             lookup_key: lookup_key.to_string(),
             last_used: Mutex::new(Instant::now()),
         });
-        session.restart_modern_subscription().await?;
+        if let Err(err) = session.restart_modern_subscription().await {
+            tracing::warn!(
+                endpoint = %session.lookup_key,
+                error = %err,
+                "Initial modern MCP HTTP subscription failed; will retry"
+            );
+        }
 
         {
             let mut map = self.http.lock().await;

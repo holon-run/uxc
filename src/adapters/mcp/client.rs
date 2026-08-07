@@ -337,7 +337,14 @@ impl McpStdioClient {
             .cancel_request(&request_id, Some(reason))
             .await;
         self.transport.forget_request(&request_id).await;
-        cancel_result
+        if let Err(err) = cancel_result {
+            tracing::debug!(
+                reason,
+                error = %err,
+                "Failed to send MCP subscription cancellation after local cleanup"
+            );
+        }
+        Ok(())
     }
 
     pub async fn lifecycle_contract(&mut self, timeout: Duration) -> Result<LifecycleContract> {
