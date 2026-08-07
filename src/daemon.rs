@@ -803,6 +803,7 @@ struct InitLockEntry {
 
 struct McpStdioSession {
     client: adapters::mcp::McpStdioClient,
+    schema_cache_key: String,
     tools: Option<Vec<adapters::mcp::types::Tool>>,
     tools_dirty: bool,
     notifications: SessionNotificationFanout,
@@ -870,6 +871,7 @@ struct SessionNotificationFanout {
 }
 
 struct StdioSessionRequestMetadata<'a> {
+    schema_cache_key: String,
     idle_ttl_secs: Option<u64>,
     link_name: Option<&'a str>,
     link_skill: Option<&'a str>,
@@ -1019,7 +1021,7 @@ impl McpStdioSession {
             if notification.method == "notifications/tools/list_changed" {
                 self.tools_dirty = true;
                 if let Some(cache) = cache {
-                    let _ = cache.invalidate(endpoint);
+                    let _ = cache.invalidate(&self.schema_cache_key);
                 }
             }
             public_notifications.push(notification);
@@ -1527,6 +1529,7 @@ impl McpSessionManager {
     ) -> Result<(Arc<Mutex<McpStdioSession>>, bool)> {
         let exclusive_keys = normalize_exclusive_keys(metadata.exclusive_keys);
         let metadata = StdioSessionRequestMetadata {
+            schema_cache_key: metadata.schema_cache_key,
             idle_ttl_secs: metadata.idle_ttl_secs,
             link_name: metadata.link_name,
             link_skill: metadata.link_skill,
@@ -1639,6 +1642,7 @@ impl McpSessionManager {
         let session = Arc::new(Mutex::new(McpStdioSession {
             child_pid,
             client,
+            schema_cache_key: metadata.schema_cache_key.clone(),
             tools: None,
             tools_dirty: false,
             notifications: SessionNotificationFanout::default(),
@@ -4249,13 +4253,16 @@ impl DaemonRuntime {
         // succeeded without network access. This keeps `-h` flows resilient when the cached
         // schema is expired but still useful.
         if result.is_err() && !request.options.no_cache && !request.options.refresh_schema {
-            if let cache::CacheLookup::Hit(hit) = cache_for_fallback
-                .get_with_policy(&request.endpoint, cache::CacheReadPolicy::AllowStale)?
-            {
+            if let Some((hit, cache_key)) = lookup_schema_cache(
+                cache_for_fallback.as_ref(),
+                &request.endpoint,
+                root_auth_profile.as_ref(),
+                cache::CacheReadPolicy::AllowStale,
+            )? {
                 if hit.stale {
                     if let Some(fallback_protocol) = protocol_from_cached_schema(&hit.schema) {
                         // Refresh TTL so adapters using normal cache reads can consume this schema.
-                        let _ = cache_for_fallback.put(&request.endpoint, &hit.schema);
+                        let _ = cache_for_fallback.put(&cache_key, &hit.schema);
                         let mut adapter =
                             adapter_from_protocol(fallback_protocol, &detection_options);
                         adapter = inject_cache_if_supported(adapter, cache_for_fallback.clone());
@@ -4616,6 +4623,10 @@ impl DaemonRuntime {
                     &spawn_options,
                     request_timeout_duration(request.options.timeout_ms),
                     StdioSessionRequestMetadata {
+                        schema_cache_key: adapters::mcp::McpAdapter::schema_cache_key_for(
+                            endpoint,
+                            auth_profile.as_ref(),
+                        ),
                         idle_ttl_secs: request.options.daemon_idle_ttl,
                         link_name: request.options.link_name.as_deref(),
                         link_skill: request.options.link_skill.as_deref(),
@@ -6381,6 +6392,10 @@ async fn run_mcp_subscription_job(
             &spawn_options,
             request_timeout_duration(request.options.timeout_ms),
             StdioSessionRequestMetadata {
+                schema_cache_key: adapters::mcp::McpAdapter::schema_cache_key_for(
+                    &request.endpoint,
+                    auth_profile.as_ref(),
+                ),
                 idle_ttl_secs: request.options.daemon_idle_ttl,
                 link_name: request.options.link_name.as_deref(),
                 link_skill: request.options.link_skill.as_deref(),
@@ -8473,24 +8488,26 @@ async fn resolve_adapter_with_schema_cache(
     refresh_schema: bool,
 ) -> Result<ResolveAdapterResult> {
     if !no_cache && !refresh_schema {
-        match cache.get_with_policy(url, cache::CacheReadPolicy::NormalTtl)? {
-            cache::CacheLookup::Hit(hit) => {
-                if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
-                    let mut adapter = adapter_from_protocol(protocol, detection_options);
-                    adapter = inject_cache_if_supported(adapter, cache.clone());
-                    adapter = inject_auth_if_supported(adapter, auth_profile.clone());
-                    adapter = inject_refresh_if_supported(adapter, refresh_schema);
-                    return Ok(ResolveAdapterResult {
-                        adapter,
-                        cache_meta: Some(SchemaCacheMeta {
-                            age_ms: cache_age_ms(hit.fetched_at),
-                            stale: hit.stale,
-                            fallback: false,
-                        }),
-                    });
-                }
+        if let Some((hit, _)) = lookup_schema_cache(
+            cache.as_ref(),
+            url,
+            auth_profile.as_ref(),
+            cache::CacheReadPolicy::NormalTtl,
+        )? {
+            if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
+                let mut adapter = adapter_from_protocol(protocol, detection_options);
+                adapter = inject_cache_if_supported(adapter, cache.clone());
+                adapter = inject_auth_if_supported(adapter, auth_profile.clone());
+                adapter = inject_refresh_if_supported(adapter, refresh_schema);
+                return Ok(ResolveAdapterResult {
+                    adapter,
+                    cache_meta: Some(SchemaCacheMeta {
+                        age_ms: cache_age_ms(hit.fetched_at),
+                        stale: hit.stale,
+                        fallback: false,
+                    }),
+                });
             }
-            cache::CacheLookup::Miss | cache::CacheLookup::Bypassed => {}
         }
     }
 
@@ -8510,11 +8527,14 @@ async fn resolve_adapter_with_schema_cache(
         }
         Err(err) => {
             if !no_cache && !refresh_schema {
-                if let cache::CacheLookup::Hit(hit) =
-                    cache.get_with_policy(url, cache::CacheReadPolicy::AllowStale)?
-                {
+                if let Some((hit, cache_key)) = lookup_schema_cache(
+                    cache.as_ref(),
+                    url,
+                    auth_profile.as_ref(),
+                    cache::CacheReadPolicy::AllowStale,
+                )? {
                     if let Some(protocol) = protocol_from_cached_schema(&hit.schema) {
-                        let _ = cache.put(url, &hit.schema);
+                        let _ = cache.put(&cache_key, &hit.schema);
                         let mut adapter = adapter_from_protocol(protocol, detection_options);
                         adapter = inject_cache_if_supported(adapter, cache.clone());
                         adapter = inject_auth_if_supported(adapter, auth_profile.clone());
@@ -8533,6 +8553,21 @@ async fn resolve_adapter_with_schema_cache(
             Err(err)
         }
     }
+}
+
+fn lookup_schema_cache(
+    cache: &dyn cache::Cache,
+    url: &str,
+    auth_profile: Option<&Profile>,
+    policy: cache::CacheReadPolicy,
+) -> Result<Option<(cache::CacheHit, String)>> {
+    let mcp_cache_key = adapters::mcp::McpAdapter::schema_cache_key_for(url, auth_profile);
+    for cache_key in [url.to_string(), mcp_cache_key] {
+        if let cache::CacheLookup::Hit(hit) = cache.get_with_policy(&cache_key, policy)? {
+            return Ok(Some((hit, cache_key)));
+        }
+    }
+    Ok(None)
 }
 
 async fn invoke_with_adapter(
@@ -8659,6 +8694,10 @@ async fn invoke_live_stdio_mcp_help(
     runtime.mcp.mark_stdio_request_started(&session_key).await;
     let mut guard = session.lock().await;
     guard.apply_request_metadata(&StdioSessionRequestMetadata {
+        schema_cache_key: adapters::mcp::McpAdapter::schema_cache_key_for(
+            &request.endpoint,
+            auth_profile,
+        ),
         idle_ttl_secs: request.options.daemon_idle_ttl,
         link_name: request.options.link_name.as_deref(),
         link_skill: request.options.link_skill.as_deref(),
@@ -9373,6 +9412,10 @@ mod tests {
         with_mcp_idle_ttl_env(None, || {
             let resolved = resolve_stdio_request_metadata(
                 &StdioSessionRequestMetadata {
+                    schema_cache_key: adapters::mcp::McpAdapter::schema_cache_key_for(
+                        "https://new.example.com",
+                        None,
+                    ),
                     idle_ttl_secs: None,
                     link_name: None,
                     link_skill: None,
@@ -9398,6 +9441,10 @@ mod tests {
     fn resolve_stdio_request_metadata_accepts_zero_ttl_override() {
         let resolved = resolve_stdio_request_metadata(
             &StdioSessionRequestMetadata {
+                schema_cache_key: adapters::mcp::McpAdapter::schema_cache_key_for(
+                    "https://new.example.com",
+                    None,
+                ),
                 idle_ttl_secs: Some(0),
                 link_name: Some("board-link"),
                 link_skill: Some("board-webmcp"),

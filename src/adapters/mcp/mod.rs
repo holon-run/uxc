@@ -115,9 +115,9 @@ impl McpAdapter {
             .unwrap_or_else(transport::McpStdioTransport::default_request_timeout)
     }
 
-    fn schema_cache_key(&self, url: &str) -> String {
+    pub(crate) fn schema_cache_key_for(url: &str, auth_profile: Option<&Profile>) -> String {
         let mut hasher = Sha256::new();
-        if let Some(profile) = &self.auth_profile {
+        if let Some(profile) = auth_profile {
             if let Ok(serialized) = serde_json::to_vec(profile) {
                 hasher.update(serialized);
             }
@@ -129,6 +129,10 @@ impl McpAdapter {
             url,
             hasher.finalize()
         )
+    }
+
+    fn schema_cache_key(&self, url: &str) -> String {
+        Self::schema_cache_key_for(url, self.auth_profile.as_ref())
     }
 
     fn catalog_ttl_seconds(metadata: &types::McpListCatalogMetadata) -> Option<u64> {
