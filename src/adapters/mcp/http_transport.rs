@@ -15,8 +15,9 @@ use anyhow::{bail, Context, Result};
 use base64::Engine;
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -1411,18 +1412,20 @@ impl McpHttpTransport {
 
     /// List available tools
     pub async fn list_tools(&self) -> Result<Vec<Tool>> {
-        let result = self.send_request("tools/list", None).await?;
+        Ok(self.list_tools_catalog().await?.items)
+    }
 
-        let response: ToolsListResponse =
-            serde_json::from_value(result).context("Failed to parse tools/list response")?;
-
+    pub async fn list_tools_catalog(&self) -> Result<ToolsCatalog> {
+        let mut catalog = self
+            .list_catalog::<Tool, ToolsListResponse>("tools/list")
+            .await?;
         if self.protocol_context.era == McpProtocolEra::Legacy {
-            return Ok(response.tools);
+            return Ok(catalog);
         }
 
         let mut headers_by_tool = HashMap::new();
-        let mut valid_tools = Vec::with_capacity(response.tools.len());
-        for tool in response.tools {
+        let mut valid_tools = Vec::with_capacity(catalog.items.len());
+        for tool in catalog.items {
             match Self::tool_header_mappings(&tool) {
                 Ok(mappings) => {
                     headers_by_tool.insert(tool.name.clone(), mappings);
@@ -1439,7 +1442,9 @@ impl McpHttpTransport {
         }
         *self.tool_headers.lock().await = headers_by_tool;
         *self.tool_catalog_loaded.lock().await = true;
-        Ok(valid_tools)
+        catalog.metadata.itemCount = valid_tools.len();
+        catalog.items = valid_tools;
+        Ok(catalog)
     }
 
     /// Call a tool
@@ -1678,12 +1683,12 @@ impl McpHttpTransport {
 
     /// List available resources
     pub async fn list_resources(&self) -> Result<Vec<Resource>> {
-        let result = self.send_request("resources/list", None).await?;
+        Ok(self.list_resources_catalog().await?.items)
+    }
 
-        let response: ResourcesListResponse =
-            serde_json::from_value(result).context("Failed to parse resources/list response")?;
-
-        Ok(response.resources)
+    pub async fn list_resources_catalog(&self) -> Result<ResourcesCatalog> {
+        self.list_catalog::<Resource, ResourcesListResponse>("resources/list")
+            .await
     }
 
     /// Read a resource
@@ -1746,12 +1751,12 @@ impl McpHttpTransport {
 
     /// List available prompts
     pub async fn list_prompts(&self) -> Result<Vec<Prompt>> {
-        let result = self.send_request("prompts/list", None).await?;
+        Ok(self.list_prompts_catalog().await?.items)
+    }
 
-        let response: PromptsListResponse =
-            serde_json::from_value(result).context("Failed to parse prompts/list response")?;
-
-        Ok(response.prompts)
+    pub async fn list_prompts_catalog(&self) -> Result<PromptsCatalog> {
+        self.list_catalog::<Prompt, PromptsListResponse>("prompts/list")
+            .await
     }
 
     /// Get a prompt
@@ -1801,6 +1806,62 @@ impl McpHttpTransport {
             Self::run_streamable_event_reader(response, notifications, stream_error).await;
         }));
         Ok(())
+    }
+
+    async fn list_catalog<T, R>(&self, method: &str) -> Result<McpListCatalog<T>>
+    where
+        R: DeserializeOwned + McpListPage<Item = T>,
+    {
+        let mut items = Vec::new();
+        let mut metadata = McpListCatalogMetadata::default();
+        let mut next_cursor = None;
+        let mut seen_cursors = HashSet::new();
+
+        loop {
+            if metadata.pageCount >= MCP_LIST_MAX_PAGES {
+                bail!(
+                    "MCP {} pagination exceeded maximum of {} pages",
+                    method,
+                    MCP_LIST_MAX_PAGES
+                );
+            }
+
+            let params = next_cursor
+                .as_ref()
+                .map(|cursor| serde_json::json!({ "cursor": cursor }));
+            let result = self
+                .send_request(method, params)
+                .await
+                .with_context(|| format!("Failed to fetch {}", method))?;
+            let response: R = serde_json::from_value(result)
+                .with_context(|| format!("Failed to parse {} response", method))?;
+            let (page_items, page_metadata) = response.into_parts();
+            metadata.absorb_page(&page_metadata, page_items.len());
+            if metadata.itemCount > MCP_LIST_MAX_ITEMS {
+                bail!(
+                    "MCP {} pagination exceeded maximum of {} items",
+                    method,
+                    MCP_LIST_MAX_ITEMS
+                );
+            }
+            items.extend(page_items);
+
+            match page_metadata.nextCursor {
+                Some(cursor) => {
+                    if !seen_cursors.insert(cursor.clone()) {
+                        bail!(
+                            "MCP {} pagination detected cursor cycle at '{}'",
+                            method,
+                            cursor
+                        );
+                    }
+                    next_cursor = Some(cursor);
+                }
+                None => break,
+            }
+        }
+
+        Ok(McpListCatalog { items, metadata })
     }
 
     async fn open_event_stream(&self) -> Result<reqwest::Response> {
@@ -2264,10 +2325,12 @@ impl LegacySseTransport {
     }
 
     async fn list_tools(&self) -> Result<Vec<Tool>> {
-        let result = self.send_request("tools/list", None).await?;
-        let response: ToolsListResponse =
-            serde_json::from_value(result).context("Failed to parse tools/list response")?;
-        Ok(response.tools)
+        Ok(self.list_tools_catalog().await?.items)
+    }
+
+    async fn list_tools_catalog(&self) -> Result<ToolsCatalog> {
+        self.list_catalog::<Tool, ToolsListResponse>("tools/list")
+            .await
     }
 
     async fn read_resource(&self, uri: &str) -> Result<ResourceContents> {
@@ -2321,6 +2384,80 @@ impl LegacySseTransport {
 
     async fn take_stream_error(&self) -> Option<String> {
         self.event_stream_error.lock().await.take()
+    }
+
+    async fn list_resources(&self) -> Result<Vec<Resource>> {
+        Ok(self.list_resources_catalog().await?.items)
+    }
+
+    async fn list_resources_catalog(&self) -> Result<ResourcesCatalog> {
+        self.list_catalog::<Resource, ResourcesListResponse>("resources/list")
+            .await
+    }
+
+    async fn list_prompts(&self) -> Result<Vec<Prompt>> {
+        Ok(self.list_prompts_catalog().await?.items)
+    }
+
+    async fn list_prompts_catalog(&self) -> Result<PromptsCatalog> {
+        self.list_catalog::<Prompt, PromptsListResponse>("prompts/list")
+            .await
+    }
+
+    async fn list_catalog<T, R>(&self, method: &str) -> Result<McpListCatalog<T>>
+    where
+        R: DeserializeOwned + McpListPage<Item = T>,
+    {
+        let mut items = Vec::new();
+        let mut metadata = McpListCatalogMetadata::default();
+        let mut next_cursor = None;
+        let mut seen_cursors = HashSet::new();
+
+        loop {
+            if metadata.pageCount >= MCP_LIST_MAX_PAGES {
+                bail!(
+                    "MCP {} pagination exceeded maximum of {} pages",
+                    method,
+                    MCP_LIST_MAX_PAGES
+                );
+            }
+
+            let params = next_cursor
+                .as_ref()
+                .map(|cursor| serde_json::json!({ "cursor": cursor }));
+            let result = self
+                .send_request(method, params)
+                .await
+                .with_context(|| format!("Failed to fetch {}", method))?;
+            let response: R = serde_json::from_value(result)
+                .with_context(|| format!("Failed to parse {} response", method))?;
+            let (page_items, page_metadata) = response.into_parts();
+            metadata.absorb_page(&page_metadata, page_items.len());
+            if metadata.itemCount > MCP_LIST_MAX_ITEMS {
+                bail!(
+                    "MCP {} pagination exceeded maximum of {} items",
+                    method,
+                    MCP_LIST_MAX_ITEMS
+                );
+            }
+            items.extend(page_items);
+
+            match page_metadata.nextCursor {
+                Some(cursor) => {
+                    if !seen_cursors.insert(cursor.clone()) {
+                        bail!(
+                            "MCP {} pagination detected cursor cycle at '{}'",
+                            method,
+                            cursor
+                        );
+                    }
+                    next_cursor = Some(cursor);
+                }
+                None => break,
+            }
+        }
+
+        Ok(McpListCatalog { items, metadata })
     }
 
     async fn run_sse_reader(
@@ -2588,6 +2725,13 @@ impl McpRemoteTransport {
         }
     }
 
+    pub async fn list_tools_catalog(&self) -> Result<ToolsCatalog> {
+        match self {
+            Self::Streamable(transport) => transport.list_tools_catalog().await,
+            Self::Legacy(transport) => transport.list_tools_catalog().await,
+        }
+    }
+
     pub async fn call_tool(
         &self,
         name: &str,
@@ -2640,6 +2784,20 @@ impl McpRemoteTransport {
         match self {
             Self::Streamable(transport) => transport.unsubscribe_resource(uri).await,
             Self::Legacy(transport) => transport.unsubscribe_resource(uri).await,
+        }
+    }
+
+    pub async fn list_resources_catalog(&self) -> Result<ResourcesCatalog> {
+        match self {
+            Self::Streamable(transport) => transport.list_resources_catalog().await,
+            Self::Legacy(transport) => transport.list_resources_catalog().await,
+        }
+    }
+
+    pub async fn list_prompts_catalog(&self) -> Result<PromptsCatalog> {
+        match self {
+            Self::Streamable(transport) => transport.list_prompts_catalog().await,
+            Self::Legacy(transport) => transport.list_prompts_catalog().await,
         }
     }
 
@@ -3777,6 +3935,71 @@ data: invalid json
     }
 
     #[tokio::test]
+    async fn list_tools_catalog_paginates_and_aggregates_metadata() {
+        let mut server = mockito::Server::new_async().await;
+
+        let page1 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 1,
+                "method": "tools/list"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":1,
+                "result":{
+                    "tools":[{"name":"tool1","description":"First tool","inputSchema":{"type":"object"}}],
+                    "nextCursor":"cursor-2",
+                    "ttlMs":30,
+                    "cacheScope":"public"
+                }
+            }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let page2 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 2,
+                "method": "tools/list",
+                "params": { "cursor": "cursor-2" }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":2,
+                "result":{
+                    "tools":[{"name":"tool2","description":"Second tool","inputSchema":{"type":"object"}}],
+                    "ttlMs":10,
+                    "cacheScope":"private"
+                }
+            }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::new(server.url()).unwrap();
+
+        let catalog = transport.list_tools_catalog().await.unwrap();
+        assert_eq!(catalog.items.len(), 2);
+        assert_eq!(catalog.items[0].name, "tool1");
+        assert_eq!(catalog.items[1].name, "tool2");
+        assert_eq!(catalog.metadata.ttlMs, Some(10));
+        assert_eq!(catalog.metadata.cacheScope.as_deref(), Some("private"));
+        assert_eq!(catalog.metadata.pageCount, 2);
+        assert_eq!(catalog.metadata.itemCount, 2);
+        page1.assert_async().await;
+        page2.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn list_tools_with_sse_response_succeeds() {
         let mut server = mockito::Server::new_async().await;
 
@@ -3990,6 +4213,62 @@ data: invalid json
     }
 
     #[tokio::test]
+    async fn list_resources_detects_cursor_cycle() {
+        let mut server = mockito::Server::new_async().await;
+
+        let page1 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 1,
+                "method": "resources/list"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":1,
+                "result":{
+                    "resources":[{"uri":"file:///r1","name":"r1","description":"R1"}],
+                    "nextCursor":"loop"
+                }
+            }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let page2 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 2,
+                "method": "resources/list",
+                "params": { "cursor": "loop" }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":2,
+                "result":{
+                    "resources":[{"uri":"file:///r2","name":"r2","description":"R2"}],
+                    "nextCursor":"loop"
+                }
+            }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::new(server.url()).unwrap();
+
+        let err = transport.list_resources().await.unwrap_err();
+        assert!(err.to_string().contains("cursor cycle"));
+        page1.assert_async().await;
+        page2.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn read_resource_succeeds() {
         let mut server = mockito::Server::new_async().await;
 
@@ -4083,6 +4362,69 @@ data: invalid json
         let prompts = result.unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].name, "prompt1");
+    }
+
+    #[tokio::test]
+    async fn list_prompts_enforces_item_limit() {
+        let mut server = mockito::Server::new_async().await;
+        let first_page_prompts: Vec<_> = (0..MCP_LIST_MAX_ITEMS)
+            .map(|idx| {
+                serde_json::json!({
+                    "name": format!("prompt-{idx}"),
+                    "description": "prompt"
+                })
+            })
+            .collect();
+        let first_page_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "prompts": first_page_prompts,
+                "nextCursor": "cursor-2"
+            }
+        })
+        .to_string();
+
+        let page1 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 1,
+                "method": "prompts/list"
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(first_page_body)
+            .expect(1)
+            .create_async()
+            .await;
+        let page2 = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "id": 2,
+                "method": "prompts/list",
+                "params": { "cursor": "cursor-2" }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "jsonrpc":"2.0",
+                "id":2,
+                "result":{
+                    "prompts":[{"name":"overflow","description":"overflow"}]
+                }
+            }"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::new(server.url()).unwrap();
+
+        let err = transport.list_prompts().await.unwrap_err();
+        assert!(err.to_string().contains("maximum of 10000 items"));
+        page1.assert_async().await;
+        page2.assert_async().await;
     }
 
     #[tokio::test]
