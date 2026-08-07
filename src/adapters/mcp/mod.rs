@@ -124,7 +124,38 @@ impl McpAdapter {
         } else {
             hasher.update(b"anonymous");
         }
-        format!("{}#uxc-mcp-auth={:x}", url, hasher.finalize())
+        format!(
+            "{}#uxc-mcp-schema=dual-era-2026&auth={:x}",
+            url,
+            hasher.finalize()
+        )
+    }
+
+    fn catalog_ttl_seconds(metadata: &types::McpListCatalogMetadata) -> Option<u64> {
+        metadata
+            .ttlMs
+            .map(|ttl_ms| ttl_ms.saturating_add(999) / 1000)
+    }
+
+    fn cache_schema(
+        &self,
+        url: &str,
+        schema: &Value,
+        metadata: Option<&types::McpListCatalogMetadata>,
+    ) {
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        let cache_key = self.schema_cache_key(url);
+        let result = match metadata.and_then(Self::catalog_ttl_seconds) {
+            Some(ttl_seconds) => cache.put_with_ttl(&cache_key, schema, ttl_seconds),
+            None => cache.put(&cache_key, schema),
+        };
+        if let Err(err) = result {
+            debug!("Failed to cache MCP schema: {}", err);
+        } else {
+            info!("Cached MCP schema for: {}", url);
+        }
     }
 
     /// Check if a URL/command looks like an MCP stdio command
@@ -409,10 +440,10 @@ impl McpAdapter {
             let server_info = client.server_info().cloned();
             let instructions = client.instructions().map(ToString::to_string);
             let tools = match client
-                .list_tools_with_timeout(self.request_timeout_or_default())
+                .list_tools_catalog_with_timeout(self.request_timeout_or_default())
                 .await
             {
-                Ok(tools) => Some(tools),
+                Ok(catalog) => Some(catalog),
                 Err(err) => {
                     debug!("MCP stdio list_tools failed while building schema: {}", err);
                     None
@@ -434,18 +465,16 @@ impl McpAdapter {
                     "prompts": client.supports_prompts(),
                 }
             });
-            if let Some(tools) = tools {
-                schema["tools"] = serde_json::json!(tools);
+            if let Some(catalog) = &tools {
+                schema["tools"] = serde_json::json!(catalog.items);
+                schema["cacheMetadata"] = serde_json::to_value(&catalog.metadata)?;
             }
 
-            // Store in cache if available
-            if let Some(cache) = &self.cache {
-                if let Err(e) = cache.put(&self.schema_cache_key(url), &schema) {
-                    debug!("Failed to cache MCP schema: {}", e);
-                } else {
-                    info!("Cached MCP schema for: {}", url);
-                }
-            }
+            self.cache_schema(
+                url,
+                &schema,
+                tools.as_ref().map(|catalog| &catalog.metadata),
+            );
 
             return Ok(schema);
         }
@@ -466,8 +495,8 @@ impl McpAdapter {
             // subsequent requests on the session. Spec-compliant servers
             // (e.g., rmcp 0.15) otherwise hang on follow-up requests.
             transport.initialized().await?;
-            let tools = match transport.list_tools().await {
-                Ok(tools) => Some(tools),
+            let tools = match transport.list_tools_catalog().await {
+                Ok(catalog) => Some(catalog),
                 Err(err) => {
                     debug!("MCP HTTP list_tools failed while building schema: {}", err);
                     None
@@ -488,18 +517,16 @@ impl McpAdapter {
                 "instructions": init_result.instructions,
                 "capabilities": init_result.capabilities
             });
-            if let Some(tools) = tools {
-                schema["tools"] = serde_json::json!(tools);
+            if let Some(catalog) = &tools {
+                schema["tools"] = serde_json::json!(catalog.items);
+                schema["cacheMetadata"] = serde_json::to_value(&catalog.metadata)?;
             }
 
-            // Store in cache if available
-            if let Some(cache) = &self.cache {
-                if let Err(e) = cache.put(&self.schema_cache_key(url), &schema) {
-                    debug!("Failed to cache MCP schema: {}", e);
-                } else {
-                    info!("Cached MCP schema for: {}", url);
-                }
-            }
+            self.cache_schema(
+                url,
+                &schema,
+                tools.as_ref().map(|catalog| &catalog.metadata),
+            );
 
             return Ok(schema);
         }
@@ -942,9 +969,10 @@ mod tests {
     async fn resolve_http_transport_reuses_cached_resolved_transport() {
         let cache = Arc::new(TestCache::default());
         let url = "https://example.com";
+        let adapter = McpAdapter::new().with_cache(cache.clone());
         cache
             .put(
-                url,
+                &adapter.schema_cache_key(url),
                 &json!({
                     "protocol": "MCP",
                     "transport": "http",
@@ -956,7 +984,6 @@ mod tests {
             )
             .unwrap();
 
-        let adapter = McpAdapter::new().with_cache(cache);
         let resolved = adapter.resolve_http_transport(url).await.unwrap().unwrap();
 
         assert_eq!(resolved.mode, http_transport::McpHttpMode::LegacySse);

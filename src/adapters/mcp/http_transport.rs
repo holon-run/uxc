@@ -3200,6 +3200,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn modern_tool_call_keeps_mrtr_controls_out_of_arguments() {
+        let mut server = mockito::Server::new_async().await;
+        let list = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"execute","inputSchema":{"type":"object"}}]}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let call = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "tools/call",
+                "params": {
+                    "name": "execute",
+                    "arguments": {"query": "rust"},
+                    "inputResponses": {
+                        "request-1": {"action": "accept"}
+                    },
+                    "requestState": "opaque-state",
+                    "_meta": {
+                        "io.modelcontextprotocol/clientCapabilities": {
+                            "elicitation": {}
+                        }
+                    }
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"input_required","inputRequests":{"request-2":{"method":"elicitation/create"}},"requestState":"next-opaque"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::with_auth_timeout_and_era(
+            server.url(),
+            None,
+            Duration::from_secs(5),
+            McpProtocolEra::Modern,
+        )
+        .unwrap();
+        let result = transport
+            .call_tool_with_options(
+                "execute",
+                Some(json!({"query": "rust"})),
+                &McpExecutionOptions {
+                    capabilities: Some(json!({"elicitation": {}})),
+                    continuation: Some(json!({
+                        "inputResponses": {
+                            "request-1": {"action": "accept"}
+                        },
+                        "requestState": "opaque-state"
+                    })),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.resultType, "input_required");
+        assert_eq!(result.requestState.as_deref(), Some("next-opaque"));
+        list.assert_async().await;
+        call.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn modern_tool_call_sends_validated_custom_header() {
         let mut server = mockito::Server::new_async().await;
         let list = server
