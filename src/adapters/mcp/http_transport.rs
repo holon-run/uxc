@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use super::types::*;
+use super::McpExecutionOptions;
 use crate::auth::{self, oauth, AuthType, Profile, Profiles};
 use crate::error::UxcError;
 use crate::error::{
@@ -275,9 +276,23 @@ impl McpHttpTransport {
         params: Option<JsonValue>,
         custom_headers: &[(HeaderName, HeaderValue)],
     ) -> Result<JsonValue> {
+        self.send_request_with_custom_headers_and_capabilities(method, params, custom_headers, None)
+            .await
+    }
+
+    async fn send_request_with_custom_headers_and_capabilities(
+        &self,
+        method: &str,
+        params: Option<JsonValue>,
+        custom_headers: &[(HeaderName, HeaderValue)],
+        capabilities: Option<&JsonValue>,
+    ) -> Result<JsonValue> {
         self.maybe_refresh_auth_token().await?;
         let params = match self.protocol_context.era {
-            McpProtocolEra::Modern => Some(self.protocol_context.modern_request_params(params)?),
+            McpProtocolEra::Modern => Some(
+                self.protocol_context
+                    .modern_request_params_with_capabilities(params, capabilities)?,
+            ),
             McpProtocolEra::Legacy => params,
         };
 
@@ -1433,29 +1448,52 @@ impl McpHttpTransport {
         name: &str,
         arguments: Option<JsonValue>,
     ) -> Result<ToolCallResult> {
+        self.call_tool_with_options(name, arguments, &McpExecutionOptions::default())
+            .await
+    }
+
+    pub async fn call_tool_with_options(
+        &self,
+        name: &str,
+        arguments: Option<JsonValue>,
+        options: &McpExecutionOptions,
+    ) -> Result<ToolCallResult> {
         if self.protocol_context.era == McpProtocolEra::Modern
             && !*self.tool_catalog_loaded.lock().await
         {
             let _ = self.list_tools().await?;
         }
 
-        let params = match arguments.clone() {
-            Some(arguments) => serde_json::json!({
-                "name": name,
-                "arguments": arguments
-            }),
-            None => serde_json::json!({
-                "name": name,
-                "arguments": {}
-            }),
-        };
+        let mut params = serde_json::Map::new();
+        params.insert("name".to_string(), JsonValue::String(name.to_string()));
+        params.insert(
+            "arguments".to_string(),
+            arguments.clone().unwrap_or_else(|| serde_json::json!({})),
+        );
+        if let Some(continuation) = &options.continuation {
+            let continuation = continuation
+                .as_object()
+                .context("MCP continuation must be a JSON object")?;
+            for (key, value) in continuation {
+                if matches!(key.as_str(), "name" | "arguments" | "_meta") {
+                    bail!("MCP continuation must not override '{}'", key);
+                }
+                params.insert(key.clone(), value.clone());
+            }
+        }
+        let params = JsonValue::Object(params);
 
         let headers = self
             .custom_tool_headers(name, arguments.as_ref())
             .await
             .with_context(|| format!("Failed to build custom headers for tool '{}'", name))?;
         let result = match self
-            .send_request_with_custom_headers("tools/call", Some(params.clone()), &headers)
+            .send_request_with_custom_headers_and_capabilities(
+                "tools/call",
+                Some(params.clone()),
+                &headers,
+                options.capabilities.as_ref(),
+            )
             .await
         {
             Err(err)
@@ -1469,10 +1507,11 @@ impl McpHttpTransport {
                     .with_context(|| {
                         format!("Failed to rebuild custom headers for tool '{}'", name)
                     })?;
-                self.send_request_with_custom_headers(
+                self.send_request_with_custom_headers_and_capabilities(
                     "tools/call",
                     Some(params),
                     &refreshed_headers,
+                    options.capabilities.as_ref(),
                 )
                 .await?
             }
@@ -2556,6 +2595,22 @@ impl McpRemoteTransport {
     ) -> Result<ToolCallResult> {
         match self {
             Self::Streamable(transport) => transport.call_tool(name, arguments).await,
+            Self::Legacy(transport) => transport.call_tool(name, arguments).await,
+        }
+    }
+
+    pub async fn call_tool_with_options(
+        &self,
+        name: &str,
+        arguments: Option<JsonValue>,
+        options: &McpExecutionOptions,
+    ) -> Result<ToolCallResult> {
+        match self {
+            Self::Streamable(transport) => {
+                transport
+                    .call_tool_with_options(name, arguments, options)
+                    .await
+            }
             Self::Legacy(transport) => transport.call_tool(name, arguments).await,
         }
     }

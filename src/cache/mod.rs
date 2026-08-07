@@ -103,6 +103,12 @@ pub trait Cache: Send + Sync {
     /// If caching is disabled, this is a no-op.
     fn put(&self, url: &str, schema: &Value) -> Result<()>;
 
+    /// Put a schema into cache with an explicit TTL in seconds.
+    fn put_with_ttl(&self, url: &str, schema: &Value, ttl_seconds: u64) -> Result<()> {
+        let _ = ttl_seconds;
+        self.put(url, schema)
+    }
+
     /// Invalidate a specific cache entry
     fn invalidate(&self, url: &str) -> Result<()>;
 

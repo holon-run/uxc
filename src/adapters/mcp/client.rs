@@ -4,6 +4,7 @@ use super::transport::{
     DefaultStdioProcessExecutor, McpStdioTransport, StdioProcessExecutor, StdioSpawnOptions,
 };
 use super::types::*;
+use super::McpExecutionOptions;
 use crate::error::{structured_error_from_anyhow, StructuredError};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -349,17 +350,51 @@ impl McpStdioClient {
         arguments: Option<JsonValue>,
         timeout: Duration,
     ) -> Result<CallToolResult> {
+        self.call_tool_with_options_and_timeout(
+            name,
+            arguments,
+            &McpExecutionOptions::default(),
+            timeout,
+        )
+        .await
+    }
+
+    pub async fn call_tool_with_options_and_timeout(
+        &mut self,
+        name: &str,
+        arguments: Option<JsonValue>,
+        options: &McpExecutionOptions,
+        timeout: Duration,
+    ) -> Result<CallToolResult> {
         if !self.supports_tools() {
             bail!("Server does not support tools");
         }
 
-        let params = CallToolParams {
-            name: name.to_string(),
-            arguments,
-        };
+        let mut params = serde_json::Map::new();
+        params.insert("name".to_string(), JsonValue::String(name.to_string()));
+        params.insert(
+            "arguments".to_string(),
+            arguments.unwrap_or_else(|| json!({})),
+        );
+        if let Some(continuation) = &options.continuation {
+            let continuation = continuation
+                .as_object()
+                .context("MCP continuation must be a JSON object")?;
+            for (key, value) in continuation {
+                if matches!(key.as_str(), "name" | "arguments" | "_meta") {
+                    bail!("MCP continuation must not override '{}'", key);
+                }
+                params.insert(key.clone(), value.clone());
+            }
+        }
 
         let result = self
-            .send_request_with_timeout("tools/call", Some(serde_json::to_value(params)?), timeout)
+            .send_request_with_timeout_and_capabilities(
+                "tools/call",
+                Some(JsonValue::Object(params)),
+                options.capabilities.as_ref(),
+                timeout,
+            )
             .await
             .context(format!("Failed to call tool '{}'", name))?;
 
@@ -516,8 +551,22 @@ impl McpStdioClient {
         params: Option<JsonValue>,
         timeout: Duration,
     ) -> Result<JsonValue> {
+        self.send_request_with_timeout_and_capabilities(method, params, None, timeout)
+            .await
+    }
+
+    async fn send_request_with_timeout_and_capabilities(
+        &mut self,
+        method: &str,
+        params: Option<JsonValue>,
+        capabilities: Option<&JsonValue>,
+        timeout: Duration,
+    ) -> Result<JsonValue> {
         let params = match self.protocol_context.era {
-            McpProtocolEra::Modern => Some(self.protocol_context.modern_request_params(params)?),
+            McpProtocolEra::Modern => Some(
+                self.protocol_context
+                    .modern_request_params_with_capabilities(params, capabilities)?,
+            ),
             McpProtocolEra::Legacy => params,
         };
         self.transport

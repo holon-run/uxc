@@ -79,6 +79,14 @@ pub struct McpProtocolContext {
 
 impl McpProtocolContext {
     pub fn modern_request_params(&self, params: Option<JsonValue>) -> Result<JsonValue> {
+        self.modern_request_params_with_capabilities(params, None)
+    }
+
+    pub fn modern_request_params_with_capabilities(
+        &self,
+        params: Option<JsonValue>,
+        client_capabilities: Option<&JsonValue>,
+    ) -> Result<JsonValue> {
         let mut params = match params {
             Some(JsonValue::Object(params)) => params,
             Some(_) => return Err(anyhow!("MCP request params must be a JSON object")),
@@ -99,7 +107,11 @@ impl McpProtocolContext {
         );
         meta.insert(
             "io.modelcontextprotocol/clientCapabilities".to_string(),
-            serde_json::to_value(&self.client_capabilities)?,
+            match client_capabilities {
+                Some(JsonValue::Object(_)) => client_capabilities.cloned().unwrap(),
+                Some(_) => return Err(anyhow!("MCP client capabilities must be a JSON object")),
+                None => serde_json::to_value(&self.client_capabilities)?,
+            },
         );
         params.insert("_meta".to_string(), JsonValue::Object(meta));
         Ok(JsonValue::Object(params))
@@ -276,14 +288,6 @@ impl Tool {
             })
             .unwrap_or(&self.name)
     }
-}
-
-/// Tool call parameters
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CallToolParams {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<JsonValue>,
 }
 
 /// Tool call result
@@ -474,6 +478,22 @@ mod tests {
         assert_eq!(
             params["_meta"]["io.modelcontextprotocol/clientInfo"]["name"],
             "uxc"
+        );
+    }
+
+    #[test]
+    fn modern_request_params_accept_explicit_client_capabilities() {
+        let capabilities = json!({
+            "elicitation": {},
+            "sampling": {}
+        });
+        let params = modern_context()
+            .modern_request_params_with_capabilities(None, Some(&capabilities))
+            .unwrap();
+
+        assert_eq!(
+            params["_meta"]["io.modelcontextprotocol/clientCapabilities"],
+            capabilities
         );
     }
 

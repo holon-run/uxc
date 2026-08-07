@@ -4587,6 +4587,8 @@ impl DaemonRuntime {
             .operation_id
             .as_ref()
             .ok_or_else(|| anyhow!("operation_id is required"))?;
+        let (raw_args, execution_options) =
+            adapters::mcp::McpAdapter::split_execution_options(raw_args)?;
 
         if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
             let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;
@@ -4638,7 +4640,7 @@ impl DaemonRuntime {
             let arguments = Some(Value::Object(args.into_iter().collect()));
             let result = guard
                 .client
-                .call_tool_with_timeout(op, arguments, timeout)
+                .call_tool_with_options_and_timeout(op, arguments, &execution_options, timeout)
                 .await;
             let _ = guard
                 .mark_tools_dirty_from_notifications(endpoint, &cache)
@@ -4692,7 +4694,10 @@ impl DaemonRuntime {
             };
             session.mark_used().await;
             let arguments = Some(Value::Object(raw_args.into_iter().collect()));
-            let result = session.transport.call_tool(op, arguments).await?;
+            let result = session
+                .transport
+                .call_tool_with_options(op, arguments, &execution_options)
+                .await?;
             let _ = session.collect_pending_notifications().await;
             Ok((
                 "call_result".to_string(),
@@ -8777,13 +8782,33 @@ async fn prepare_runtime_execute_args(
         .as_ref()
         .ok_or_else(|| anyhow!("operation_id is required"))?;
 
-    prepare_execute_args(
-        adapter,
-        &request.endpoint,
-        op,
-        request.args.clone().unwrap_or_default(),
-    )
-    .await
+    let mut raw_args = request.args.clone().unwrap_or_default();
+    let mcp_options = if matches!(adapter.protocol_type(), ProtocolType::Mcp) {
+        let capabilities = raw_args.remove(adapters::mcp::MCP_CAPABILITIES_ARG);
+        let continuation = raw_args.remove(adapters::mcp::MCP_CONTINUATION_ARG);
+        let (_, options) = adapters::mcp::McpAdapter::split_execution_options(HashMap::from_iter(
+            capabilities
+                .map(|value| (adapters::mcp::MCP_CAPABILITIES_ARG.to_string(), value))
+                .into_iter()
+                .chain(
+                    continuation
+                        .map(|value| (adapters::mcp::MCP_CONTINUATION_ARG.to_string(), value)),
+                ),
+        ))?;
+        Some(options)
+    } else {
+        None
+    };
+    let mut args = prepare_execute_args(adapter, &request.endpoint, op, raw_args).await?;
+    if let Some(options) = mcp_options {
+        if let Some(value) = options.capabilities {
+            args.insert(adapters::mcp::MCP_CAPABILITIES_ARG.to_string(), value);
+        }
+        if let Some(value) = options.continuation {
+            args.insert(adapters::mcp::MCP_CONTINUATION_ARG.to_string(), value);
+        }
+    }
+    Ok(args)
 }
 
 async fn host_help_service_summary(

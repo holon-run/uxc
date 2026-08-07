@@ -15,12 +15,22 @@ use async_trait::async_trait;
 pub use client::{LifecycleReapPolicy, McpStdioClient};
 pub use http_transport::{McpHttpTransport, McpRemoteTransport, ResolvedMcpHttpTransport};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 pub use transport::StdioSpawnOptions;
+
+pub const MCP_CAPABILITIES_ARG: &str = "__uxc_mcp_capabilities";
+pub const MCP_CONTINUATION_ARG: &str = "__uxc_mcp_continuation";
+
+#[derive(Debug, Clone, Default)]
+pub struct McpExecutionOptions {
+    pub capabilities: Option<Value>,
+    pub continuation: Option<Value>,
+}
 
 pub struct McpAdapter {
     cache: Option<Arc<dyn crate::cache::Cache>>,
@@ -33,6 +43,32 @@ pub struct McpAdapter {
 }
 
 impl McpAdapter {
+    pub fn split_execution_options(
+        mut args: HashMap<String, Value>,
+    ) -> Result<(HashMap<String, Value>, McpExecutionOptions)> {
+        let capabilities = args.remove(MCP_CAPABILITIES_ARG);
+        if capabilities
+            .as_ref()
+            .is_some_and(|value| !value.is_object())
+        {
+            bail!("--mcp-capabilities must resolve to a JSON object");
+        }
+        let continuation = args.remove(MCP_CONTINUATION_ARG);
+        if continuation
+            .as_ref()
+            .is_some_and(|value| !value.is_object())
+        {
+            bail!("--mcp-continuation must resolve to a JSON object");
+        }
+        Ok((
+            args,
+            McpExecutionOptions {
+                capabilities,
+                continuation,
+            },
+        ))
+    }
+
     fn build_tool_arguments(args: HashMap<String, Value>) -> Option<Value> {
         Some(Value::Object(args.into_iter().collect()))
     }
@@ -77,6 +113,18 @@ impl McpAdapter {
     fn request_timeout_or_default(&self) -> Duration {
         self.request_timeout
             .unwrap_or_else(transport::McpStdioTransport::default_request_timeout)
+    }
+
+    fn schema_cache_key(&self, url: &str) -> String {
+        let mut hasher = Sha256::new();
+        if let Some(profile) = &self.auth_profile {
+            if let Ok(serialized) = serde_json::to_vec(profile) {
+                hasher.update(serialized);
+            }
+        } else {
+            hasher.update(b"anonymous");
+        }
+        format!("{}#uxc-mcp-auth={:x}", url, hasher.finalize())
     }
 
     /// Check if a URL/command looks like an MCP stdio command
@@ -162,7 +210,9 @@ impl McpAdapter {
         }
         if !self.force_refresh_schema {
             if let Some(cache) = &self.cache {
-                if let crate::cache::CacheResult::Hit(schema) = cache.get(url)? {
+                if let crate::cache::CacheResult::Hit(schema) =
+                    cache.get(&self.schema_cache_key(url))?
+                {
                     if let Some(resolved) = Self::resolved_transport_from_schema(&schema) {
                         let mut discovered = self.discovered_http_endpoints.write().await;
                         discovered.insert(normalized, resolved.clone());
@@ -329,7 +379,7 @@ impl McpAdapter {
     async fn fetch_schema_internal(&self, url: &str, allow_cache_read: bool) -> Result<Value> {
         if allow_cache_read {
             if let Some(cache) = &self.cache {
-                match cache.get(url)? {
+                match cache.get(&self.schema_cache_key(url))? {
                     crate::cache::CacheResult::Hit(schema) => {
                         debug!("MCP cache hit for: {}", url);
                         return Ok(schema);
@@ -390,7 +440,7 @@ impl McpAdapter {
 
             // Store in cache if available
             if let Some(cache) = &self.cache {
-                if let Err(e) = cache.put(url, &schema) {
+                if let Err(e) = cache.put(&self.schema_cache_key(url), &schema) {
                     debug!("Failed to cache MCP schema: {}", e);
                 } else {
                     info!("Cached MCP schema for: {}", url);
@@ -444,7 +494,7 @@ impl McpAdapter {
 
             // Store in cache if available
             if let Some(cache) = &self.cache {
-                if let Err(e) = cache.put(url, &schema) {
+                if let Err(e) = cache.put(&self.schema_cache_key(url), &schema) {
                     debug!("Failed to cache MCP schema: {}", e);
                 } else {
                     info!("Cached MCP schema for: {}", url);
@@ -547,6 +597,7 @@ impl Adapter for McpAdapter {
         args: HashMap<String, Value>,
     ) -> Result<ExecutionResult> {
         let start = std::time::Instant::now();
+        let (args, execution_options) = Self::split_execution_options(args)?;
         self.validate_tool_call(url, operation, &args).await?;
 
         if Self::is_stdio_command(url) {
@@ -562,7 +613,12 @@ impl Adapter for McpAdapter {
             let arguments = Self::build_tool_arguments(args);
 
             let result = client
-                .call_tool_with_timeout(operation, arguments, self.request_timeout_or_default())
+                .call_tool_with_options_and_timeout(
+                    operation,
+                    arguments,
+                    &execution_options,
+                    self.request_timeout_or_default(),
+                )
                 .await?;
 
             let output = convert_tool_result_to_value(&result);
@@ -594,7 +650,9 @@ impl Adapter for McpAdapter {
 
             let arguments = Self::build_tool_arguments(args);
 
-            let result = transport.call_tool(operation, arguments).await?;
+            let result = transport
+                .call_tool_with_options(operation, arguments, &execution_options)
+                .await?;
 
             let output = convert_tool_result_to_value(&result);
 
@@ -772,6 +830,35 @@ mod tests {
         assert_eq!(output["isError"], true);
         assert_eq!(output["structuredContent"]["message"], "hello");
         assert_eq!(output["structuredContent"]["count"], 1);
+    }
+
+    #[test]
+    fn split_execution_options_keeps_control_fields_out_of_tool_arguments() {
+        let (args, options) = McpAdapter::split_execution_options(StdHashMap::from([
+            ("message".to_string(), json!("hello")),
+            (MCP_CAPABILITIES_ARG.to_string(), json!({"elicitation": {}})),
+            (
+                MCP_CONTINUATION_ARG.to_string(),
+                json!({
+                    "inputResponses": {"request-1": {"action": "accept"}},
+                    "requestState": "opaque"
+                }),
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            args,
+            StdHashMap::from([("message".to_string(), json!("hello"))])
+        );
+        assert_eq!(options.capabilities, Some(json!({"elicitation": {}})));
+        assert_eq!(
+            options.continuation,
+            Some(json!({
+                "inputResponses": {"request-1": {"action": "accept"}},
+                "requestState": "opaque"
+            }))
+        );
     }
 
     #[test]
