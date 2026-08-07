@@ -12,12 +12,17 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
-  id-token: write
   packages: read
+  id-token: write
+
+concurrency:
+  group: holon-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   holon:
     name: Run Holon
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -28,10 +33,11 @@ jobs:
       - name: Run Holon
         uses: holon-run/holon@main
         with:
+          build_from_source: 'false'
           trigger: auto
-          auto_review: true
+          auto_review: ${{ vars.HOLON_AUTO_REVIEW || 'false' }}
           auto_review_on_push: ${{ vars.HOLON_AUTO_REVIEW_ON_PUSH || 'false' }}
-          model: bigmodel/glm-5.2
-          build_from_source: false
+          model: dashscope-token-plan/qwen-3.7
           github_token: ${{ secrets.HOLON_GITHUB_TOKEN }}
-          bigmodel_api_key: ${{ secrets.BIGMODEL_API_KEY }}
+        env:
+          DASHSCOPE_TOKEN_PLAN_API_KEY: ${{ secrets.DASHSCOPE_TOKEN_PLAN_API_KEY }}
