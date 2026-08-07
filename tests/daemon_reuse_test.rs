@@ -1117,7 +1117,10 @@ for line in sys.stdin:
         serde_json::from_slice(&cold.stdout).expect("cold stdout should be valid JSON");
     assert_eq!(cold_json["ok"], true);
     assert_eq!(cold_json["data"]["structuredContent"]["count"], 7);
-    assert_eq!(cold_json["data"]["structuredContent"]["starts"], 1);
+    // A legacy stdio endpoint is first probed with server/discover, then
+    // restarted before initialize so a late probe response cannot contaminate
+    // the legacy session.
+    assert_eq!(cold_json["data"]["structuredContent"]["starts"], 2);
 
     let warm = uxc_command_with_home(temp_home.path())
         .arg(&endpoint)
@@ -1136,7 +1139,7 @@ for line in sys.stdin:
         serde_json::from_slice(&warm.stdout).expect("warm stdout should be valid JSON");
     assert_eq!(warm_json["ok"], true);
     assert_eq!(warm_json["data"]["structuredContent"]["count"], 9);
-    assert_eq!(warm_json["data"]["structuredContent"]["starts"], 1);
+    assert_eq!(warm_json["data"]["structuredContent"]["starts"], 2);
     assert_eq!(warm_json["meta"]["daemon_session_reused"], true);
 
     daemon_stop_best_effort_with_home(temp_home.path());

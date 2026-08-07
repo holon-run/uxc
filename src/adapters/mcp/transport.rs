@@ -1270,6 +1270,10 @@ mod tests {
         let client_info = ClientInfo {
             name: "uxc".to_string(),
             version: "1.0.0".to_string(),
+            title: None,
+            description: None,
+            websiteUrl: None,
+            icons: None,
         };
 
         let result = transport.initialize(client_info).await.unwrap();
@@ -1439,6 +1443,10 @@ mod tests {
         let client_info = ClientInfo {
             name: "uxc".to_string(),
             version: "1.0.0".to_string(),
+            title: None,
+            description: None,
+            websiteUrl: None,
+            icons: None,
         };
 
         let start = tokio::time::Instant::now();

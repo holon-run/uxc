@@ -8823,8 +8823,8 @@ fn live_stdio_service_summary(client: &adapters::mcp::McpStdioClient) -> Option<
 fn operation_from_mcp_tool(tool: &adapters::mcp::types::Tool) -> Operation {
     Operation {
         operation_id: tool.name.clone(),
-        display_name: tool.name.clone(),
-        description: Some(tool.description.clone()),
+        display_name: tool.display_name().to_string(),
+        description: tool.description.clone(),
         parameters: tool
             .inputSchema
             .as_ref()
@@ -8837,8 +8837,8 @@ fn operation_from_mcp_tool(tool: &adapters::mcp::types::Tool) -> Operation {
 fn operation_detail_from_mcp_tool(tool: &adapters::mcp::types::Tool) -> adapters::OperationDetail {
     adapters::OperationDetail {
         operation_id: tool.name.clone(),
-        display_name: tool.name.clone(),
-        description: Some(tool.description.clone()),
+        display_name: tool.display_name().to_string(),
+        description: tool.description.clone(),
         parameters: tool
             .inputSchema
             .as_ref()

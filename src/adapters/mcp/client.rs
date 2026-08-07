@@ -4,6 +4,7 @@ use super::transport::{
     DefaultStdioProcessExecutor, McpStdioTransport, StdioProcessExecutor, StdioSpawnOptions,
 };
 use super::types::*;
+use crate::error::{structured_error_from_anyhow, StructuredError};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
@@ -26,6 +27,7 @@ pub struct LifecycleContract {
 /// MCP stdio client
 pub struct McpStdioClient {
     transport: McpStdioTransport,
+    protocol_context: McpProtocolContext,
     server_capabilities: Option<ServerCapabilities>,
     server_info: Option<ServerInfo>,
     instructions: Option<String>,
@@ -76,17 +78,106 @@ impl McpStdioClient {
         executor: Arc<dyn StdioProcessExecutor>,
         timeout: Duration,
     ) -> Result<Self> {
-        let mut transport =
-            McpStdioTransport::connect_with_executor(command, args, options, executor).await?;
-
-        // Initialize the session
         let client_info = ClientInfo {
             name: env!("CARGO_PKG_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            title: None,
+            description: None,
+            websiteUrl: None,
+            icons: None,
         };
 
+        let mut transport = McpStdioTransport::connect_with_executor(
+            command,
+            args,
+            options.clone(),
+            executor.clone(),
+        )
+        .await?;
+        let modern_context = McpProtocolContext {
+            era: McpProtocolEra::Modern,
+            version: MCP_MODERN_PROTOCOL_VERSION.to_string(),
+            client_capabilities: ClientCapabilities::default(),
+            server_capabilities: ServerCapabilities::default(),
+            client_info: client_info.clone(),
+            server_info: None,
+        };
+        let discover_result = transport
+            .send_request_with_timeout(
+                "server/discover",
+                Some(modern_context.modern_request_params(None)?),
+                timeout.min(Duration::from_secs(1)),
+            )
+            .await;
+
+        match discover_result {
+            Ok(result) => match serde_json::from_value::<DiscoverResult>(result) {
+                Ok(discover) => {
+                    if !discover
+                        .supportedVersions
+                        .iter()
+                        .any(|version| version == MCP_MODERN_PROTOCOL_VERSION)
+                    {
+                        return Err(StructuredError::new(
+                            "UNSUPPORTED_PROTOCOL_VERSION",
+                            format!(
+                                "MCP server does not support protocol version {}",
+                                MCP_MODERN_PROTOCOL_VERSION
+                            ),
+                            Some(json!({
+                                "requested": MCP_MODERN_PROTOCOL_VERSION,
+                                "supported": discover.supportedVersions,
+                            })),
+                        )
+                        .into());
+                    }
+
+                    let server_info = discover.server_info();
+                    tracing::info!(
+                        "Connected to modern MCP server: {} v{}",
+                        server_info
+                            .as_ref()
+                            .map(|server| server.name.as_str())
+                            .unwrap_or("unknown"),
+                        server_info
+                            .as_ref()
+                            .map(|server| server.version.as_str())
+                            .unwrap_or("unknown")
+                    );
+                    let protocol_context = McpProtocolContext {
+                        server_capabilities: discover.capabilities.clone(),
+                        server_info: server_info.clone(),
+                        ..modern_context
+                    };
+                    return Ok(Self {
+                        transport,
+                        protocol_context,
+                        server_capabilities: Some(discover.capabilities),
+                        server_info,
+                        instructions: discover.instructions,
+                    });
+                }
+                Err(err) => tracing::debug!(
+                    "MCP server/discover returned a non-modern result; retrying legacy initialize: {}",
+                    err
+                ),
+            },
+            Err(err) if is_unsupported_protocol_version(&err) => return Err(err),
+            Err(err) => {
+                tracing::debug!(
+                    "MCP server/discover probe did not identify a modern server; retrying legacy initialize: {}",
+                    err
+                );
+            }
+        }
+        let _ = transport.kill_and_wait(Duration::from_millis(250)).await;
+
+        // Never reuse a failed probe process: a late response could otherwise
+        // be mistaken for the legacy initialize response.
+        let mut transport =
+            McpStdioTransport::connect_with_executor(command, args, options, executor).await?;
         let init_result = transport
-            .initialize_with_timeout(client_info, timeout)
+            .initialize_with_timeout(client_info.clone(), timeout)
             .await?;
         tracing::info!(
             "Connected to MCP server: {} v{}",
@@ -105,12 +196,29 @@ impl McpStdioClient {
         // Send initialized notification
         transport.initialized().await?;
 
+        let protocol_context = McpProtocolContext {
+            era: McpProtocolEra::Legacy,
+            version: init_result.protocolVersion.clone(),
+            client_capabilities: ClientCapabilities::default(),
+            server_capabilities: init_result.capabilities.clone(),
+            client_info,
+            server_info: init_result.serverInfo.clone(),
+        };
         Ok(Self {
             transport,
+            protocol_context,
             server_capabilities: Some(init_result.capabilities),
             server_info: init_result.serverInfo,
             instructions: init_result.instructions,
         })
+    }
+
+    pub fn protocol_era(&self) -> McpProtocolEra {
+        self.protocol_context.era
+    }
+
+    pub fn protocol_version(&self) -> &str {
+        &self.protocol_context.version
     }
 
     /// Check if the server supports tools
@@ -130,6 +238,9 @@ impl McpStdioClient {
     }
 
     pub fn supports_resource_subscribe(&self) -> bool {
+        if self.protocol_context.era == McpProtocolEra::Modern {
+            return false;
+        }
         self.server_capabilities
             .as_ref()
             .and_then(|c| c.resources.as_ref())
@@ -175,7 +286,6 @@ impl McpStdioClient {
 
     pub async fn lifecycle_contract(&mut self, timeout: Duration) -> Result<LifecycleContract> {
         let result = self
-            .transport
             .send_request_with_timeout("uxc/lifecycle_contract", Some(json!({})), timeout)
             .await
             .context("Failed to fetch uxc/lifecycle_contract")?;
@@ -197,7 +307,6 @@ impl McpStdioClient {
         }
 
         let result = self
-            .transport
             .send_request_with_timeout("tools/list", None, timeout)
             .await
             .context("Failed to list tools")?;
@@ -250,7 +359,6 @@ impl McpStdioClient {
         };
 
         let result = self
-            .transport
             .send_request_with_timeout("tools/call", Some(serde_json::to_value(params)?), timeout)
             .await
             .context(format!("Failed to call tool '{}'", name))?;
@@ -269,7 +377,6 @@ impl McpStdioClient {
         }
 
         let result = self
-            .transport
             .send_request("resources/list", None)
             .await
             .context("Failed to list resources")?;
@@ -300,7 +407,6 @@ impl McpStdioClient {
         let params = json!({ "uri": uri });
 
         let result = self
-            .transport
             .send_request("resources/read", Some(params))
             .await
             .context(format!("Failed to read resource '{}'", uri))?;
@@ -309,6 +415,9 @@ impl McpStdioClient {
     }
 
     pub async fn subscribe_resource(&mut self, uri: &str) -> Result<()> {
+        if self.protocol_context.era == McpProtocolEra::Modern {
+            bail!("Modern MCP resource subscriptions require subscriptions/listen");
+        }
         if !self.supports_resources() {
             bail!("Server does not support resources");
         }
@@ -317,21 +426,22 @@ impl McpStdioClient {
         }
 
         let params = json!({ "uri": uri });
-        self.transport
-            .send_request("resources/subscribe", Some(params))
+        self.send_request("resources/subscribe", Some(params))
             .await
             .context(format!("Failed to subscribe resource '{}'", uri))?;
         Ok(())
     }
 
     pub async fn unsubscribe_resource(&mut self, uri: &str) -> Result<()> {
+        if self.protocol_context.era == McpProtocolEra::Modern {
+            bail!("Modern MCP resource subscriptions require subscriptions/listen");
+        }
         if !self.supports_resources() {
             bail!("Server does not support resources");
         }
 
         let params = json!({ "uri": uri });
-        self.transport
-            .send_request("resources/unsubscribe", Some(params))
+        self.send_request("resources/unsubscribe", Some(params))
             .await
             .context(format!("Failed to unsubscribe resource '{}'", uri))?;
         Ok(())
@@ -345,7 +455,6 @@ impl McpStdioClient {
         }
 
         let result = self
-            .transport
             .send_request("prompts/list", None)
             .await
             .context("Failed to list prompts")?;
@@ -383,7 +492,6 @@ impl McpStdioClient {
         });
 
         let result = self
-            .transport
             .send_request("prompts/get", Some(params))
             .await
             .context(format!("Failed to get prompt '{}'", name))?;
@@ -393,12 +501,117 @@ impl McpStdioClient {
 
         Ok(prompt_result)
     }
+
+    async fn send_request(&mut self, method: &str, params: Option<JsonValue>) -> Result<JsonValue> {
+        let params = match self.protocol_context.era {
+            McpProtocolEra::Modern => Some(self.protocol_context.modern_request_params(params)?),
+            McpProtocolEra::Legacy => params,
+        };
+        self.transport.send_request(method, params).await
+    }
+
+    async fn send_request_with_timeout(
+        &mut self,
+        method: &str,
+        params: Option<JsonValue>,
+        timeout: Duration,
+    ) -> Result<JsonValue> {
+        let params = match self.protocol_context.era {
+            McpProtocolEra::Modern => Some(self.protocol_context.modern_request_params(params)?),
+            McpProtocolEra::Legacy => params,
+        };
+        self.transport
+            .send_request_with_timeout(method, params, timeout)
+            .await
+    }
+}
+
+fn is_unsupported_protocol_version(err: &anyhow::Error) -> bool {
+    structured_error_from_anyhow(err)
+        .and_then(|error| error.details)
+        .and_then(|details| details.get("jsonrpc_code").and_then(JsonValue::as_i64))
+        == Some(-32022)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::structured_error_from_anyhow;
+
+    #[tokio::test]
+    async fn modern_stdio_uses_discover_and_request_metadata_without_initialize() {
+        let script = r#"
+            read discover
+            echo "$discover" | grep -q '"method":"server/discover"' || exit 10
+            echo "$discover" | grep -q '"io.modelcontextprotocol/protocolVersion":"2026-07-28"' || exit 11
+            echo "$discover" | grep -q '"io.modelcontextprotocol/clientCapabilities":{}' || exit 12
+            echo '{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"modern-test","version":"1.0.0"}}}}'
+            read list
+            echo "$list" | grep -q '"method":"tools/list"' || exit 13
+            echo "$list" | grep -q '"io.modelcontextprotocol/protocolVersion":"2026-07-28"' || exit 14
+            echo "$list" | grep -q '"method":"initialize"' && exit 15
+            echo '{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":[{"name":"ping","inputSchema":{"type":"object"}}],"ttlMs":0,"cacheScope":"private"}}'
+            read call
+            echo "$call" | grep -q '"method":"tools/call"' || exit 16
+            echo "$call" | grep -q '"name":"ping"' || exit 17
+            echo "$call" | grep -q '"io.modelcontextprotocol/protocolVersion":"2026-07-28"' || exit 18
+            echo '{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","content":[{"type":"audio","data":"opaque","mimeType":"audio/wav","futureField":true}]}}'
+        "#;
+
+        let mut client = McpStdioClient::connect("sh", &["-c".to_string(), script.to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(client.protocol_era(), McpProtocolEra::Modern);
+        assert_eq!(client.protocol_version(), MCP_MODERN_PROTOCOL_VERSION);
+        assert_eq!(
+            client.server_info().map(|server| server.name.as_str()),
+            Some("modern-test")
+        );
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "ping");
+        assert_eq!(tools[0].description, None);
+        let result = client.call_tool("ping", None).await.unwrap();
+        assert_eq!(result.resultType, "complete");
+        assert_eq!(result.content[0].content_type(), Some("audio"));
+        assert_eq!(result.content[0].as_value()["futureField"], true);
+    }
+
+    #[tokio::test]
+    async fn legacy_fallback_restarts_process_before_initialize() {
+        let dir = tempfile::tempdir().unwrap();
+        let count_path = dir.path().join("spawn-count");
+        let script = format!(
+            r#"
+            count=0
+            if [ -f "{path}" ]; then count=$(cat "{path}"); fi
+            count=$((count + 1))
+            echo "$count" > "{path}"
+            read request
+            if [ "$count" -eq 1 ]; then
+                echo "$request" | grep -q '"method":"server/discover"' || exit 20
+                echo '{{"jsonrpc":"2.0","id":1,"error":{{"code":-32601,"message":"Method not found"}}}}'
+                while read ignored; do :; done
+            else
+                echo "$request" | grep -q '"method":"initialize"' || exit 21
+                echo '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"legacy-test","version":"1.0.0"}}}}}}'
+                read initialized
+                echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 22
+                while read ignored; do :; done
+            fi
+            "#,
+            path = count_path.display()
+        );
+
+        let client = McpStdioClient::connect("sh", &["-c".to_string(), script])
+            .await
+            .unwrap();
+
+        assert_eq!(client.protocol_era(), McpProtocolEra::Legacy);
+        assert_eq!(client.protocol_version(), MCP_PROTOCOL_VERSION);
+        assert_eq!(std::fs::read_to_string(count_path).unwrap().trim(), "2");
+    }
 
     #[tokio::test]
     async fn client_requires_tools_capability() {
@@ -499,7 +712,7 @@ mod tests {
         let tools = client.list_tools().await.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "test_tool");
-        assert_eq!(tools[0].description, "A test tool");
+        assert_eq!(tools[0].description.as_deref(), Some("A test tool"));
     }
 
     #[tokio::test]
@@ -518,11 +731,13 @@ mod tests {
         let args = serde_json::json!({"param1": "value1"});
         let result = client.call_tool("test_tool", Some(args)).await.unwrap();
 
+        assert_eq!(result.resultType, "complete");
         assert_eq!(result.content.len(), 1);
-        match &result.content[0] {
-            ToolContent::Text { text } => assert_eq!(text, "Tool executed successfully"),
-            _ => panic!("Expected text content"),
-        }
+        assert_eq!(result.content[0].content_type(), Some("text"));
+        assert_eq!(
+            result.content[0].as_value()["text"],
+            "Tool executed successfully"
+        );
         assert_eq!(
             result.structuredContent,
             Some(serde_json::json!({ "message": "Tool executed successfully" }))
@@ -683,30 +898,20 @@ mod tests {
         // Test that different tool content types can be deserialized
         let text_json = r#"{"type":"text","text":"Hello"}"#;
         let text: ToolContent = serde_json::from_str(text_json).unwrap();
-        match text {
-            ToolContent::Text { text: t } => assert_eq!(t, "Hello"),
-            _ => panic!("Expected text content"),
-        }
+        assert_eq!(text.content_type(), Some("text"));
+        assert_eq!(text.as_value()["text"], "Hello");
 
         let image_json = r#"{"type":"image","data":"base64data","mimeType":"image/png"}"#;
         let image: ToolContent = serde_json::from_str(image_json).unwrap();
-        match image {
-            ToolContent::Image { data, mimeType } => {
-                assert_eq!(data, "base64data");
-                assert_eq!(mimeType, "image/png");
-            }
-            _ => panic!("Expected image content"),
-        }
+        assert_eq!(image.content_type(), Some("image"));
+        assert_eq!(image.as_value()["data"], "base64data");
+        assert_eq!(image.as_value()["mimeType"], "image/png");
 
         let resource_json = r#"{"type":"resource","uri":"test://resource","text":"content"}"#;
         let resource: ToolContent = serde_json::from_str(resource_json).unwrap();
-        match resource {
-            ToolContent::Resource { uri, text, .. } => {
-                assert_eq!(uri, "test://resource");
-                assert_eq!(text.unwrap(), "content");
-            }
-            _ => panic!("Expected resource content"),
-        }
+        assert_eq!(resource.content_type(), Some("resource"));
+        assert_eq!(resource.as_value()["uri"], "test://resource");
+        assert_eq!(resource.as_value()["text"], "content");
     }
 
     #[tokio::test]
