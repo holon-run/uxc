@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use base64::Engine;
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::Client;
-use serde_json::Value as JsonValue;
+use serde_json::{json, Value as JsonValue};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -118,6 +118,8 @@ pub struct McpHttpTransport {
     event_stream_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Terminal error from the current event stream reader, if any.
     event_stream_error: Arc<Mutex<Option<String>>>,
+    /// JSON-RPC id of the active modern subscriptions/listen request.
+    subscription_id: Arc<Mutex<Option<RequestId>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +263,7 @@ impl McpHttpTransport {
             notifications: Arc::new(Mutex::new(VecDeque::new())),
             event_stream_task: Arc::new(Mutex::new(None)),
             event_stream_error: Arc::new(Mutex::new(None)),
+            subscription_id: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1746,6 +1749,67 @@ impl McpHttpTransport {
         if let Some(task) = self.event_stream_task.lock().await.take() {
             task.abort();
         }
+        *self.subscription_id.lock().await = None;
+    }
+
+    pub async fn start_subscription(&self, filter: SubscriptionFilter) -> Result<RequestId> {
+        if self.protocol_context.era != McpProtocolEra::Modern {
+            bail!("subscriptions/listen requires modern MCP");
+        }
+        if filter.is_empty() {
+            bail!("subscriptions/listen requires at least one notification filter");
+        }
+        self.shutdown_event_stream().await;
+        self.maybe_refresh_auth_token().await?;
+
+        let id = {
+            let mut next_id = self.next_id.lock().await;
+            let id = RequestId::Number(*next_id);
+            *next_id += 1;
+            id
+        };
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: id.clone(),
+            method: "subscriptions/listen".to_string(),
+            params: Some(
+                self.protocol_context
+                    .modern_request_params(Some(json!({ "notifications": filter })))?,
+            ),
+        };
+        let mut response = self.send_jsonrpc_request(&request, &[]).await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && self.is_refreshable_profile().await
+        {
+            self.force_refresh_auth_token().await?;
+            response = self.send_jsonrpc_request(&request, &[]).await?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unable to read response body".to_string());
+            Self::map_http_error(status, &body, None)?;
+            unreachable!("map_http_error should always return an error");
+        }
+        let is_sse = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
+        if !is_sse {
+            bail!("subscriptions/listen HTTP response must use text/event-stream");
+        }
+
+        *self.event_stream_error.lock().await = None;
+        *self.subscription_id.lock().await = Some(id.clone());
+        let notifications = self.notifications.clone();
+        let stream_error = self.event_stream_error.clone();
+        *self.event_stream_task.lock().await = Some(tokio::spawn(async move {
+            Self::run_streamable_event_reader(response, notifications, stream_error).await;
+        }));
+        Ok(id)
     }
 
     /// List available prompts
@@ -2587,6 +2651,13 @@ impl Drop for LegacySseTransport {
 }
 
 impl McpRemoteTransport {
+    pub fn protocol_era(&self) -> McpProtocolEra {
+        match self {
+            Self::Streamable(transport) => transport.protocol_context.era,
+            Self::Legacy(_) => McpProtocolEra::Legacy,
+        }
+    }
+
     pub fn with_auth(
         resolved: ResolvedMcpHttpTransport,
         auth_profile: Option<Profile>,
@@ -2691,6 +2762,13 @@ impl McpRemoteTransport {
         match self {
             Self::Streamable(transport) => transport.subscribe_resource(uri).await,
             Self::Legacy(transport) => transport.subscribe_resource(uri).await,
+        }
+    }
+
+    pub async fn start_subscription(&self, filter: SubscriptionFilter) -> Result<RequestId> {
+        match self {
+            Self::Streamable(transport) => transport.start_subscription(filter).await,
+            Self::Legacy(_) => bail!("subscriptions/listen requires modern MCP"),
         }
     }
 
@@ -3117,6 +3195,55 @@ mod tests {
             .read_resource("file:///tmp/example")
             .await
             .unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn modern_subscription_listen_uses_request_scoped_sse() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .match_header("mcp-protocol-version", MCP_MODERN_PROTOCOL_VERSION)
+            .match_header("mcp-method", "subscriptions/listen")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "id": 1,
+                "method": "subscriptions/listen",
+                "params": {
+                    "notifications": {
+                        "toolsListChanged": true,
+                        "resourceSubscriptions": ["file:///tmp/example"]
+                    },
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": MCP_MODERN_PROTOCOL_VERSION
+                    }
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(
+                "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"notifications\":{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"file:///tmp/example\"]},\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":1}}}\n\n",
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::with_auth_timeout_and_era(
+            server.url(),
+            None,
+            Duration::from_secs(5),
+            McpProtocolEra::Modern,
+        )
+        .unwrap();
+        let request_id = transport
+            .start_subscription(SubscriptionFilter {
+                toolsListChanged: Some(true),
+                resourceSubscriptions: Some(vec!["file:///tmp/example".to_string()]),
+                ..SubscriptionFilter::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(request_id, RequestId::Number(1));
         mock.assert_async().await;
     }
 

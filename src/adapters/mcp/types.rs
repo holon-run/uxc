@@ -49,6 +49,45 @@ pub enum RequestId {
     String(String),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SubscriptionFilter {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolsListChanged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promptsListChanged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resourcesListChanged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resourceSubscriptions: Option<Vec<String>>,
+}
+
+impl SubscriptionFilter {
+    pub fn is_empty(&self) -> bool {
+        !self.toolsListChanged.unwrap_or(false)
+            && !self.promptsListChanged.unwrap_or(false)
+            && !self.resourcesListChanged.unwrap_or(false)
+            && self
+                .resourceSubscriptions
+                .as_ref()
+                .is_none_or(Vec::is_empty)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubscriptionsAcknowledgedParams {
+    pub notifications: SubscriptionFilter,
+    #[serde(rename = "_meta")]
+    pub meta: JsonValue,
+}
+
+impl SubscriptionsAcknowledgedParams {
+    pub fn subscription_id(&self) -> Option<RequestId> {
+        self.meta
+            .get("io.modelcontextprotocol/subscriptionId")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+}
+
 /// JSON-RPC Error
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
@@ -715,6 +754,27 @@ mod tests {
         assert_eq!(
             params["_meta"]["io.modelcontextprotocol/clientCapabilities"],
             capabilities
+        );
+    }
+
+    #[test]
+    fn subscription_acknowledgement_parses_subscription_id_and_filter() {
+        let params: SubscriptionsAcknowledgedParams = serde_json::from_value(json!({
+            "notifications": {
+                "toolsListChanged": true,
+                "resourceSubscriptions": ["file:///tmp/example"]
+            },
+            "_meta": {
+                "io.modelcontextprotocol/subscriptionId": 7
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(params.subscription_id(), Some(RequestId::Number(7)));
+        assert_eq!(params.notifications.toolsListChanged, Some(true));
+        assert_eq!(
+            params.notifications.resourceSubscriptions,
+            Some(vec!["file:///tmp/example".to_string()])
         );
     }
 
