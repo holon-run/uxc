@@ -5,9 +5,14 @@
 use super::types::*;
 use crate::auth::{self, oauth, AuthType, Profile, Profiles};
 use crate::error::UxcError;
-use crate::error::{structured_error_from_jsonrpc_error, StructuredError, StructuredErrorPayload};
+use crate::error::{
+    structured_error_from_anyhow, structured_error_from_jsonrpc_error, StructuredError,
+    StructuredErrorPayload,
+};
 use crate::http_client::build_resilient_http_client;
 use anyhow::{bail, Context, Result};
+use base64::Engine;
+use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::Client;
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, VecDeque};
@@ -45,7 +50,8 @@ impl PendingResponseError {
 /// MCP HTTP transport mode selected during endpoint probing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpHttpMode {
-    StreamableHttp,
+    ModernStreamableHttp,
+    LegacyStreamableHttp,
     LegacySse,
 }
 
@@ -95,6 +101,12 @@ pub struct McpHttpTransport {
     next_id: Arc<Mutex<i64>>,
     /// MCP Streamable HTTP session id (if provided by server)
     session_id: Arc<Mutex<Option<String>>>,
+    /// Negotiated MCP protocol context.
+    protocol_context: Box<McpProtocolContext>,
+    /// Validated custom HTTP header mappings keyed by tool name.
+    tool_headers: Arc<Mutex<HashMap<String, Vec<ToolHeaderMapping>>>>,
+    /// Whether the tool catalog has been loaded for custom header mappings.
+    tool_catalog_loaded: Arc<Mutex<bool>>,
     /// Authentication profile
     auth_profile: Arc<Mutex<Option<Profile>>>,
     /// Lock for OAuth refresh operations
@@ -105,6 +117,20 @@ pub struct McpHttpTransport {
     event_stream_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Terminal error from the current event stream reader, if any.
     event_stream_error: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolHeaderMapping {
+    header_name: HeaderName,
+    path: Vec<String>,
+    value_type: ToolHeaderValueType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolHeaderValueType {
+    String,
+    Integer,
+    Boolean,
 }
 
 #[derive(Debug)]
@@ -176,6 +202,15 @@ impl McpHttpTransport {
         auth_profile: Option<Profile>,
         request_timeout: Duration,
     ) -> Result<Self> {
+        Self::with_auth_timeout_and_era(url, auth_profile, request_timeout, McpProtocolEra::Legacy)
+    }
+
+    fn with_auth_timeout_and_era(
+        url: String,
+        auth_profile: Option<Profile>,
+        request_timeout: Duration,
+        era: McpProtocolEra,
+    ) -> Result<Self> {
         // Validate URL
         let parsed = url::Url::parse(&url).context("Invalid MCP server URL")?;
 
@@ -199,6 +234,27 @@ impl McpHttpTransport {
             server_url: url,
             next_id: Arc::new(Mutex::new(1i64)),
             session_id: Arc::new(Mutex::new(None)),
+            protocol_context: Box::new(McpProtocolContext {
+                era,
+                version: match era {
+                    McpProtocolEra::Modern => MCP_MODERN_PROTOCOL_VERSION,
+                    McpProtocolEra::Legacy => MCP_PROTOCOL_VERSION,
+                }
+                .to_string(),
+                client_capabilities: ClientCapabilities::default(),
+                server_capabilities: ServerCapabilities::default(),
+                client_info: ClientInfo {
+                    name: env!("CARGO_PKG_NAME").to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    title: None,
+                    description: None,
+                    websiteUrl: None,
+                    icons: None,
+                },
+                server_info: None,
+            }),
+            tool_headers: Arc::new(Mutex::new(HashMap::new())),
+            tool_catalog_loaded: Arc::new(Mutex::new(false)),
             auth_profile: Arc::new(Mutex::new(auth_profile)),
             oauth_refresh_lock: Arc::new(Mutex::new(())),
             notifications: Arc::new(Mutex::new(VecDeque::new())),
@@ -209,7 +265,21 @@ impl McpHttpTransport {
 
     /// Send a request and wait for response
     pub async fn send_request(&self, method: &str, params: Option<JsonValue>) -> Result<JsonValue> {
+        self.send_request_with_custom_headers(method, params, &[])
+            .await
+    }
+
+    async fn send_request_with_custom_headers(
+        &self,
+        method: &str,
+        params: Option<JsonValue>,
+        custom_headers: &[(HeaderName, HeaderValue)],
+    ) -> Result<JsonValue> {
         self.maybe_refresh_auth_token().await?;
+        let params = match self.protocol_context.era {
+            McpProtocolEra::Modern => Some(self.protocol_context.modern_request_params(params)?),
+            McpProtocolEra::Legacy => params,
+        };
 
         // Generate request ID
         let id = {
@@ -234,7 +304,7 @@ impl McpHttpTransport {
         );
 
         let mut response = self
-            .send_jsonrpc_request(&request)
+            .send_jsonrpc_request(&request, custom_headers)
             .await
             .context("Failed to send HTTP request to MCP server")?;
 
@@ -243,19 +313,21 @@ impl McpHttpTransport {
         {
             self.force_refresh_auth_token().await?;
             response = self
-                .send_jsonrpc_request(&request)
+                .send_jsonrpc_request(&request, custom_headers)
                 .await
                 .context("Failed to send HTTP retry request to MCP server")?;
         }
 
         let status = response.status();
-        if let Some(session_id) = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-        {
-            *self.session_id.lock().await = Some(session_id);
+        if self.protocol_context.era == McpProtocolEra::Legacy {
+            if let Some(session_id) = response
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+            {
+                *self.session_id.lock().await = Some(session_id);
+            }
         }
         let www_authenticate = response
             .headers()
@@ -273,6 +345,18 @@ impl McpHttpTransport {
 
         // Check HTTP status
         if !status.is_success() {
+            if let Ok(json_response) = Self::parse_jsonrpc_response(content_type.as_deref(), &body)
+            {
+                if let Some(error) = json_response.error {
+                    return Err(structured_error_from_jsonrpc_error(
+                        error.code,
+                        &error.message,
+                        error.data.as_ref(),
+                        "EXECUTION_FAILED",
+                    )
+                    .into());
+                }
+            }
             return Self::map_http_error(status, &body, www_authenticate.as_deref());
         }
 
@@ -297,9 +381,17 @@ impl McpHttpTransport {
             .context("MCP server response missing result field")
     }
 
-    async fn send_jsonrpc_request(&self, request: &JsonRpcRequest) -> Result<reqwest::Response> {
+    async fn send_jsonrpc_request(
+        &self,
+        request: &JsonRpcRequest,
+        custom_headers: &[(HeaderName, HeaderValue)],
+    ) -> Result<reqwest::Response> {
         let profile = self.auth_profile.lock().await.clone();
-        let session_id = self.session_id.lock().await.clone();
+        let session_id = if self.protocol_context.era == McpProtocolEra::Legacy {
+            self.session_id.lock().await.clone()
+        } else {
+            None
+        };
         let resolved = Self::resolve_request_auth("POST", &self.server_url, profile.as_ref())?;
 
         let mut req = self
@@ -310,9 +402,58 @@ impl McpHttpTransport {
         if let Some(session_id) = session_id {
             req = req.header("mcp-session-id", session_id);
         }
+        if self.protocol_context.era == McpProtocolEra::Modern {
+            req = req
+                .header("MCP-Protocol-Version", &self.protocol_context.version)
+                .header("Mcp-Method", &request.method);
+            if let Some(name) = Self::request_name(request)? {
+                req = req.header("Mcp-Name", Self::encode_header_value(name)?);
+            }
+            for (name, value) in custom_headers {
+                req = req.header(name, value);
+            }
+        }
         req = Self::apply_resolved_request_auth(req, &resolved);
 
         req.json(request).send().await.map_err(Into::into)
+    }
+
+    fn request_name(request: &JsonRpcRequest) -> Result<Option<&str>> {
+        let key = match request.method.as_str() {
+            "tools/call" | "prompts/get" => "name",
+            "resources/read" => "uri",
+            _ => return Ok(None),
+        };
+        let value = request
+            .params
+            .as_ref()
+            .and_then(|params| params.get(key))
+            .and_then(JsonValue::as_str)
+            .with_context(|| {
+                format!(
+                    "MCP {} request params.{} must be a string",
+                    request.method, key
+                )
+            })?;
+        Ok(Some(value))
+    }
+
+    fn encode_header_value(value: &str) -> Result<HeaderValue> {
+        let plain_safe = !(value.is_empty()
+            || (value.starts_with("=?base64?") && value.ends_with("?=")))
+            && value.trim_matches([' ', '\t']) == value
+            && value
+                .bytes()
+                .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte));
+        let encoded = if plain_safe {
+            value.to_string()
+        } else {
+            format!(
+                "=?base64?{}?=",
+                base64::engine::general_purpose::STANDARD.encode(value.as_bytes())
+            )
+        };
+        HeaderValue::from_str(&encoded).context("Failed to construct safe MCP HTTP header value")
     }
 
     async fn is_refreshable_profile(&self) -> bool {
@@ -650,7 +791,28 @@ impl McpHttpTransport {
             "MCP HTTP probe",
         )?;
 
-        let request = JsonRpcRequest {
+        let modern_context = McpProtocolContext {
+            era: McpProtocolEra::Modern,
+            version: MCP_MODERN_PROTOCOL_VERSION.to_string(),
+            client_capabilities: ClientCapabilities::default(),
+            server_capabilities: ServerCapabilities::default(),
+            client_info: ClientInfo {
+                name: "uxc-probe".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                title: None,
+                description: None,
+                websiteUrl: None,
+                icons: None,
+            },
+            server_info: None,
+        };
+        let modern_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "server/discover".to_string(),
+            params: Some(modern_context.modern_request_params(None)?),
+            id: RequestId::Number(1),
+        };
+        let legacy_request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "initialize".to_string(),
             params: Some(serde_json::json!({
@@ -666,7 +828,52 @@ impl McpHttpTransport {
 
         let mut auth_profile = auth_profile;
 
-        match Self::probe_initialize_once(url, &client, &request, auth_profile.as_ref()).await {
+        match Self::probe_modern_once(url, &client, &modern_request, auth_profile.as_ref()).await {
+            ProbeAttemptResult::Success(mode) => {
+                return Ok(ProbeInitializeOutcome::Success(mode));
+            }
+            ProbeAttemptResult::Unauthorized(reason) => {
+                if !auth::supports_refresh_retry(auth_profile.as_ref()) {
+                    return Ok(ProbeInitializeOutcome::NotMcp(reason));
+                }
+                let profile = auth_profile
+                    .as_mut()
+                    .expect("oauth probe path requires auth profile");
+                if let Err(err) =
+                    auth::refresh_effective_auth_profile(profile, &client, true, 60, Some(url))
+                        .await
+                {
+                    return Ok(Self::probe_auth_failure_from_refresh_error(err));
+                }
+                if let Err(err) = persist_profile_update(profile).await {
+                    return Ok(ProbeInitializeOutcome::AuthFailed(ProbeAuthFailure {
+                        code: ProbeAuthFailureCode::OAuthRefreshFailed,
+                        message: format!("Failed to persist refreshed OAuth profile: {}", err),
+                    }));
+                }
+                match Self::probe_modern_once(url, &client, &modern_request, Some(profile)).await {
+                    ProbeAttemptResult::Success(mode) => {
+                        return Ok(ProbeInitializeOutcome::Success(mode));
+                    }
+                    ProbeAttemptResult::Unauthorized(retry_reason) => {
+                        return Ok(ProbeInitializeOutcome::AuthFailed(ProbeAuthFailure {
+                            code: ProbeAuthFailureCode::OAuthRequired,
+                            message: format!(
+                                "OAuth token rejected after refresh during MCP probe: {}",
+                                retry_reason
+                            ),
+                        }));
+                    }
+                    ProbeAttemptResult::LegacyBootstrapRequired(_)
+                    | ProbeAttemptResult::NotMcp(_) => {}
+                }
+            }
+            ProbeAttemptResult::LegacyBootstrapRequired(_) | ProbeAttemptResult::NotMcp(_) => {}
+        }
+
+        match Self::probe_initialize_once(url, &client, &legacy_request, auth_profile.as_ref())
+            .await
+        {
             ProbeAttemptResult::Success(mode) => Ok(ProbeInitializeOutcome::Success(mode)),
             ProbeAttemptResult::LegacyBootstrapRequired(reason) => {
                 Self::probe_legacy_sse_with_oauth_retry(url, &client, &mut auth_profile, reason)
@@ -698,7 +905,9 @@ impl McpHttpTransport {
                     }));
                 }
 
-                match Self::probe_initialize_once(url, &client, &request, Some(profile)).await {
+                match Self::probe_initialize_once(url, &client, &legacy_request, Some(profile))
+                    .await
+                {
                     ProbeAttemptResult::Success(mode) => Ok(ProbeInitializeOutcome::Success(mode)),
                     ProbeAttemptResult::LegacyBootstrapRequired(reason) => {
                         Self::probe_legacy_sse_with_oauth_retry(
@@ -724,6 +933,93 @@ impl McpHttpTransport {
                 }
             }
             ProbeAttemptResult::NotMcp(reason) => Ok(ProbeInitializeOutcome::NotMcp(reason)),
+        }
+    }
+
+    async fn probe_modern_once(
+        url: &str,
+        client: &Client,
+        request: &JsonRpcRequest,
+        auth_profile: Option<&Profile>,
+    ) -> ProbeAttemptResult {
+        let resolved = match Self::resolve_request_auth("POST", url, auth_profile) {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                return ProbeAttemptResult::NotMcp(format!(
+                    "failed to apply auth profile to url: {}",
+                    err
+                ));
+            }
+        };
+        let req = client
+            .post(&resolved.url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", MCP_MODERN_PROTOCOL_VERSION)
+            .header("Mcp-Method", &request.method);
+        let req = Self::apply_resolved_request_auth(req, &resolved);
+        let mut response = match req.json(request).send().await {
+            Ok(response) => response,
+            Err(err) => {
+                return ProbeAttemptResult::NotMcp(format!("request failed: {}", err));
+            }
+        };
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let body = response.text().await.unwrap_or_default();
+            return ProbeAttemptResult::Unauthorized(format!(
+                "HTTP {}: {}",
+                status,
+                Self::summarize_body(&body)
+            ));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = match Self::read_response_body(&mut response, content_type.as_deref()).await {
+            Ok(body) => body,
+            Err(err) => {
+                return ProbeAttemptResult::NotMcp(format!(
+                    "failed to read response body: {}",
+                    err
+                ));
+            }
+        };
+        let parsed = Self::parse_jsonrpc_response(content_type.as_deref(), &body);
+        if let Ok(response) = parsed {
+            if let Some(error) = response.error {
+                let recognized_modern = matches!(error.code, -32022..=-32020)
+                    || (error.code == -32601 && status == reqwest::StatusCode::NOT_FOUND);
+                if recognized_modern {
+                    return ProbeAttemptResult::Success(McpHttpMode::ModernStreamableHttp);
+                }
+                return ProbeAttemptResult::LegacyBootstrapRequired(format!(
+                    "JSON-RPC error {}: {}",
+                    error.code, error.message
+                ));
+            }
+            if let Some(result) = response.result {
+                return match serde_json::from_value::<DiscoverResult>(result) {
+                    Ok(_) => ProbeAttemptResult::Success(McpHttpMode::ModernStreamableHttp),
+                    Err(err) => ProbeAttemptResult::LegacyBootstrapRequired(format!(
+                        "invalid server/discover result: {}",
+                        err
+                    )),
+                };
+            }
+        }
+        let reason = format!("HTTP {}: {}", status, Self::summarize_body(&body));
+        if matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST
+                | reqwest::StatusCode::NOT_FOUND
+                | reqwest::StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            ProbeAttemptResult::LegacyBootstrapRequired(reason)
+        } else {
+            ProbeAttemptResult::NotMcp(reason)
         }
     }
 
@@ -869,7 +1165,7 @@ impl McpHttpTransport {
         };
 
         match serde_json::from_value::<InitializeResult>(result) {
-            Ok(_) => ProbeAttemptResult::Success(McpHttpMode::StreamableHttp),
+            Ok(_) => ProbeAttemptResult::Success(McpHttpMode::LegacyStreamableHttp),
             Err(err) => ProbeAttemptResult::NotMcp(format!("invalid initialize result: {}", err)),
         }
     }
@@ -989,6 +1285,28 @@ impl McpHttpTransport {
 
     /// Initialize the MCP session
     pub async fn initialize(&self) -> Result<InitializeResult> {
+        if self.protocol_context.era == McpProtocolEra::Modern {
+            let result = self.send_request("server/discover", None).await?;
+            let discover: DiscoverResult =
+                serde_json::from_value(result).context("Failed to parse server/discover result")?;
+            if !discover
+                .supportedVersions
+                .iter()
+                .any(|version| version == MCP_MODERN_PROTOCOL_VERSION)
+            {
+                bail!(
+                    "MCP server does not support protocol version {}",
+                    MCP_MODERN_PROTOCOL_VERSION
+                );
+            }
+            let server_info = discover.server_info();
+            return Ok(InitializeResult {
+                protocolVersion: MCP_MODERN_PROTOCOL_VERSION.to_string(),
+                capabilities: discover.capabilities,
+                serverInfo: server_info,
+                instructions: discover.instructions,
+            });
+        }
         tracing::info!("Initializing MCP HTTP session with {}", self.server_url);
 
         let params = serde_json::json!({
@@ -1016,6 +1334,9 @@ impl McpHttpTransport {
     /// received. The notification carries no id and expects no response body;
     /// servers typically reply with 202 Accepted or 204 No Content.
     pub async fn initialized(&self) -> Result<()> {
+        if self.protocol_context.era == McpProtocolEra::Modern {
+            return Ok(());
+        }
         self.maybe_refresh_auth_token().await?;
 
         let notification = JsonRpcNotification {
@@ -1080,7 +1401,30 @@ impl McpHttpTransport {
         let response: ToolsListResponse =
             serde_json::from_value(result).context("Failed to parse tools/list response")?;
 
-        Ok(response.tools)
+        if self.protocol_context.era == McpProtocolEra::Legacy {
+            return Ok(response.tools);
+        }
+
+        let mut headers_by_tool = HashMap::new();
+        let mut valid_tools = Vec::with_capacity(response.tools.len());
+        for tool in response.tools {
+            match Self::tool_header_mappings(&tool) {
+                Ok(mappings) => {
+                    headers_by_tool.insert(tool.name.clone(), mappings);
+                    valid_tools.push(tool);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        tool = %tool.name,
+                        reason = %err,
+                        "Excluding MCP tool with invalid x-mcp-header annotation"
+                    );
+                }
+            }
+        }
+        *self.tool_headers.lock().await = headers_by_tool;
+        *self.tool_catalog_loaded.lock().await = true;
+        Ok(valid_tools)
     }
 
     /// Call a tool
@@ -1089,7 +1433,13 @@ impl McpHttpTransport {
         name: &str,
         arguments: Option<JsonValue>,
     ) -> Result<ToolCallResult> {
-        let params = match arguments {
+        if self.protocol_context.era == McpProtocolEra::Modern
+            && !*self.tool_catalog_loaded.lock().await
+        {
+            let _ = self.list_tools().await?;
+        }
+
+        let params = match arguments.clone() {
             Some(arguments) => serde_json::json!({
                 "name": name,
                 "arguments": arguments
@@ -1100,9 +1450,191 @@ impl McpHttpTransport {
             }),
         };
 
-        let result = self.send_request("tools/call", Some(params)).await?;
+        let headers = self
+            .custom_tool_headers(name, arguments.as_ref())
+            .await
+            .with_context(|| format!("Failed to build custom headers for tool '{}'", name))?;
+        let result = match self
+            .send_request_with_custom_headers("tools/call", Some(params.clone()), &headers)
+            .await
+        {
+            Err(err)
+                if self.protocol_context.era == McpProtocolEra::Modern
+                    && Self::is_header_mismatch(&err) =>
+            {
+                let _ = self.list_tools().await?;
+                let refreshed_headers = self
+                    .custom_tool_headers(name, arguments.as_ref())
+                    .await
+                    .with_context(|| {
+                        format!("Failed to rebuild custom headers for tool '{}'", name)
+                    })?;
+                self.send_request_with_custom_headers(
+                    "tools/call",
+                    Some(params),
+                    &refreshed_headers,
+                )
+                .await?
+            }
+            result => result?,
+        };
 
         serde_json::from_value(result).context("Failed to parse tools/call result")
+    }
+
+    fn is_header_mismatch(err: &anyhow::Error) -> bool {
+        structured_error_from_anyhow(err)
+            .and_then(|error| error.details)
+            .and_then(|details| details.get("jsonrpc_code").and_then(JsonValue::as_i64))
+            == Some(-32020)
+    }
+
+    async fn custom_tool_headers(
+        &self,
+        name: &str,
+        arguments: Option<&JsonValue>,
+    ) -> Result<Vec<(HeaderName, HeaderValue)>> {
+        if self.protocol_context.era == McpProtocolEra::Legacy {
+            return Ok(Vec::new());
+        }
+        let mappings = self
+            .tool_headers
+            .lock()
+            .await
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let Some(arguments) = arguments else {
+            return Ok(Vec::new());
+        };
+        let mut headers = Vec::with_capacity(mappings.len());
+        for mapping in mappings {
+            let Some(value) = Self::value_at_path(arguments, &mapping.path) else {
+                continue;
+            };
+            let value = match mapping.value_type {
+                ToolHeaderValueType::String => value
+                    .as_str()
+                    .context("x-mcp-header string argument must be a string")?
+                    .to_string(),
+                ToolHeaderValueType::Integer => {
+                    let integer = value
+                        .as_i64()
+                        .context("x-mcp-header integer argument must be an integer")?;
+                    const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+                    if !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&integer) {
+                        bail!("x-mcp-header integer argument exceeds the safe integer range");
+                    }
+                    integer.to_string()
+                }
+                ToolHeaderValueType::Boolean => value
+                    .as_bool()
+                    .context("x-mcp-header boolean argument must be a boolean")?
+                    .to_string(),
+            };
+            headers.push((mapping.header_name, Self::encode_header_value(&value)?));
+        }
+        Ok(headers)
+    }
+
+    fn value_at_path<'a>(value: &'a JsonValue, path: &[String]) -> Option<&'a JsonValue> {
+        path.iter().try_fold(value, |current, key| current.get(key))
+    }
+
+    fn tool_header_mappings(tool: &Tool) -> Result<Vec<ToolHeaderMapping>> {
+        let Some(schema) = tool.inputSchema.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut mappings = Vec::new();
+        let mut names = std::collections::HashSet::new();
+        Self::collect_tool_header_mappings(
+            schema,
+            &mut Vec::new(),
+            true,
+            &mut mappings,
+            &mut names,
+        )?;
+        Ok(mappings)
+    }
+
+    fn collect_tool_header_mappings(
+        schema: &JsonValue,
+        path: &mut Vec<String>,
+        statically_reachable: bool,
+        mappings: &mut Vec<ToolHeaderMapping>,
+        names: &mut std::collections::HashSet<String>,
+    ) -> Result<()> {
+        let Some(object) = schema.as_object() else {
+            return Ok(());
+        };
+        if let Some(annotation) = object.get("x-mcp-header") {
+            if !statically_reachable || path.is_empty() {
+                bail!("x-mcp-header annotation is not statically reachable via properties");
+            }
+            let name = annotation
+                .as_str()
+                .context("x-mcp-header annotation must be a string")?;
+            if name.is_empty() {
+                bail!("x-mcp-header annotation must not be empty");
+            }
+            let header_name = HeaderName::from_bytes(format!("Mcp-Param-{}", name).as_bytes())
+                .context("x-mcp-header annotation is not a valid HTTP field-name token")?;
+            if !names.insert(name.to_ascii_lowercase()) {
+                bail!("x-mcp-header annotations must be case-insensitively unique");
+            }
+            let value_type = match object.get("type").and_then(JsonValue::as_str) {
+                Some("string") => ToolHeaderValueType::String,
+                Some("integer") => ToolHeaderValueType::Integer,
+                Some("boolean") => ToolHeaderValueType::Boolean,
+                _ => bail!("x-mcp-header annotation requires string, integer, or boolean type"),
+            };
+            mappings.push(ToolHeaderMapping {
+                header_name,
+                path: path.clone(),
+                value_type,
+            });
+        }
+
+        for (keyword, child) in object {
+            if keyword == "properties" {
+                if let Some(properties) = child.as_object() {
+                    for (property, property_schema) in properties {
+                        path.push(property.clone());
+                        Self::collect_tool_header_mappings(
+                            property_schema,
+                            path,
+                            statically_reachable,
+                            mappings,
+                            names,
+                        )?;
+                        path.pop();
+                    }
+                }
+            } else if child.is_object() || child.is_array() {
+                Self::find_unreachable_tool_header(child)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn find_unreachable_tool_header(value: &JsonValue) -> Result<()> {
+        match value {
+            JsonValue::Object(object) => {
+                if object.contains_key("x-mcp-header") {
+                    bail!("x-mcp-header annotation is not statically reachable via properties");
+                }
+                for child in object.values() {
+                    Self::find_unreachable_tool_header(child)?;
+                }
+            }
+            JsonValue::Array(items) => {
+                for child in items {
+                    Self::find_unreachable_tool_header(child)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// List available resources
@@ -1127,6 +1659,12 @@ impl McpHttpTransport {
     }
 
     pub async fn subscribe_resource(&self, uri: &str) -> Result<()> {
+        if self.protocol_context.era == McpProtocolEra::Modern {
+            bail!(
+                "MCP resource subscriptions require subscriptions/listen for protocol {}",
+                self.protocol_context.version
+            );
+        }
         let params = serde_json::json!({
             "uri": uri
         });
@@ -1137,6 +1675,12 @@ impl McpHttpTransport {
     }
 
     pub async fn unsubscribe_resource(&self, uri: &str) -> Result<()> {
+        if self.protocol_context.era == McpProtocolEra::Modern {
+            bail!(
+                "MCP resource subscriptions require subscriptions/listen for protocol {}",
+                self.protocol_context.version
+            );
+        }
         let params = serde_json::json!({
             "uri": uri
         });
@@ -1188,6 +1732,9 @@ impl McpHttpTransport {
     }
 
     async fn ensure_event_stream(&self) -> Result<()> {
+        if self.protocol_context.era == McpProtocolEra::Modern {
+            return Ok(());
+        }
         {
             let task_guard = self.event_stream_task.lock().await;
             if let Some(task) = task_guard.as_ref() {
@@ -1956,7 +2503,15 @@ impl McpRemoteTransport {
         request_timeout: Duration,
     ) -> Result<Self> {
         match resolved.mode {
-            McpHttpMode::StreamableHttp => {
+            McpHttpMode::ModernStreamableHttp => Ok(Self::Streamable(
+                McpHttpTransport::with_auth_timeout_and_era(
+                    resolved.connect_url,
+                    auth_profile,
+                    request_timeout,
+                    McpProtocolEra::Modern,
+                )?,
+            )),
+            McpHttpMode::LegacyStreamableHttp => {
                 Ok(Self::Streamable(McpHttpTransport::with_auth_and_timeout(
                     resolved.connect_url,
                     auth_profile,
@@ -2290,6 +2845,283 @@ mod tests {
         assert!(transport.is_err());
         let err_msg = transport.unwrap_err().to_string();
         assert!(err_msg.contains("Invalid MCP server URL"));
+    }
+
+    #[test]
+    fn modern_header_value_encoding_handles_unsafe_and_sentinel_values() {
+        assert_eq!(
+            McpHttpTransport::encode_header_value("us-west1")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "us-west1"
+        );
+        assert_eq!(
+            McpHttpTransport::encode_header_value("Hello, 世界")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "=?base64?SGVsbG8sIOS4lueVjA==?="
+        );
+        assert_eq!(
+            McpHttpTransport::encode_header_value(" padded ")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "=?base64?IHBhZGRlZCA=?="
+        );
+        assert_eq!(
+            McpHttpTransport::encode_header_value("=?base64?literal?=")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?="
+        );
+    }
+
+    #[test]
+    fn tool_header_mappings_accept_nested_properties() {
+        let tool: Tool = serde_json::from_value(json!({
+            "name": "execute",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "routing": {
+                        "type": "object",
+                        "properties": {
+                            "region": {
+                                "type": "string",
+                                "x-mcp-header": "Region"
+                            }
+                        }
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "x-mcp-header": "Priority"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let mut mappings = McpHttpTransport::tool_header_mappings(&tool).unwrap();
+        mappings.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].path, ["priority"]);
+        assert_eq!(mappings[1].path, ["routing", "region"]);
+    }
+
+    #[test]
+    fn tool_header_mappings_reject_invalid_annotations() {
+        for schema in [
+            json!({
+                "type": "object",
+                "properties": {
+                    "value": {"type": "number", "x-mcp-header": "Value"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "first": {"type": "string", "x-mcp-header": "Region"},
+                    "second": {"type": "string", "x-mcp-header": "region"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "oneOf": [{
+                    "properties": {
+                        "value": {"type": "string", "x-mcp-header": "Value"}
+                    }
+                }]
+            }),
+        ] {
+            let tool: Tool = serde_json::from_value(json!({
+                "name": "invalid",
+                "inputSchema": schema
+            }))
+            .unwrap();
+            assert!(McpHttpTransport::tool_header_mappings(&tool).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn modern_request_sends_metadata_and_standard_headers_without_session() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .match_header("mcp-protocol-version", MCP_MODERN_PROTOCOL_VERSION)
+            .match_header("mcp-method", "resources/read")
+            .match_header("mcp-name", "file:///tmp/example")
+            .match_header("mcp-session-id", mockito::Matcher::Missing)
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "resources/read",
+                "params": {
+                    "uri": "file:///tmp/example",
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": MCP_MODERN_PROTOCOL_VERSION
+                    }
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"file:///tmp/example","text":"ok"}]}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::with_auth_timeout_and_era(
+            server.url(),
+            None,
+            Duration::from_secs(5),
+            McpProtocolEra::Modern,
+        )
+        .unwrap();
+        transport
+            .read_resource("file:///tmp/example")
+            .await
+            .unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn modern_tool_call_sends_validated_custom_header() {
+        let mut server = mockito::Server::new_async().await;
+        let list = server
+            .mock("POST", "/")
+            .match_header("mcp-method", "tools/list")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"execute","inputSchema":{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}}}}]}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let call = server
+            .mock("POST", "/")
+            .match_header("mcp-method", "tools/call")
+            .match_header("mcp-name", "execute")
+            .match_header("mcp-param-region", "=?base64?SGVsbG8sIOS4lueVjA==?=")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[{"type":"text","text":"ok"}]}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::with_auth_timeout_and_era(
+            server.url(),
+            None,
+            Duration::from_secs(5),
+            McpProtocolEra::Modern,
+        )
+        .unwrap();
+        let result = transport
+            .call_tool("execute", Some(json!({"region": "Hello, 世界"})))
+            .await
+            .unwrap();
+        assert_eq!(result.content[0].as_value()["text"], "ok");
+        list.assert_async().await;
+        call.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn modern_probe_uses_discover_metadata_and_headers() {
+        let mut server = mockito::Server::new_async().await;
+        let discover = server
+            .mock("POST", "/")
+            .match_header("mcp-protocol-version", MCP_MODERN_PROTOCOL_VERSION)
+            .match_header("mcp-method", "server/discover")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "method": "server/discover",
+                "params": {
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": MCP_MODERN_PROTOCOL_VERSION
+                    }
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let result = McpHttpTransport::probe_initialize_with_reason(&server.url(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            ProbeInitializeOutcome::Success(McpHttpMode::ModernStreamableHttp)
+        );
+        discover.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn header_mismatch_refreshes_catalog_and_retries_once() {
+        let mut server = mockito::Server::new_async().await;
+        let initial_list = server
+            .mock("POST", "/")
+            .match_header("mcp-method", "tools/list")
+            .match_body(mockito::Matcher::PartialJson(json!({"id": 1})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"execute","inputSchema":{"type":"object","properties":{"region":{"type":"string"}}}}]}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let mismatch = server
+            .mock("POST", "/")
+            .match_header("mcp-method", "tools/call")
+            .match_header("mcp-param-region", mockito::Matcher::Missing)
+            .match_body(mockito::Matcher::PartialJson(json!({"id": 2})))
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32020,"message":"Header mismatch"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let refreshed_list = server
+            .mock("POST", "/")
+            .match_header("mcp-method", "tools/list")
+            .match_body(mockito::Matcher::PartialJson(json!({"id": 3})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"execute","inputSchema":{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}}}}]}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let retry = server
+            .mock("POST", "/")
+            .match_header("mcp-method", "tools/call")
+            .match_header("mcp-param-region", "us-west1")
+            .match_body(mockito::Matcher::PartialJson(json!({"id": 4})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":4,"result":{"resultType":"complete","content":[{"type":"text","text":"ok"}]}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let transport = McpHttpTransport::with_auth_timeout_and_era(
+            server.url(),
+            None,
+            Duration::from_secs(5),
+            McpProtocolEra::Modern,
+        )
+        .unwrap();
+        let result = transport
+            .call_tool("execute", Some(json!({"region": "us-west1"})))
+            .await
+            .unwrap();
+        assert_eq!(result.content[0].as_value()["text"], "ok");
+        initial_list.assert_async().await;
+        mismatch.assert_async().await;
+        refreshed_list.assert_async().await;
+        retry.assert_async().await;
     }
 
     #[test]
@@ -3769,7 +4601,7 @@ data: invalid json
         let result = McpHttpTransport::probe_initialize_with_reason(&endpoint, Some(profile)).await;
         assert!(matches!(
             result.unwrap(),
-            ProbeInitializeOutcome::Success(McpHttpMode::StreamableHttp)
+            ProbeInitializeOutcome::Success(McpHttpMode::LegacyStreamableHttp)
         ));
     }
 

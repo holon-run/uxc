@@ -232,7 +232,10 @@ impl McpAdapter {
     fn resolved_transport_from_schema(schema: &Value) -> Option<ResolvedMcpHttpTransport> {
         let resolved = schema.get("resolvedTransport")?;
         let mode = match resolved.get("mode")?.as_str()? {
-            "streamable_http" => http_transport::McpHttpMode::StreamableHttp,
+            "modern_streamable_http" => http_transport::McpHttpMode::ModernStreamableHttp,
+            "streamable_http" | "legacy_streamable_http" => {
+                http_transport::McpHttpMode::LegacyStreamableHttp
+            }
             "legacy_sse" => http_transport::McpHttpMode::LegacySse,
             _ => return None,
         };
@@ -242,7 +245,8 @@ impl McpAdapter {
 
     fn resolved_transport_json(resolved: &ResolvedMcpHttpTransport) -> Value {
         let mode = match resolved.mode {
-            http_transport::McpHttpMode::StreamableHttp => "streamable_http",
+            http_transport::McpHttpMode::ModernStreamableHttp => "modern_streamable_http",
+            http_transport::McpHttpMode::LegacyStreamableHttp => "legacy_streamable_http",
             http_transport::McpHttpMode::LegacySse => "legacy_sse",
         };
         serde_json::json!({
@@ -422,7 +426,11 @@ impl McpAdapter {
 
             let mut schema = serde_json::json!({
                 "protocol": "MCP",
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": init_result.protocolVersion,
+                "protocolEra": match resolved.mode {
+                    http_transport::McpHttpMode::ModernStreamableHttp => "modern",
+                    _ => "legacy",
+                },
                 "transport": "http",
                 "url": url,
                 "resolvedTransport": Self::resolved_transport_json(&resolved),
