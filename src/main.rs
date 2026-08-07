@@ -7223,12 +7223,17 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                     auth::oauth_sessions::remove_session(session_id)?;
                     persist_oauth_login(
                         credential_id,
-                        OAuthFlow::AuthorizationCode,
-                        login.login.metadata,
-                        login.login.token,
-                        Some(login.client_id),
-                        login.client_secret,
-                        session.scopes,
+                        OAuthLoginPersistence {
+                            flow: OAuthFlow::AuthorizationCode,
+                            metadata: login.login.metadata,
+                            token: login.login.token,
+                            client_identity: auth::oauth::OAuthClientIdentity {
+                                client_id: Some(login.client_id),
+                                client_secret: login.client_secret,
+                                registration_issuer: login.client_registration_issuer,
+                            },
+                            scopes: session.scopes,
+                        },
                     )
                 }
                 Err(err) => {
@@ -7274,7 +7279,13 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                 resource_metadata_url,
             );
 
-            let (metadata, token, resolved_client_id, resolved_client_secret) = match flow {
+            let (
+                metadata,
+                token,
+                resolved_client_id,
+                resolved_client_secret,
+                client_registration_issuer,
+            ) = match flow {
                 OAuthFlow::DeviceCode => {
                     let client_id = client_id.clone().ok_or_else(|| {
                         UxcError::InvalidArguments(
@@ -7294,6 +7305,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                         login.token,
                         Some(client_id),
                         client_secret.clone(),
+                        None,
                     )
                 }
                 OAuthFlow::AuthorizationCode => {
@@ -7319,6 +7331,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                         login.login.token,
                         Some(login.client_id),
                         login.client_secret,
+                        login.client_registration_issuer,
                     )
                 }
                 OAuthFlow::ClientCredentials => {
@@ -7346,17 +7359,23 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
                         login.token,
                         Some(client_id),
                         Some(client_secret),
+                        None,
                     )
                 }
             };
             persist_oauth_login(
                 credential_id,
-                flow,
-                metadata,
-                token,
-                resolved_client_id,
-                resolved_client_secret,
-                scopes,
+                OAuthLoginPersistence {
+                    flow,
+                    metadata,
+                    token,
+                    client_identity: auth::oauth::OAuthClientIdentity {
+                        client_id: resolved_client_id,
+                        client_secret: resolved_client_secret,
+                        registration_issuer: client_registration_issuer,
+                    },
+                    scopes,
+                },
             )
         }
         AuthOauthCommands::Refresh { credential_id } => {
@@ -7444,14 +7463,17 @@ fn build_oauth_discovery_overrides(
     }
 }
 
-fn persist_oauth_login(
-    credential_id: &str,
+struct OAuthLoginPersistence {
     flow: OAuthFlow,
     metadata: auth::oauth::OAuthProviderMetadata,
     token: auth::oauth::OAuthTokenResponse,
-    resolved_client_id: Option<String>,
-    resolved_client_secret: Option<String>,
+    client_identity: auth::oauth::OAuthClientIdentity,
     scopes: Vec<String>,
+}
+
+fn persist_oauth_login(
+    credential_id: &str,
+    login: OAuthLoginPersistence,
 ) -> Result<OutputEnvelope> {
     let mut profiles = Profiles::load_profiles()?;
     let mut profile_obj = profiles
@@ -7461,12 +7483,11 @@ fn persist_oauth_login(
     profile_obj.name = Some(credential_id.to_string());
     auth::oauth::apply_token_to_profile(
         &mut profile_obj,
-        flow,
-        metadata,
-        token,
-        resolved_client_id,
-        resolved_client_secret,
-        scopes,
+        login.flow,
+        login.metadata,
+        login.token,
+        login.client_identity,
+        login.scopes,
     );
     profiles.set_profile(credential_id.to_string(), profile_obj.clone())?;
     profiles.save_profiles()?;

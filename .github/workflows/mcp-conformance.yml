@@ -1,0 +1,52 @@
+name: MCP Conformance
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/adapters/mcp/**"
+      - "src/auth/**"
+      - "src/daemon.rs"
+      - "src/main.rs"
+      - "tests/conformance/**"
+      - "scripts/run-mcp-conformance.sh"
+      - ".github/workflows/mcp-conformance.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/adapters/mcp/**"
+      - "src/auth/**"
+      - "src/daemon.rs"
+      - "src/main.rs"
+      - "tests/conformance/**"
+      - "scripts/run-mcp-conformance.sh"
+      - ".github/workflows/mcp-conformance.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: mcp-conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  client:
+    name: Client requirements (2026-07-28)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: "22"
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mcp-conformance
+
+      - name: Run MCP client conformance
+        run: scripts/run-mcp-conformance.sh --verbose

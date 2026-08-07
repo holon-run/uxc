@@ -20,6 +20,8 @@ const MATRIX_DEVICE_SCOPE_PREFIX: &str = "urn:matrix:org.matrix.msc2967.client:d
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthProviderMetadata {
     pub provider_issuer: Option<String>,
+    #[serde(default)]
+    pub authorization_response_iss_parameter_supported: bool,
     pub resource_metadata_url: Option<String>,
     pub authorization_server: Option<String>,
     pub authorization_endpoint: Option<String>,
@@ -85,6 +87,14 @@ pub struct AuthorizationCodeLoginResult {
     pub login: OAuthLoginResult,
     pub client_id: String,
     pub client_secret: Option<String>,
+    pub client_registration_issuer: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OAuthClientIdentity {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub registration_issuer: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +210,8 @@ struct OpenIdConfiguration {
     token_endpoint: String,
     #[serde(default)]
     device_authorization_endpoint: Option<String>,
+    #[serde(default)]
+    authorization_response_iss_parameter_supported: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +225,8 @@ struct AuthorizationServerMetadata {
     token_endpoint: String,
     #[serde(default)]
     device_authorization_endpoint: Option<String>,
+    #[serde(default)]
+    authorization_response_iss_parameter_supported: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,8 +323,7 @@ pub fn apply_token_to_profile(
     flow: OAuthFlow,
     metadata: OAuthProviderMetadata,
     token: OAuthTokenResponse,
-    client_id: Option<String>,
-    client_secret: Option<String>,
+    client: OAuthClientIdentity,
     scopes: Vec<String>,
 ) {
     let expires_at = token.expires_in.map(|seconds| now_unix() + seconds);
@@ -329,12 +342,13 @@ pub fn apply_token_to_profile(
     profile.api_key = access_token.clone();
     profile.oauth = Some(OAuthProfile {
         provider_issuer: metadata.provider_issuer,
+        client_registration_issuer: client.registration_issuer,
         resource_metadata_url: metadata.resource_metadata_url,
         authorization_server: metadata.authorization_server,
         token_endpoint: Some(metadata.token_endpoint),
         device_authorization_endpoint: metadata.device_authorization_endpoint,
-        client_id,
-        client_secret,
+        client_id: client.client_id,
+        client_secret: client.client_secret,
         access_token: Some(access_token),
         refresh_token: token.refresh_token,
         token_type: token.token_type,
@@ -393,6 +407,7 @@ pub async fn discover_provider_metadata_with_requirements(
         }
         return Ok(OAuthProviderMetadata {
             provider_issuer,
+            authorization_response_iss_parameter_supported: false,
             resource_metadata_url: overrides.resource_metadata_url.clone(),
             authorization_server,
             authorization_endpoint,
@@ -438,6 +453,7 @@ pub async fn discover_provider_metadata_with_requirements(
     ) {
         return Ok(OAuthProviderMetadata {
             provider_issuer,
+            authorization_response_iss_parameter_supported: false,
             resource_metadata_url: overrides.resource_metadata_url.clone(),
             authorization_server,
             authorization_endpoint,
@@ -482,6 +498,7 @@ pub async fn discover_provider_metadata_with_requirements(
     }
 
     let mut metadata_fetch_errors: Vec<String> = Vec::new();
+    let mut authorization_response_iss_parameter_supported = false;
 
     if let Some(issuer) = authorization_server.clone() {
         let should_fetch_provider_metadata = !requirements.is_satisfied(
@@ -559,6 +576,12 @@ pub async fn discover_provider_metadata_with_requirements(
                 .or_else(|| openid.as_ref().and_then(|config| config.issuer.clone()))
                 .or(Some(issuer.clone()));
         }
+        authorization_response_iss_parameter_supported = authorization_server_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.authorization_response_iss_parameter_supported)
+            || openid
+                .as_ref()
+                .is_some_and(|metadata| metadata.authorization_response_iss_parameter_supported);
     }
 
     let token_endpoint = token_endpoint.ok_or_else(|| {
@@ -575,6 +598,7 @@ pub async fn discover_provider_metadata_with_requirements(
 
     Ok(OAuthProviderMetadata {
         provider_issuer,
+        authorization_response_iss_parameter_supported,
         resource_metadata_url,
         authorization_server,
         authorization_endpoint,
@@ -648,9 +672,20 @@ pub async fn prepare_authorization_code_login(
             "OAuth provider does not expose authorization_endpoint".to_string(),
         )
     })?;
-    let (resolved_client_id, resolved_client_secret) = match client_id {
-        Some(id) => (id.to_string(), client_secret.map(|s| s.to_string())),
-        None => dynamic_client_registration(&metadata, client, redirect_uri, scopes).await?,
+    let (resolved_client_id, resolved_client_secret, client_registration_issuer) = match client_id {
+        Some(id) => (id.to_string(), client_secret.map(|s| s.to_string()), None),
+        None => {
+            let (registered_id, registered_secret) =
+                dynamic_client_registration(&metadata, client, redirect_uri, scopes).await?;
+            (
+                registered_id,
+                registered_secret,
+                metadata
+                    .provider_issuer
+                    .clone()
+                    .or_else(|| metadata.authorization_server.clone()),
+            )
+        }
     };
 
     let state = random_urlsafe(24)?;
@@ -682,6 +717,7 @@ pub async fn prepare_authorization_code_login(
             metadata,
             client_id: resolved_client_id,
             client_secret: resolved_client_secret,
+            client_registration_issuer,
             state,
             code_verifier,
             created_at,
@@ -696,18 +732,17 @@ pub async fn finish_authorization_code_login(
     session: &PendingAuthorizationCodeSession,
     authorization_response: &str,
 ) -> std::result::Result<AuthorizationCodeLoginResult, SessionCompletionError> {
-    let (code, returned_state) = parse_authorization_code_input(authorization_response)
-        .ok_or_else(|| {
-            SessionCompletionError::new(
-                UxcError::OAuthTokenExchangeFailed(
-                    "Could not parse authorization code from input".to_string(),
-                )
-                .into(),
-                false,
+    let response = parse_authorization_code_input(authorization_response).ok_or_else(|| {
+        SessionCompletionError::new(
+            UxcError::OAuthTokenExchangeFailed(
+                "Could not parse authorization code from input".to_string(),
             )
-        })?;
+            .into(),
+            false,
+        )
+    })?;
 
-    if let Some(returned_state) = returned_state {
+    if let Some(returned_state) = response.state {
         if returned_state != session.state {
             return Err(SessionCompletionError::new(
                 UxcError::OAuthTokenExchangeFailed(
@@ -719,9 +754,51 @@ pub async fn finish_authorization_code_login(
         }
     }
 
+    if session
+        .metadata
+        .authorization_response_iss_parameter_supported
+        && response.issuer.is_none()
+    {
+        return Err(SessionCompletionError::new(
+            UxcError::OAuthTokenExchangeFailed(
+                "OAuth authorization response omitted required 'iss' parameter".to_string(),
+            )
+            .into(),
+            true,
+        ));
+    }
+
+    if let Some(returned_issuer) = response.issuer {
+        let expected_issuer = session
+            .metadata
+            .provider_issuer
+            .as_deref()
+            .or(session.metadata.authorization_server.as_deref())
+            .ok_or_else(|| {
+                SessionCompletionError::new(
+                    UxcError::OAuthTokenExchangeFailed(
+                        "OAuth authorization response included 'iss', but the expected issuer is unknown"
+                            .to_string(),
+                    )
+                    .into(),
+                    true,
+                )
+            })?;
+        if returned_issuer != expected_issuer {
+            return Err(SessionCompletionError::new(
+                UxcError::OAuthTokenExchangeFailed(format!(
+                    "OAuth issuer mismatch from authorization response: expected '{}', received '{}'",
+                    expected_issuer, returned_issuer
+                ))
+                .into(),
+                true,
+            ));
+        }
+    }
+
     let mut form: HashMap<&str, String> = HashMap::new();
     form.insert("grant_type", "authorization_code".to_string());
-    form.insert("code", code);
+    form.insert("code", response.code);
     form.insert("redirect_uri", session.redirect_uri.clone());
     form.insert("client_id", session.client_id.clone());
     form.insert("code_verifier", session.code_verifier.clone());
@@ -747,6 +824,7 @@ pub async fn finish_authorization_code_login(
         },
         client_id: session.client_id.clone(),
         client_secret: session.client_secret.clone(),
+        client_registration_issuer: session.client_registration_issuer.clone(),
     })
 }
 
@@ -989,6 +1067,7 @@ pub async fn refresh_oauth_profile(
         .as_mut()
         .ok_or_else(|| UxcError::OAuthRefreshFailed("OAuth profile data is missing".to_string()))?;
 
+    refresh_dynamic_client_registration_metadata(oauth, client, endpoint_hint).await?;
     let token_endpoint = resolve_token_endpoint(oauth, client).await?;
 
     if let Some(refresh_token) = oauth.refresh_token.clone() {
@@ -1039,6 +1118,80 @@ pub async fn refresh_oauth_profile(
     }
 
     Err(UxcError::OAuthRequired(oauth_login_required_message(profile, endpoint_hint)).into())
+}
+
+fn validate_client_registration_issuer(oauth: &OAuthProfile) -> Result<()> {
+    let Some(registration_issuer) = oauth.client_registration_issuer.as_deref() else {
+        return Ok(());
+    };
+    let current_issuer = oauth
+        .provider_issuer
+        .as_deref()
+        .or(oauth.authorization_server.as_deref())
+        .ok_or_else(|| {
+            UxcError::OAuthRefreshFailed(
+                "Dynamically registered OAuth client is missing its current issuer binding"
+                    .to_string(),
+            )
+        })?;
+    if current_issuer != registration_issuer {
+        return Err(UxcError::OAuthRefreshFailed(format!(
+            "Dynamically registered OAuth client belongs to issuer '{}', not '{}'; start a new OAuth login",
+            registration_issuer, current_issuer
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+async fn refresh_dynamic_client_registration_metadata(
+    oauth: &mut OAuthProfile,
+    client: &Client,
+    endpoint_hint: Option<&str>,
+) -> Result<()> {
+    if oauth.client_registration_issuer.is_none() {
+        return Ok(());
+    }
+
+    let Some(endpoint) = endpoint_hint else {
+        return validate_client_registration_issuer(oauth);
+    };
+    let metadata = discover_provider_metadata(endpoint, client)
+        .await
+        .map_err(|err| {
+            UxcError::OAuthRefreshFailed(format!(
+                "Could not rediscover OAuth issuer for dynamically registered client: {}",
+                err
+            ))
+        })?;
+    let current_issuer = metadata
+        .provider_issuer
+        .as_deref()
+        .or(metadata.authorization_server.as_deref())
+        .ok_or_else(|| {
+            UxcError::OAuthRefreshFailed(
+                "Could not determine current OAuth issuer for dynamically registered client"
+                    .to_string(),
+            )
+        })?;
+    let registration_issuer = oauth
+        .client_registration_issuer
+        .as_deref()
+        .expect("checked above");
+    if current_issuer != registration_issuer {
+        return Err(UxcError::OAuthRefreshFailed(format!(
+            "Dynamically registered OAuth client belongs to issuer '{}', not '{}'; start a new OAuth login",
+            registration_issuer, current_issuer
+        ))
+        .into());
+    }
+
+    oauth.provider_issuer = metadata.provider_issuer;
+    oauth.resource_metadata_url = metadata.resource_metadata_url;
+    oauth.authorization_server = metadata.authorization_server;
+    oauth.token_endpoint = Some(metadata.token_endpoint);
+    oauth.device_authorization_endpoint = metadata.device_authorization_endpoint;
+    Ok(())
 }
 
 pub fn parse_scopes(scopes: &[String]) -> Vec<String> {
@@ -1124,6 +1277,7 @@ async fn discover_matrix_auth_metadata(
 
     Ok(Some(OAuthProviderMetadata {
         provider_issuer: Some(metadata.issuer.clone()),
+        authorization_response_iss_parameter_supported: false,
         resource_metadata_url: None,
         authorization_server: Some(metadata.issuer),
         authorization_endpoint: Some(metadata.authorization_endpoint),
@@ -1272,11 +1426,13 @@ async fn fetch_openid_configuration(issuer: &str, client: &Client) -> Result<Ope
 
         match response {
             Ok(resp) if resp.status().is_success() => {
-                return resp
+                let metadata = resp
                     .json::<OpenIdConfiguration>()
                     .await
                     .context("Failed to decode OAuth OpenID configuration")
-                    .map_err(|err| UxcError::OAuthDiscoveryFailed(err.to_string()).into());
+                    .map_err(|err| UxcError::OAuthDiscoveryFailed(err.to_string()))?;
+                validate_discovered_issuer(issuer, metadata.issuer.as_deref())?;
+                return Ok(metadata);
             }
             Ok(resp) => {
                 last_error = Some(anyhow!(
@@ -1315,11 +1471,13 @@ async fn fetch_authorization_server_metadata(
 
         match response {
             Ok(resp) if resp.status().is_success() => {
-                return resp
+                let metadata = resp
                     .json::<AuthorizationServerMetadata>()
                     .await
                     .context("Failed to decode OAuth authorization server metadata")
-                    .map_err(|err| UxcError::OAuthDiscoveryFailed(err.to_string()).into());
+                    .map_err(|err| UxcError::OAuthDiscoveryFailed(err.to_string()))?;
+                validate_discovered_issuer(issuer, metadata.issuer.as_deref())?;
+                return Ok(metadata);
             }
             Ok(resp) => {
                 last_error = Some(anyhow!(
@@ -1340,6 +1498,19 @@ async fn fetch_authorization_server_metadata(
             .unwrap_or_else(|| "Failed to fetch OAuth authorization server metadata".to_string()),
     )
     .into())
+}
+
+fn validate_discovered_issuer(expected: &str, discovered: Option<&str>) -> Result<()> {
+    if let Some(discovered) = discovered {
+        if discovered != expected {
+            return Err(UxcError::OAuthDiscoveryFailed(format!(
+                "OAuth metadata issuer mismatch: expected '{}', received '{}'",
+                expected, discovered
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn metadata_candidates(issuer: &str, well_known: &str) -> Result<Vec<String>> {
@@ -1460,36 +1631,53 @@ fn read_authorization_code_from_stdin() -> Option<String> {
     }
 }
 
-/// Extract code and state parameters from a URL's query string.
-/// Returns Some((code, state)) if code is found, None otherwise.
-fn extract_code_and_state_from_query(url: &Url) -> Option<(String, Option<String>)> {
+#[derive(Debug, PartialEq, Eq)]
+struct AuthorizationCodeInput {
+    code: String,
+    state: Option<String>,
+    issuer: Option<String>,
+}
+
+/// Extract code, state, and issuer parameters from a URL's query string.
+fn extract_authorization_code_from_query(url: &Url) -> Option<AuthorizationCodeInput> {
     let mut code: Option<String> = None;
     let mut state: Option<String> = None;
+    let mut issuer: Option<String> = None;
     for (k, v) in url.query_pairs() {
         if k == "code" {
             code = Some(v.to_string());
         } else if k == "state" {
             state = Some(v.to_string());
+        } else if k == "iss" {
+            issuer = Some(v.to_string());
         }
     }
-    code.map(|c| (c, state))
+    code.map(|code| AuthorizationCodeInput {
+        code,
+        state,
+        issuer,
+    })
 }
 
-fn parse_authorization_code_input(input: &str) -> Option<(String, Option<String>)> {
+fn parse_authorization_code_input(input: &str) -> Option<AuthorizationCodeInput> {
     if let Some((_, query)) = input.split_once('?') {
         // Try parsing as a full URL first
         if let Ok(url) = Url::parse(input) {
-            return extract_code_and_state_from_query(&url);
+            return extract_authorization_code_from_query(&url);
         }
         // Fallback: parse as query string only
         let url_like = format!("https://placeholder.local/?{}", query);
         if let Ok(url) = Url::parse(&url_like) {
-            return extract_code_and_state_from_query(&url);
+            return extract_authorization_code_from_query(&url);
         }
     }
 
     // Plain code input (no query string)
-    Some((input.trim().to_string(), None))
+    Some(AuthorizationCodeInput {
+        code: input.trim().to_string(),
+        state: None,
+        issuer: None,
+    })
 }
 
 async fn exchange_token(
@@ -1649,24 +1837,136 @@ mod tests {
     #[test]
     fn parse_authorization_code_input_supports_plain_code() {
         let parsed = parse_authorization_code_input("abc123").unwrap();
-        assert_eq!(parsed.0, "abc123");
-        assert!(parsed.1.is_none());
+        assert_eq!(parsed.code, "abc123");
+        assert!(parsed.state.is_none());
+        assert!(parsed.issuer.is_none());
     }
 
     #[test]
     fn parse_authorization_code_input_supports_callback_url() {
-        let parsed =
-            parse_authorization_code_input("http://127.0.0.1/callback?code=abc123&state=xyz")
-                .unwrap();
-        assert_eq!(parsed.0, "abc123");
-        assert_eq!(parsed.1.as_deref(), Some("xyz"));
+        let parsed = parse_authorization_code_input(
+            "http://127.0.0.1/callback?code=abc123&state=xyz&iss=https%3A%2F%2Fissuer.example.com",
+        )
+        .unwrap();
+        assert_eq!(parsed.code, "abc123");
+        assert_eq!(parsed.state.as_deref(), Some("xyz"));
+        assert_eq!(parsed.issuer.as_deref(), Some("https://issuer.example.com"));
     }
 
     #[test]
     fn parse_authorization_code_input_supports_query_string_only() {
         let parsed = parse_authorization_code_input("?code=abc123&state=xyz").unwrap();
-        assert_eq!(parsed.0, "abc123");
-        assert_eq!(parsed.1.as_deref(), Some("xyz"));
+        assert_eq!(parsed.code, "abc123");
+        assert_eq!(parsed.state.as_deref(), Some("xyz"));
+        assert!(parsed.issuer.is_none());
+    }
+
+    #[test]
+    fn dynamic_registration_issuer_must_match_current_provider() {
+        let oauth = OAuthProfile {
+            provider_issuer: Some("https://issuer-b.example.com".to_string()),
+            client_registration_issuer: Some("https://issuer-a.example.com".to_string()),
+            ..Default::default()
+        };
+        let error = validate_client_registration_issuer(&oauth)
+            .expect_err("cross-issuer client reuse must be rejected");
+        assert!(error.to_string().contains("belongs to issuer"));
+    }
+
+    #[tokio::test]
+    async fn advertised_authorization_response_issuer_cannot_be_omitted() {
+        let session = PendingAuthorizationCodeSession {
+            version: 1,
+            session_id: "session".to_string(),
+            credential_id: "credential".to_string(),
+            endpoint: "https://resource.example.com/mcp".to_string(),
+            redirect_uri: "http://127.0.0.1/callback".to_string(),
+            scopes: Vec::new(),
+            metadata: OAuthProviderMetadata {
+                provider_issuer: Some("https://issuer.example.com".to_string()),
+                authorization_response_iss_parameter_supported: true,
+                resource_metadata_url: None,
+                authorization_server: Some("https://issuer.example.com".to_string()),
+                authorization_endpoint: Some("https://issuer.example.com/authorize".to_string()),
+                registration_endpoint: None,
+                token_endpoint: "https://issuer.example.com/token".to_string(),
+                device_authorization_endpoint: None,
+            },
+            client_id: "client".to_string(),
+            client_secret: None,
+            client_registration_issuer: None,
+            state: "state".to_string(),
+            code_verifier: "verifier".to_string(),
+            created_at: 1,
+            expires_at: i64::MAX,
+        };
+
+        let error = finish_authorization_code_login(
+            &Client::new(),
+            &session,
+            "http://127.0.0.1/callback?code=code&state=state",
+        )
+        .await
+        .expect_err("advertised iss support must require iss in the response");
+        assert!(error.error.to_string().contains("omitted required 'iss'"));
+        assert!(error.should_remove_session());
+    }
+
+    #[tokio::test]
+    async fn dynamic_registration_is_checked_against_current_endpoint_issuer() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = format!("{}/mcp", server.url());
+        let resource_metadata_url =
+            format!("{}/.well-known/oauth-protected-resource", server.url());
+        let current_issuer = format!("{}/issuer-b", server.url());
+        let _discovery = server
+            .mock("POST", "/mcp")
+            .with_status(401)
+            .with_header(
+                "www-authenticate",
+                &format!(r#"Bearer resource_metadata="{}""#, resource_metadata_url),
+            )
+            .create_async()
+            .await;
+        let _resource_metadata = server
+            .mock("GET", "/.well-known/oauth-protected-resource")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"authorization_servers":["{}"]}}"#,
+                current_issuer
+            ))
+            .create_async()
+            .await;
+        let _authorization_server_metadata = server
+            .mock("GET", "/.well-known/oauth-authorization-server/issuer-b")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"issuer":"{0}","token_endpoint":"{0}/token"}}"#,
+                current_issuer
+            ))
+            .create_async()
+            .await;
+
+        let mut oauth = OAuthProfile {
+            provider_issuer: Some("https://issuer-a.example.com".to_string()),
+            client_registration_issuer: Some("https://issuer-a.example.com".to_string()),
+            token_endpoint: Some("https://issuer-a.example.com/token".to_string()),
+            ..Default::default()
+        };
+        let error = refresh_dynamic_client_registration_metadata(
+            &mut oauth,
+            &Client::new(),
+            Some(&endpoint),
+        )
+        .await
+        .expect_err("current endpoint issuer must constrain dynamic client reuse");
+        assert!(error.to_string().contains("belongs to issuer"));
+        assert_eq!(
+            oauth.token_endpoint.as_deref(),
+            Some("https://issuer-a.example.com/token")
+        );
     }
 
     #[test]

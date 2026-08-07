@@ -214,6 +214,120 @@ fn oauth_complete_success_persists_profile_and_removes_session() {
 }
 
 #[test]
+fn oauth_complete_accepts_matching_authorization_response_issuer() {
+    let files = AuthFiles::new();
+    let mut server = mockito::Server::new();
+    let issuer = server.url();
+
+    let start = uxc_command(&files)
+        .args(["auth", "oauth", "start", "notion"])
+        .arg("--endpoint")
+        .arg("https://api.example.com/mcp")
+        .arg("--redirect-uri")
+        .arg("http://127.0.0.1:11111/callback")
+        .arg("--client-id")
+        .arg("client-1")
+        .arg("--issuer")
+        .arg(&issuer)
+        .arg("--authorization-endpoint")
+        .arg(format!("{issuer}/authorize"))
+        .arg("--token-endpoint")
+        .arg(format!("{issuer}/token"))
+        .output()
+        .expect("oauth start should run");
+    assert!(start.status.success(), "oauth start should succeed");
+    let start_json = parse_stdout_json(&start);
+    let session_id = start_json["data"]["session_id"].as_str().unwrap();
+    let session_json = read_session_json(&files, session_id);
+    let state = session_json["state"].as_str().unwrap();
+
+    let _token_mock = server
+        .mock("POST", "/token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"access_token":"access-1","token_type":"bearer"}"#)
+        .create();
+    let mut callback = url::Url::parse("http://127.0.0.1:11111/callback").unwrap();
+    callback
+        .query_pairs_mut()
+        .append_pair("code", "abc123")
+        .append_pair("state", state)
+        .append_pair("iss", &issuer);
+
+    let complete = uxc_command(&files)
+        .args(["auth", "oauth", "complete", "notion"])
+        .arg("--session-id")
+        .arg(session_id)
+        .arg("--authorization-response")
+        .arg(callback.as_str())
+        .output()
+        .expect("oauth complete should run");
+
+    assert!(
+        complete.status.success(),
+        "matching authorization response issuer should succeed"
+    );
+}
+
+#[test]
+fn oauth_complete_rejects_mismatched_authorization_response_issuer() {
+    let files = AuthFiles::new();
+    let server = mockito::Server::new();
+
+    let start = uxc_command(&files)
+        .args(["auth", "oauth", "start", "notion"])
+        .arg("--endpoint")
+        .arg("https://api.example.com/mcp")
+        .arg("--redirect-uri")
+        .arg("http://127.0.0.1:11111/callback")
+        .arg("--client-id")
+        .arg("client-1")
+        .arg("--issuer")
+        .arg("https://issuer.example.com")
+        .arg("--authorization-endpoint")
+        .arg(format!("{}/authorize", server.url()))
+        .arg("--token-endpoint")
+        .arg(format!("{}/token", server.url()))
+        .output()
+        .expect("oauth start should run");
+    assert!(start.status.success(), "oauth start should succeed");
+    let start_json = parse_stdout_json(&start);
+    let session_id = start_json["data"]["session_id"].as_str().unwrap();
+    let session_json = read_session_json(&files, session_id);
+    let state = session_json["state"].as_str().unwrap();
+    let mut callback = url::Url::parse("http://127.0.0.1:11111/callback").unwrap();
+    callback
+        .query_pairs_mut()
+        .append_pair("code", "abc123")
+        .append_pair("state", state)
+        .append_pair("iss", "https://attacker.example.com");
+
+    let complete = uxc_command(&files)
+        .args(["auth", "oauth", "complete", "notion"])
+        .arg("--session-id")
+        .arg(session_id)
+        .arg("--authorization-response")
+        .arg(callback.as_str())
+        .output()
+        .expect("oauth complete should run");
+
+    assert!(!complete.status.success(), "issuer mismatch should fail");
+    let json = parse_stdout_json(&complete);
+    assert_eq!(json["error"]["code"], "OAUTH_TOKEN_EXCHANGE_FAILED");
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("issuer mismatch"));
+    assert!(
+        !files
+            .session_dir
+            .join(format!("{}.json", session_id))
+            .exists(),
+        "issuer mismatch should delete the session"
+    );
+}
+
+#[test]
 fn oauth_complete_missing_session_returns_structured_error() {
     let files = AuthFiles::new();
 
@@ -468,6 +582,12 @@ fn oauth_start_supports_dynamic_client_registration() {
             .unwrap_or_default()
             .contains("registered-client"),
         "registered client id should be used in authorization URL"
+    );
+    let session_id = json["data"]["session_id"].as_str().unwrap();
+    let session_json = read_session_json(&files, session_id);
+    assert_eq!(
+        session_json["client_registration_issuer"],
+        "https://api.example.com"
     );
 }
 
