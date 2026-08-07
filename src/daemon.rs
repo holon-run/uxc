@@ -8562,7 +8562,7 @@ fn lookup_schema_cache(
     policy: cache::CacheReadPolicy,
 ) -> Result<Option<(cache::CacheHit, String)>> {
     let mcp_cache_key = adapters::mcp::McpAdapter::schema_cache_key_for(url, auth_profile);
-    for cache_key in [url.to_string(), mcp_cache_key] {
+    for cache_key in [mcp_cache_key, url.to_string()] {
         if let cache::CacheLookup::Hit(hit) = cache.get_with_policy(&cache_key, policy)? {
             return Ok(Some((hit, cache_key)));
         }

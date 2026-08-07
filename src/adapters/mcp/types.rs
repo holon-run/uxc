@@ -2,10 +2,11 @@
 
 #![allow(non_snake_case)]
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const MCP_LIST_MAX_PAGES: usize = 100;
 pub const MCP_LIST_MAX_ITEMS: usize = 10_000;
@@ -510,6 +511,80 @@ pub trait McpListPage {
     type Item;
 
     fn into_parts(self) -> (Vec<Self::Item>, McpListPageMetadata);
+}
+
+pub struct McpCatalogPaginator<T> {
+    method: String,
+    items: Vec<T>,
+    metadata: McpListCatalogMetadata,
+    next_cursor: Option<String>,
+    seen_cursors: HashSet<String>,
+}
+
+impl<T> McpCatalogPaginator<T> {
+    pub fn new(method: &str) -> Self {
+        Self {
+            method: method.to_string(),
+            items: Vec::new(),
+            metadata: McpListCatalogMetadata::default(),
+            next_cursor: None,
+            seen_cursors: HashSet::new(),
+        }
+    }
+
+    pub fn next_request_params(&self) -> Result<Option<JsonValue>> {
+        if self.metadata.pageCount >= MCP_LIST_MAX_PAGES {
+            bail!(
+                "MCP {} pagination exceeded maximum of {} pages",
+                self.method,
+                MCP_LIST_MAX_PAGES
+            );
+        }
+        Ok(self
+            .next_cursor
+            .as_ref()
+            .map(|cursor| serde_json::json!({ "cursor": cursor })))
+    }
+
+    pub fn absorb_response<R>(&mut self, result: JsonValue) -> Result<bool>
+    where
+        R: DeserializeOwned + McpListPage<Item = T>,
+    {
+        let response: R = serde_json::from_value(result)
+            .with_context(|| format!("Failed to parse {} response", self.method))?;
+        let (page_items, page_metadata) = response.into_parts();
+        self.metadata.absorb_page(&page_metadata, page_items.len());
+        if self.metadata.itemCount > MCP_LIST_MAX_ITEMS {
+            bail!(
+                "MCP {} pagination exceeded maximum of {} items",
+                self.method,
+                MCP_LIST_MAX_ITEMS
+            );
+        }
+        self.items.extend(page_items);
+
+        match page_metadata.nextCursor {
+            Some(cursor) => {
+                if !self.seen_cursors.insert(cursor.clone()) {
+                    bail!(
+                        "MCP {} pagination detected cursor cycle at '{}'",
+                        self.method,
+                        cursor
+                    );
+                }
+                self.next_cursor = Some(cursor);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub fn finish(self) -> McpListCatalog<T> {
+        McpListCatalog {
+            items: self.items,
+            metadata: self.metadata,
+        }
+    }
 }
 
 fn merge_cache_scope(current: Option<String>, next: Option<String>) -> Option<String> {

@@ -7,10 +7,9 @@ use super::types::*;
 use super::McpExecutionOptions;
 use crate::error::{structured_error_from_anyhow, StructuredError};
 use anyhow::{bail, Context, Result};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -549,58 +548,19 @@ impl McpStdioClient {
 
     async fn list_catalog<T, R>(&mut self, method: &str) -> Result<McpListCatalog<T>>
     where
-        R: DeserializeOwned + McpListPage<Item = T>,
+        R: serde::de::DeserializeOwned + McpListPage<Item = T>,
     {
-        let mut items = Vec::new();
-        let mut metadata = McpListCatalogMetadata::default();
-        let mut next_cursor = None;
-        let mut seen_cursors = HashSet::new();
-
+        let mut paginator = McpCatalogPaginator::new(method);
         loop {
-            if metadata.pageCount >= MCP_LIST_MAX_PAGES {
-                bail!(
-                    "MCP {} pagination exceeded maximum of {} pages",
-                    method,
-                    MCP_LIST_MAX_PAGES
-                );
-            }
-
-            let params = next_cursor
-                .as_ref()
-                .map(|cursor| json!({ "cursor": cursor }));
+            let params = paginator.next_request_params()?;
             let result = self
                 .send_request(method, params)
                 .await
                 .with_context(|| format!("Failed to fetch {}", method))?;
-            let response: R = serde_json::from_value(result)
-                .with_context(|| format!("Failed to parse {} response", method))?;
-            let (page_items, page_metadata) = response.into_parts();
-            metadata.absorb_page(&page_metadata, page_items.len());
-            if metadata.itemCount > MCP_LIST_MAX_ITEMS {
-                bail!(
-                    "MCP {} pagination exceeded maximum of {} items",
-                    method,
-                    MCP_LIST_MAX_ITEMS
-                );
-            }
-            items.extend(page_items);
-
-            match page_metadata.nextCursor {
-                Some(cursor) => {
-                    if !seen_cursors.insert(cursor.clone()) {
-                        bail!(
-                            "MCP {} pagination detected cursor cycle at '{}'",
-                            method,
-                            cursor
-                        );
-                    }
-                    next_cursor = Some(cursor);
-                }
-                None => break,
+            if !paginator.absorb_response::<R>(result)? {
+                return Ok(paginator.finish());
             }
         }
-
-        Ok(McpListCatalog { items, metadata })
     }
 
     async fn list_catalog_with_timeout<T, R>(
@@ -609,58 +569,19 @@ impl McpStdioClient {
         timeout: Duration,
     ) -> Result<McpListCatalog<T>>
     where
-        R: DeserializeOwned + McpListPage<Item = T>,
+        R: serde::de::DeserializeOwned + McpListPage<Item = T>,
     {
-        let mut items = Vec::new();
-        let mut metadata = McpListCatalogMetadata::default();
-        let mut next_cursor = None;
-        let mut seen_cursors = HashSet::new();
-
+        let mut paginator = McpCatalogPaginator::new(method);
         loop {
-            if metadata.pageCount >= MCP_LIST_MAX_PAGES {
-                bail!(
-                    "MCP {} pagination exceeded maximum of {} pages",
-                    method,
-                    MCP_LIST_MAX_PAGES
-                );
-            }
-
-            let params = next_cursor
-                .as_ref()
-                .map(|cursor| json!({ "cursor": cursor }));
+            let params = paginator.next_request_params()?;
             let result = self
                 .send_request_with_timeout(method, params, timeout)
                 .await
                 .with_context(|| format!("Failed to fetch {}", method))?;
-            let response: R = serde_json::from_value(result)
-                .with_context(|| format!("Failed to parse {} response", method))?;
-            let (page_items, page_metadata) = response.into_parts();
-            metadata.absorb_page(&page_metadata, page_items.len());
-            if metadata.itemCount > MCP_LIST_MAX_ITEMS {
-                bail!(
-                    "MCP {} pagination exceeded maximum of {} items",
-                    method,
-                    MCP_LIST_MAX_ITEMS
-                );
-            }
-            items.extend(page_items);
-
-            match page_metadata.nextCursor {
-                Some(cursor) => {
-                    if !seen_cursors.insert(cursor.clone()) {
-                        bail!(
-                            "MCP {} pagination detected cursor cycle at '{}'",
-                            method,
-                            cursor
-                        );
-                    }
-                    next_cursor = Some(cursor);
-                }
-                None => break,
+            if !paginator.absorb_response::<R>(result)? {
+                return Ok(paginator.finish());
             }
         }
-
-        Ok(McpListCatalog { items, metadata })
     }
 }
 
