@@ -268,6 +268,17 @@ struct OutboundMessage {
     message: String,
 }
 
+pub struct StdioLongLivedRequest {
+    request_id: RequestId,
+    response_rx: tokio::sync::oneshot::Receiver<JsonRpcResponse>,
+}
+
+impl StdioLongLivedRequest {
+    pub fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+}
+
 impl McpStdioTransport {
     pub fn default_request_timeout() -> Duration {
         Duration::from_millis(DEFAULT_STDIO_REQUEST_TIMEOUT_MS)
@@ -507,55 +518,13 @@ impl McpStdioTransport {
         params: Option<JsonValue>,
         timeout: Duration,
     ) -> Result<JsonValue> {
-        // Get the next ID
-        let id = {
-            let mut id_guard = self.next_id.lock().await;
-            let id = *id_guard;
-            *id_guard += 1;
-            RequestId::Number(id)
-        };
-
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: id.clone(),
-            method: method.to_string(),
-            params,
-        };
-
-        let request_json = serde_json::to_string(&request)?;
-        tracing::debug!("Sending request: {}", request_json);
-
-        let request_tx = self
-            .request_tx
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| anyhow!("Request channel closed"))?;
-
-        // Create a response channel
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-        // Register request id -> response channel before sending the request
-        {
-            let mut channels = self.response_channels.lock().await;
-            channels.insert(id.clone(), response_tx);
-        }
-
-        // Send the request
-        if request_tx
-            .send(OutboundMessage {
-                request_id: Some(id.clone()),
-                message: request_json,
-            })
-            .is_err()
-        {
-            let mut channels = self.response_channels.lock().await;
-            channels.remove(&id);
-            return Err(anyhow!("Request channel closed"));
-        }
+        let StdioLongLivedRequest {
+            request_id: id,
+            mut response_rx,
+        } = self.start_long_lived_request(method, params).await?;
 
         // Wait for the response with timeout so a stuck MCP server/tool call
         // does not block the caller indefinitely.
-        let mut response_rx = response_rx;
         let response = match tokio::select! {
             biased;
             response = &mut response_rx => StdioRequestOutcome::Response(response),
@@ -602,6 +571,85 @@ impl McpStdioTransport {
             }
         };
 
+        Self::response_result(response)
+    }
+
+    pub async fn start_long_lived_request(
+        &mut self,
+        method: &str,
+        params: Option<JsonValue>,
+    ) -> Result<StdioLongLivedRequest> {
+        let id = {
+            let mut id_guard = self.next_id.lock().await;
+            let id = *id_guard;
+            *id_guard += 1;
+            RequestId::Number(id)
+        };
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: id.clone(),
+            method: method.to_string(),
+            params,
+        };
+        let request_json = serde_json::to_string(&request)?;
+        tracing::debug!("Sending request: {}", request_json);
+        let request_tx = self
+            .request_tx
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow!("Request channel closed"))?;
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        self.response_channels
+            .lock()
+            .await
+            .insert(id.clone(), response_tx);
+        if request_tx
+            .send(OutboundMessage {
+                request_id: Some(id.clone()),
+                message: request_json,
+            })
+            .is_err()
+        {
+            self.response_channels.lock().await.remove(&id);
+            return Err(anyhow!("Request channel closed"));
+        }
+        Ok(StdioLongLivedRequest {
+            request_id: id,
+            response_rx,
+        })
+    }
+
+    pub fn poll_long_lived_request(
+        request: &mut StdioLongLivedRequest,
+    ) -> Result<Option<JsonValue>> {
+        match request.response_rx.try_recv() {
+            Ok(response) => Self::response_result(response).map(Some),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => Ok(None),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                Err(anyhow!("Response channel closed"))
+            }
+        }
+    }
+
+    pub async fn cancel_request(
+        &mut self,
+        request_id: &RequestId,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let mut params = serde_json::Map::new();
+        params.insert("requestId".to_string(), serde_json::to_value(request_id)?);
+        if let Some(reason) = reason {
+            params.insert("reason".to_string(), JsonValue::String(reason.to_string()));
+        }
+        self.send_notification("notifications/cancelled", Some(JsonValue::Object(params)))
+            .await
+    }
+
+    pub async fn forget_request(&self, request_id: &RequestId) {
+        self.response_channels.lock().await.remove(request_id);
+    }
+
+    fn response_result(response: JsonRpcResponse) -> Result<JsonValue> {
         if let Some(error) = response.error {
             return Err(structured_error_from_jsonrpc_error(
                 error.code,
@@ -611,7 +659,6 @@ impl McpStdioTransport {
             )
             .into());
         }
-
         response.result.context("No result in response")
     }
 

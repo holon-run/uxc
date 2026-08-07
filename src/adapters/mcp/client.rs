@@ -1,7 +1,8 @@
 //! MCP stdio client implementation
 
 use super::transport::{
-    DefaultStdioProcessExecutor, McpStdioTransport, StdioProcessExecutor, StdioSpawnOptions,
+    DefaultStdioProcessExecutor, McpStdioTransport, StdioLongLivedRequest, StdioProcessExecutor,
+    StdioSpawnOptions,
 };
 use super::types::*;
 use super::McpExecutionOptions;
@@ -32,6 +33,7 @@ pub struct McpStdioClient {
     server_capabilities: Option<ServerCapabilities>,
     server_info: Option<ServerInfo>,
     instructions: Option<String>,
+    subscription: Option<StdioLongLivedRequest>,
 }
 
 impl McpStdioClient {
@@ -156,6 +158,7 @@ impl McpStdioClient {
                         server_capabilities: Some(discover.capabilities),
                         server_info,
                         instructions: discover.instructions,
+                        subscription: None,
                     });
                 }
                 Err(err) => tracing::debug!(
@@ -211,6 +214,7 @@ impl McpStdioClient {
             server_capabilities: Some(init_result.capabilities),
             server_info: init_result.serverInfo,
             instructions: init_result.instructions,
+            subscription: None,
         })
     }
 
@@ -283,6 +287,57 @@ impl McpStdioClient {
 
     pub async fn drain_notifications(&mut self) -> Vec<JsonRpcNotification> {
         self.transport.drain_notifications().await
+    }
+
+    pub async fn start_subscription(&mut self, filter: SubscriptionFilter) -> Result<RequestId> {
+        if self.protocol_context.era != McpProtocolEra::Modern {
+            bail!("subscriptions/listen requires modern MCP");
+        }
+        if filter.is_empty() {
+            bail!("subscriptions/listen requires at least one notification filter");
+        }
+        self.cancel_subscription("subscription filter replaced")
+            .await?;
+        let params = self
+            .protocol_context
+            .modern_request_params(Some(json!({ "notifications": filter })))?;
+        let request = self
+            .transport
+            .start_long_lived_request("subscriptions/listen", Some(params))
+            .await?;
+        let request_id = request.request_id().clone();
+        self.subscription = Some(request);
+        Ok(request_id)
+    }
+
+    pub fn poll_subscription_closed(&mut self) -> Result<Option<JsonValue>> {
+        let Some(request) = self.subscription.as_mut() else {
+            return Ok(None);
+        };
+        match McpStdioTransport::poll_long_lived_request(request) {
+            Ok(Some(result)) => {
+                self.subscription = None;
+                Ok(Some(result))
+            }
+            Ok(None) => Ok(None),
+            Err(err) => {
+                self.subscription = None;
+                Err(err)
+            }
+        }
+    }
+
+    pub async fn cancel_subscription(&mut self, reason: &str) -> Result<()> {
+        let Some(request) = self.subscription.take() else {
+            return Ok(());
+        };
+        let request_id = request.request_id().clone();
+        let cancel_result = self
+            .transport
+            .cancel_request(&request_id, Some(reason))
+            .await;
+        self.transport.forget_request(&request_id).await;
+        cancel_result
     }
 
     pub async fn lifecycle_contract(&mut self, timeout: Duration) -> Result<LifecycleContract> {

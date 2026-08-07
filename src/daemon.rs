@@ -527,6 +527,57 @@ fn should_read_mcp_resource_snapshot(notification: &JsonRpcNotification) -> bool
     notification.method == "notifications/resources/updated"
 }
 
+fn desired_mcp_subscription_filter(
+    resource_subscriptions: &HashMap<String, usize>,
+) -> adapters::mcp::types::SubscriptionFilter {
+    let mut resource_uris = resource_subscriptions.keys().cloned().collect::<Vec<_>>();
+    resource_uris.sort();
+    adapters::mcp::types::SubscriptionFilter {
+        toolsListChanged: Some(true),
+        promptsListChanged: None,
+        resourcesListChanged: None,
+        resourceSubscriptions: (!resource_uris.is_empty()).then_some(resource_uris),
+    }
+}
+
+fn notification_subscription_id(
+    notification: &JsonRpcNotification,
+) -> Option<adapters::mcp::types::RequestId> {
+    notification
+        .params
+        .as_ref()?
+        .get("_meta")?
+        .get("io.modelcontextprotocol/subscriptionId")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
+fn accept_subscription_notification(
+    notification: &JsonRpcNotification,
+    active_subscription_id: Option<&adapters::mcp::types::RequestId>,
+    acknowledged: &mut bool,
+) -> bool {
+    let Some(subscription_id) = notification_subscription_id(notification) else {
+        return true;
+    };
+    if active_subscription_id != Some(&subscription_id) {
+        return false;
+    }
+    if notification.method == "notifications/subscriptions/acknowledged" {
+        if serde_json::from_value::<adapters::mcp::types::SubscriptionsAcknowledgedParams>(
+            notification.params.clone().unwrap_or_default(),
+        )
+        .ok()
+        .and_then(|params| params.subscription_id())
+        .as_ref()
+            == active_subscription_id
+        {
+            *acknowledged = true;
+        }
+        return false;
+    }
+    *acknowledged
+}
+
 async fn append_mcp_resource_snapshot(
     recorder: &mut impl SubscriptionEventRecorder,
     reason: &str,
@@ -808,6 +859,8 @@ struct McpStdioSession {
     tools_dirty: bool,
     notifications: SessionNotificationFanout,
     resource_subscriptions: HashMap<String, usize>,
+    subscription_id: Option<adapters::mcp::types::RequestId>,
+    subscription_acknowledged: bool,
     last_used: Instant,
     last_used_at_unix: u64,
     idle_ttl_secs: u64,
@@ -853,6 +906,8 @@ struct McpHttpSession {
     notifications: Mutex<SessionNotificationFanout>,
     resource_subscriptions: Mutex<HashMap<String, usize>>,
     resource_subscription_ops: Mutex<()>,
+    subscription_id: Mutex<Option<adapters::mcp::types::RequestId>>,
+    subscription_acknowledged: Mutex<bool>,
     lookup_key: String,
     last_used: Mutex<Instant>,
 }
@@ -955,6 +1010,42 @@ struct ManagedSourceRuntimeStateSnapshot {
 }
 
 impl McpStdioSession {
+    fn desired_subscription_filter(&self) -> adapters::mcp::types::SubscriptionFilter {
+        desired_mcp_subscription_filter(&self.resource_subscriptions)
+    }
+
+    async fn restart_modern_subscription(&mut self) -> Result<()> {
+        if self.client.protocol_era() != adapters::mcp::types::McpProtocolEra::Modern {
+            return Ok(());
+        }
+        let request_id = self
+            .client
+            .start_subscription(self.desired_subscription_filter())
+            .await?;
+        self.subscription_id = Some(request_id);
+        self.subscription_acknowledged = false;
+        Ok(())
+    }
+
+    async fn ensure_modern_subscription(&mut self) -> Result<()> {
+        if self.client.protocol_era() != adapters::mcp::types::McpProtocolEra::Modern {
+            return Ok(());
+        }
+        match self.client.poll_subscription_closed() {
+            Ok(Some(_)) => self.restart_modern_subscription().await,
+            Ok(None) if self.subscription_id.is_some() => Ok(()),
+            Ok(None) => self.restart_modern_subscription().await,
+            Err(err) => {
+                tracing::warn!(
+                    endpoint = %self.endpoint,
+                    error = %err,
+                    "Modern MCP stdio subscription ended; reopening"
+                );
+                self.restart_modern_subscription().await
+            }
+        }
+    }
+
     fn apply_lifecycle_notification(&mut self, notification: &JsonRpcNotification) -> Result<bool> {
         if notification.method != "notifications/uxc.lifecycle_changed" {
             return Ok(false);
@@ -1011,6 +1102,13 @@ impl McpStdioSession {
     ) -> Vec<JsonRpcNotification> {
         let mut public_notifications = Vec::new();
         for notification in notifications {
+            if !accept_subscription_notification(
+                &notification,
+                self.subscription_id.as_ref(),
+                &mut self.subscription_acknowledged,
+            ) {
+                continue;
+            }
             if let Err(err) = self.apply_lifecycle_notification(&notification) {
                 tracing::warn!(endpoint = %endpoint, error = %err, "Failed to apply MCP lifecycle notification");
                 continue;
@@ -1035,6 +1133,13 @@ impl McpStdioSession {
         endpoint: &str,
         cache: Option<&Arc<dyn Cache>>,
     ) -> Vec<JsonRpcNotification> {
+        if let Err(err) = self.ensure_modern_subscription().await {
+            tracing::warn!(
+                endpoint = %endpoint,
+                error = %err,
+                "Failed to maintain modern MCP stdio subscription"
+            );
+        }
         let notifications = self.client.drain_notifications().await;
         self.record_notifications(notifications, endpoint, cache)
     }
@@ -1059,6 +1164,15 @@ impl McpStdioSession {
             *count = count.saturating_add(1);
             return Ok(());
         }
+        if self.client.protocol_era() == adapters::mcp::types::McpProtocolEra::Modern {
+            self.resource_subscriptions.insert(uri.to_string(), 1);
+            if let Err(err) = self.restart_modern_subscription().await {
+                self.resource_subscriptions.remove(uri);
+                return Err(err);
+            }
+            let _ = self.sync_notifications(endpoint, cache).await;
+            return Ok(());
+        }
         self.client.subscribe_resource(uri).await?;
         self.resource_subscriptions.insert(uri.to_string(), 1);
         let _ = self.sync_notifications(endpoint, cache).await;
@@ -1079,6 +1193,11 @@ impl McpStdioSession {
             return Ok(());
         }
         self.resource_subscriptions.remove(uri);
+        if self.client.protocol_era() == adapters::mcp::types::McpProtocolEra::Modern {
+            self.restart_modern_subscription().await?;
+            let _ = self.sync_notifications(endpoint, cache).await;
+            return Ok(());
+        }
         self.client.unsubscribe_resource(uri).await?;
         let _ = self.sync_notifications(endpoint, cache).await;
         Ok(())
@@ -1136,8 +1255,53 @@ impl SessionNotificationFanout {
 }
 
 impl McpHttpSession {
+    async fn desired_subscription_filter(&self) -> adapters::mcp::types::SubscriptionFilter {
+        let subscriptions = self.resource_subscriptions.lock().await;
+        desired_mcp_subscription_filter(&subscriptions)
+    }
+
+    async fn restart_modern_subscription(&self) -> Result<()> {
+        if self.transport.protocol_era() != adapters::mcp::types::McpProtocolEra::Modern {
+            return Ok(());
+        }
+        let request_id = self
+            .transport
+            .start_subscription(self.desired_subscription_filter().await)
+            .await?;
+        *self.subscription_id.lock().await = Some(request_id);
+        *self.subscription_acknowledged.lock().await = false;
+        self.notifications.lock().await.clear_stream_error();
+        Ok(())
+    }
+
+    async fn ensure_modern_subscription(&self) -> Result<()> {
+        if self.transport.protocol_era() != adapters::mcp::types::McpProtocolEra::Modern {
+            return Ok(());
+        }
+        let stream_error = self.transport.take_stream_error().await;
+        let needs_start = self.subscription_id.lock().await.is_none();
+        if stream_error.is_none() && !needs_start {
+            return Ok(());
+        }
+        let _op_guard = self.resource_subscription_ops.lock().await;
+        if let Some(err) = stream_error {
+            tracing::warn!(
+                endpoint = %self.lookup_key,
+                error = %err,
+                "Modern MCP HTTP subscription ended; reopening"
+            );
+        }
+        self.restart_modern_subscription().await
+    }
+
     async fn drain_pending_notifications(&self) -> Vec<JsonRpcNotification> {
-        if let Err(err) = self.transport.ensure_notification_stream().await {
+        let stream_result =
+            if self.transport.protocol_era() == adapters::mcp::types::McpProtocolEra::Modern {
+                self.ensure_modern_subscription().await
+            } else {
+                self.transport.ensure_notification_stream().await
+            };
+        if let Err(err) = stream_result {
             self.notifications
                 .lock()
                 .await
@@ -1149,9 +1313,30 @@ impl McpHttpSession {
 
     async fn collect_pending_notifications(&self) -> Vec<JsonRpcNotification> {
         if let Some(error) = self.transport.take_stream_error().await {
-            self.notifications.lock().await.set_stream_error(error);
+            if self.transport.protocol_era() == adapters::mcp::types::McpProtocolEra::Modern {
+                if let Err(restart_error) = self.restart_modern_subscription().await {
+                    self.notifications.lock().await.set_stream_error(format!(
+                        "{}; failed to reopen subscription: {}",
+                        error, restart_error
+                    ));
+                }
+            } else {
+                self.notifications.lock().await.set_stream_error(error);
+            }
         }
         let notifications = self.transport.drain_notifications().await;
+        let active_subscription_id = self.subscription_id.lock().await.clone();
+        let mut acknowledged = self.subscription_acknowledged.lock().await;
+        let notifications = notifications
+            .into_iter()
+            .filter(|notification| {
+                accept_subscription_notification(
+                    notification,
+                    active_subscription_id.as_ref(),
+                    &mut acknowledged,
+                )
+            })
+            .collect::<Vec<_>>();
         self.notifications
             .lock()
             .await
@@ -1174,6 +1359,16 @@ impl McpHttpSession {
         let mut subscriptions = self.resource_subscriptions.lock().await;
         if let Some(count) = subscriptions.get_mut(uri) {
             *count = count.saturating_add(1);
+            return Ok(());
+        }
+        if self.transport.protocol_era() == adapters::mcp::types::McpProtocolEra::Modern {
+            subscriptions.insert(uri.to_string(), 1);
+            drop(subscriptions);
+            if let Err(err) = self.restart_modern_subscription().await {
+                self.resource_subscriptions.lock().await.remove(uri);
+                return Err(err);
+            }
+            let _ = self.collect_pending_notifications().await;
             return Ok(());
         }
         drop(subscriptions);
@@ -1200,6 +1395,11 @@ impl McpHttpSession {
         subscriptions.remove(uri);
         let no_more_subscriptions = subscriptions.is_empty();
         drop(subscriptions);
+        if self.transport.protocol_era() == adapters::mcp::types::McpProtocolEra::Modern {
+            self.restart_modern_subscription().await?;
+            let _ = self.collect_pending_notifications().await;
+            return Ok(());
+        }
         let unsubscribe_result = self.transport.unsubscribe_resource(uri).await;
         if no_more_subscriptions {
             self.transport.shutdown_notification_stream().await;
@@ -1639,7 +1839,7 @@ impl McpSessionManager {
         let created_at_unix = now_unix_secs();
         let command_summary = command_summary_from_endpoint(metadata.endpoint);
         let child_pid = client.child_id();
-        let session = Arc::new(Mutex::new(McpStdioSession {
+        let mut session = McpStdioSession {
             child_pid,
             client,
             schema_cache_key: metadata.schema_cache_key.clone(),
@@ -1647,6 +1847,8 @@ impl McpSessionManager {
             tools_dirty: false,
             notifications: SessionNotificationFanout::default(),
             resource_subscriptions: HashMap::new(),
+            subscription_id: None,
+            subscription_acknowledged: false,
             last_used: Instant::now(),
             last_used_at_unix: created_at_unix,
             idle_ttl_secs: metadata
@@ -1663,7 +1865,9 @@ impl McpSessionManager {
             lifecycle_contract_fetch_state,
             last_lifecycle_update_at_unix: None,
             last_lifecycle_snapshot: None,
-        }));
+        };
+        session.restart_modern_subscription().await?;
+        let session = Arc::new(Mutex::new(session));
 
         {
             let mut map = self.stdio.lock().await;
@@ -2096,9 +2300,12 @@ impl McpSessionManager {
             notifications: Mutex::new(SessionNotificationFanout::default()),
             resource_subscriptions: Mutex::new(HashMap::new()),
             resource_subscription_ops: Mutex::new(()),
+            subscription_id: Mutex::new(None),
+            subscription_acknowledged: Mutex::new(false),
             lookup_key: lookup_key.to_string(),
             last_used: Mutex::new(Instant::now()),
         });
+        session.restart_modern_subscription().await?;
 
         {
             let mut map = self.http.lock().await;
@@ -6408,7 +6615,9 @@ async fn run_mcp_subscription_job(
         .await?;
     {
         let mut guard = session.lock().await;
-        if !guard.client.supports_resource_subscribe() {
+        if guard.client.protocol_era() == adapters::mcp::types::McpProtocolEra::Legacy
+            && !guard.client.supports_resource_subscribe()
+        {
             bail!("MCP server does not support resources.subscribe");
         }
         guard
@@ -9246,6 +9455,80 @@ mod tests {
                 "https://example.com/mcp".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn modern_mcp_subscription_filter_tracks_sorted_resource_uris() {
+        let subscriptions = HashMap::from([
+            ("file:///tmp/z".to_string(), 1),
+            ("file:///tmp/a".to_string(), 2),
+        ]);
+
+        let filter = desired_mcp_subscription_filter(&subscriptions);
+
+        assert_eq!(filter.toolsListChanged, Some(true));
+        assert_eq!(
+            filter.resourceSubscriptions,
+            Some(vec![
+                "file:///tmp/a".to_string(),
+                "file:///tmp/z".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn modern_mcp_subscription_notifications_wait_for_matching_ack() {
+        let active_id = adapters::mcp::types::RequestId::Number(7);
+        let notification = |method: &str, subscription_id: i64| JsonRpcNotification {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params: Some(json!({
+                "_meta": {
+                    "io.modelcontextprotocol/subscriptionId": subscription_id
+                }
+            })),
+        };
+        let acknowledgement = |subscription_id: i64| JsonRpcNotification {
+            jsonrpc: "2.0".to_string(),
+            method: "notifications/subscriptions/acknowledged".to_string(),
+            params: Some(json!({
+                "notifications": {
+                    "toolsListChanged": true
+                },
+                "_meta": {
+                    "io.modelcontextprotocol/subscriptionId": subscription_id
+                }
+            })),
+        };
+        let mut acknowledged = false;
+
+        assert!(!accept_subscription_notification(
+            &notification("notifications/tools/list_changed", 7),
+            Some(&active_id),
+            &mut acknowledged,
+        ));
+        assert!(!accept_subscription_notification(
+            &acknowledgement(8),
+            Some(&active_id),
+            &mut acknowledged,
+        ));
+        assert!(!acknowledged);
+        assert!(!accept_subscription_notification(
+            &acknowledgement(7),
+            Some(&active_id),
+            &mut acknowledged,
+        ));
+        assert!(acknowledged);
+        assert!(accept_subscription_notification(
+            &notification("notifications/tools/list_changed", 7),
+            Some(&active_id),
+            &mut acknowledged,
+        ));
+        assert!(!accept_subscription_notification(
+            &notification("notifications/tools/list_changed", 8),
+            Some(&active_id),
+            &mut acknowledged,
+        ));
     }
 
     #[test]
