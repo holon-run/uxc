@@ -33,11 +33,14 @@ background subscriptions should stay outside one-off CLI processes.
 
 - [Daemon API](./api.md)
   UXC exposes a stable local daemon control plane over a Unix socket using `Content-Length` framed JSON-RPC 2.0.
+  <!-- mdorigin:index kind=article -->
 
 - [Logging and Troubleshooting](./logging.md)
   UXC uses structured logging through `tracing`. Logs go to `stderr` so JSON output on `stdout` remains machine-parseable.
+  <!-- mdorigin:index kind=article -->
 
 - [Run as a Managed Service](./service.md)
   Run `uxc` daemon under a service manager when runtime auth environment must stay stable across requests.
+  <!-- mdorigin:index kind=article -->
 
 <!-- INDEX:END -->

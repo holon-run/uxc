@@ -68,11 +68,24 @@ single-page overview.
 <!-- INDEX:START -->
 
 - [Auth](./auth/)
+  <!-- mdorigin:index kind=directory -->
+
 - [Daemon](./daemon/)
+  <!-- mdorigin:index kind=directory -->
+
 - [Ecosystem](./ecosystem/)
+  <!-- mdorigin:index kind=directory -->
+
 - [Getting Started](./getting-started/)
+  <!-- mdorigin:index kind=directory -->
+
 - [Protocols](./protocols/)
+  <!-- mdorigin:index kind=directory -->
+
 - [Reference](./reference/)
+  <!-- mdorigin:index kind=directory -->
+
 - [Skills](./skills/)
+  <!-- mdorigin:index kind=directory -->
 
 <!-- INDEX:END -->

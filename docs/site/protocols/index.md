@@ -37,5 +37,6 @@ feel consistent across them.
 
 - [MCP](./mcp.md)
   UXC supports MCP servers over Streamable HTTP and stdio while preserving compatibility across the stateful and stateless protocol eras.
+  <!-- mdorigin:index kind=article -->
 
 <!-- INDEX:END -->

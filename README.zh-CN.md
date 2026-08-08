@@ -108,6 +108,7 @@ MCP-only workflow。
 - 默认返回稳定的 JSON 输出，文本输出为可选模式
 - 可复用的认证凭证和 endpoint binding
 - 面向常用 host 的快捷 link
+- 面向常见编辑器/客户端的 MCP 配置导入
 - daemon 驱动的会话复用和后台订阅
 - 用于本地集成的 TypeScript daemon client
 
@@ -208,7 +209,7 @@ bash install-uxc.sh
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.15.3
+curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.17.0
 ```
 
 Windows 说明：不再支持原生 Windows，请通过 WSL 运行 UXC。
@@ -310,6 +311,7 @@ daemon 合约见 [站点中的 daemon API 文档](https://uxc.holon.run/daemon/a
 ## 文档导航
 
 - 入门： [https://uxc.holon.run/getting-started/](https://uxc.holon.run/getting-started/)
+- MCP 协议支持： [https://uxc.holon.run/protocols/mcp/](https://uxc.holon.run/protocols/mcp/)
 - 免 API key 的公开 endpoint： [https://uxc.holon.run/reference/public-endpoints/](https://uxc.holon.run/reference/public-endpoints/)
 - auth secret 来源： [https://uxc.holon.run/auth/secret-sources/](https://uxc.holon.run/auth/secret-sources/)
 - MCP HTTP OAuth： [https://uxc.holon.run/auth/oauth-mcp-http/](https://uxc.holon.run/auth/oauth-mcp-http/)
