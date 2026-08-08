@@ -5,7 +5,7 @@ UXC presents multiple protocol families through one top-level CLI contract.
 ## Supported Protocols
 
 - OpenAPI / Swagger
-- MCP over HTTP and stdio
+- [MCP over HTTP and stdio](./mcp.md)
 - GraphQL introspection and execution
 - gRPC reflection-based discovery and unary invocation
 - JSON-RPC with OpenRPC-style discovery
@@ -34,5 +34,8 @@ It tries to make discovery, inspection, auth attachment, invocation, and output
 feel consistent across them.
 
 <!-- INDEX:START -->
+
+- [MCP](./mcp.md)
+  UXC supports MCP servers over Streamable HTTP and stdio while preserving compatibility across the stateful and stateless protocol eras.
 
 <!-- INDEX:END -->

@@ -13,6 +13,8 @@ This page summarizes OAuth support for MCP HTTP in UXC.
 - token persistence in the local credential store
 - refresh before expiry
 - one-time refresh and retry on `401 Unauthorized`
+- RFC 9207 authorization response issuer validation
+- issuer binding for dynamically registered clients
 - structured OAuth error reporting
 
 ## Typical Commands
@@ -61,8 +63,11 @@ uxc auth oauth start <credential_id> \
 ```bash
 uxc auth oauth complete <credential_id> \
   --session-id <session_id> \
-  --authorization-response "http://127.0.0.1:11111/callback?code=..."
+  --authorization-response "http://127.0.0.1:11111/callback?code=...&state=...&iss=..."
 ```
+
+If the callback includes `iss`, UXC requires it to match the discovered OAuth
+issuer. Providers that omit `iss` remain supported.
 
 ## Runtime Behavior
 
@@ -71,6 +76,11 @@ When calling MCP HTTP with an OAuth credential:
 1. Refresh before expiry when needed.
 2. Retry once after `401` if refresh succeeds.
 3. Return structured OAuth errors if recovery fails.
+
+Dynamic Client Registration remains available when `--client-id` is omitted.
+The returned client is bound to the registering issuer and is rejected if the
+stored credential is later pointed at another issuer. Client ID Metadata
+Documents are not implemented yet.
 
 ## Common Error Codes
 

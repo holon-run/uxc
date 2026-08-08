@@ -125,6 +125,8 @@ pub struct OAuthProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_issuer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_registration_issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_metadata_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_server: Option<String>,

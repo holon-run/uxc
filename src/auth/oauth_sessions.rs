@@ -22,6 +22,8 @@ pub struct PendingAuthorizationCodeSession {
     pub client_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_registration_issuer: Option<String>,
     pub state: String,
     pub code_verifier: String,
     pub created_at: i64,
@@ -178,6 +180,7 @@ mod tests {
             scopes: vec!["openid".to_string()],
             metadata: OAuthProviderMetadata {
                 provider_issuer: Some("https://issuer.example.com".to_string()),
+                authorization_response_iss_parameter_supported: false,
                 resource_metadata_url: None,
                 authorization_server: None,
                 authorization_endpoint: Some("https://issuer.example.com/authorize".to_string()),
@@ -187,6 +190,7 @@ mod tests {
             },
             client_id: "client-id".to_string(),
             client_secret: None,
+            client_registration_issuer: None,
             state: "state".to_string(),
             code_verifier: "verifier".to_string(),
             created_at: 100,

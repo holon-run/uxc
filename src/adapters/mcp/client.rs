@@ -898,6 +898,8 @@ mod tests {
         let script = r#"
             read line
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 29
             read line
             echo '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Tool executed successfully"}],"structuredContent":{"message":"Tool executed successfully"}}}'
         "#;
@@ -965,6 +967,8 @@ mod tests {
         let script = r#"
             read line
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"resources":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 30
             read line
             echo '{"jsonrpc":"2.0","id":2,"result":{"resources":[{"name":"test_resource","uri":"test://resource","description":"A test resource"}]}}'
         "#;
@@ -1008,6 +1012,8 @@ mod tests {
         let script = r#"
             read line
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"resources":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 31
             read line
             echo '{"jsonrpc":"2.0","id":2,"result":{"contents":[{"uri":"test://resource"}]}}'
         "#;
@@ -1045,6 +1051,8 @@ mod tests {
         let script = r#"
             read line
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"prompts":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 32
             read line
             echo '{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"test_prompt","description":"A test prompt"}]}}'
         "#;
@@ -1086,6 +1094,8 @@ mod tests {
         let script = r#"
             read line
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"prompts":{}},"serverInfo":{"name":"test","version":"1.0"}}}'
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 33
             read line
             echo '{"jsonrpc":"2.0","id":2,"result":{"description":"Test prompt","messages":[{"role":"user","content":"Test content"}]}}'
         "#;
@@ -1165,7 +1175,10 @@ mod tests {
         let script = r#"
             read line
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1.0"}}}'
-            read line
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 1
+            read lifecycle
+            echo "$lifecycle" | grep -q '"method":"uxc/lifecycle_contract"' || exit 2
             echo '{"jsonrpc":"2.0","id":2,"result":{"reap_policy":"stateful"}}'
         "#;
 
@@ -1185,7 +1198,10 @@ mod tests {
         let script = r#"
             read line
             echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1.0"}}}'
-            read line
+            read initialized
+            echo "$initialized" | grep -q '"method":"notifications/initialized"' || exit 1
+            read lifecycle
+            echo "$lifecycle" | grep -q '"method":"uxc/lifecycle_contract"' || exit 2
             echo '{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}'
         "#;
 
