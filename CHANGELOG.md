@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-08
+
+### Added
+- MCP 2026-07-28 dual-era compatibility: protocol negotiation for stdio (#428), modern Streamable HTTP transport (#429), results pagination and cache with MRTR execution controls (#431), subscriptions/listen and daemon integration (#432), OAuth issuer (RFC 9207) hardening and conformance test harness (#433).
+- MCP documentation page covering protocol lifecycle, transport modes, and auth flows.
+
+### Fixed
+- Aligned Holon CI trigger configuration to match upstream workflow expectations (#430).
+
 ## [0.16.0] - 2026-07-15
 
 ### Added
