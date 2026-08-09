@@ -24,8 +24,10 @@ These remain repository docs rather than public site pages:
 
 - [Public Endpoints](./public-endpoints.md)
   These endpoints are useful for protocol availability checks without API keys.
+  <!-- mdorigin:index kind=article -->
 
 - [Schema Mapping](./schema-mapping.md)
   Some services expose runtime APIs and OpenAPI schemas at different URLs.
+  <!-- mdorigin:index kind=article -->
 
 <!-- INDEX:END -->

@@ -28,8 +28,10 @@ individual command.
 
 - [MCP HTTP OAuth](./oauth-mcp-http.md)
   This page summarizes OAuth support for MCP HTTP in UXC.
+  <!-- mdorigin:index kind=article -->
 
 - [Secret Sources](./secret-sources.md)
   UXC supports two layers of non-OAuth auth values:
+  <!-- mdorigin:index kind=article -->
 
 <!-- INDEX:END -->

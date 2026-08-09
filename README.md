@@ -214,7 +214,7 @@ bash install-uxc.sh
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.15.3
+curl -fsSL https://raw.githubusercontent.com/holon-run/uxc/main/scripts/install.sh | bash -s -- -v v0.17.0
 ```
 
 Windows note: native Windows is no longer supported; run UXC through WSL.
@@ -317,6 +317,7 @@ See [the daemon API docs](https://uxc.holon.run/daemon/api/) for the daemon cont
 ## Docs Map
 
 - getting started: [https://uxc.holon.run/getting-started/](https://uxc.holon.run/getting-started/)
+- MCP protocol support: [https://uxc.holon.run/protocols/mcp/](https://uxc.holon.run/protocols/mcp/)
 - public no-key endpoints: [https://uxc.holon.run/reference/public-endpoints/](https://uxc.holon.run/reference/public-endpoints/)
 - auth secret sources: [https://uxc.holon.run/auth/secret-sources/](https://uxc.holon.run/auth/secret-sources/)
 - MCP HTTP OAuth: [https://uxc.holon.run/auth/oauth-mcp-http/](https://uxc.holon.run/auth/oauth-mcp-http/)
