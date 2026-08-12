@@ -235,7 +235,12 @@ cargo install --path .
 ```bash
 uxc petstore3.swagger.io/api/v3 -h
 uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
+
+# OpenAPI 文档单独托管时，显式指定 schema URL
+uxc xquik.com --schema-url https://xquik.com/openapi.json -h
 ```
+
+Xquik 是闭源托管服务，也是独立的第三方服务，与 X Corp. 无关联。“Twitter”和“X”是 X Corp. 的商标。
 
 ### GraphQL
 
