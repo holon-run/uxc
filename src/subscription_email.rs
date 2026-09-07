@@ -28,14 +28,15 @@ const DEFAULT_MAILBOX: &str = "INBOX";
 const IMAP_CONNECT_TIMEOUT_SECS: u64 = 10;
 const IMAP_COMMAND_TIMEOUT_SECS: u64 = 30;
 const IMAP_IDLE_DONE_TIMEOUT_SECS: u64 = 5;
+const IMAP_ATTACHMENT_TIMEOUT_SECS: u64 = 120;
 const EMAIL_SNIPPET_CHARS: usize = 512;
 const EMAIL_RAW_INLINE_BYTES: usize = 32 * 1024;
 
-trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
+pub(crate) trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
 type BoxedIo = Box<dyn AsyncReadWrite>;
-type BoxFutureResult<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
+pub(crate) type BoxFutureResult<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 
 #[derive(Debug, Clone)]
 pub struct EmailImapIdleRuntimeConfig {
@@ -261,7 +262,7 @@ where
     }
 }
 
-fn connect_imap(config: EmailImapIdleRuntimeConfig) -> BoxFutureResult<ImapConnection> {
+pub(crate) fn connect_imap(config: EmailImapIdleRuntimeConfig) -> BoxFutureResult<ImapConnection> {
     Box::pin(async move {
         let tcp = tokio::time::timeout(
             Duration::from_secs(IMAP_CONNECT_TIMEOUT_SECS),
@@ -1058,7 +1059,7 @@ fn body_snippet(raw: &str) -> Option<String> {
     }
 }
 
-fn quote_imap_string(value: &str) -> String {
+pub(crate) fn quote_imap_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
@@ -1075,7 +1076,7 @@ fn imap_public_endpoint(config: &EmailImapIdleRuntimeConfig) -> String {
 }
 
 /// Extract the mailbox UIDVALIDITY from an IMAP SELECT response.
-fn parse_imap_uidvalidity(lines: &[String]) -> Option<u64> {
+pub(crate) fn parse_imap_uidvalidity(lines: &[String]) -> Option<u64> {
     for line in lines {
         let Some(index) = line.find("[UIDVALIDITY ") else {
             continue;
@@ -1114,6 +1115,18 @@ async fn wait_for_stop_or_timeout(stop_rx: &mut watch::Receiver<bool>, duration:
     }
 }
 
+/// Outcome of a `UID FETCH ... BODY.PEEK[<section>]` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ImapSectionLiteral {
+    /// The server produced no FETCH response for the UID, meaning the
+    /// message no longer exists (or never did) in the mailbox.
+    Missing,
+    /// The server returned `BODY[<section>] NIL` for the section.
+    Nil,
+    /// Raw (still content-transfer-encoded) literal bytes for the section.
+    Bytes(Vec<u8>),
+}
+
 pub struct ImapConnection {
     reader: BufReader<ReadHalf<BoxedIo>>,
     writer: WriteHalf<BoxedIo>,
@@ -1121,7 +1134,7 @@ pub struct ImapConnection {
 }
 
 impl ImapConnection {
-    fn new(io: BoxedIo) -> Self {
+    pub(crate) fn new(io: BoxedIo) -> Self {
         let (reader, writer) = tokio::io::split(io);
         Self {
             reader: BufReader::new(reader),
@@ -1130,7 +1143,7 @@ impl ImapConnection {
         }
     }
 
-    async fn expect_greeting(&mut self) -> Result<()> {
+    pub(crate) async fn expect_greeting(&mut self) -> Result<()> {
         let line = self.read_line().await?;
         if !line.starts_with("* OK") && !line.starts_with("* PREAUTH") {
             bail!("unexpected IMAP greeting: {}", line);
@@ -1193,7 +1206,7 @@ impl ImapConnection {
         Ok(line)
     }
 
-    async fn command_ok(&mut self, command: &str) -> Result<Vec<String>> {
+    pub(crate) async fn command_ok(&mut self, command: &str) -> Result<Vec<String>> {
         let lines = self.command(command).await?;
         if lines.last().is_some_and(|line| line.contains(" OK")) {
             Ok(lines)
@@ -1203,6 +1216,67 @@ impl ImapConnection {
                 lines.last().cloned().unwrap_or_default()
             )
         }
+    }
+
+    /// Fetch one MIME section by UID with binary-safe literal handling.
+    ///
+    /// Unlike [`ImapConnection::command`], literal bytes are returned as raw
+    /// `Vec<u8>` instead of being lossily flattened into a UTF-8 string, so
+    /// attachment payloads survive the round trip. The caller must validate
+    /// that `uid` is decimal digits and `section` is an RFC 3501 section
+    /// path before this reaches the wire.
+    pub(crate) async fn fetch_body_section_bytes(
+        &mut self,
+        uid: &str,
+        section: &str,
+    ) -> Result<ImapSectionLiteral> {
+        let command = format!("UID FETCH {uid} (BODY.PEEK[{section}])");
+        let tag = format!("A{:04}", self.next_tag);
+        self.next_tag = self.next_tag.saturating_add(1);
+        self.write_line(&format!("{tag} {command}")).await?;
+        let marker = format!("BODY[{section}]");
+        let mut result = ImapSectionLiteral::Missing;
+        loop {
+            let line = self.read_line().await?;
+            if line.starts_with(&format!("{tag} ")) {
+                if !line.contains(" OK") {
+                    bail!("IMAP command failed: {}", line);
+                }
+                break;
+            }
+            if !line.contains(" FETCH ") || result != ImapSectionLiteral::Missing {
+                continue;
+            }
+            let Some(index) = line.find(&marker) else {
+                continue;
+            };
+            let tail = line[index + marker.len()..].trim_start();
+            let literal_len = if let Some(len) = trailing_literal_len(tail) {
+                Some(len)
+            } else {
+                tail.strip_prefix('~').and_then(trailing_literal_len)
+            };
+            match literal_len {
+                Some(len) => {
+                    let mut literal = vec![0u8; len];
+                    tokio::time::timeout(
+                        Duration::from_secs(IMAP_ATTACHMENT_TIMEOUT_SECS),
+                        self.reader.read_exact(&mut literal),
+                    )
+                    .await
+                    .context("IMAP attachment literal read timed out")??;
+                    // Consume the remainder of the response line after the
+                    // literal (typically `)\r\n`).
+                    let _suffix = self.read_line().await?;
+                    result = ImapSectionLiteral::Bytes(literal);
+                }
+                None if tail.starts_with("NIL") => {
+                    result = ImapSectionLiteral::Nil;
+                }
+                None => {}
+            }
+        }
+        Ok(result)
     }
 
     async fn fetch_recent(&mut self, limit: usize) -> Result<Vec<ImapFetchedMessage>> {
@@ -1257,7 +1331,7 @@ impl ImapConnection {
         .context("IMAP IDLE DONE timed out")?
     }
 
-    async fn logout(&mut self) -> Result<()> {
+    pub(crate) async fn logout(&mut self) -> Result<()> {
         let _ = self.command("LOGOUT").await;
         Ok(())
     }

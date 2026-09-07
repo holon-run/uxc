@@ -77,6 +77,45 @@ pub fn imap_message_attachments(raw: &[u8], ctx: &ImapAttachmentContext<'_>) -> 
         .collect()
 }
 
+/// Parse the header block of a single MIME part (as returned by an IMAP
+/// `BODY[<section>.MIME]` fetch) into normalized `(name, value)` pairs.
+pub fn parse_part_headers(raw: &str) -> Vec<(String, String)> {
+    let (header_block, _) = split_header_block(raw);
+    parse_header_block(header_block)
+}
+
+/// Decode a MIME part body per its `Content-Transfer-Encoding` header.
+///
+/// Base64 and quoted-printable bodies are decoded; `7bit`/`8bit`/`binary`
+/// and unknown encodings pass the raw bytes through untouched so binary
+/// payloads are never corrupted by a lossy UTF-8 projection.
+pub fn decode_part_body_bytes(headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
+    let encoding = header_value_of(headers, "content-transfer-encoding")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    match encoding.as_str() {
+        "base64" => {
+            decode_base64_lenient(&String::from_utf8_lossy(body)).unwrap_or_else(|| body.to_vec())
+        }
+        "quoted-printable" => decode_quoted_printable(&String::from_utf8_lossy(body)),
+        _ => body.to_vec(),
+    }
+}
+
+/// Best-effort decoded filename for a MIME part (Content-Disposition
+/// `filename` parameter, RFC 2047/2231 aware, falling back to the legacy
+/// Content-Type `name` parameter).
+pub fn part_filename(headers: &[(String, String)]) -> Option<String> {
+    let (_, ct_params) = content_type_and_params(headers);
+    attachment_filename(headers, &ct_params)
+}
+
+/// Lowercase `type/subtype` for a MIME part, defaulting to `text/plain`
+/// per RFC 2045 when no Content-Type header is present.
+pub fn part_content_type(headers: &[(String, String)]) -> String {
+    content_type_and_params(headers).0
+}
+
 fn attachment_entry(meta: &EmailAttachmentMeta, handle: Value) -> Value {
     json!({
         "id": meta.id,
