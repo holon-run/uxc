@@ -1,7 +1,9 @@
 use crate::auth::Profile;
 use crate::daemon::{SubscribeStartRequest, SubscriptionEventRecorder};
 use crate::daemon_log::redact_endpoint;
-use crate::email_attachment::{imap_message_attachments, ImapAttachmentContext};
+use crate::email_attachment::{
+    imap_message_attachments, ImapAttachmentContext, MIME_MAX_DEPTH, MIME_MAX_PARTS,
+};
 use crate::subscription_poll::{PollCheckpointState, PollFetchResult};
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -62,6 +64,8 @@ pub struct EmailProviderPollRuntimeConfig {
     pub provider: EmailProviderKind,
     pub account: Option<String>,
     pub mailbox: String,
+    /// Auth profile name referenced by attachment handles (never credentials).
+    pub auth_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,12 +439,14 @@ pub fn resolve_email_provider_poll_runtime_config(
         .or_else(|| {
             auth_profile.and_then(|profile| profile.resolve_field_value("account").ok().flatten())
         });
-
+    // The handle references the profile by name only; credentials stay in
+    // the auth store and are re-resolved at lazy retrieval time.
     Ok(EmailProviderPollRuntimeConfig {
         endpoint: request.endpoint.clone(),
         provider,
         account,
         mailbox,
+        auth_profile: request.options.auth.clone(),
     })
 }
 
@@ -579,6 +585,8 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
         }
         _ => first_string(item, &["subject"]),
     };
+    let (attachments, has_attachments, attachment_count) =
+        provider_message_attachments(config, provider, item, &message_id, &uid);
     json!({
         "type": "email_event",
         "version": "v1",
@@ -598,7 +606,9 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
             "subject": subject,
             "date": first_string(item, &["receivedDateTime", "receivedAt", "internalDate", "date"]),
             "snippet": first_string(item, &["snippet", "bodyPreview", "preview"]),
-            "attachments": [],
+            "attachments": attachments,
+            "has_attachments": has_attachments,
+            "attachment_count": attachment_count,
             "flags": provider_flags(config.provider, item),
         },
         "raw": {
@@ -615,6 +625,274 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
     })
 }
 
+/// Credential-free context used to stamp opaque provider attachment handles.
+struct ProviderAttachmentContext<'a> {
+    provider: &'a str,
+    endpoint: &'a str,
+    account: &'a str,
+    mailbox: &'a str,
+    message_id: &'a str,
+    uid: &'a str,
+    auth_profile: Option<&'a str>,
+}
+
+/// Map provider attachment metadata onto the neutral event shape.
+///
+/// Returns `(entries, has_attachments, attachment_count)`. `attachment_count`
+/// is `null` when the provider reports attachments but did not expand their
+/// metadata (e.g. Microsoft Graph without `$expand=attachments`); consumers
+/// detect that case as `has_attachments: true` with an empty list.
+fn provider_message_attachments(
+    config: &EmailProviderPollRuntimeConfig,
+    provider: &str,
+    item: &Value,
+    message_id: &str,
+    uid: &str,
+) -> (Vec<Value>, bool, Value) {
+    let ctx = ProviderAttachmentContext {
+        provider,
+        endpoint: &config.endpoint,
+        account: config.account.as_deref().unwrap_or("default"),
+        mailbox: &config.mailbox,
+        message_id,
+        uid,
+        auth_profile: config.auth_profile.as_deref(),
+    };
+    let entries = match config.provider {
+        EmailProviderKind::Gmail => gmail_attachment_entries(item, &ctx),
+        EmailProviderKind::Graph => graph_attachment_entries(item, &ctx),
+        EmailProviderKind::Jmap => jmap_attachment_entries(item, &ctx),
+    };
+    // Gmail exposes no `hasAttachments` boolean; metadata presence is the
+    // only signal there.
+    let provider_has_attachments = match config.provider {
+        EmailProviderKind::Gmail => None,
+        EmailProviderKind::Graph | EmailProviderKind::Jmap => {
+            item.get("hasAttachments").and_then(Value::as_bool)
+        }
+    };
+    let has_attachments = !entries.is_empty() || provider_has_attachments == Some(true);
+    let attachment_count = if entries.is_empty() && provider_has_attachments == Some(true) {
+        Value::Null
+    } else {
+        json!(entries.len())
+    };
+    (entries, has_attachments, attachment_count)
+}
+
+fn provider_attachment_handle(ctx: &ProviderAttachmentContext<'_>, part: Value) -> Value {
+    let mut handle = Map::new();
+    handle.insert("type".into(), json!("email_attachment"));
+    handle.insert("provider".into(), json!(ctx.provider));
+    handle.insert("endpoint".into(), json!(ctx.endpoint));
+    handle.insert("account".into(), json!(ctx.account));
+    handle.insert("mailbox".into(), json!(ctx.mailbox));
+    handle.insert("message_id".into(), json!(ctx.message_id));
+    handle.insert("uid".into(), json!(ctx.uid));
+    if let Some(auth_profile) = ctx.auth_profile {
+        handle.insert("auth_profile".into(), json!(auth_profile));
+    }
+    handle.insert("part".into(), part);
+    Value::Object(handle)
+}
+
+fn gmail_attachment_entries(item: &Value, ctx: &ProviderAttachmentContext<'_>) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut parts_seen = 0usize;
+    if let Some(payload) = item.get("payload") {
+        walk_gmail_part(payload, None, 0, &mut parts_seen, ctx, &mut out);
+    }
+    out
+}
+
+/// Walk Gmail `payload.parts` recursively. Leaf classification mirrors the
+/// IMAP MIME walker (`email_attachment`): `multipart/alternative` text
+/// variants stay body content and the disposition/filename/content-id rules
+/// are identical. The walk is bounded by the same MIME limits.
+fn walk_gmail_part(
+    part: &Value,
+    parent_subtype: Option<&str>,
+    depth: usize,
+    parts_seen: &mut usize,
+    ctx: &ProviderAttachmentContext<'_>,
+    out: &mut Vec<Value>,
+) {
+    if depth > MIME_MAX_DEPTH || *parts_seen >= MIME_MAX_PARTS {
+        return;
+    }
+    *parts_seen += 1;
+    let mime_type = part
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or("text/plain")
+        .to_ascii_lowercase();
+    if let Some(subtype) = mime_type.strip_prefix("multipart/") {
+        if let Some(children) = part.get("parts").and_then(Value::as_array) {
+            for child in children {
+                walk_gmail_part(child, Some(subtype), depth + 1, parts_seen, ctx, out);
+            }
+        }
+        return;
+    }
+    let disposition = gmail_part_header(part, "Content-Disposition")
+        .and_then(|value| value.split(';').next().map(str::to_string))
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| token == "attachment" || token == "inline");
+    let filename = part
+        .get("filename")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    let content_id = gmail_part_header(part, "Content-ID").map(|value| value.trim().to_string());
+    let is_attachment = match disposition.as_deref() {
+        Some("attachment") => true,
+        Some("inline") => filename.is_some() || content_id.is_some(),
+        _ => match &filename {
+            Some(_) => true,
+            None => !(mime_type.starts_with("text/") || parent_subtype == Some("alternative")),
+        },
+    };
+    if !is_attachment {
+        return;
+    }
+    let body = part.get("body");
+    let attachment_id = body
+        .and_then(|body| body.get("attachmentId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let id = part
+        .get("partId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| attachment_id.clone());
+    // Parts without `body.attachmentId` (small inline bodies Gmail inlines)
+    // stay metadata-only entries with a null handle.
+    let handle = attachment_id.map(|attachment_id| {
+        provider_attachment_handle(ctx, json!({ "attachment_id": attachment_id }))
+    });
+    out.push(json!({
+        "id": id,
+        "filename": filename,
+        "content_type": mime_type,
+        "size": body
+            .and_then(|body| body.get("size"))
+            .and_then(Value::as_u64),
+        "disposition": disposition,
+        "content_id": content_id,
+        "handle": handle,
+    }));
+}
+
+fn graph_attachment_entries(item: &Value, ctx: &ProviderAttachmentContext<'_>) -> Vec<Value> {
+    item.get("attachments")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|att| graph_attachment_entry(att, ctx))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn graph_attachment_entry(att: &Value, ctx: &ProviderAttachmentContext<'_>) -> Value {
+    let id = att
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let disposition = att
+        .get("isInline")
+        .and_then(Value::as_bool)
+        .map(|inline| if inline { "inline" } else { "attachment" }.to_string());
+    json!({
+        "id": id.clone(),
+        "filename": att.get("name").and_then(Value::as_str).map(str::to_string),
+        "content_type": att
+            .get("contentType")
+            .or_else(|| att.get("@odata.mediaContentType"))
+            .and_then(Value::as_str)
+            .map(|value| value.to_ascii_lowercase()),
+        "size": att.get("size").and_then(Value::as_u64),
+        "disposition": disposition,
+        "content_id": att.get("contentId").and_then(Value::as_str).map(str::to_string),
+        "handle": provider_attachment_handle(ctx, json!({ "attachment_id": id })),
+    })
+}
+
+fn jmap_attachment_entries(item: &Value, ctx: &ProviderAttachmentContext<'_>) -> Vec<Value> {
+    item.get("attachments")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|part| jmap_attachment_entry(part, ctx))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn jmap_attachment_entry(part: &Value, ctx: &ProviderAttachmentContext<'_>) -> Value {
+    let blob_id = part
+        .get("blobId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let id = part
+        .get("partId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| blob_id.clone());
+    let handle =
+        blob_id.map(|blob_id| provider_attachment_handle(ctx, json!({ "blob_id": blob_id })));
+    json!({
+        "id": id,
+        "filename": part
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        "content_type": part
+            .get("type")
+            .and_then(Value::as_str)
+            .map(|value| value.to_ascii_lowercase()),
+        "size": part.get("size").and_then(Value::as_u64),
+        "disposition": jmap_disposition(part.get("disposition")),
+        "content_id": part
+            .get("cid")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        "handle": handle,
+    })
+}
+
+/// JMAP `disposition` is a plain string in RFC 8621 and a
+/// `Map<String, Boolean>` in newer revisions; normalize both to the
+/// neutral token.
+fn jmap_disposition(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(raw)) => raw
+            .split(';')
+            .next()
+            .map(|token| token.trim().to_ascii_lowercase())
+            .filter(|token| token == "attachment" || token == "inline"),
+        Some(Value::Object(map)) => {
+            if map.get("attachment").and_then(Value::as_bool) == Some(true) {
+                Some("attachment".to_string())
+            } else if map.get("inline").and_then(Value::as_bool) == Some(true) {
+                Some("inline".to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn first_string(value: &Value, names: &[&str]) -> Option<String> {
     names
         .iter()
@@ -623,7 +901,12 @@ fn first_string(value: &Value, names: &[&str]) -> Option<String> {
 }
 
 fn gmail_header(item: &Value, name: &str) -> Option<String> {
-    item.pointer("/payload/headers")
+    item.get("payload")
+        .and_then(|payload| gmail_part_header(payload, name))
+}
+
+fn gmail_part_header(part: &Value, name: &str) -> Option<String> {
+    part.get("headers")
         .and_then(Value::as_array)?
         .iter()
         .find(|header| {
@@ -1176,6 +1459,7 @@ mod tests {
             provider: EmailProviderKind::Gmail,
             account: Some("gmail-primary".to_string()),
             mailbox: "INBOX".to_string(),
+            auth_profile: None,
         };
         let raw = json!({
             "messages": [{
@@ -1210,6 +1494,7 @@ mod tests {
             provider: EmailProviderKind::Graph,
             account: None,
             mailbox: "Inbox".to_string(),
+            auth_profile: None,
         };
         let graph_raw = json!({
             "value": [{
@@ -1237,6 +1522,7 @@ mod tests {
             provider: EmailProviderKind::Jmap,
             account: Some("jmap-primary".to_string()),
             mailbox: "Inbox".to_string(),
+            auth_profile: None,
         };
         let jmap_raw = json!({
             "list": [{
@@ -1257,6 +1543,198 @@ mod tests {
             "<jmap@example.com>"
         );
         assert_eq!(jmap_events[0]["message"]["flags"], json!(["$seen"]));
+    }
+
+    #[test]
+    fn maps_gmail_attachment_metadata_from_payload_parts() {
+        let config = EmailProviderPollRuntimeConfig {
+            endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages".to_string(),
+            provider: EmailProviderKind::Gmail,
+            account: Some("gmail-primary".to_string()),
+            mailbox: "INBOX".to_string(),
+            auth_profile: Some("gmail-primary".to_string()),
+        };
+        let raw = json!({
+            "messages": [{
+                "id": "msg-a1",
+                "threadId": "thread-a1",
+                "payload": {
+                    "mimeType": "multipart/mixed",
+                    "headers": [{"name": "Message-ID", "value": "<a1@example.com>"}],
+                    "parts": [
+                        {
+                            "partId": "0",
+                            "mimeType": "multipart/alternative",
+                            "parts": [
+                                {"partId": "0.0", "mimeType": "text/plain", "body": {"size": 12}},
+                                {"partId": "0.1", "mimeType": "text/html", "body": {"size": 48}}
+                            ]
+                        },
+                        {
+                            "partId": "1",
+                            "mimeType": "application/pdf",
+                            "filename": "合同.pdf",
+                            "headers": [
+                                {"name": "Content-Disposition", "value": "attachment; filename=\"合同.pdf\""},
+                                {"name": "Content-ID", "value": "<pdf@a1.example.com>"}
+                            ],
+                            "body": {"attachmentId": "ATT-1", "size": 102400}
+                        },
+                        {
+                            "partId": "2",
+                            "mimeType": "image/png",
+                            "filename": "logo.png",
+                            "headers": [
+                                {"name": "Content-Disposition", "value": "inline"},
+                                {"name": "Content-ID", "value": "<logo@a1.example.com>"}
+                            ],
+                            "body": {"size": 2048}
+                        }
+                    ]
+                }
+            }]
+        });
+
+        let events = normalize_email_provider_items(&config, &raw).unwrap();
+        let message = &events[0]["message"];
+        assert_eq!(message["has_attachments"], true);
+        assert_eq!(message["attachment_count"], 2);
+        let pdf = &message["attachments"][0];
+        assert_eq!(pdf["id"], "1");
+        assert_eq!(pdf["filename"], "合同.pdf");
+        assert_eq!(pdf["content_type"], "application/pdf");
+        assert_eq!(pdf["size"], 102400);
+        assert_eq!(pdf["disposition"], "attachment");
+        assert_eq!(pdf["content_id"], "<pdf@a1.example.com>");
+        assert_eq!(pdf["handle"]["type"], "email_attachment");
+        assert_eq!(pdf["handle"]["provider"], "gmail");
+        assert_eq!(pdf["handle"]["uid"], "msg-a1");
+        assert_eq!(pdf["handle"]["auth_profile"], "gmail-primary");
+        assert_eq!(pdf["handle"]["part"], json!({"attachment_id": "ATT-1"}));
+        let logo = &message["attachments"][1];
+        assert_eq!(logo["id"], "2");
+        assert_eq!(logo["disposition"], "inline");
+        assert_eq!(logo["content_id"], "<logo@a1.example.com>");
+        // No `body.attachmentId` on the inlined part: metadata-only entry.
+        assert_eq!(logo["handle"], json!(null));
+    }
+
+    #[test]
+    fn maps_graph_attachment_metadata_and_unexpanded_semantics() {
+        let config = EmailProviderPollRuntimeConfig {
+            endpoint: "https://graph.microsoft.com/v1.0/me/messages".to_string(),
+            provider: EmailProviderKind::Graph,
+            account: None,
+            mailbox: "Inbox".to_string(),
+            auth_profile: None,
+        };
+        let expanded = json!({
+            "value": [{
+                "id": "graph-a1",
+                "internetMessageId": "<g1@example.com>",
+                "hasAttachments": true,
+                "attachments": [{
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "id": "graph-att-1",
+                    "name": "report.pdf",
+                    "contentType": "application/pdf",
+                    "size": 20480,
+                    "isInline": false,
+                    "contentId": "att1@graph.example.com"
+                }]
+            }]
+        });
+        let events = normalize_email_provider_items(&config, &expanded).unwrap();
+        let message = &events[0]["message"];
+        assert_eq!(message["has_attachments"], true);
+        assert_eq!(message["attachment_count"], 1);
+        let att = &message["attachments"][0];
+        assert_eq!(att["id"], "graph-att-1");
+        assert_eq!(att["filename"], "report.pdf");
+        assert_eq!(att["content_type"], "application/pdf");
+        assert_eq!(att["size"], 20480);
+        assert_eq!(att["disposition"], "attachment");
+        assert_eq!(att["content_id"], "att1@graph.example.com");
+        assert_eq!(att["handle"]["provider"], "graph");
+        assert_eq!(att["handle"]["uid"], "graph-a1");
+        assert_eq!(
+            att["handle"]["part"],
+            json!({"attachment_id": "graph-att-1"})
+        );
+
+        // Without `$expand=attachments` Graph lists messages with
+        // `hasAttachments: true` but no attachment metadata: keep the
+        // signal, expose an empty list, and mark the count unknown.
+        let unexpanded = json!({
+            "value": [{
+                "id": "graph-a2",
+                "internetMessageId": "<g2@example.com>",
+                "hasAttachments": true
+            }]
+        });
+        let events = normalize_email_provider_items(&config, &unexpanded).unwrap();
+        let message = &events[0]["message"];
+        assert_eq!(message["attachments"], json!([]));
+        assert_eq!(message["has_attachments"], true);
+        assert_eq!(message["attachment_count"], json!(null));
+    }
+
+    #[test]
+    fn maps_jmap_attachment_metadata() {
+        let config = EmailProviderPollRuntimeConfig {
+            endpoint: "https://api.fastmail.com/jmap/session".to_string(),
+            provider: EmailProviderKind::Jmap,
+            account: Some("jmap-primary".to_string()),
+            mailbox: "INBOX".to_string(),
+            auth_profile: None,
+        };
+        let raw = json!({
+            "list": [{
+                "id": "Mailbox-42-email-7",
+                "messageId": "<j1@example.com>",
+                "hasAttachments": true,
+                "attachments": [
+                    {
+                        "partId": "2",
+                        "blobId": "B-att-1",
+                        "type": "application/pdf",
+                        "name": "doc.pdf",
+                        "size": 4096,
+                        "disposition": "attachment",
+                        "cid": null
+                    },
+                    {
+                        "partId": "3",
+                        "blobId": "B-att-2",
+                        "type": "image/png",
+                        "name": null,
+                        "size": 1024,
+                        "disposition": {"inline": true},
+                        "cid": "logo@j1.example.com"
+                    }
+                ]
+            }]
+        });
+        let events = normalize_email_provider_items(&config, &raw).unwrap();
+        let message = &events[0]["message"];
+        assert_eq!(message["has_attachments"], true);
+        assert_eq!(message["attachment_count"], 2);
+        let pdf = &message["attachments"][0];
+        assert_eq!(pdf["id"], "2");
+        assert_eq!(pdf["filename"], "doc.pdf");
+        assert_eq!(pdf["content_type"], "application/pdf");
+        assert_eq!(pdf["size"], 4096);
+        assert_eq!(pdf["disposition"], "attachment");
+        assert_eq!(pdf["handle"]["provider"], "jmap");
+        assert_eq!(pdf["handle"]["account"], "jmap-primary");
+        assert_eq!(pdf["handle"]["uid"], "Mailbox-42-email-7");
+        assert_eq!(pdf["handle"]["part"], json!({"blob_id": "B-att-1"}));
+        let logo = &message["attachments"][1];
+        assert_eq!(logo["id"], "3");
+        assert_eq!(logo["filename"], json!(null));
+        assert_eq!(logo["disposition"], "inline");
+        assert_eq!(logo["content_id"], "logo@j1.example.com");
+        assert_eq!(logo["handle"]["part"], json!({"blob_id": "B-att-2"}));
     }
 
     #[test]
