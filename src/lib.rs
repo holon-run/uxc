@@ -16,6 +16,7 @@ pub mod daemon_client;
 pub mod daemon_log;
 pub mod email;
 pub mod email_attachment;
+pub mod email_attachment_get;
 pub mod error;
 pub mod http_client;
 pub mod managed_source_streams;

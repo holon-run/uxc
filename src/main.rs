@@ -24,6 +24,7 @@ mod daemon;
 mod daemon_log;
 mod email;
 mod email_attachment;
+mod email_attachment_get;
 mod error;
 mod http_client;
 mod managed_source_streams;
@@ -257,6 +258,18 @@ enum EmailCommands {
 
     /// Reply to an email_event using SMTP reply headers
     Reply(EmailReplyArgs),
+
+    /// Download attachments referenced by email_event handles
+    Attachment {
+        #[command(subcommand)]
+        attachment_command: EmailAttachmentCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum EmailAttachmentCommands {
+    /// Download an attachment using its email_attachment handle
+    Get(EmailAttachmentGetArgs),
 }
 
 #[derive(Parser)]
@@ -355,6 +368,25 @@ struct EmailReplyArgs {
     /// Validate and render envelope without connecting to SMTP
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Parser)]
+struct EmailAttachmentGetArgs {
+    /// JSON email_attachment handle from an email_event, or @file to read it from a file
+    #[arg(long = "handle", value_name = "JSON")]
+    handle: String,
+
+    /// Auth profile override; takes precedence over handle.auth_profile
+    #[arg(long = "profile", value_name = "NAME")]
+    profile: Option<String>,
+
+    /// Output file path; defaults to ~/.uxc/email-attachments/<provider>-<uid>-<id>
+    #[arg(long = "output", value_name = "PATH")]
+    output: Option<String>,
+
+    /// Reject attachments larger than this many bytes; 0 disables the limit
+    #[arg(long = "max-bytes", value_name = "BYTES", default_value_t = email_attachment_get::DEFAULT_MAX_ATTACHMENT_BYTES)]
+    max_bytes: u64,
 }
 
 #[derive(Subcommand)]
@@ -1766,6 +1798,9 @@ fn static_help_path_from_cli(cli: &Cli) -> Option<Vec<&'static str>> {
         Some(Commands::Email { email_command }) => match email_command {
             EmailCommands::Send(_) => Some(vec!["email", "send"]),
             EmailCommands::Reply(_) => Some(vec!["email", "reply"]),
+            EmailCommands::Attachment { attachment_command } => match attachment_command {
+                EmailAttachmentCommands::Get(_) => Some(vec!["email", "attachment", "get"]),
+            },
         },
         Some(Commands::External(_)) | None => None,
     }
@@ -2528,6 +2563,7 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             commands: commands(&[
                 ("send", "Send a new email over SMTP"),
                 ("reply", "Reply to an email_event using SMTP reply headers"),
+                ("attachment", "Download attachments referenced by email_event handles"),
             ]),
             notes: vec![
                 "Use --auth with credentials containing username/user/account and password/secret fields when SMTP AUTH is required.".to_string(),
@@ -2565,6 +2601,34 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
             ],
             examples: vec![
                 "uxc email reply --smtp smtp://localhost:2525 --reply-handle '{\"message_id\":\"<msg@example.com>\"}' --from bot@example.com --to user@example.com --subject 'Re: Hello' --text-body 'Thanks' --dry-run".to_string(),
+            ],
+        },
+        ["email", "attachment"] => HelpData {
+            path: "uxc email attachment".to_string(),
+            about: "Download attachments referenced by email_event handles".to_string(),
+            usage: "uxc email attachment <get> ...".to_string(),
+            commands: commands(&[
+                ("get", "Download an attachment using its email_attachment handle"),
+            ]),
+            notes: vec![
+                "Handles come from the attachments[].handle field of email_event messages; they never carry credentials.".to_string(),
+            ],
+            examples: vec![
+                "uxc email attachment get --handle '{\"type\":\"email_attachment\",...}'".to_string(),
+            ],
+        },
+        ["email", "attachment", "get"] => HelpData {
+            path: "uxc email attachment get".to_string(),
+            about: "Download an attachment using its email_attachment handle".to_string(),
+            usage: "uxc email attachment get --handle <json|@file> [--profile <name>] [--output <path>] [--max-bytes <n>]".to_string(),
+            commands: vec![],
+            notes: vec![
+                "--handle accepts the opaque handle object from attachments[].handle of an email_event, or @path to read it from a file.".to_string(),
+                "The handle's auth_profile name is re-resolved from the local auth store at retrieval time; --profile overrides it.".to_string(),
+                "Content is written to --output or ~/.uxc/email-attachments/ and never inlined into the JSON envelope.".to_string(),
+            ],
+            examples: vec![
+                "uxc email attachment get --handle @handle.json --output ./report.pdf".to_string(),
             ],
         },
         ["cache"] => HelpData {
@@ -6143,6 +6207,25 @@ async fn handle_email_command(command: &EmailCommands, cli: &Cli) -> Result<Outp
         )
         .into());
     }
+    if let EmailCommands::Attachment { attachment_command } = command {
+        let EmailAttachmentCommands::Get(args) = attachment_command;
+        let request = email_attachment_get::EmailAttachmentGetRequest {
+            handle: args.handle.clone(),
+            profile: args.profile.clone().or_else(|| cli.auth.clone()),
+            output: args.output.clone(),
+            max_bytes: args.max_bytes,
+        };
+        let data =
+            serde_json::to_value(email_attachment_get::get_email_attachment(&request).await?)?;
+        return Ok(OutputEnvelope::success(
+            "email_attachment_get_result",
+            "email",
+            "uxc email",
+            None,
+            data,
+            None,
+        ));
+    }
     let request = match command {
         EmailCommands::Send(args) => email::EmailSendRequest {
             smtp_url: args.smtp_url.clone(),
@@ -6186,6 +6269,7 @@ async fn handle_email_command(command: &EmailCommands, cli: &Cli) -> Result<Outp
                 dry_run: args.dry_run,
             }
         }
+        EmailCommands::Attachment { .. } => unreachable!("attachment handled above"),
     };
     let data = serde_json::to_value(email::send_email(request).await?)?;
     Ok(OutputEnvelope::success(
