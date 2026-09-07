@@ -34,6 +34,7 @@ uxc petstore3.swagger.io/api/v3 get:/pet/{petId} petId=1
 - [Protocols](./protocols/)
 - [Auth](./auth/)
 - [Daemon](./daemon/)
+- [Sources](./sources/)
 - [Ecosystem](./ecosystem/)
 - [Reference](./reference/)
 - [Skills Directory](./skills/)
@@ -86,6 +87,9 @@ single-page overview.
   <!-- mdorigin:index kind=directory -->
 
 - [Skills](./skills/)
+  <!-- mdorigin:index kind=directory -->
+
+- [Sources](./sources/)
   <!-- mdorigin:index kind=directory -->
 
 <!-- INDEX:END -->
