@@ -1,6 +1,7 @@
 use crate::auth::Profile;
 use crate::daemon::{SubscribeStartRequest, SubscriptionEventRecorder};
 use crate::daemon_log::redact_endpoint;
+use crate::email_attachment::{imap_message_attachments, ImapAttachmentContext};
 use crate::subscription_poll::{PollCheckpointState, PollFetchResult};
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -44,6 +45,7 @@ pub struct EmailImapIdleRuntimeConfig {
     pub password: String,
     pub mailbox: String,
     pub account: Option<String>,
+    pub auth_profile: Option<String>,
     pub initial_fetch_limit: usize,
 }
 
@@ -119,6 +121,7 @@ pub fn resolve_email_imap_idle_runtime_config(
         use_tls,
         username,
         password,
+        auth_profile: request.options.auth.clone(),
         mailbox,
         account,
         initial_fetch_limit,
@@ -199,8 +202,10 @@ where
         quote_imap_string(&config.password)
     ))
     .await?;
-    conn.command_ok(&format!("SELECT {}", quote_imap_string(&config.mailbox)))
+    let select_lines = conn
+        .command_ok(&format!("SELECT {}", quote_imap_string(&config.mailbox)))
         .await?;
+    let uidvalidity = parse_imap_uidvalidity(&select_lines);
     recorder
         .emit(
             "email_imap_idle",
@@ -215,7 +220,7 @@ where
         .await?;
     recorder.update_status(Some("running"), None, false).await?;
 
-    let mut last_seen_uid = emit_recent_messages(config, &mut conn, recorder).await?;
+    let mut last_seen_uid = emit_recent_messages(config, &mut conn, recorder, uidvalidity).await?;
 
     loop {
         if *stop_rx.borrow() {
@@ -241,7 +246,9 @@ where
                         Some(uid) => conn.fetch_since_uid(uid).await?,
                         None => conn.fetch_recent(config.initial_fetch_limit).await?,
                     };
-                    if let Some(uid) = emit_messages(config, messages, recorder).await? {
+                    if let Some(uid) =
+                        emit_messages(config, messages, recorder, uidvalidity).await?
+                    {
                         last_seen_uid = Some(last_seen_uid.map_or(uid, |last| last.max(uid)));
                     }
                 }
@@ -288,18 +295,20 @@ async fn emit_recent_messages<R>(
     config: &EmailImapIdleRuntimeConfig,
     conn: &mut ImapConnection,
     recorder: &mut R,
+    uidvalidity: Option<u64>,
 ) -> Result<Option<u64>>
 where
     R: SubscriptionEventRecorder,
 {
     let messages = conn.fetch_recent(config.initial_fetch_limit).await?;
-    emit_messages(config, messages, recorder).await
+    emit_messages(config, messages, recorder, uidvalidity).await
 }
 
 async fn emit_messages<R>(
     config: &EmailImapIdleRuntimeConfig,
     messages: Vec<ImapFetchedMessage>,
     recorder: &mut R,
+    uidvalidity: Option<u64>,
 ) -> Result<Option<u64>>
 where
     R: SubscriptionEventRecorder,
@@ -313,7 +322,7 @@ where
             .emit(
                 "email_imap_idle",
                 "data",
-                Some(build_email_event(config, &message)),
+                Some(build_email_event(config, &message, uidvalidity)),
                 None,
             )
             .await?;
@@ -321,7 +330,11 @@ where
     Ok(max_uid)
 }
 
-fn build_email_event(config: &EmailImapIdleRuntimeConfig, message: &ImapFetchedMessage) -> Value {
+fn build_email_event(
+    config: &EmailImapIdleRuntimeConfig,
+    message: &ImapFetchedMessage,
+    uidvalidity: Option<u64>,
+) -> Value {
     let raw_len = message.raw.len();
     let raw_text = String::from_utf8_lossy(&message.raw);
     let headers = parse_email_headers(&raw_text);
@@ -330,6 +343,20 @@ fn build_email_event(config: &EmailImapIdleRuntimeConfig, message: &ImapFetchedM
     let thread_id =
         header_value(&headers, "references").or_else(|| header_value(&headers, "in-reply-to"));
     let account = config.account.as_deref().unwrap_or(&config.username);
+    let attachments = imap_message_attachments(
+        &message.raw,
+        &ImapAttachmentContext {
+            endpoint: &imap_public_endpoint(config),
+            account,
+            mailbox: &config.mailbox,
+            message_id: &message_id,
+            uid: &message.uid,
+            uidvalidity,
+            auth_profile: config.auth_profile.as_deref(),
+        },
+    );
+    let has_attachments = !attachments.is_empty();
+    let attachment_count = attachments.len();
     json!({
         "type": "email_event",
         "version": "v1",
@@ -349,7 +376,9 @@ fn build_email_event(config: &EmailImapIdleRuntimeConfig, message: &ImapFetchedM
             "subject": subject,
             "date": header_value(&headers, "date"),
             "snippet": body_snippet(&raw_text),
-            "attachments": [],
+            "attachments": attachments,
+            "has_attachments": has_attachments,
+            "attachment_count": attachment_count,
             "flags": message.flags,
         },
         "raw": {
@@ -745,6 +774,33 @@ fn quote_imap_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Rebuild a credential-free IMAP endpoint (`imap://host:port` or
+/// `imaps://host:port`) for embedding in attachment retrieval handles.
+/// Userinfo that may be present in the original endpoint URL is dropped.
+fn imap_public_endpoint(config: &EmailImapIdleRuntimeConfig) -> String {
+    format!(
+        "{}://{}:{}",
+        if config.use_tls { "imaps" } else { "imap" },
+        config.host,
+        config.port
+    )
+}
+
+/// Extract the mailbox UIDVALIDITY from an IMAP SELECT response.
+fn parse_imap_uidvalidity(lines: &[String]) -> Option<u64> {
+    for line in lines {
+        let Some(index) = line.find("[UIDVALIDITY ") else {
+            continue;
+        };
+        let rest = &line[index + "[UIDVALIDITY ".len()..];
+        let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+        if let Ok(uidvalidity) = digits.parse() {
+            return Some(uidvalidity);
+        }
+    }
+    None
+}
+
 async fn close_email_subscription<R: SubscriptionEventRecorder>(
     recorder: &mut R,
     reason: &str,
@@ -1020,6 +1076,7 @@ mod tests {
             use_tls: true,
             username: "agent@example.com".to_string(),
             password: "secret".to_string(),
+            auth_profile: None,
             mailbox: "INBOX".to_string(),
             account: Some("primary".to_string()),
             initial_fetch_limit: 25,
@@ -1030,13 +1087,86 @@ mod tests {
             raw: b"Message-ID: <m1@example.com>\r\nSubject: Hi\r\nFrom: sender@example.com\r\n\r\nBody"
                 .to_vec(),
         };
-        let event = build_email_event(&config, &message);
+        let event = build_email_event(&config, &message, None);
         assert_eq!(event["type"], "email_event");
         assert_eq!(event["provider"], "imap");
         assert_eq!(event["message"]["uid"], "42");
         assert_eq!(event["message"]["subject"], "Hi");
+        // Backward-compatible shape for messages without attachments.
+        assert_eq!(event["message"]["attachments"], json!([]));
+        assert_eq!(event["message"]["has_attachments"], false);
+        assert_eq!(event["message"]["attachment_count"], 0);
         assert_eq!(event["raw"]["mime_truncated"], false);
         assert_eq!(event["reply_handle"]["message_id"], "<m1@example.com>");
+    }
+
+    #[test]
+    fn builds_email_event_with_attachment_metadata_and_handles() {
+        let config = EmailImapIdleRuntimeConfig {
+            endpoint: "imaps://imap.example.com:993".to_string(),
+            host: "imap.example.com".to_string(),
+            port: 993,
+            use_tls: true,
+            username: "agent@example.com".to_string(),
+            password: "secret".to_string(),
+            auth_profile: Some("imap-primary".to_string()),
+            mailbox: "INBOX".to_string(),
+            account: Some("primary".to_string()),
+            initial_fetch_limit: 25,
+        };
+        let raw = concat!(
+            "Message-ID: <m42@example.com>\r\n",
+            "Subject: Contract\r\n",
+            "From: sender@example.com\r\n",
+            "Content-Type: multipart/mixed; boundary=MIX\r\n",
+            "\r\n",
+            "--MIX\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "Please review.\r\n",
+            "--MIX\r\n",
+            "Content-Type: application/pdf\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "Content-Disposition: attachment;\r\n",
+            " filename*=UTF-8''%E5%90%88%E5%90%8C.pdf\r\n",
+            "\r\n",
+            "JVBERi0xLjQK\r\n",
+            "--MIX--\r\n"
+        );
+        let message = ImapFetchedMessage {
+            uid: "42".to_string(),
+            flags: Vec::new(),
+            raw: raw.as_bytes().to_vec(),
+        };
+        let event = build_email_event(&config, &message, Some(3857529045));
+        assert_eq!(event["message"]["has_attachments"], true);
+        assert_eq!(event["message"]["attachment_count"], 1);
+        let attachment = &event["message"]["attachments"][0];
+        assert_eq!(attachment["id"], "2");
+        assert_eq!(attachment["filename"], "合同.pdf");
+        assert_eq!(attachment["content_type"], "application/pdf");
+        assert_eq!(attachment["disposition"], "attachment");
+        assert_eq!(attachment["size"], 9);
+        let handle = &attachment["handle"];
+        assert_eq!(handle["type"], "email_attachment");
+        assert_eq!(handle["provider"], "imap");
+        assert_eq!(handle["endpoint"], "imaps://imap.example.com:993");
+        assert_eq!(handle["auth_profile"], "imap-primary");
+        assert_eq!(handle["uidvalidity"], json!(3857529045u64));
+        assert_eq!(handle["part"]["section"], "2");
+    }
+
+    #[test]
+    fn parses_uidvalidity_from_select_response() {
+        let lines = vec![
+            "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen)".to_string(),
+            "* OK [PERMANENTFLAGS (\\* \\Answered \\Flagged \\Deleted \\Seen)] Limited".to_string(),
+            "* 3 EXISTS".to_string(),
+            "* OK [UIDVALIDITY 3857529045] UIDs valid".to_string(),
+            "A0003 OK [READ-WRITE] SELECT completed".to_string(),
+        ];
+        assert_eq!(parse_imap_uidvalidity(&lines), Some(3857529045));
+        assert_eq!(parse_imap_uidvalidity(&[]), None);
     }
 
     #[test]
