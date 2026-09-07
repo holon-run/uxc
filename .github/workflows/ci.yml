@@ -254,7 +254,11 @@ jobs:
         uses: taiki-e/install-action@cargo-audit
 
       - name: Run cargo audit
-        run: cargo audit --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0205
+        # RUSTSEC-2026-0258: h2 0.3.x (via tonic 0.10 / hyper 0.14, gRPC adapter) has no
+        # patched 0.3 release; the h2 0.4.x path is already upgraded to >=0.4.16 in
+        # Cargo.lock. Remove this ignore after upgrading tonic to a hyper 1.x stack.
+        # Tracking: https://github.com/holon-run/uxc/issues/438
+        run: cargo audit --ignore RUSTSEC-2025-0134 --ignore RUSTSEC-2026-0205 --ignore RUSTSEC-2026-0258
 
   build-pr:
     name: Build (PR Linux)
