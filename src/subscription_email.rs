@@ -803,6 +803,11 @@ fn graph_attachment_entry(att: &Value, ctx: &ProviderAttachmentContext<'_>) -> V
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    // Attachments without an `id` cannot be fetched later; keep them as
+    // metadata-only entries with a null handle, mirroring Gmail/JMAP.
+    let handle = id
+        .as_ref()
+        .map(|id| provider_attachment_handle(ctx, json!({ "attachment_id": id })));
     let disposition = att
         .get("isInline")
         .and_then(Value::as_bool)
@@ -818,7 +823,7 @@ fn graph_attachment_entry(att: &Value, ctx: &ProviderAttachmentContext<'_>) -> V
         "size": att.get("size").and_then(Value::as_u64),
         "disposition": disposition,
         "content_id": att.get("contentId").and_then(Value::as_str).map(str::to_string),
-        "handle": provider_attachment_handle(ctx, json!({ "attachment_id": id })),
+        "handle": handle,
     })
 }
 
@@ -1641,13 +1646,19 @@ mod tests {
                     "size": 20480,
                     "isInline": false,
                     "contentId": "att1@graph.example.com"
+                }, {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": "orphan.bin",
+                    "contentType": "application/octet-stream",
+                    "size": 8,
+                    "isInline": false
                 }]
             }]
         });
         let events = normalize_email_provider_items(&config, &expanded).unwrap();
         let message = &events[0]["message"];
         assert_eq!(message["has_attachments"], true);
-        assert_eq!(message["attachment_count"], 1);
+        assert_eq!(message["attachment_count"], 2);
         let att = &message["attachments"][0];
         assert_eq!(att["id"], "graph-att-1");
         assert_eq!(att["filename"], "report.pdf");
@@ -1661,6 +1672,10 @@ mod tests {
             att["handle"]["part"],
             json!({"attachment_id": "graph-att-1"})
         );
+        // Attachment without `id`: metadata-only entry with a null handle.
+        let orphan = &message["attachments"][1];
+        assert_eq!(orphan["id"], json!(null));
+        assert_eq!(orphan["handle"], json!(null));
 
         // Without `$expand=attachments` Graph lists messages with
         // `hasAttachments: true` but no attachment metadata: keep the
