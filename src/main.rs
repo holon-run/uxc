@@ -23,6 +23,7 @@ mod config_import;
 mod daemon;
 mod daemon_log;
 mod email;
+mod email_attachment;
 mod error;
 mod http_client;
 mod managed_source_streams;
