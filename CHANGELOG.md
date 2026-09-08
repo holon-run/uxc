@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-08
+
+### Added
+- Email support: MIME attachment metadata parsing for IMAP events with RFC 2047/2231 filename decoding (#437).
+- Email support: provider-neutral attachment metadata mapping for Gmail, Microsoft Graph, and JMAP sources (#439).
+- Email support: `uxc email attachment get` for lazy attachment retrieval with a 25 MiB default size guardrail (#440).
+- Email documentation covering email sources and attachments (#441).
+
 ## [0.17.0] - 2026-08-08
 
 ### Added
