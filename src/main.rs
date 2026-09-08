@@ -6239,6 +6239,7 @@ async fn handle_email_command(command: &EmailCommands, cli: &Cli) -> Result<Outp
             in_reply_to: None,
             references: vec![],
             auth: cli.auth.clone(),
+            message_id: None,
             allow_insecure_auth: args.allow_insecure_auth,
             dry_run: args.dry_run,
         },
@@ -6265,6 +6266,7 @@ async fn handle_email_command(command: &EmailCommands, cli: &Cli) -> Result<Outp
                 in_reply_to,
                 references,
                 auth: cli.auth.clone(),
+                message_id: None,
                 allow_insecure_auth: args.allow_insecure_auth,
                 dry_run: args.dry_run,
             }

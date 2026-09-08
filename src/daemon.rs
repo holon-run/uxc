@@ -9,6 +9,7 @@ use crate::cache::{self, Cache, CacheConfig};
 use crate::codegen::build_codegen_host_schema;
 use crate::daemon_log::{redact_endpoint, redact_sensitive};
 use crate::daemon_log::{DaemonEventType, DaemonLogEntry, DaemonLogger};
+use crate::email::{self, EmailSendRequest};
 use crate::error::{
     structured_error_from_anyhow, structured_error_from_jsonrpc_error, StructuredError,
     StructuredErrorPayload, UxcError,
@@ -328,6 +329,63 @@ pub struct ManagedSourceEnsureRequest {
     pub namespace: String,
     pub source_key: String,
     pub spec: ManagedSourceSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonEmailSendRequest {
+    pub smtp_url: String,
+    pub from: String,
+    #[serde(default)]
+    pub to: Vec<String>,
+    #[serde(default)]
+    pub cc: Vec<String>,
+    #[serde(default)]
+    pub bcc: Vec<String>,
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub html: Option<String>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
+    #[serde(default)]
+    pub auth: Option<String>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub allow_insecure_auth: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonEmailReplyRequest {
+    #[serde(flatten)]
+    pub send: DaemonEmailSendRequest,
+    #[serde(default)]
+    pub reply_handle: Option<email::EmailReplyHandle>,
+}
+
+pub fn daemon_email_send_request_to_email(request: DaemonEmailSendRequest) -> EmailSendRequest {
+    EmailSendRequest {
+        smtp_url: request.smtp_url,
+        from: request.from,
+        to: request.to,
+        cc: request.cc,
+        bcc: request.bcc,
+        subject: request.subject,
+        text: request.text,
+        html: request.html,
+        in_reply_to: request.in_reply_to,
+        references: request.references,
+        auth: request.auth,
+        message_id: request.message_id,
+        allow_insecure_auth: request.allow_insecure_auth,
+        dry_run: request.dry_run,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7427,6 +7485,82 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                 error: None,
             }
         }
+        "email.send" => {
+            let Some(params) = req.params else {
+                write_jsonrpc_error(&mut stream, req.id, -32602, "Missing params".to_string())
+                    .await?;
+                return Ok(());
+            };
+            let request: DaemonEmailSendRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    write_jsonrpc_error(
+                        &mut stream,
+                        req.id,
+                        -32602,
+                        format!("Invalid params: {err}"),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            match email::send_email(daemon_email_send_request_to_email(request)).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
+        "email.reply" => {
+            let Some(params) = req.params else {
+                write_jsonrpc_error(&mut stream, req.id, -32602, "Missing params".to_string())
+                    .await?;
+                return Ok(());
+            };
+            let request: DaemonEmailReplyRequest = match serde_json::from_value(params) {
+                Ok(value) => value,
+                Err(err) => {
+                    write_jsonrpc_error(
+                        &mut stream,
+                        req.id,
+                        -32602,
+                        format!("Invalid params: {err}"),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            let mut send = daemon_email_send_request_to_email(request.send);
+            let (in_reply_to, references) = email::references_with_reply_handle(
+                request.reply_handle.as_ref(),
+                send.in_reply_to,
+                std::mem::take(&mut send.references),
+            );
+            send.in_reply_to = in_reply_to;
+            send.references = references;
+            match email::send_email(send).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
         "runtime.invoke" => {
             let Some(params) = req.params else {
                 let resp = JsonRpcResponse {
@@ -9406,6 +9540,62 @@ mod tests {
     use tokio_tungstenite::accept_hdr_async;
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[test]
+    fn daemon_email_reply_request_parses_flattened_params_and_reply_handle() {
+        let params = serde_json::json!({
+            "smtp_url": "smtp://localhost:2525",
+            "from": "bot@example.com",
+            "to": ["alice@example.org"],
+            "subject": "Re: Quarterly report",
+            "text": "Thanks",
+            "auth": "email-primary",
+            "message_id": "<agentinbox-reply-42@localhost>",
+            "reply_handle": {
+                "message_id": "<m1@example.com>",
+                "account": "user@example.com",
+                "mailbox": "INBOX",
+                "uid": 42
+            }
+        });
+        let request: DaemonEmailReplyRequest = serde_json::from_value(params).unwrap();
+        assert_eq!(request.send.smtp_url, "smtp://localhost:2525");
+        assert_eq!(request.send.to, vec!["alice@example.org".to_string()]);
+        assert_eq!(
+            request.send.message_id.as_deref(),
+            Some("<agentinbox-reply-42@localhost>")
+        );
+        let reply_handle = request.reply_handle.clone().expect("reply_handle parsed");
+        assert_eq!(reply_handle.message_id.as_deref(), Some("<m1@example.com>"));
+        assert_eq!(reply_handle.uid, Some(42));
+
+        let mut send = daemon_email_send_request_to_email(request.send);
+        let (in_reply_to, references) = email::references_with_reply_handle(
+            request.reply_handle.as_ref(),
+            send.in_reply_to,
+            std::mem::take(&mut send.references),
+        );
+        assert_eq!(in_reply_to.as_deref(), Some("<m1@example.com>"));
+        assert_eq!(references, vec!["<m1@example.com>".to_string()]);
+    }
+
+    #[test]
+    fn daemon_email_send_request_defaults_collections() {
+        let request: DaemonEmailSendRequest = serde_json::from_value(serde_json::json!({
+            "smtp_url": "smtp://localhost:2525",
+            "from": "bot@example.com",
+            "subject": "hello",
+            "text": "body"
+        }))
+        .unwrap();
+        assert!(request.to.is_empty());
+        assert!(request.cc.is_empty());
+        assert!(!request.dry_run);
+        assert!(!request.allow_insecure_auth);
+        let converted = daemon_email_send_request_to_email(request);
+        assert_eq!(converted.from, "bot@example.com");
+        assert_eq!(converted.message_id, None);
+    }
 
     #[derive(Default)]
     struct RecordingCache {

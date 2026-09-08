@@ -154,6 +154,85 @@ describe("UxcDaemonClient", () => {
     ]);
   });
 
+  test("emailSend maps args onto email.send params", async () => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    const calls: Array<{ method: string; params: unknown }> = [];
+    (stub as unknown as { request: (method: string, params?: unknown) => Promise<unknown> }).request = async (
+      method,
+      params,
+    ) => {
+      calls.push({ method, params });
+      return { message_id: "<agentinbox-1@localhost>", accepted_recipients: 1 };
+    };
+
+    const response = await stub.emailSend({
+      smtpUrl: "smtp://localhost:2525",
+      from: "bot@example.com",
+      to: ["alice@example.org"],
+      cc: ["carol@example.net"],
+      subject: "Ping",
+      text: "Hello",
+      auth: "email-primary",
+      messageId: "<agentinbox-1@localhost>",
+      dryRun: true,
+    });
+    expect(response.message_id).toBe("<agentinbox-1@localhost>");
+    expect(calls).toEqual([
+      {
+        method: "email.send",
+        params: {
+          smtp_url: "smtp://localhost:2525",
+          from: "bot@example.com",
+          to: ["alice@example.org"],
+          cc: ["carol@example.net"],
+          subject: "Ping",
+          text: "Hello",
+          auth: "email-primary",
+          message_id: "<agentinbox-1@localhost>",
+          dry_run: true,
+        },
+      },
+    ]);
+  });
+
+  test("emailReply includes reply_handle on email.reply params", async () => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    const calls: Array<{ method: string; params: unknown }> = [];
+    (stub as unknown as { request: (method: string, params?: unknown) => Promise<unknown> }).request = async (
+      method,
+      params,
+    ) => {
+      calls.push({ method, params });
+      return { message_id: "<agentinbox-2@localhost>", accepted_recipients: 1 };
+    };
+
+    await stub.emailReply({
+      smtpUrl: "smtp://localhost:2525",
+      from: "bot@example.com",
+      to: ["alice@example.org"],
+      subject: "Re: Quarterly report",
+      text: "Thanks",
+      replyHandle: { messageId: "<m1@example.com>", account: "user@example.com", uid: 42 },
+    });
+    expect(calls).toEqual([
+      {
+        method: "email.reply",
+        params: {
+          smtp_url: "smtp://localhost:2525",
+          from: "bot@example.com",
+          to: ["alice@example.org"],
+          subject: "Re: Quarterly report",
+          text: "Thanks",
+          reply_handle: {
+            message_id: "<m1@example.com>",
+            account: "user@example.com",
+            uid: 42,
+          },
+        },
+      },
+    ]);
+  });
+
   test("call executes OpenAPI operations without CLI envelope parsing", async () => {
     const server = createOpenApiServer();
     await server.start();

@@ -32,6 +32,9 @@ pub struct EmailSendRequest {
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub auth: Option<String>,
+    /// Optional caller-supplied Message-ID. Used for outbound idempotency:
+    /// retries with the same correlation key produce the same Message-ID.
+    pub message_id: Option<String>,
     pub allow_insecure_auth: bool,
     pub dry_run: bool,
 }
@@ -64,14 +67,22 @@ struct SmtpAuth {
 pub async fn send_email(request: EmailSendRequest) -> Result<EmailSendResult> {
     validate_request(&request)?;
     let smtp_url = parse_smtp_url(&request.smtp_url)?;
-    let message_id = format!(
-        "<uxc-{}-{}@localhost>",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
+    let message_id = request
+        .message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "<uxc-{}-{}@localhost>",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            )
+        });
     let body = build_message(&request, &message_id)?;
     let accepted_recipients = request.to.len() + request.cc.len() + request.bcc.len();
 
@@ -411,10 +422,34 @@ mod tests {
             in_reply_to: None,
             references: vec![],
             auth: None,
+            message_id: None,
             allow_insecure_auth: false,
             dry_run: true,
         };
         assert!(build_message(&request, "<id@example.com>").is_err());
+    }
+
+    #[tokio::test]
+    async fn send_email_honors_caller_message_id_in_dry_run() {
+        let result = send_email(EmailSendRequest {
+            smtp_url: "smtp://localhost:25".to_string(),
+            from: "sender@example.com".to_string(),
+            to: vec!["recipient@example.com".to_string()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "hello".to_string(),
+            text: Some("body".to_string()),
+            html: None,
+            in_reply_to: None,
+            references: vec![],
+            auth: None,
+            message_id: Some("<agentinbox-correlation-1@localhost>".to_string()),
+            allow_insecure_auth: false,
+            dry_run: true,
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.message_id, "<agentinbox-correlation-1@localhost>");
     }
 
     #[test]
