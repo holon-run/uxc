@@ -614,6 +614,32 @@ impl Profile {
         Ok(self)
     }
 
+    /// Describe env-sourced secret references in this profile.
+    ///
+    /// Entries look like `secret (env DEMO_TOKEN)` for the primary secret and
+    /// `field 'password' (env IMAP_PASSWORD)` for named fields. The CLI uses
+    /// this to warn when a daemon-resolved credential references environment
+    /// the daemon process cannot see.
+    pub fn env_sourced_secret_refs(&self) -> Vec<String> {
+        let mut refs = Vec::new();
+        if let Some(SecretSource::Env { key }) = &self.secret_source {
+            refs.push(format!("secret (env {})", key));
+        }
+        let mut env_fields: Vec<(&String, &String)> = self
+            .fields
+            .iter()
+            .filter_map(|(name, source)| match source {
+                SecretSource::Env { key } => Some((name, key)),
+                _ => None,
+            })
+            .collect();
+        env_fields.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, key) in env_fields {
+            refs.push(format!("field '{}' (env {})", name, key));
+        }
+        refs
+    }
+
     /// Mask the API key for display (show only first 8 and last 4 characters)
     pub fn mask_api_key(&self) -> String {
         let key = self.active_secret_for_masking();
@@ -3039,6 +3065,45 @@ mod tests {
         let profile = Profile::new("test-key".to_string(), AuthType::ApiKey)
             .with_description("Test profile".to_string());
         assert_eq!(profile.description, Some("Test profile".to_string()));
+    }
+
+    #[test]
+    fn test_env_sourced_secret_refs_describes_primary_and_fields() {
+        let mut profile = Profile::new("test-key".to_string(), AuthType::ApiKey);
+        profile.secret_source = Some(SecretSource::Env {
+            key: "DEMO_TOKEN".to_string(),
+        });
+        profile.fields.insert(
+            "password".to_string(),
+            SecretSource::Env {
+                key: "IMAP_PASSWORD".to_string(),
+            },
+        );
+        profile.fields.insert(
+            "literal_field".to_string(),
+            SecretSource::Literal {
+                value: "plain".to_string(),
+            },
+        );
+        assert_eq!(
+            profile.env_sourced_secret_refs(),
+            vec![
+                "secret (env DEMO_TOKEN)".to_string(),
+                "field 'password' (env IMAP_PASSWORD)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_env_sourced_secret_refs_empty_for_non_env_sources() {
+        let mut profile = Profile::new("test-key".to_string(), AuthType::ApiKey);
+        profile.fields.insert(
+            "api_key".to_string(),
+            SecretSource::Op {
+                reference: "op://vault/demo/token".to_string(),
+            },
+        );
+        assert!(profile.env_sourced_secret_refs().is_empty());
     }
 
     #[test]

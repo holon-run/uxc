@@ -38,6 +38,27 @@ uxc auth credential set flipside --auth-type api_key --query-param "apiKey={{sec
 - `--header` and `--query-param` can be repeated and templated
 - resolved values from `env` and `op` are used at runtime and are not stored as plaintext
 
+## Env Sources and Daemon Resolution
+
+`env` secret sources are resolved in whichever process performs the call:
+
+- one-off CLI calls resolve the variable from your current shell
+- daemon-managed sources (`uxc source ensure ...`, for example email IMAP IDLE
+  or provider poll sources) resolve credentials inside the daemon process
+
+An already-running daemon does not inherit variables exported in the shell that
+later runs `uxc source ensure`, so an env-sourced secret attached to a
+daemon-managed source can fail authentication with no hint that the lookup
+happened in a different process. `uxc source ensure` prints a warning on stderr
+whenever the resolved credential references env-sourced secrets.
+
+Recommended alternatives for daemon-managed sources:
+
+- store the secret directly: `uxc auth credential set demo --secret <value>`
+- reference 1Password: `uxc auth credential set demo --secret-op op://vault/demo/token`
+  (the daemon must have a valid 1Password auth context)
+- or export the variable in the daemon's own environment and restart the daemon
+
 ## 1Password and Daemon Scope
 
 When using `--secret-op`, resolution happens in the daemon execution path.

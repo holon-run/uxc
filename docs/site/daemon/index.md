@@ -29,6 +29,11 @@ npm install @holon-run/uxc-daemon-client
 The daemon is especially useful when auth resolution, session reuse, or
 background subscriptions should stay outside one-off CLI processes.
 
+Credentials for daemon-managed sources are resolved inside the daemon process,
+which does not inherit env vars exported in the invoking shell; see
+[Secret Sources](../auth/secret-sources.md) for the boundary and recommended
+alternatives.
+
 <!-- INDEX:START -->
 
 - [Daemon API](./api.md)

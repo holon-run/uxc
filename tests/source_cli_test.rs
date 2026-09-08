@@ -186,3 +186,109 @@ fn source_doctor_warns_on_legacy_cursor_file() {
 
     daemon_stop_best_effort_with_home(temp_home.path());
 }
+
+#[test]
+#[serial]
+fn source_ensure_warns_when_credential_uses_env_secret() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+    let server = start_test_server("openapi", "ok");
+
+    let credential = uxc_command_with_home(temp_home.path())
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("env-demo")
+        .arg("--secret-env")
+        .arg("UXC_ITEST_UNSET_ENV_SECRET")
+        .output()
+        .expect("uxc auth credential set should run");
+    assert!(
+        credential.status.success(),
+        "credential set should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&credential.stdout),
+        String::from_utf8_lossy(&credential.stderr)
+    );
+
+    let mut ensure = uxc_command_with_home(temp_home.path());
+    ensure
+        .arg("source")
+        .arg("ensure")
+        .arg("test")
+        .arg("warn-env-secret")
+        .arg(&server.addr)
+        .arg("get:/poll/events")
+        .arg("--mode")
+        .arg("poll")
+        .arg("--poll-config")
+        .arg(
+            r#"{"interval_secs":1,"extract_items_pointer":"/items","request_cursor_arg":"cursor","response_cursor_pointer":"/next_cursor","checkpoint_strategy":{"type":"cursor_only"}}"#,
+        )
+        .arg("--auth")
+        .arg("env-demo")
+        .env_remove("UXC_ITEST_UNSET_ENV_SECRET");
+    let output = ensure.output().expect("uxc source ensure should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("daemon-managed sources resolve credentials inside the daemon process"),
+        "expected env-secret warning on stderr, got:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("env-demo"),
+        "warning should name the credential, got:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("UXC_ITEST_UNSET_ENV_SECRET"),
+        "warning should name the env var, got:\n{}",
+        stderr
+    );
+
+    daemon_stop_best_effort_with_home(temp_home.path());
+}
+
+#[test]
+#[serial]
+fn source_ensure_does_not_warn_for_literal_secret() {
+    let temp_home = tempfile::tempdir().expect("temp home should be created");
+    daemon_stop_best_effort_with_home(temp_home.path());
+    let server = start_test_server("openapi", "ok");
+
+    let credential = uxc_command_with_home(temp_home.path())
+        .arg("auth")
+        .arg("credential")
+        .arg("set")
+        .arg("literal-demo")
+        .arg("--secret")
+        .arg("sk-test-literal")
+        .output()
+        .expect("uxc auth credential set should run");
+    assert!(credential.status.success());
+
+    let output = uxc_command_with_home(temp_home.path())
+        .arg("source")
+        .arg("ensure")
+        .arg("test")
+        .arg("literal-secret")
+        .arg(&server.addr)
+        .arg("get:/poll/events")
+        .arg("--mode")
+        .arg("poll")
+        .arg("--poll-config")
+        .arg(
+            r#"{"interval_secs":1,"extract_items_pointer":"/items","request_cursor_arg":"cursor","response_cursor_pointer":"/next_cursor","checkpoint_strategy":{"type":"cursor_only"}}"#,
+        )
+        .arg("--auth")
+        .arg("literal-demo")
+        .output()
+        .expect("uxc source ensure should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("env-sourced") && !stderr.contains("env vars exported in this shell"),
+        "literal secret should not trigger the env warning, got:\n{}",
+        stderr
+    );
+
+    daemon_stop_best_effort_with_home(temp_home.path());
+}
