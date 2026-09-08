@@ -279,6 +279,15 @@ export interface PollSubscriptionConfig {
   response_cursor_pointer?: string;
   cursor_from_item_pointer?: string;
   cursor_transform?: "increment";
+  /**
+   * First-look backfill depth. When set, only the initial poll cycle after a
+   * fresh checkpoint emits items: the whole first page is recorded in the
+   * checkpoint, but at most this many unseen items are emitted. `0`
+   * establishes the baseline without emitting anything ("new items only").
+   * Later cycles are unaffected. Requires the item_key, watermark, or
+   * content_hash checkpoint strategy.
+   */
+  initial_items_limit?: number;
   checkpoint_strategy:
     | {
         type: "cursor_only";

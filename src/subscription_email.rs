@@ -28,6 +28,10 @@ const DEFAULT_MAILBOX: &str = "INBOX";
 const IMAP_CONNECT_TIMEOUT_SECS: u64 = 10;
 const IMAP_COMMAND_TIMEOUT_SECS: u64 = 30;
 const IMAP_IDLE_DONE_TIMEOUT_SECS: u64 = 5;
+/// Number of existing messages fetched on the first look by default.
+pub const EMAIL_IMAP_DEFAULT_INITIAL_FETCH_LIMIT: u64 = 25;
+/// Upper bound for the IMAP first-look backfill depth.
+pub const EMAIL_IMAP_MAX_INITIAL_FETCH_LIMIT: u64 = 100;
 const IMAP_ATTACHMENT_TIMEOUT_SECS: u64 = 120;
 const EMAIL_SNIPPET_CHARS: usize = 512;
 const EMAIL_RAW_INLINE_BYTES: usize = 32 * 1024;
@@ -105,11 +109,13 @@ pub fn resolve_email_imap_idle_runtime_config(
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| auth_profile.resolve_field_value("account").ok().flatten());
+    // 0 means "new mail only": skip the initial backfill entirely and only
+    // emit messages that arrive after the subscription is established.
     let initial_fetch_limit = args
         .and_then(|args| args.get("initial_fetch_limit"))
         .and_then(Value::as_u64)
-        .unwrap_or(25)
-        .min(100) as usize;
+        .unwrap_or(EMAIL_IMAP_DEFAULT_INITIAL_FETCH_LIMIT)
+        .min(EMAIL_IMAP_MAX_INITIAL_FETCH_LIMIT) as usize;
     let username = resolve_first_profile_field(auth_profile, &["username", "user", "email"])?
         .ok_or_else(|| {
             anyhow!("email-imap-idle auth profile requires username/user/email field")
@@ -305,6 +311,11 @@ async fn emit_recent_messages<R>(
 where
     R: SubscriptionEventRecorder,
 {
+    if config.initial_fetch_limit == 0 {
+        // New mail only: establish the high-water UID without fetching or
+        // emitting any pre-existing messages.
+        return conn.latest_uid().await;
+    }
     let messages = conn.fetch_recent(config.initial_fetch_limit).await?;
     emit_messages(config, messages, recorder, uidvalidity).await
 }
@@ -1291,6 +1302,17 @@ impl ImapConnection {
         self.fetch_uid_set(&uids.join(",")).await
     }
 
+    /// Returns the highest message UID in the selected mailbox without
+    /// fetching any message bodies. Used to establish the high-water mark for
+    /// `initial_fetch_limit = 0` ("new mail only") subscriptions.
+    async fn latest_uid(&mut self) -> Result<Option<u64>> {
+        let search_lines = self.command_ok("UID SEARCH ALL").await?;
+        Ok(parse_uid_search_uids(&search_lines)
+            .iter()
+            .filter_map(|uid| parse_uid_number(uid))
+            .max())
+    }
+
     async fn fetch_since_uid(&mut self, last_uid: u64) -> Result<Vec<ImapFetchedMessage>> {
         self.fetch_uid_set(&format!("{}:*", last_uid.saturating_add(1)))
             .await
@@ -1921,5 +1943,145 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["42", "43"]
         );
+    }
+
+    #[derive(Default)]
+    struct RecordingRecorder {
+        events: Vec<(String, String)>,
+    }
+
+    #[async_trait::async_trait]
+    impl SubscriptionEventRecorder for RecordingRecorder {
+        async fn emit(
+            &mut self,
+            source_kind: &str,
+            event_kind: &str,
+            _data: Option<Value>,
+            _meta: Option<Value>,
+        ) -> Result<()> {
+            self.events
+                .push((source_kind.to_string(), event_kind.to_string()));
+            Ok(())
+        }
+
+        async fn update_status(
+            &mut self,
+            _status: Option<&str>,
+            _last_error: Option<String>,
+            _increment_reconnect: bool,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn imap_idle_test_config(initial_fetch_limit: usize) -> EmailImapIdleRuntimeConfig {
+        EmailImapIdleRuntimeConfig {
+            endpoint: "imaps://imap.example.com:993".to_string(),
+            host: "imap.example.com".to_string(),
+            port: 993,
+            use_tls: true,
+            username: "agent@example.com".to_string(),
+            password: "secret".to_string(),
+            auth_profile: None,
+            mailbox: "INBOX".to_string(),
+            account: None,
+            initial_fetch_limit,
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_uid_returns_max_search_uid_without_fetching() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "A0001 UID SEARCH ALL\r\n");
+            writer
+                .write_all(b"* SEARCH 7 42 43\r\nA0001 OK search done\r\n")
+                .await
+                .unwrap();
+        });
+
+        let latest = conn.latest_uid().await.unwrap();
+        server.await.unwrap();
+        assert_eq!(latest, Some(43));
+    }
+
+    #[tokio::test]
+    async fn emit_recent_messages_with_zero_limit_baselines_without_emitting() {
+        let config = imap_idle_test_config(0);
+        let (client, server) = tokio::io::duplex(4096);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "A0001 UID SEARCH ALL\r\n");
+            writer
+                .write_all(b"* SEARCH 7 42 43\r\nA0001 OK search done\r\n")
+                .await
+                .unwrap();
+            // The connection must not receive a UID FETCH command afterwards:
+            // dropping the writer closes the pipe and any further read fails.
+        });
+
+        let mut recorder = RecordingRecorder::default();
+        let last_uid = emit_recent_messages(&config, &mut conn, &mut recorder, None)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(last_uid, Some(43));
+        assert!(recorder.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn emit_recent_messages_with_positive_limit_fetches_and_emits() {
+        let config = imap_idle_test_config(25);
+        let (client, server) = tokio::io::duplex(4096);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let raw =
+            "Message-ID: <m43@example.com>\r\nSubject: New\r\nFrom: sender@example.com\r\n\r\nBody";
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "A0001 UID SEARCH ALL\r\n");
+            writer
+                .write_all(b"* SEARCH 42 43\r\nA0001 OK search done\r\n")
+                .await
+                .unwrap();
+
+            command.clear();
+            reader.read_line(&mut command).await.unwrap();
+            assert_eq!(command, "A0002 UID FETCH 42,43 (UID FLAGS BODY.PEEK[])\r\n");
+            writer
+                .write_all(
+                    format!(
+                        "* 1 FETCH (UID 42 FLAGS () BODY[] \"Subject: Old\\r\\n\\r\\nOld\")\r\n* 2 FETCH (UID 43 FLAGS () BODY[] {{{}}}\r\n{})\r\nA0002 OK fetch done\r\n",
+                        raw.len(),
+                        raw
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let mut recorder = RecordingRecorder::default();
+        let last_uid = emit_recent_messages(&config, &mut conn, &mut recorder, None)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(last_uid, Some(43));
+        assert_eq!(recorder.events.len(), 2);
+        assert!(recorder
+            .events
+            .iter()
+            .all(|(kind, _)| kind == "email_imap_idle"));
     }
 }

@@ -19,6 +19,14 @@ pub struct PollSubscriptionConfig {
     pub cursor_from_item_pointer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_transform: Option<PollCursorTransform>,
+    /// First-look backfill depth. When set, only the initial poll cycle after
+    /// a fresh checkpoint emits items: the whole first page is recorded in the
+    /// checkpoint, but at most this many unseen items are emitted. `Some(0)`
+    /// establishes the baseline without emitting anything ("new items only").
+    /// Later cycles are unaffected. Requires the item_key, watermark, or
+    /// content_hash checkpoint strategy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_items_limit: Option<usize>,
     pub checkpoint_strategy: PollCheckpointStrategy,
 }
 
@@ -66,6 +74,10 @@ pub struct PollCheckpointState {
     pub etag_set_at_unix: Option<u64>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub consecutive_304_count: u32,
+    /// Set once the first-look backfill policy (`initial_items_limit`) has
+    /// been applied, so an empty first page does not re-trigger the baseline.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub baseline_done: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +140,13 @@ impl PollSubscriptionConfig {
         if self.response_cursor_pointer.is_some() && self.cursor_from_item_pointer.is_some() {
             bail!(
                 "poll response_cursor_pointer and cursor_from_item_pointer are mutually exclusive"
+            );
+        }
+        if self.initial_items_limit.is_some()
+            && matches!(self.checkpoint_strategy, PollCheckpointStrategy::CursorOnly)
+        {
+            bail!(
+                "poll initial_items_limit requires item_key, watermark, or content_hash checkpoint strategy"
             );
         }
 
@@ -215,12 +234,23 @@ impl PollSubscriptionRunner {
         let fetched_items = items.len();
         let previous_checkpoint = self.checkpoint.clone();
         let strategy = self.config.checkpoint_strategy.clone();
+        let baseline_limit =
+            if self.config.initial_items_limit.is_some() && !self.checkpoint.baseline_done {
+                self.config.initial_items_limit
+            } else {
+                None
+            };
         let emitted_items = match strategy {
             PollCheckpointStrategy::CursorOnly => items.to_vec(),
             PollCheckpointStrategy::ItemKey {
                 item_key_pointer,
                 seen_window,
-            } => self.filter_by_item_key(items, &item_key_pointer, seen_window.unwrap_or(1024))?,
+            } => self.filter_by_item_key(
+                items,
+                &item_key_pointer,
+                seen_window.unwrap_or(1024),
+                baseline_limit,
+            )?,
             PollCheckpointStrategy::Watermark {
                 item_watermark_pointer,
                 item_tiebreaker_pointer,
@@ -230,11 +260,18 @@ impl PollSubscriptionRunner {
                 &item_watermark_pointer,
                 item_tiebreaker_pointer.as_deref(),
                 seen_window.unwrap_or(1024),
+                baseline_limit,
             )?,
             PollCheckpointStrategy::ContentHash { seen_window } => {
-                self.filter_by_content_hash(items, seen_window.unwrap_or(1024))?
+                self.filter_by_content_hash(items, seen_window.unwrap_or(1024), baseline_limit)?
             }
         };
+
+        if baseline_limit.is_some() {
+            // The first-look policy applied to this cycle (even when the page
+            // was empty); it must not run again after this checkpoint.
+            self.checkpoint.baseline_done = true;
+        }
 
         if let Some(pointer) = self.config.response_cursor_pointer.as_ref() {
             self.checkpoint.cursor = Some(
@@ -284,6 +321,7 @@ impl PollSubscriptionRunner {
         items: &[Value],
         pointer: &str,
         seen_window: usize,
+        baseline_limit: Option<usize>,
     ) -> Result<Vec<Value>> {
         let mut emitted = Vec::new();
         for item in items {
@@ -294,6 +332,10 @@ impl PollSubscriptionRunner {
                 continue;
             }
             push_seen_key(&mut self.checkpoint.seen_keys, key, seen_window);
+            if baseline_limit.is_some_and(|limit| emitted.len() >= limit) {
+                // Baseline cycle: record the item as seen without emitting.
+                continue;
+            }
             emitted.push(item.clone());
         }
         Ok(emitted)
@@ -305,6 +347,7 @@ impl PollSubscriptionRunner {
         watermark_pointer: &str,
         tiebreaker_pointer: Option<&str>,
         seen_window: usize,
+        baseline_limit: Option<usize>,
     ) -> Result<Vec<Value>> {
         let mut emitted = Vec::new();
         let mut max_watermark = self.checkpoint.watermark.clone();
@@ -343,7 +386,12 @@ impl PollSubscriptionRunner {
                 self.checkpoint.watermark.as_ref(),
                 self.checkpoint.tie_breaker.as_ref(),
             ) {
-                emitted.push(item.clone());
+                if baseline_limit.is_some_and(|limit| emitted.len() >= limit) {
+                    // Baseline cycle: still advance the watermark below, but
+                    // do not emit beyond the first-look budget.
+                } else {
+                    emitted.push(item.clone());
+                }
                 if let Some(key) = seen_key {
                     push_seen_key(&mut self.checkpoint.seen_keys, key, seen_window);
                 }
@@ -369,6 +417,7 @@ impl PollSubscriptionRunner {
         &mut self,
         items: &[Value],
         seen_window: usize,
+        baseline_limit: Option<usize>,
     ) -> Result<Vec<Value>> {
         let mut emitted = Vec::new();
         for item in items {
@@ -377,6 +426,9 @@ impl PollSubscriptionRunner {
                 continue;
             }
             push_seen_key(&mut self.checkpoint.seen_keys, key, seen_window);
+            if baseline_limit.is_some_and(|limit| emitted.len() >= limit) {
+                continue;
+            }
             emitted.push(item.clone());
         }
         Ok(emitted)
@@ -585,6 +637,10 @@ fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 trait ResultExt<T> {
     fn with_context<F>(self, f: F) -> Result<T>
     where
@@ -613,6 +669,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/id".to_string(),
                 seen_window: Some(4),
@@ -630,6 +687,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         }
         .validate()
@@ -653,6 +711,100 @@ mod tests {
     }
 
     #[test]
+    fn initial_items_limit_caps_first_look_and_baselines_page() {
+        let mut config = item_key_config();
+        config.initial_items_limit = Some(1);
+        let mut runner = PollSubscriptionRunner::new(config).unwrap();
+        let first = runner
+            .process_response(json!({"items":[{"id":1},{"id":2},{"id":3}]}), None)
+            .unwrap();
+        assert_eq!(first.emitted_items, vec![json!({"id":1})]);
+        // The whole first page was baselined; only genuinely new items emit.
+        let second = runner
+            .process_response(json!({"items":[{"id":2},{"id":3},{"id":4}]}), None)
+            .unwrap();
+        assert_eq!(second.emitted_items, vec![json!({"id":4})]);
+    }
+
+    #[test]
+    fn initial_items_limit_zero_emits_nothing_on_first_look() {
+        let mut config = item_key_config();
+        config.initial_items_limit = Some(0);
+        let mut runner = PollSubscriptionRunner::new(config).unwrap();
+        let first = runner
+            .process_response(json!({"items":[{"id":1},{"id":2}]}), None)
+            .unwrap();
+        assert!(first.emitted_items.is_empty());
+        let second = runner
+            .process_response(json!({"items":[{"id":2},{"id":3}]}), None)
+            .unwrap();
+        assert_eq!(second.emitted_items, vec![json!({"id":3})]);
+    }
+
+    #[test]
+    fn initial_items_limit_baseline_applies_once_even_with_empty_first_page() {
+        let mut config = item_key_config();
+        config.initial_items_limit = Some(0);
+        let mut runner = PollSubscriptionRunner::new(config).unwrap();
+        let empty = runner.process_response(json!({"items":[]}), None).unwrap();
+        assert!(empty.emitted_items.is_empty());
+        // Baseline was established even though the first page was empty, so
+        // later arrivals must not be swallowed by the zero limit.
+        let later = runner
+            .process_response(json!({"items":[{"id":9}]}), None)
+            .unwrap();
+        assert_eq!(later.emitted_items, vec![json!({"id":9})]);
+    }
+
+    #[test]
+    fn initial_items_limit_caps_watermark_first_look() {
+        let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
+            request_cursor_arg: None,
+            response_cursor_pointer: None,
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
+            initial_items_limit: Some(1),
+            checkpoint_strategy: PollCheckpointStrategy::Watermark {
+                item_watermark_pointer: "/ts".to_string(),
+                item_tiebreaker_pointer: None,
+                seen_window: Some(4),
+            },
+        })
+        .unwrap();
+        let first = runner
+            .process_response(json!({"items":[{"ts":1},{"ts":2}]}), None)
+            .unwrap();
+        assert_eq!(first.emitted_items, vec![json!({"ts":1})]);
+        // The watermark advanced past the whole first page.
+        let second = runner
+            .process_response(json!({"items":[{"ts":2},{"ts":3}]}), None)
+            .unwrap();
+        assert_eq!(second.emitted_items, vec![json!({"ts":3})]);
+    }
+
+    #[test]
+    fn initial_items_limit_rejects_cursor_only_strategy() {
+        let err = PollSubscriptionConfig {
+            interval_secs: 1,
+            extract_items_pointer: "/items".to_string(),
+            missing_extract_items_pointer_as_empty: false,
+            request_cursor_arg: Some("cursor".to_string()),
+            response_cursor_pointer: Some("/next".to_string()),
+            cursor_from_item_pointer: None,
+            cursor_transform: None,
+            initial_items_limit: Some(5),
+            checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(err.to_string().contains("initial_items_limit"));
+    }
+
+    #[test]
     fn watermark_strategy_uses_tiebreaker() {
         let mut runner = PollSubscriptionRunner::new(PollSubscriptionConfig {
             interval_secs: 1,
@@ -662,6 +814,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::Watermark {
                 item_watermark_pointer: "/updated_at".to_string(),
                 item_tiebreaker_pointer: Some("/id".to_string()),
@@ -710,6 +863,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::ContentHash {
                 seen_window: Some(4),
             },
@@ -732,6 +886,7 @@ mod tests {
             response_cursor_pointer: Some("/next_cursor".to_string()),
             cursor_from_item_pointer: None,
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         })
         .unwrap();
@@ -753,6 +908,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::Watermark {
                 item_watermark_pointer: "/updated_at".to_string(),
                 item_tiebreaker_pointer: Some("/id".to_string()),
@@ -791,6 +947,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
             cursor_transform: Some(PollCursorTransform::Increment),
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/id".to_string(),
                 seen_window: Some(4),
@@ -814,6 +971,7 @@ mod tests {
             response_cursor_pointer: Some("/next_cursor".to_string()),
             cursor_from_item_pointer: Some("/update_id".to_string()),
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         }
         .validate()
@@ -832,6 +990,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: Some("/update_id".to_string()),
             cursor_transform: Some(PollCursorTransform::Increment),
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/update_id".to_string(),
                 seen_window: Some(8),
@@ -863,6 +1022,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: Some("/update_id".to_string()),
             cursor_transform: Some(PollCursorTransform::Increment),
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/update_id".to_string(),
                 seen_window: Some(8),
@@ -896,6 +1056,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: Some("/update_id".to_string()),
             cursor_transform: Some(PollCursorTransform::Increment),
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/update_id".to_string(),
                 seen_window: Some(8),
@@ -935,6 +1096,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: Some("/update_id".to_string()),
             cursor_transform: Some(PollCursorTransform::Increment),
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/update_id".to_string(),
                 seen_window: Some(8),
@@ -959,6 +1121,7 @@ mod tests {
             response_cursor_pointer: Some("/next_batch".to_string()),
             cursor_from_item_pointer: None,
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         })
         .unwrap();
@@ -982,6 +1145,7 @@ mod tests {
             response_cursor_pointer: Some("/next_batch".to_string()),
             cursor_from_item_pointer: None,
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         })
         .unwrap();
@@ -1005,6 +1169,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/id".to_string(),
                 seen_window: Some(8),
@@ -1036,6 +1201,7 @@ mod tests {
             response_cursor_pointer: None,
             cursor_from_item_pointer: None,
             cursor_transform: None,
+            initial_items_limit: None,
             checkpoint_strategy: PollCheckpointStrategy::ContentHash {
                 seen_window: Some(8),
             },
