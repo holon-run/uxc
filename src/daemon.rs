@@ -7487,13 +7487,20 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
         }
         "email.send" => {
             let Some(params) = req.params else {
-                write_jsonrpc_error(&mut stream, req.id, -32602, "Missing params".to_string()).await?;
+                write_jsonrpc_error(&mut stream, req.id, -32602, "Missing params".to_string())
+                    .await?;
                 return Ok(());
             };
             let request: DaemonEmailSendRequest = match serde_json::from_value(params) {
                 Ok(value) => value,
                 Err(err) => {
-                    write_jsonrpc_error(&mut stream, req.id, -32602, format!("Invalid params: {err}")).await?;
+                    write_jsonrpc_error(
+                        &mut stream,
+                        req.id,
+                        -32602,
+                        format!("Invalid params: {err}"),
+                    )
+                    .await?;
                     return Ok(());
                 }
             };
@@ -7514,13 +7521,20 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
         }
         "email.reply" => {
             let Some(params) = req.params else {
-                write_jsonrpc_error(&mut stream, req.id, -32602, "Missing params".to_string()).await?;
+                write_jsonrpc_error(&mut stream, req.id, -32602, "Missing params".to_string())
+                    .await?;
                 return Ok(());
             };
             let request: DaemonEmailReplyRequest = match serde_json::from_value(params) {
                 Ok(value) => value,
                 Err(err) => {
-                    write_jsonrpc_error(&mut stream, req.id, -32602, format!("Invalid params: {err}")).await?;
+                    write_jsonrpc_error(
+                        &mut stream,
+                        req.id,
+                        -32602,
+                        format!("Invalid params: {err}"),
+                    )
+                    .await?;
                     return Ok(());
                 }
             };

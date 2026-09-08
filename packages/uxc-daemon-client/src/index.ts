@@ -139,7 +139,7 @@ export interface EmailSendResult {
 }
 
 export interface EmailReplyHandle {
-  message_id?: string;
+  messageId?: string;
   account?: string;
   mailbox?: string;
   uid?: number;
