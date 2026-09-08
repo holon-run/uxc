@@ -100,6 +100,7 @@ const SUBSCRIPTION_MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const SUBSCRIPTION_EVENTS_MAX_LIMIT: usize = 500;
 const MANAGED_SOURCE_INITIAL_RESTART_DELAY_SECS: u64 = 1;
 const MANAGED_SOURCE_MAX_RESTART_DELAY_SECS: u64 = 30;
+const MANAGED_SOURCE_STOP_GRACE_SECS: u64 = 15;
 const MANAGED_STREAM_EVENTS_DEFAULT_LIMIT: usize = 100;
 const MANAGED_STREAM_EVENTS_MAX_LIMIT: usize = 500;
 const MCP_NOTIFICATION_HISTORY_LIMIT: usize = 256;
@@ -3205,7 +3206,7 @@ impl ManagedSourceManager {
         entry: Arc<ManagedSourceEntry>,
         record: ManagedSourceRecord,
         spec: ManagedSourceSpec,
-        stop_rx: watch::Receiver<bool>,
+        mut stop_rx: watch::Receiver<bool>,
     ) {
         let request = managed_source_subscription_request(&record, &spec);
         let runtime_view = Arc::new(Mutex::new(subscription_view_for_managed_source(
@@ -3267,6 +3268,12 @@ impl ManagedSourceManager {
                                 .await;
                         last_synced_state.as_ref() != Some(&next_state)
                     }
+                    changed = stop_rx.changed() => {
+                        if changed.is_ok() && *stop_rx.borrow() {
+                            break;
+                        }
+                        false
+                    }
                 };
 
                 if should_sync {
@@ -3293,7 +3300,11 @@ impl ManagedSourceManager {
                 }
             }
 
-            let _ = runner_task.await;
+            Self::await_task_with_grace(
+                runner_task,
+                Duration::from_secs(MANAGED_SOURCE_STOP_GRACE_SECS),
+            )
+            .await;
             let final_status = runtime_view.lock().await.status.clone();
             if let Err(err) =
                 sync_managed_source_state(&self.store, &entry, &runtime_view, &final_status).await
@@ -3718,6 +3729,26 @@ impl ManagedSourceManager {
         state.last_error = Some(message);
     }
 
+    /// Await a runner task with a bounded grace period, aborting the task if
+    /// it does not finish in time so a wedged runner cannot block callers.
+    async fn await_task_with_grace(task: JoinHandle<()>, grace: Duration) {
+        let mut task = task;
+        if tokio::time::timeout(grace, &mut task).await.is_err() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    /// Signal a managed source entry to stop and wait a bounded grace period
+    /// for its runner task; wedged runners are aborted so stop/delete always
+    /// make progress.
+    async fn signal_and_await_entry_task(entry: &Arc<ManagedSourceEntry>, grace: Duration) {
+        let _ = entry.stop_tx.lock().await.send(true);
+        if let Some(task) = entry.task.lock().await.take() {
+            Self::await_task_with_grace(task, grace).await;
+        }
+    }
+
     async fn stop_internal(
         &self,
         runtime: &DaemonRuntime,
@@ -3737,11 +3768,11 @@ impl ManagedSourceManager {
             })?;
         let active_entry = { self.entries.lock().await.get(&identity_key).cloned() };
         if let Some(entry) = active_entry {
-            let _ = entry.stop_tx.lock().await.send(true);
-            if let Some(task) = entry.task.lock().await.take() {
-                let task = task;
-                let _ = task.await;
-            }
+            Self::signal_and_await_entry_task(
+                &entry,
+                Duration::from_secs(MANAGED_SOURCE_STOP_GRACE_SECS),
+            )
+            .await;
             self.entries.lock().await.remove(&identity_key);
         }
         self.store
@@ -8163,7 +8194,17 @@ async fn client_call(method: &str, params: Option<Value>) -> Result<Value> {
     });
     write_frame(&mut stream, &request).await?;
 
-    let resp_val = read_frame(&mut stream).await?;
+    let resp_val = match read_frame(&mut stream).await {
+        Ok(value) => value,
+        Err(err) => {
+            let timed_out = err.to_string().contains("Timed out");
+            return Err(err.context(daemon_frame_wait_context(
+                method,
+                params.as_ref(),
+                timed_out,
+            )));
+        }
+    };
     let resp: JsonRpcResponse = serde_json::from_value(resp_val)?;
     if let Some(err) = resp.error {
         if let Some(data) = err.data.as_ref() {
@@ -8296,6 +8337,33 @@ async fn read_frame(stream: &mut UnixStream) -> Result<Value> {
     .await
     .context("Timed out reading frame body")??;
     Ok(serde_json::from_slice(&body)?)
+}
+
+#[cfg(unix)]
+fn daemon_frame_wait_context(method: &str, params: Option<&Value>, timed_out: bool) -> String {
+    let mut context = if timed_out {
+        format!(
+            "Timed out waiting for the daemon to respond to '{method}' within {FRAME_IO_TIMEOUT_SECS}s"
+        )
+    } else {
+        format!("Failed to read the daemon response for '{method}'")
+    };
+    if let Some(params) = params {
+        if let Some(namespace) = params.get("namespace").and_then(Value::as_str) {
+            let source_key = params
+                .get("source_key")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            context.push_str(&format!(" (source {namespace}/{source_key})"));
+        }
+    }
+    if timed_out {
+        context.push_str(
+            "; the daemon handler may still be processing the request — check \
+             `uxc source status` / `uxc source list` and daemon logs (`uxc daemon doctor`)",
+        );
+    }
+    context
 }
 
 fn daemon_dir() -> PathBuf {
@@ -11242,6 +11310,235 @@ mod tests {
             .unwrap();
 
         server_task.abort();
+    }
+
+    struct CredentialsEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for CredentialsEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.clone() {
+                Some(value) => std::env::set_var("UXC_CREDENTIALS_FILE", value),
+                None => std::env::remove_var("UXC_CREDENTIALS_FILE"),
+            }
+        }
+    }
+
+    /// Fake IMAP server that mimics the M365 personal-account basic-auth
+    /// rejection: greeting, then `* BYE` + tagged `NO Basic authentication is
+    /// disabled` for every LOGIN attempt, then the connection is closed.
+    async fn start_test_imap_server_login_rejected(
+    ) -> (String, StdArc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connects = StdArc::new(AtomicUsize::new(0));
+        let counter = connects.clone();
+        let task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(accepted) => accepted,
+                    Err(_) => break,
+                };
+                let counter = counter.clone();
+                tokio::spawn(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    if socket
+                        .write_all(b"* OK Microsoft Exchange IMAP4 ready\r\n")
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let mut buf = vec![0u8; 4096];
+                    let read = socket.read(&mut buf).await.unwrap_or(0);
+                    let line = String::from_utf8_lossy(&buf[..read]).to_string();
+                    let tag = line
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("A0001")
+                        .to_string();
+                    let _ = socket
+                        .write_all(b"* BYE Connection is closed. 13\r\n")
+                        .await;
+                    let _ = socket
+                        .write_all(
+                            format!("{tag} NO Basic authentication is disabled\r\n").as_bytes(),
+                        )
+                        .await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (format!("imap://{}", addr), connects, task)
+    }
+
+    fn managed_source_email_spec(endpoint: &str, mailbox: &str) -> ManagedSourceSpec {
+        let mut spec = managed_source_spec(endpoint);
+        spec.endpoint = endpoint.to_string();
+        spec.transport_hint = Some(SubscriptionTransportHint::EmailImapIdle);
+        let mut args = std::collections::HashMap::new();
+        args.insert("mailbox".to_string(), json!(mailbox));
+        spec.args = Some(args);
+        spec.options.auth = Some("imap-login-probe".to_string());
+        spec
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn managed_source_ensure_stop_and_delete_are_bounded_when_imap_login_rejected() {
+        let _env_lock = crate::test_support::credentials_env_lock().lock().unwrap();
+        let temp = tempdir().unwrap();
+        let (endpoint, connects, server_task) = start_test_imap_server_login_rejected().await;
+
+        let credentials_path = temp.path().join("credentials.json");
+        std::fs::write(
+            &credentials_path,
+            r#"{
+                "version": 1,
+                "credentials": {
+                    "imap-login-probe": {
+                        "auth_type": "basic",
+                        "secret_source": { "kind": "literal", "value": "app-password" },
+                        "fields": {
+                            "username": { "kind": "literal", "value": "user@hotmail.com" },
+                            "password": { "kind": "literal", "value": "app-password" }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let _credentials_env = CredentialsEnvGuard {
+            previous: std::env::var_os("UXC_CREDENTIALS_FILE"),
+        };
+        std::env::set_var("UXC_CREDENTIALS_FILE", &credentials_path);
+
+        let runtime = test_runtime_with_store(&temp);
+        let ensure_request = ManagedSourceEnsureRequest {
+            namespace: "email-assistant".to_string(),
+            source_key: "hotmail-probe".to_string(),
+            spec: managed_source_email_spec(&endpoint, "INBOX"),
+        };
+
+        let ensured = tokio::time::timeout(
+            StdDuration::from_secs(30),
+            runtime.source_ensure(ensure_request.clone()),
+        )
+        .await
+        .expect("source ensure should complete within bound");
+        ensured.unwrap();
+
+        for _ in 0..200 {
+            if connects.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(50)).await;
+        }
+        assert!(
+            connects.load(Ordering::SeqCst) >= 2,
+            "runner should retry the unhealthy IMAP source"
+        );
+
+        let status = runtime
+            .source_status(&ManagedSourceStatusRequest {
+                namespace: "email-assistant".to_string(),
+                source_key: "hotmail-probe".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(status.status, "reconnecting");
+
+        let reensured = tokio::time::timeout(
+            StdDuration::from_secs(30),
+            runtime.source_ensure(ensure_request.clone()),
+        )
+        .await
+        .expect("source re-ensure should complete within bound");
+        reensured.unwrap();
+
+        let stopped = tokio::time::timeout(
+            StdDuration::from_secs(20),
+            runtime.source_stop(&ManagedSourceStatusRequest {
+                namespace: "email-assistant".to_string(),
+                source_key: "hotmail-probe".to_string(),
+            }),
+        )
+        .await
+        .expect("source stop should complete within bound");
+        stopped.unwrap();
+
+        let ensured_again = tokio::time::timeout(
+            StdDuration::from_secs(30),
+            runtime.source_ensure(ManagedSourceEnsureRequest {
+                namespace: "email-assistant".to_string(),
+                source_key: "hotmail-probe-2".to_string(),
+                spec: managed_source_email_spec(&endpoint, "INBOX"),
+            }),
+        )
+        .await
+        .expect("second source ensure should complete within bound");
+        ensured_again.unwrap();
+        tokio::time::sleep(StdDuration::from_millis(500)).await;
+
+        let deleted = tokio::time::timeout(
+            StdDuration::from_secs(20),
+            runtime.source_delete(&ManagedSourceStatusRequest {
+                namespace: "email-assistant".to_string(),
+                source_key: "hotmail-probe-2".to_string(),
+            }),
+        )
+        .await
+        .expect("source delete should complete within bound");
+        deleted.unwrap();
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_source_stop_aborts_wedged_runner_task() {
+        let entry = StdArc::new(ManagedSourceEntry {
+            namespace: "team".to_string(),
+            source_key: "wedged".to_string(),
+            stream_id: managed_stream_id("team", "wedged"),
+            state: StdArc::new(Mutex::new(view_from_record(&poll_checkpoint_test_record(
+                "team",
+                "wedged",
+                "run-wedged",
+            )))),
+            runtime_view: Mutex::new(None),
+            stop_tx: Mutex::new(watch::channel(false).0),
+            task: Mutex::new(None),
+        });
+        *entry.task.lock().await = Some(tokio::spawn(async {
+            std::future::pending::<()>().await;
+        }));
+
+        let started = std::time::Instant::now();
+        ManagedSourceManager::signal_and_await_entry_task(&entry, StdDuration::from_secs(1)).await;
+
+        assert!(started.elapsed() < StdDuration::from_secs(5));
+        assert!(entry.task.lock().await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_frame_wait_context_includes_method_and_source() {
+        let timed_out = daemon_frame_wait_context(
+            "source.ensure",
+            Some(&json!({
+                "namespace": "email-assistant",
+                "source_key": "email:hotmail-probe"
+            })),
+            true,
+        );
+        assert!(timed_out.contains("source.ensure"));
+        assert!(timed_out.contains("email-assistant/email:hotmail-probe"));
+        assert!(timed_out.contains("120"));
+        let not_timed_out = daemon_frame_wait_context("source.list", None, false);
+        assert!(not_timed_out.contains("source.list"));
+        assert!(!not_timed_out.contains("Timed out"));
     }
 }
 

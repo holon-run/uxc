@@ -39,6 +39,22 @@ mod subscription_poll;
 mod subscription_slack;
 mod subscription_websocket;
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, OnceLock};
+
+    /// The credentials store location is process-global: it is resolved from
+    /// `UXC_CREDENTIALS_FILE` or `HOME`. Tests that mutate either variable,
+    /// or that persist/load profiles, must serialize through this lock so
+    /// concurrent test modules cannot observe each other's credential files.
+    /// Mirrored in `src/lib.rs` because module files compile into both the
+    /// lib and bin crate trees.
+    pub(crate) fn credentials_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+}
+
 use adapters::OperationDetail;
 use auth::injected_env::{parse_inject_env_specs, InjectEnvSpec};
 use auth::{AuthBindingRule, AuthBindings, AuthHeader, AuthType, OAuthFlow, Profile, Profiles};

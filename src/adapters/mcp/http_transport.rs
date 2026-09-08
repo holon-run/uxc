@@ -2839,15 +2839,16 @@ mod tests {
     use serde_json::json;
     use std::convert::Infallible;
     use std::net::TcpListener;
-    use std::sync::{Mutex as StdMutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex as StdMutex, MutexGuard};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tempfile::TempDir;
     use tokio::sync::{mpsc, oneshot};
     use tokio_stream::wrappers::UnboundedReceiverStream;
 
     fn home_env_lock() -> &'static StdMutex<()> {
-        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| StdMutex::new(()))
+        // HOME and UXC_CREDENTIALS_FILE both steer the credentials store;
+        // share one crate-wide lock so env-touching test modules serialize.
+        crate::test_support::credentials_env_lock()
     }
 
     struct TestEnv {

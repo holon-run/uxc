@@ -842,11 +842,9 @@ mod tests {
     use base64::Engine;
     use mockito::Server;
     use serde_json::json;
-    use std::sync::Mutex;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    /// `UXC_CREDENTIALS_FILE` is process-global; serialize env-touching tests.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::credentials_env_lock;
 
     const GMAIL_CREDENTIALS: &str = r#"{
         "version": 1,
@@ -1039,7 +1037,7 @@ mod tests {
 
     #[tokio::test]
     async fn imap_download_decodes_base64_section() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = credentials_env_lock().lock().unwrap();
         let _credentials = set_credentials_file(GMAIL_CREDENTIALS);
         let output = test_output_dir();
         let output_path = output.join("report.bin").display().to_string();
@@ -1074,7 +1072,7 @@ mod tests {
 
     #[tokio::test]
     async fn imap_uidvalidity_mismatch_maps_to_uid_invalid() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = credentials_env_lock().lock().unwrap();
         let _credentials = set_credentials_file(GMAIL_CREDENTIALS);
         let output = test_output_dir();
         let script = imap_login_select_script(999999, vec![]);
@@ -1092,7 +1090,7 @@ mod tests {
 
     #[tokio::test]
     async fn imap_missing_uid_maps_to_message_not_found() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = credentials_env_lock().lock().unwrap();
         let _credentials = set_credentials_file(GMAIL_CREDENTIALS);
         let output = test_output_dir();
         let script = imap_login_select_script(
@@ -1113,7 +1111,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_profile_reference_maps_to_auth_profile_missing() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = credentials_env_lock().lock().unwrap();
         let credentials = tempfile::tempdir().unwrap();
         std::env::set_var(
             "UXC_CREDENTIALS_FILE",
@@ -1126,7 +1124,7 @@ mod tests {
 
     #[tokio::test]
     async fn gmail_download_decodes_base64url_and_reports_metadata() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = credentials_env_lock().lock().unwrap();
         let _credentials = set_credentials_file(GMAIL_CREDENTIALS);
         let mut server = Server::new_async().await;
         let endpoint = format!("{}/gmail/v1/users/me/messages", server.url());
@@ -1166,7 +1164,7 @@ mod tests {
 
     #[tokio::test]
     async fn gmail_404_maps_to_attachment_not_found() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = credentials_env_lock().lock().unwrap();
         let _credentials = set_credentials_file(GMAIL_CREDENTIALS);
         let mut server = Server::new_async().await;
         let endpoint = format!("{}/gmail/v1/users/me/messages", server.url());
@@ -1187,7 +1185,7 @@ mod tests {
 
     #[tokio::test]
     async fn gmail_401_maps_to_auth_failed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = credentials_env_lock().lock().unwrap();
         let _credentials = set_credentials_file(GMAIL_CREDENTIALS);
         let mut server = Server::new_async().await;
         let endpoint = format!("{}/gmail/v1/users/me/messages", server.url());
@@ -1208,7 +1206,7 @@ mod tests {
 
     #[tokio::test]
     async fn size_limit_maps_to_size_limit_exceeded() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = credentials_env_lock().lock().unwrap();
         let _credentials = set_credentials_file(GMAIL_CREDENTIALS);
         let mut server = Server::new_async().await;
         let endpoint = format!("{}/gmail/v1/users/me/messages", server.url());
@@ -1231,7 +1229,7 @@ mod tests {
 
     #[tokio::test]
     async fn graph_download_returns_raw_bytes() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = credentials_env_lock().lock().unwrap();
         let _credentials = set_credentials_file(GMAIL_CREDENTIALS);
         let mut server = Server::new_async().await;
         let endpoint = format!("{}/v1.0/users/me/messages", server.url());
@@ -1267,7 +1265,7 @@ mod tests {
 
     #[tokio::test]
     async fn jmap_download_resolves_session_download_template() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = credentials_env_lock().lock().unwrap();
         let _credentials = set_credentials_file(GMAIL_CREDENTIALS);
         let mut server = Server::new_async().await;
         let endpoint = format!("{}/api", server.url());
