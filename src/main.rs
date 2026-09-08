@@ -6051,12 +6051,50 @@ fn build_managed_source_spec(
     })
 }
 
+/// Daemon-managed sources resolve credentials inside the daemon process, which
+/// does not inherit env vars exported in the invoking shell after the daemon
+/// started. Warn before sending the ensure request so this failure mode is
+/// visible instead of authentication failing with no hint about where the env
+/// lookup happened.
+fn warn_daemon_env_sourced_secrets(endpoint: &str, explicit_auth: Option<&str>) {
+    let credential_id = match explicit_auth {
+        Some(id) => Some(id.to_string()),
+        None => AuthBindings::load_bindings().ok().and_then(|bindings| {
+            bindings
+                .matching_rule(endpoint)
+                .map(|rule| rule.credential.clone())
+        }),
+    };
+    let Some(credential_id) = credential_id else {
+        return;
+    };
+    let Ok(profiles) = Profiles::load_profiles() else {
+        return;
+    };
+    let Ok(profile) = profiles.get_profile(&credential_id) else {
+        return;
+    };
+    let refs = profile.env_sourced_secret_refs();
+    if refs.is_empty() {
+        return;
+    }
+    eprintln!(
+        "Warning: daemon-managed sources resolve credentials inside the daemon process, which may not see env vars exported in this shell. Credential '{}' resolves {} from the environment. If the source fails authentication, re-create the credential with `uxc auth credential set {} --secret <value>` or `--secret-op <ref>`, or make the variable available to the daemon process and restart it.",
+        credential_id,
+        refs.join(", "),
+        credential_id
+    );
+}
+
 async fn handle_source_command(command: &SourceCommands, cli: &Cli) -> Result<OutputEnvelope> {
     if cli.schema_url.is_some() {
         return Err(UxcError::InvalidArguments(
             "--schema-url is not supported for source commands".to_string(),
         )
         .into());
+    }
+    if let SourceCommands::Ensure { endpoint, .. } = command {
+        warn_daemon_env_sourced_secrets(endpoint, cli.auth.as_deref());
     }
     let daemon_ensure = daemon::ensure_compatible_daemon_running().await?;
     let daemon_autostarted =

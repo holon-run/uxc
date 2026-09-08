@@ -27,6 +27,12 @@ The subscription holds the connection open with IMAP IDLE and emits one
 auth profile (`--auth email-primary`); store the IMAP username and password in
 that profile with your preferred auth mechanism.
 
+These subscriptions resolve credentials inside the daemon process, so
+env-sourced secrets (`--secret-env`) cannot see variables exported in the
+shell that runs `uxc source ensure`. `uxc source ensure` warns on stderr in
+that case; see [Secret Sources](../auth/secret-sources.md) for recommended
+alternatives such as literal secrets or 1Password references.
+
 ### Provider Polling
 
 ```bash
