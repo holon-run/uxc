@@ -104,6 +104,8 @@ export interface ManagedSourceSpec {
     | "discord_gateway"
     | "slack_socket_mode"
     | "feishu_long_connection"
+    | "email_imap_idle"
+    | "email_provider_poll"
     | null;
   subprotocols?: string[];
   initial_text_frames?: string[];
@@ -120,6 +122,49 @@ export interface ManagedSourceEnsureResponse {
   status: string;
   reused: boolean;
   replaced_previous: boolean;
+}
+
+export interface EmailSendResult {
+  smtp_url: string;
+  from: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  message_id: string;
+  in_reply_to?: string | null;
+  references?: string[];
+  dry_run: boolean;
+  accepted_recipients: number;
+}
+
+export interface EmailReplyHandle {
+  message_id?: string;
+  account?: string;
+  mailbox?: string;
+  uid?: number;
+}
+
+export interface EmailSendArgs {
+  smtpUrl: string;
+  from: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  text?: string;
+  html?: string;
+  inReplyTo?: string;
+  references?: string[];
+  auth?: string;
+  /** Caller-supplied Message-ID used for outbound idempotency. */
+  messageId?: string;
+  allowInsecureAuth?: boolean;
+  dryRun?: boolean;
+}
+
+export interface EmailReplyArgs extends EmailSendArgs {
+  replyHandle?: EmailReplyHandle | null;
 }
 
 export interface ManagedSourceView {
@@ -343,6 +388,18 @@ export class UxcDaemonClient {
       options: args.options,
     });
     return generateTypeScriptClient(schema, args.emitter);
+  }
+
+  async emailSend(args: EmailSendArgs): Promise<EmailSendResult> {
+    return this.request("email.send", emailSendParams(args));
+  }
+
+  async emailReply(args: EmailReplyArgs): Promise<EmailSendResult> {
+    const { replyHandle, ...send } = args;
+    return this.request("email.reply", {
+      ...emailSendParams(send),
+      ...(replyHandle ? { reply_handle: emailReplyHandleParams(replyHandle) } : {}),
+    });
   }
 
   async sourceEnsure(args: {
@@ -946,6 +1003,37 @@ function defaultSocketPath(env: NodeJS.ProcessEnv | undefined): string {
   }
   const label = bestEffortUserLabel(env);
   return join(tmpdir(), `uxc-${label}`, "daemon", "uxc.sock");
+}
+
+function emailSendParams(args: EmailSendArgs): Record<string, unknown> {
+  const params: Record<string, unknown> = {
+    smtp_url: args.smtpUrl,
+    from: args.from,
+    to: args.to,
+    subject: args.subject,
+  };
+  if (args.cc?.length) params.cc = args.cc;
+  if (args.bcc?.length) params.bcc = args.bcc;
+  if (args.text != null) params.text = args.text;
+  if (args.html != null) params.html = args.html;
+  if (args.inReplyTo != null) params.in_reply_to = args.inReplyTo;
+  if (args.references?.length) params.references = args.references;
+  if (args.auth != null) params.auth = args.auth;
+  if (args.messageId != null) params.message_id = args.messageId;
+  if (args.allowInsecureAuth != null) params.allow_insecure_auth = args.allowInsecureAuth;
+  if (args.dryRun != null) params.dry_run = args.dryRun;
+  return params;
+}
+
+function emailReplyHandleParams(replyHandle: EmailReplyHandle): Record<string, unknown> {
+  if (replyHandle.messageId == null) {
+    throw new Error("emailReply replyHandle requires messageId");
+  }
+  const params: Record<string, unknown> = { message_id: replyHandle.messageId };
+  if (replyHandle.account != null) params.account = replyHandle.account;
+  if (replyHandle.mailbox != null) params.mailbox = replyHandle.mailbox;
+  if (replyHandle.uid != null) params.uid = replyHandle.uid;
+  return params;
 }
 
 function bestEffortUserLabel(env: NodeJS.ProcessEnv | undefined): string {
