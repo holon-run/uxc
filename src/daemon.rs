@@ -10714,6 +10714,7 @@ mod tests {
             etag: Some("\"etag-v1\"".to_string()),
             etag_set_at_unix: None,
             consecutive_304_count: 0,
+            baseline_done: false,
         };
         let checkpoint_path = runtime.managed_source_checkpoint_path(&record.run_id);
         fs::create_dir_all(checkpoint_path.parent().unwrap()).unwrap();
@@ -10757,6 +10758,7 @@ mod tests {
             etag: Some("\"etag-v2\"".to_string()),
             etag_set_at_unix: None,
             consecutive_304_count: 0,
+            baseline_done: false,
         };
         let offsets = runtime
             .managed_sources
