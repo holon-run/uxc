@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-08
+
+### Added
+- Daemon JSON-RPC methods `email.send` and `email.reply` for outbound email, with typed `emailSend`/`emailReply` methods in `uxc-daemon-client` and caller-supplied `message_id` support for outbound idempotency (#443).
+
 ## [0.18.0] - 2026-09-08
 
 ### Added
