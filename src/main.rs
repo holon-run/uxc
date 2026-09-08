@@ -1083,6 +1083,9 @@ struct AuthProfileView {
     name: String,
     auth_type: String,
     api_key_masked: String,
+    /// Present when the main secret is empty but a password-class field
+    /// covers basic-auth transports.
+    secret_hint: Option<String>,
     secret_source: Option<AuthSecretSourceView>,
     fields: Option<Vec<AuthFieldView>>,
     auth_headers: Option<Vec<AuthHeaderView>>,
@@ -3259,6 +3262,9 @@ fn render_text_output(envelope: &OutputEnvelope) -> Result<()> {
             println!("Credential: {}", credential.name);
             println!("  Type: {}", credential.auth_type);
             println!("  Secret: {}", credential.api_key_masked);
+            if let Some(hint) = credential.secret_hint {
+                println!("  Secret Hint: {}", hint);
+            }
             if let Some(source) = credential.secret_source {
                 println!("  Source: {}", source.kind);
             }
@@ -6658,13 +6664,19 @@ async fn handle_auth_credential_command(
             }
 
             if resolved_auth_type != AuthType::OAuth {
-                let has_existing_secret = matches!(
-                    profile_obj.secret_source,
-                    Some(crate::auth::SecretSource::Literal { .. })
-                        | Some(crate::auth::SecretSource::Env { .. })
-                        | Some(crate::auth::SecretSource::Op { .. })
-                ) || (previous_auth_type != Some(AuthType::OAuth)
-                    && !profile_obj.api_key.is_empty());
+                let has_existing_secret =
+                    profile_obj
+                        .secret_source
+                        .as_ref()
+                        .is_some_and(|source| match source {
+                            // An empty literal (the `Profile::new` default) is not
+                            // a usable secret; do not let it bypass validation.
+                            crate::auth::SecretSource::Literal { value } => !value.is_empty(),
+                            crate::auth::SecretSource::Env { .. }
+                            | crate::auth::SecretSource::Op { .. } => true,
+                        })
+                        || (previous_auth_type != Some(AuthType::OAuth)
+                            && !profile_obj.api_key.is_empty());
 
                 let requires_secret = if resolved_auth_type == AuthType::ApiKey {
                     if profile_obj.has_custom_api_key_headers()
@@ -6675,6 +6687,14 @@ async fn handle_auth_credential_command(
                     } else {
                         profile_obj.fields.is_empty()
                     }
+                } else if resolved_auth_type == AuthType::Basic {
+                    // Basic-auth transports resolve the secret from
+                    // password-class fields, so they do not require a main
+                    // secret when one of those (or a `secret` field) exists.
+                    !(profile_obj
+                        .fields
+                        .contains_key(crate::auth::PRIMARY_SECRET_FIELD)
+                        || profile_obj.has_basic_password_field())
                 } else if resolved_auth_type == AuthType::Bearer {
                     profile_obj.fields.is_empty()
                 } else {
@@ -6682,11 +6702,12 @@ async fn handle_auth_credential_command(
                 };
 
                 if provided_secret_flags == 0 && !has_existing_secret && requires_secret {
-                    return Err(UxcError::InvalidArguments(
+                    let message = if resolved_auth_type == AuthType::Basic {
+                        "Credential set requires one of --secret, --secret-env, --secret-op, or a password/app_password field"
+                    } else {
                         "Credential set requires one of --secret, --secret-env, or --secret-op"
-                            .to_string(),
-                    )
-                    .into());
+                    };
+                    return Err(UxcError::InvalidArguments(message.to_string()).into());
                 }
             }
 
@@ -7617,6 +7638,7 @@ fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
         name: name.to_string(),
         auth_type: profile.auth_type.to_string(),
         api_key_masked: profile.mask_api_key(),
+        secret_hint: basic_secret_hint(profile),
         secret_source: profile
             .secret_source
             .as_ref()
@@ -7666,6 +7688,22 @@ fn to_auth_profile_view(name: &str, profile: &Profile) -> AuthProfileView {
         description: profile.description.clone(),
         oauth,
         bootstrap,
+    }
+}
+
+/// Hint shown by `credential info` when a basic-auth credential has no main
+/// secret but a password-class field that basic-auth transports resolve.
+fn basic_secret_hint(profile: &Profile) -> Option<String> {
+    if profile.auth_type == crate::auth::AuthType::Basic
+        && profile.mask_api_key().is_empty()
+        && profile.has_basic_password_field()
+    {
+        Some(
+            "main secret is empty; basic-auth transports will use the password/app_password field as the secret"
+                .to_string(),
+        )
+    } else {
+        None
     }
 }
 

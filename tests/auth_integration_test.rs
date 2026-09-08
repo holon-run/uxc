@@ -548,3 +548,70 @@ fn test_profile_name_validation_starts_with_digit() {
         .to_string()
         .contains("cannot start with a digit"));
 }
+
+#[test]
+fn test_resolve_auth_accepts_basic_password_field_secret() {
+    let _temp_dir = setup_test_env();
+
+    let mut profiles = Profiles::new();
+    let mut profile = Profile::new(String::new(), AuthType::Basic);
+    profile.name = Some("email-basic".to_string());
+    profile
+        .set_field_source(
+            "username".to_string(),
+            uxc::auth::SecretSource::Literal {
+                value: "user@example.com".to_string(),
+            },
+        )
+        .expect("username field should be accepted");
+    profile
+        .set_field_source(
+            "password".to_string(),
+            uxc::auth::SecretSource::Literal {
+                value: "app-password".to_string(),
+            },
+        )
+        .expect("password field should be accepted");
+    profiles
+        .set_profile("email-basic".to_string(), profile)
+        .expect("Failed to set profile");
+    profiles.save_profiles().expect("Failed to save profiles");
+
+    // Basic-auth transports resolve the password from fields, so the
+    // credential must be considered ready even without a main secret.
+    let resolved = uxc::auth::resolve_auth_for_endpoint(
+        "imaps://outlook.office365.com:993",
+        Some("email-basic".to_string()),
+    )
+    .expect("basic credential with password field should resolve");
+    assert!(resolved.is_some());
+}
+
+#[test]
+fn test_resolve_auth_rejects_basic_without_any_secret() {
+    let _temp_dir = setup_test_env();
+
+    let mut profiles = Profiles::new();
+    let mut profile = Profile::new(String::new(), AuthType::Basic);
+    profile.name = Some("email-basic".to_string());
+    profile
+        .set_field_source(
+            "username".to_string(),
+            uxc::auth::SecretSource::Literal {
+                value: "user@example.com".to_string(),
+            },
+        )
+        .expect("username field should be accepted");
+    profiles
+        .set_profile("email-basic".to_string(), profile)
+        .expect("Failed to set profile");
+    profiles.save_profiles().expect("Failed to save profiles");
+
+    let err = uxc::auth::resolve_auth_for_endpoint(
+        "imaps://outlook.office365.com:993",
+        Some("email-basic".to_string()),
+    )
+    .expect_err("basic credential without any secret should fail");
+    assert!(err.to_string().contains("does not have a usable secret"));
+    assert!(err.to_string().contains("password/app_password field"));
+}

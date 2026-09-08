@@ -28,6 +28,10 @@ const CREDENTIALS_FILE_ENV: &str = "UXC_CREDENTIALS_FILE";
 const AUTH_BINDINGS_FILE_ENV: &str = "UXC_AUTH_BINDINGS_FILE";
 pub const PRIMARY_SECRET_FIELD: &str = "secret";
 
+/// Field names that basic-auth transports resolve as the effective password
+/// secret (mirrors `resolve_email_imap_idle_runtime_config`).
+pub const BASIC_PASSWORD_FIELD_NAMES: [&str; 2] = ["password", "app_password"];
+
 /// Authentication type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthType {
@@ -640,6 +644,17 @@ impl Profile {
 
     pub fn has_bootstrap_config(&self) -> bool {
         self.bootstrap.is_some()
+    }
+
+    /// Whether a password-class field is configured for basic-auth transports.
+    ///
+    /// Basic-auth transports (for example `email-imap-idle`) resolve the
+    /// effective secret from the `password`/`app_password` fields, so such a
+    /// profile has a usable secret even when the main secret is empty.
+    pub fn has_basic_password_field(&self) -> bool {
+        BASIC_PASSWORD_FIELD_NAMES
+            .iter()
+            .any(|name| self.fields.contains_key(*name))
     }
 
     fn active_secret_for_masking(&self) -> String {
@@ -1576,6 +1591,17 @@ fn validate_ready(profile: &Profile) -> Result<()> {
             if profile.api_key.is_empty() {
                 anyhow::bail!(
                     "Credential '{}' does not have a usable secret. Set it with --secret, --secret-env, or --secret-op.",
+                    profile.name.as_deref().unwrap_or("unknown"),
+                );
+            }
+        }
+        AuthType::Basic => {
+            if profile.api_key.is_empty()
+                && !profile.has_bootstrap_config()
+                && !profile.has_basic_password_field()
+            {
+                anyhow::bail!(
+                    "Credential '{}' does not have a usable secret. Set it with --secret, --secret-env, --secret-op, or a password/app_password field.",
                     profile.name.as_deref().unwrap_or("unknown"),
                 );
             }
@@ -3391,6 +3417,92 @@ mod tests {
         }));
 
         validate_ready(&profile).unwrap();
+    }
+
+    #[test]
+    fn has_basic_password_field_detects_password_class_fields() {
+        let mut profile = Profile::new(String::new(), AuthType::Basic);
+        assert!(!profile.has_basic_password_field());
+
+        profile
+            .set_field_source(
+                "username".to_string(),
+                SecretSource::Literal {
+                    value: "user@example.com".to_string(),
+                },
+            )
+            .unwrap();
+        assert!(!profile.has_basic_password_field());
+
+        profile
+            .set_field_source(
+                "app_password".to_string(),
+                SecretSource::Literal {
+                    value: "pw".to_string(),
+                },
+            )
+            .unwrap();
+        assert!(profile.has_basic_password_field());
+    }
+
+    #[test]
+    fn validate_ready_accepts_basic_password_fields_as_usable_secret() {
+        for field_name in ["password", "app_password"] {
+            let mut profile = Profile::new(String::new(), AuthType::Basic);
+            profile.name = Some("email-basic".to_string());
+            profile
+                .set_field_source(
+                    "username".to_string(),
+                    SecretSource::Literal {
+                        value: "user@example.com".to_string(),
+                    },
+                )
+                .unwrap();
+            profile
+                .set_field_source(
+                    field_name.to_string(),
+                    SecretSource::Literal {
+                        value: "pw".to_string(),
+                    },
+                )
+                .unwrap();
+            let profile = profile.materialize_runtime().unwrap();
+            validate_ready(&profile).unwrap();
+        }
+    }
+
+    #[test]
+    fn validate_ready_rejects_basic_without_any_secret() {
+        let mut profile = Profile::new(String::new(), AuthType::Basic);
+        profile.name = Some("email-basic".to_string());
+        profile
+            .set_field_source(
+                "username".to_string(),
+                SecretSource::Literal {
+                    value: "user@example.com".to_string(),
+                },
+            )
+            .unwrap();
+        let profile = profile.materialize_runtime().unwrap();
+        let err = validate_ready(&profile).unwrap_err();
+        assert!(err.to_string().contains("usable secret"));
+        assert!(err.to_string().contains("password/app_password field"));
+    }
+
+    #[test]
+    fn validate_ready_does_not_extend_password_fields_to_bearer() {
+        let mut profile = Profile::new(String::new(), AuthType::Bearer);
+        profile
+            .set_field_source(
+                "password".to_string(),
+                SecretSource::Literal {
+                    value: "pw".to_string(),
+                },
+            )
+            .unwrap();
+        let profile = profile.materialize_runtime().unwrap();
+        let err = validate_ready(&profile).unwrap_err();
+        assert!(err.to_string().contains("usable secret"));
     }
 
     #[test]
