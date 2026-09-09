@@ -201,11 +201,12 @@ Notes:
 
 - Use `--auth` with credentials containing `username`/`user`/`account` and
   `password`/`secret` fields when SMTP AUTH is required.
-- `smtp://` upgrades to TLS via STARTTLS automatically when the server
-  advertises it; `smtps://` (implicit TLS, port 465) is also supported.
-- Password AUTH (`AUTH PLAIN`) over a `smtp://` connection that cannot be
-  upgraded requires explicit `--allow-insecure-auth`; prefer a trusted local
-  relay or STARTTLS-capable submission endpoint.
+- `smtps://` (implicit TLS, port 465) is supported for every auth mode; for
+  OAuth credentials, `smtp://` also upgrades to TLS via STARTTLS automatically
+  when the server advertises it.
+- Password AUTH (`AUTH PLAIN`) over `smtp://` is not auto-upgraded and requires
+  explicit `--allow-insecure-auth` (the password travels in cleartext); prefer
+  a trusted local relay, `smtps://`, or OAuth credentials.
 - OAuth credentials authenticate with `AUTH XOAUTH2`. This is how Microsoft
   personal accounts send mail:
 

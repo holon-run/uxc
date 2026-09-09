@@ -1477,9 +1477,9 @@ impl ImapConnection {
             let line = self.read_response_line_with_literals().await?;
             if let Some(payload) = line.strip_prefix('+') {
                 challenge_json = decode_base64_json_challenge(payload);
-                // Abort SASL with an empty response so the server finishes
-                // the exchange with a tagged NO instead of waiting forever.
-                self.write_line("").await?;
+                // Abort SASL with `*` (RFC 3501 section 6.2.2) so the server
+                // finishes the exchange with a tagged NO instead of waiting forever.
+                self.write_line("*").await?;
                 continue;
             }
             if line.starts_with(&format!("{tag} ")) {
@@ -2437,10 +2437,10 @@ mod tests {
                 .write_all(format!("+ {challenge}\r\n").as_bytes())
                 .await
                 .unwrap();
-            // After the SASL abort (empty line), the server finishes with NO.
+            // After the SASL abort (`*` per RFC 3501), the server finishes with NO.
             let mut abort = String::new();
             reader.read_line(&mut abort).await.unwrap();
-            assert_eq!(abort, "\r\n");
+            assert_eq!(abort, "*\r\n");
             writer
                 .write_all(b"A0001 NO AUTHENTICATE failed.\r\n")
                 .await
