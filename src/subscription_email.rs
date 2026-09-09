@@ -35,6 +35,11 @@ pub const EMAIL_IMAP_MAX_INITIAL_FETCH_LIMIT: u64 = 100;
 const IMAP_ATTACHMENT_TIMEOUT_SECS: u64 = 120;
 const EMAIL_SNIPPET_CHARS: usize = 512;
 const EMAIL_RAW_INLINE_BYTES: usize = 32 * 1024;
+/// Marker Microsoft Exchange servers return when IMAP basic auth is disabled
+/// for the account (typical for personal outlook.com/hotmail.com/live.com
+/// accounts). The server rejects LOGIN before credential validation, so no
+/// credential fix can help; only an OAuth-capable transport can proceed.
+const IMAP_BASIC_AUTH_DISABLED_MARKER: &str = "basic authentication is disabled";
 
 pub(crate) trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -156,12 +161,26 @@ pub(crate) async fn run_email_imap_idle_subscription_runtime<R>(
 where
     R: SubscriptionEventRecorder,
 {
+    run_email_imap_idle_subscription_with_connector(config, recorder, stop_rx, connect_imap).await
+}
+
+async fn run_email_imap_idle_subscription_with_connector<R, C>(
+    config: EmailImapIdleRuntimeConfig,
+    recorder: &mut R,
+    stop_rx: &mut watch::Receiver<bool>,
+    connector: C,
+) -> Result<()>
+where
+    R: SubscriptionEventRecorder,
+    C: Fn(EmailImapIdleRuntimeConfig) -> BoxFutureResult<ImapConnection>,
+{
     let mut delay_secs = 1u64;
     loop {
-        match run_email_imap_idle_session_once(&config, recorder, stop_rx, connect_imap).await {
+        match run_email_imap_idle_session_once(&config, recorder, stop_rx, &connector).await {
             Ok(()) => return Ok(()),
             Err(err) => {
                 let message = err.to_string();
+                let permanent = is_imap_basic_auth_disabled_message(&message);
                 recorder
                     .emit(
                         "email_imap_idle",
@@ -170,6 +189,15 @@ where
                         Some(json!({ "message": message })),
                     )
                     .await?;
+                if permanent {
+                    // Server-side policy rejection: retrying with the same
+                    // credential can never succeed, so stop the backoff loop
+                    // and surface the failure instead of reconnecting forever.
+                    recorder
+                        .update_status(Some("failed"), Some(message), false)
+                        .await?;
+                    return Err(err);
+                }
                 recorder
                     .update_status(Some("reconnecting"), Some(message), true)
                     .await?;
@@ -191,15 +219,55 @@ where
     }
 }
 
+fn is_imap_basic_auth_disabled_message(message: &str) -> bool {
+    message
+        .to_lowercase()
+        .contains(IMAP_BASIC_AUTH_DISABLED_MARKER)
+}
+
+fn imap_basic_auth_disabled_error(server_lines: &[String]) -> anyhow::Error {
+    anyhow!(
+        "IMAP LOGIN rejected: the server disabled basic authentication for this account. \
+         Microsoft personal accounts (outlook.com/hotmail.com/live.com) reject IMAP basic auth \
+         before validating credentials, so fixing the password cannot help. Use an OAuth-capable \
+         transport (IMAP XOAUTH2 or `email-provider-poll` with provider=graph) instead. \
+         Server response: {}",
+        server_lines.last().cloned().unwrap_or_default()
+    )
+}
+
+async fn imap_login(conn: &mut ImapConnection, username: &str, password: &str) -> Result<()> {
+    let lines = conn
+        .command(&format!(
+            "LOGIN {} {}",
+            quote_imap_string(username),
+            quote_imap_string(password)
+        ))
+        .await?;
+    if !lines.last().is_some_and(|line| line.contains(" OK")) {
+        if lines
+            .iter()
+            .any(|line| is_imap_basic_auth_disabled_message(line))
+        {
+            return Err(imap_basic_auth_disabled_error(&lines));
+        }
+        bail!(
+            "IMAP command failed: {}",
+            lines.last().cloned().unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
 async fn run_email_imap_idle_session_once<R, C>(
     config: &EmailImapIdleRuntimeConfig,
     recorder: &mut R,
     stop_rx: &mut watch::Receiver<bool>,
-    connector: C,
+    connector: &C,
 ) -> Result<()>
 where
     R: SubscriptionEventRecorder,
-    C: Fn(EmailImapIdleRuntimeConfig) -> BoxFutureResult<ImapConnection> + Copy,
+    C: Fn(EmailImapIdleRuntimeConfig) -> BoxFutureResult<ImapConnection>,
 {
     if *stop_rx.borrow() {
         close_email_subscription(recorder, "stopped").await?;
@@ -207,12 +275,7 @@ where
     }
     let mut conn = connector(config.clone()).await?;
     conn.expect_greeting().await?;
-    conn.command_ok(&format!(
-        "LOGIN {} {}",
-        quote_imap_string(&config.username),
-        quote_imap_string(&config.password)
-    ))
-    .await?;
+    imap_login(&mut conn, &config.username, &config.password).await?;
     let select_lines = conn
         .command_ok(&format!("SELECT {}", quote_imap_string(&config.mailbox)))
         .await?;
@@ -1948,6 +2011,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingRecorder {
         events: Vec<(String, String)>,
+        statuses: Vec<(String, Option<String>, bool)>,
     }
 
     #[async_trait::async_trait]
@@ -1966,10 +2030,15 @@ mod tests {
 
         async fn update_status(
             &mut self,
-            _status: Option<&str>,
-            _last_error: Option<String>,
-            _increment_reconnect: bool,
+            status: Option<&str>,
+            last_error: Option<String>,
+            increment_reconnect: bool,
         ) -> Result<()> {
+            self.statuses.push((
+                status.unwrap_or("<none>").to_string(),
+                last_error,
+                increment_reconnect,
+            ));
             Ok(())
         }
     }
@@ -2083,5 +2152,136 @@ mod tests {
             .events
             .iter()
             .all(|(kind, _)| kind == "email_imap_idle"));
+    }
+
+    fn basic_auth_disabled_server_script() -> &'static [u8] {
+        b"* OK Microsoft Exchange IMAP4 service ready.\r\n"
+    }
+
+    #[tokio::test]
+    async fn imap_login_maps_m365_basic_auth_disabled_to_actionable_error() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            assert!(command.starts_with("A0001 LOGIN "));
+            writer
+                .write_all(b"A0001 NO Basic authentication is disabled.\r\n")
+                .await
+                .unwrap();
+            writer
+                .write_all(b"* BYE Microsoft Exchange Server IMAP4 server signing off.\r\n")
+                .await
+                .unwrap();
+        });
+
+        let err = imap_login(&mut conn, "jolestar@hotmail.com", "secret")
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        let message = err.to_string();
+        assert!(is_imap_basic_auth_disabled_message(&message));
+        assert!(message.contains("outlook.com/hotmail.com/live.com"));
+        assert!(message.contains("XOAUTH2"));
+        assert!(message.contains("Basic authentication is disabled"));
+    }
+
+    #[tokio::test]
+    async fn imap_login_keeps_generic_failure_for_other_rejections() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            let _ = reader.read_line(&mut command).await;
+            writer
+                .write_all(b"A0001 NO LOGIN failed.\r\n")
+                .await
+                .unwrap();
+        });
+
+        let err = imap_login(&mut conn, "user@example.com", "wrong")
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        let message = err.to_string();
+        assert!(!is_imap_basic_auth_disabled_message(&message));
+        assert!(message.contains("IMAP command failed"));
+    }
+
+    #[tokio::test]
+    async fn email_imap_idle_stops_reconnecting_on_basic_auth_disabled() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let config = EmailImapIdleRuntimeConfig {
+            endpoint: "imaps://outlook.office365.com:993".to_string(),
+            host: "outlook.office365.com".to_string(),
+            port: 993,
+            use_tls: true,
+            username: "jolestar@hotmail.com".to_string(),
+            password: "secret".to_string(),
+            auth_profile: Some("email-hotmail".to_string()),
+            mailbox: "INBOX".to_string(),
+            account: Some("primary".to_string()),
+            initial_fetch_limit: 25,
+        };
+        let mut recorder = RecordingRecorder::default();
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_connector = attempts.clone();
+        let connector = move |_config: EmailImapIdleRuntimeConfig| {
+            let attempts = attempts_for_connector.clone();
+            Box::pin(async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let (client, server) = tokio::io::duplex(4096);
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(server);
+                    let mut reader = BufReader::new(reader);
+                    writer
+                        .write_all(basic_auth_disabled_server_script())
+                        .await
+                        .unwrap();
+                    // Hold the server side open until the client LOGIN has
+                    // been consumed: dropping it early turns the client write
+                    // into a broken pipe, which is not a permanent rejection.
+                    let mut command = String::new();
+                    reader.read_line(&mut command).await.unwrap();
+                    assert!(command.starts_with("A0001 LOGIN "));
+                    writer
+                        .write_all(b"A0001 NO Basic authentication is disabled.\r\n")
+                        .await
+                        .unwrap();
+                });
+                Ok(ImapConnection::new(Box::new(client)))
+            }) as BoxFutureResult<ImapConnection>
+        };
+
+        let result = run_email_imap_idle_subscription_with_connector(
+            config,
+            &mut recorder,
+            &mut stop_rx,
+            connector,
+        )
+        .await;
+        let message = result.unwrap_err().to_string();
+        assert!(is_imap_basic_auth_disabled_message(&message));
+        // Exactly one connection attempt: permanent rejections must not retry.
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(recorder.statuses.iter().any(|(status, error, inc)| {
+            status == "failed"
+                && error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("outlook.com"))
+                && !inc
+        }));
+        assert!(!recorder
+            .statuses
+            .iter()
+            .any(|(status, _, _)| status == "reconnecting"));
+        assert!(!recorder.events.iter().any(|(_, kind)| kind == "reconnect"));
     }
 }

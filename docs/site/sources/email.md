@@ -33,6 +33,15 @@ shell that runs `uxc source ensure`. `uxc source ensure` warns on stderr in
 that case; see [Secret Sources](../auth/secret-sources.md) for recommended
 alternatives such as literal secrets or 1Password references.
 
+> **Microsoft personal accounts do not support IMAP basic auth.**
+> Personal Microsoft accounts (`outlook.com`, `hotmail.com`, `live.com`)
+> reject `LOGIN` with `NO Basic authentication is disabled` before validating
+> credentials, so no password fix can make IMAP IDLE work for them. UXC
+> detects this server-side policy rejection, reports the source as `failed`
+> with an actionable error, and stops reconnecting. To read mail from a
+> personal Microsoft account, use [Provider Polling](#provider-polling) with
+> `provider=graph` and a Microsoft Graph OAuth credential instead.
+
 ### Provider Polling
 
 ```bash
