@@ -6,6 +6,7 @@ use crate::email_attachment::{
 };
 use crate::subscription_poll::{PollCheckpointState, PollFetchResult};
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rustls_pki_types::ServerName;
 use serde_json::{json, Map, Value};
@@ -53,12 +54,30 @@ pub struct EmailImapIdleRuntimeConfig {
     pub host: String,
     pub port: u16,
     pub use_tls: bool,
-    pub username: String,
-    pub password: String,
+    pub auth_method: ImapAuthMethod,
     pub mailbox: String,
     pub account: Option<String>,
     pub auth_profile: Option<String>,
     pub initial_fetch_limit: usize,
+}
+
+/// How an `email-imap-idle` session authenticates against the IMAP server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImapAuthMethod {
+    /// Classic `LOGIN` with username and password. Personal Microsoft
+    /// accounts reject this path server-side.
+    Basic { username: String, password: String },
+    /// `AUTHENTICATE XOAUTH2` with an OAuth access token (Microsoft
+    /// personal/organization accounts, Gmail with OAuth, etc).
+    Xoauth2 { username: String, token: String },
+}
+
+impl ImapAuthMethod {
+    pub(crate) fn username(&self) -> &str {
+        match self {
+            Self::Basic { username, .. } | Self::Xoauth2 { username, .. } => username,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,22 +140,46 @@ pub fn resolve_email_imap_idle_runtime_config(
         .and_then(Value::as_u64)
         .unwrap_or(EMAIL_IMAP_DEFAULT_INITIAL_FETCH_LIMIT)
         .min(EMAIL_IMAP_MAX_INITIAL_FETCH_LIMIT) as usize;
-    let username = resolve_first_profile_field(auth_profile, &["username", "user", "email"])?
-        .ok_or_else(|| {
+    let auth_method = if auth_profile.auth_type == crate::auth::AuthType::OAuth {
+        let username = resolve_first_profile_field(auth_profile, &["username", "user", "email"])?
+            .or_else(|| account.clone())
+            .or_else(|| auth_profile.name.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "email-imap-idle OAuth auth profile requires a username/user/email field, an account, or the credential id to name the mailbox address"
+                )
+            })?;
+        let token = auth_profile
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.access_token.clone())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "email-imap-idle OAuth auth profile has no access token; run `uxc auth oauth login` first"
+                )
+            })?;
+        ImapAuthMethod::Xoauth2 { username, token }
+    } else {
+        let username = resolve_first_profile_field(auth_profile, &["username", "user", "email"])?
+            .ok_or_else(|| {
             anyhow!("email-imap-idle auth profile requires username/user/email field")
         })?;
-    let password =
-        resolve_first_profile_field(auth_profile, &["password", "app_password", "secret"])?
-            .ok_or_else(|| {
-                anyhow!("email-imap-idle auth profile requires password/app_password/secret field")
-            })?;
+        let password =
+            resolve_first_profile_field(auth_profile, &["password", "app_password", "secret"])?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "email-imap-idle auth profile requires password/app_password/secret field"
+                    )
+                })?;
+        ImapAuthMethod::Basic { username, password }
+    };
     Ok(EmailImapIdleRuntimeConfig {
         endpoint: request.endpoint.clone(),
         host,
         port,
         use_tls,
-        username,
-        password,
+        auth_method,
         auth_profile: request.options.auth.clone(),
         mailbox,
         account,
@@ -174,13 +217,17 @@ where
     R: SubscriptionEventRecorder,
     C: Fn(EmailImapIdleRuntimeConfig) -> BoxFutureResult<ImapConnection>,
 {
+    let mut config = config;
     let mut delay_secs = 1u64;
     loop {
+        if let ImapAuthMethod::Xoauth2 { token, .. } = &mut config.auth_method {
+            refresh_imap_xoauth2_token_if_stale(token, config.auth_profile.as_deref()).await?;
+        }
         match run_email_imap_idle_session_once(&config, recorder, stop_rx, &connector).await {
             Ok(()) => return Ok(()),
             Err(err) => {
                 let message = err.to_string();
-                let permanent = is_imap_basic_auth_disabled_message(&message);
+                let permanent = is_imap_permanent_auth_failure(&message);
                 recorder
                     .emit(
                         "email_imap_idle",
@@ -223,6 +270,114 @@ fn is_imap_basic_auth_disabled_message(message: &str) -> bool {
     message
         .to_lowercase()
         .contains(IMAP_BASIC_AUTH_DISABLED_MARKER)
+}
+
+/// Auth failures that retrying with the same credentials can never fix.
+/// Used to stop the reconnect backoff instead of hammering the server.
+fn is_imap_permanent_auth_failure(message: &str) -> bool {
+    is_imap_basic_auth_disabled_message(message) || message.contains(IMAP_XOAUTH2_REJECTED_MARKER)
+}
+
+/// Marker embedded in the actionable XOAUTH2 rejection error below.
+const IMAP_XOAUTH2_REJECTED_MARKER: &str = "IMAP AUTHENTICATE XOAUTH2 rejected";
+
+/// Refresh skew applied before reconnecting: refresh slightly early so the
+/// freshly connected session never carries an about-to-expire token.
+pub(crate) const IMAP_XOAUTH2_REFRESH_SKEW_SECS: i64 = 120;
+
+async fn refresh_imap_xoauth2_token_if_stale(
+    token: &mut String,
+    profile_name: Option<&str>,
+) -> Result<()> {
+    let Some(name) = profile_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        // Anonymous profile: nothing to refresh on disk; the resolved token
+        // from subscribe time is used as-is.
+        return Ok(());
+    };
+    let profiles = crate::auth::Profiles::load_profiles()?;
+    let mut profile = match profiles.get_profile(name) {
+        Ok(profile) => profile.clone(),
+        Err(_) => return Ok(()),
+    };
+    if profile.auth_type != crate::auth::AuthType::OAuth {
+        return Ok(());
+    }
+    let client = reqwest::Client::new();
+    let refreshed = crate::auth::refresh_effective_auth_profile(
+        &mut profile,
+        &client,
+        false,
+        IMAP_XOAUTH2_REFRESH_SKEW_SECS,
+        None,
+    )
+    .await;
+    match refreshed {
+        Ok(true) => {
+            crate::auth::persist_profile_if_named(&profile)?;
+        }
+        Ok(false) => {}
+        Err(err) => {
+            // Keep the current token when refresh fails transiently; the
+            // server rejects it via AUTHENTICATE if it really is dead.
+            if token.is_empty() {
+                return Err(err);
+            }
+        }
+    }
+    if let Some(new_token) = profile
+        .oauth
+        .as_ref()
+        .and_then(|oauth| oauth.access_token.clone())
+        .filter(|value| !value.is_empty())
+    {
+        *token = new_token;
+    }
+    Ok(())
+}
+
+/// Build the XOAUTH2 SASL initial-response string:
+/// `user=<u>\x01auth=Bearer <token>\x01\x01`.
+pub(crate) fn build_xoauth2_sasl_string(username: &str, token: &str) -> String {
+    format!("user={username}\x01auth=Bearer {token}\x01\x01")
+}
+
+fn decode_base64_json_challenge(payload: &str) -> Option<String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
+        Some(text)
+    } else {
+        None
+    }
+}
+
+fn imap_xoauth2_rejected_error(tagged_line: &str, challenge_json: Option<&str>) -> anyhow::Error {
+    let mut server_detail = tagged_line.trim().to_string();
+    if let Some(challenge) = challenge_json {
+        server_detail.push_str("; challenge: ");
+        server_detail.push_str(challenge);
+    }
+    anyhow!(
+        "IMAP AUTHENTICATE XOAUTH2 rejected: the access token is missing, expired, or lacks the \
+         required IMAP scope (for Microsoft accounts: \
+         https://outlook.office.com/IMAP.AccessAsUser.All). Re-run \
+         `uxc auth oauth login <credential> --provider outlook` (or with your own --client-id) \
+         to consent and refresh the token, then restart the source. Server response: {}",
+        server_detail
+    )
+}
+
+async fn imap_authenticate_xoauth2(
+    conn: &mut ImapConnection,
+    username: &str,
+    token: &str,
+) -> Result<()> {
+    conn.authenticate_xoauth2(username, token).await
 }
 
 fn imap_basic_auth_disabled_error(server_lines: &[String]) -> anyhow::Error {
@@ -275,7 +430,14 @@ where
     }
     let mut conn = connector(config.clone()).await?;
     conn.expect_greeting().await?;
-    imap_login(&mut conn, &config.username, &config.password).await?;
+    match &config.auth_method {
+        ImapAuthMethod::Basic { username, password } => {
+            imap_login(&mut conn, username, password).await?;
+        }
+        ImapAuthMethod::Xoauth2 { username, token } => {
+            imap_authenticate_xoauth2(&mut conn, username, token).await?;
+        }
+    }
     let select_lines = conn
         .command_ok(&format!("SELECT {}", quote_imap_string(&config.mailbox)))
         .await?;
@@ -421,7 +583,10 @@ fn build_email_event(
     let message_id = header_value(&headers, "message-id").unwrap_or_else(|| message.uid.clone());
     let thread_id =
         header_value(&headers, "references").or_else(|| header_value(&headers, "in-reply-to"));
-    let account = config.account.as_deref().unwrap_or(&config.username);
+    let account = config
+        .account
+        .as_deref()
+        .unwrap_or(config.auth_method.username());
     let attachments = imap_message_attachments(
         &message.raw,
         &ImapAttachmentContext {
@@ -1292,6 +1457,44 @@ impl ImapConnection {
         }
     }
 
+    /// Authenticate with SASL XOAUTH2 (RFC 7628 style, OAuth 2.0 SASL).
+    ///
+    /// The initial response carries the base64 credential string inline. On
+    /// rejection most servers (including Microsoft Exchange) answer with a
+    /// `+ <base64 JSON>` continuation instead of a tagged NO, so the client
+    /// must send an empty line to abort SASL before the tagged status line
+    /// arrives; both shapes are handled here and mapped to one actionable
+    /// error.
+    pub(crate) async fn authenticate_xoauth2(&mut self, username: &str, token: &str) -> Result<()> {
+        let tag = format!("A{:04}", self.next_tag);
+        self.next_tag = self.next_tag.saturating_add(1);
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(build_xoauth2_sasl_string(username, token));
+        self.write_line(&format!("{tag} AUTHENTICATE XOAUTH2 {encoded}"))
+            .await?;
+        let mut challenge_json: Option<String> = None;
+        let tagged = loop {
+            let line = self.read_response_line_with_literals().await?;
+            if let Some(payload) = line.strip_prefix('+') {
+                challenge_json = decode_base64_json_challenge(payload);
+                // Abort SASL with `*` (RFC 3501 section 6.2.2) so the server
+                // finishes the exchange with a tagged NO instead of waiting forever.
+                self.write_line("*").await?;
+                continue;
+            }
+            if line.starts_with(&format!("{tag} ")) {
+                break line;
+            }
+        };
+        if tagged.contains(" OK") {
+            return Ok(());
+        }
+        Err(imap_xoauth2_rejected_error(
+            &tagged,
+            challenge_json.as_deref(),
+        ))
+    }
+
     /// Fetch one MIME section by UID with binary-safe literal handling.
     ///
     /// Unlike [`ImapConnection::command`], literal bytes are returned as raw
@@ -1521,8 +1724,10 @@ mod tests {
             host: "imap.example.com".to_string(),
             port: 993,
             use_tls: true,
-            username: "agent@example.com".to_string(),
-            password: "secret".to_string(),
+            auth_method: ImapAuthMethod::Basic {
+                username: "agent@example.com".to_string(),
+                password: "secret".to_string(),
+            },
             auth_profile: None,
             mailbox: "INBOX".to_string(),
             account: Some("primary".to_string()),
@@ -1554,8 +1759,10 @@ mod tests {
             host: "imap.example.com".to_string(),
             port: 993,
             use_tls: true,
-            username: "agent@example.com".to_string(),
-            password: "secret".to_string(),
+            auth_method: ImapAuthMethod::Basic {
+                username: "agent@example.com".to_string(),
+                password: "secret".to_string(),
+            },
             auth_profile: Some("imap-primary".to_string()),
             mailbox: "INBOX".to_string(),
             account: Some("primary".to_string()),
@@ -2049,8 +2256,10 @@ mod tests {
             host: "imap.example.com".to_string(),
             port: 993,
             use_tls: true,
-            username: "agent@example.com".to_string(),
-            password: "secret".to_string(),
+            auth_method: ImapAuthMethod::Basic {
+                username: "agent@example.com".to_string(),
+                password: "secret".to_string(),
+            },
             auth_profile: None,
             mailbox: "INBOX".to_string(),
             account: None,
@@ -2154,6 +2363,208 @@ mod tests {
             .all(|(kind, _)| kind == "email_imap_idle"));
     }
 
+    fn subscribe_request_for_resolve(endpoint: &str) -> crate::daemon::SubscribeStartRequest {
+        serde_json::from_value(serde_json::json!({
+            "request_id": "test-request",
+            "endpoint": endpoint,
+            "sink": "memory:",
+            "mode": "stream",
+            "options": {
+                "auth": null,
+                "no_cache": false,
+                "refresh_schema": false,
+                "schema_url": null,
+                "link_name": null,
+                "schema_mapping_file": null,
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn xoauth2_sasl_string_has_expected_shape() {
+        let value = build_xoauth2_sasl_string("user@example.com", "token1");
+        assert_eq!(value, "user=user@example.com\x01auth=Bearer token1\x01\x01");
+    }
+
+    #[test]
+    fn decode_base64_json_challenge_accepts_json_only() {
+        let payload = base64::engine::general_purpose::STANDARD
+            .encode(r#"{"status":"401","schemes":"Bearer,XOAUTH2"}"#);
+        assert!(decode_base64_json_challenge(&payload).is_some());
+        let not_json = base64::engine::general_purpose::STANDARD.encode("plain text");
+        assert!(decode_base64_json_challenge(&not_json).is_none());
+        assert!(decode_base64_json_challenge("!!!not-base64!!!").is_none());
+    }
+
+    #[tokio::test]
+    async fn imap_authenticate_xoauth2_accepts_tagged_ok() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            assert!(command.starts_with("A0001 AUTHENTICATE XOAUTH2 "));
+            assert!(command.ends_with("\r\n"));
+            writer
+                .write_all(b"A0001 OK Authenticated.\r\n")
+                .await
+                .unwrap();
+        });
+
+        conn.authenticate_xoauth2("user@example.com", "token1")
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn imap_authenticate_xoauth2_aborts_challenge_and_maps_actionable_error() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            assert!(command.starts_with("A0001 AUTHENTICATE XOAUTH2 "));
+            let challenge = base64::engine::general_purpose::STANDARD.encode(
+                r#"{"status":"401","schemes":"Bearer,XOAUTH2","scope":"https://outlook.office.com/IMAP.AccessAsUser.All"}"#,
+            );
+            writer
+                .write_all(format!("+ {challenge}\r\n").as_bytes())
+                .await
+                .unwrap();
+            // After the SASL abort (`*` per RFC 3501), the server finishes with NO.
+            let mut abort = String::new();
+            reader.read_line(&mut abort).await.unwrap();
+            assert_eq!(abort, "*\r\n");
+            writer
+                .write_all(b"A0001 NO AUTHENTICATE failed.\r\n")
+                .await
+                .unwrap();
+        });
+
+        let err = conn
+            .authenticate_xoauth2("user@hotmail.com", "stale-token")
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        let message = err.to_string();
+        assert!(message.contains(IMAP_XOAUTH2_REJECTED_MARKER));
+        assert!(message.contains("IMAP.AccessAsUser.All"));
+        assert!(message.contains("auth oauth login"));
+        assert!(message.contains("AUTHENTICATE failed"));
+        // The base64 JSON challenge is decoded into the error detail.
+        assert!(message.contains("\"status\":\"401\""));
+        assert!(is_imap_permanent_auth_failure(&message));
+    }
+
+    #[tokio::test]
+    async fn imap_authenticate_xoauth2_maps_direct_no_rejection() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            writer
+                .write_all(b"A0001 NO AUTHENTICATE failed.\r\n")
+                .await
+                .unwrap();
+        });
+
+        let err = conn
+            .authenticate_xoauth2("user@hotmail.com", "token1")
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        let message = err.to_string();
+        assert!(message.contains(IMAP_XOAUTH2_REJECTED_MARKER));
+        assert!(is_imap_permanent_auth_failure(&message));
+    }
+
+    fn oauth_profile_for_imap(username_field: Option<(&str, &str)>) -> Profile {
+        let mut profile = Profile::new(String::new(), crate::auth::AuthType::OAuth);
+        profile.name = Some("outlook-imap".to_string());
+        let oauth = crate::auth::OAuthProfile {
+            access_token: Some("access-token-1".to_string()),
+            scopes: vec!["https://outlook.office.com/IMAP.AccessAsUser.All".to_string()],
+            ..Default::default()
+        };
+        profile.oauth = Some(oauth);
+        if let Some((name, value)) = username_field {
+            profile
+                .set_field_source(
+                    name.to_string(),
+                    crate::auth::SecretSource::Literal {
+                        value: value.to_string(),
+                    },
+                )
+                .unwrap();
+        }
+        profile
+    }
+
+    #[test]
+    fn resolve_config_uses_xoauth2_for_oauth_profiles() {
+        let mut request = subscribe_request_for_resolve("imaps://outlook.office365.com:993");
+        request.options.auth = Some("outlook-imap".to_string());
+        let profile = oauth_profile_for_imap(Some(("email", "user@hotmail.com")));
+        let config = resolve_email_imap_idle_runtime_config(&request, &profile).unwrap();
+        assert_eq!(
+            config.auth_method,
+            ImapAuthMethod::Xoauth2 {
+                username: "user@hotmail.com".to_string(),
+                token: "access-token-1".to_string(),
+            }
+        );
+        // Without a username field the account arg and finally the profile
+        // name act as the mailbox address.
+        let profile = oauth_profile_for_imap(None);
+        let config = resolve_email_imap_idle_runtime_config(&request, &profile).unwrap();
+        assert_eq!(
+            config.auth_method,
+            ImapAuthMethod::Xoauth2 {
+                username: "outlook-imap".to_string(),
+                token: "access-token-1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_config_keeps_basic_auth_for_password_profiles() {
+        let request = subscribe_request_for_resolve("imaps://imap.example.com:993");
+        let mut profile = Profile::new(String::new(), crate::auth::AuthType::Basic);
+        profile
+            .set_field_source(
+                "username".to_string(),
+                crate::auth::SecretSource::Literal {
+                    value: "agent@example.com".to_string(),
+                },
+            )
+            .unwrap();
+        profile
+            .set_field_source(
+                "password".to_string(),
+                crate::auth::SecretSource::Literal {
+                    value: "secret".to_string(),
+                },
+            )
+            .unwrap();
+        let config = resolve_email_imap_idle_runtime_config(&request, &profile).unwrap();
+        assert_eq!(
+            config.auth_method,
+            ImapAuthMethod::Basic {
+                username: "agent@example.com".to_string(),
+                password: "secret".to_string(),
+            }
+        );
+    }
+
     fn basic_auth_disabled_server_script() -> &'static [u8] {
         b"* OK Microsoft Exchange IMAP4 service ready.\r\n"
     }
@@ -2222,8 +2633,10 @@ mod tests {
             host: "outlook.office365.com".to_string(),
             port: 993,
             use_tls: true,
-            username: "jolestar@hotmail.com".to_string(),
-            password: "secret".to_string(),
+            auth_method: ImapAuthMethod::Basic {
+                username: "jolestar@hotmail.com".to_string(),
+                password: "secret".to_string(),
+            },
             auth_profile: Some("email-hotmail".to_string()),
             mailbox: "INBOX".to_string(),
             account: Some("primary".to_string()),

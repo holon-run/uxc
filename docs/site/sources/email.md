@@ -33,14 +33,59 @@ shell that runs `uxc source ensure`. `uxc source ensure` warns on stderr in
 that case; see [Secret Sources](../auth/secret-sources.md) for recommended
 alternatives such as literal secrets or 1Password references.
 
-> **Microsoft personal accounts do not support IMAP basic auth.**
+> **Microsoft personal accounts require OAuth (XOAUTH2).**
 > Personal Microsoft accounts (`outlook.com`, `hotmail.com`, `live.com`)
-> reject `LOGIN` with `NO Basic authentication is disabled` before validating
-> credentials, so no password fix can make IMAP IDLE work for them. UXC
-> detects this server-side policy rejection, reports the source as `failed`
-> with an actionable error, and stops reconnecting. To read mail from a
-> personal Microsoft account, use [Provider Polling](#provider-polling) with
-> `provider=graph` and a Microsoft Graph OAuth credential instead.
+> reject IMAP `LOGIN` with `NO Basic authentication is disabled` before
+> validating credentials, so no password fix can make basic auth work for
+> them. UXC detects this server-side policy rejection, reports the source as
+> `failed` with an actionable error, and stops reconnecting. Use the
+> [XOAUTH2 flow below](#microsoft-personal-accounts-xoauth2) to keep IMAP
+> IDLE push delivery, or fall back to [Provider Polling](#provider-polling)
+> with `provider=graph` for minute-level polling instead.
+
+### Microsoft Personal Accounts (XOAUTH2)
+
+IMAP for personal Microsoft accounts authenticates with OAuth via the
+XOAUTH2 SASL mechanism. UXC ships a provider preset that borrows the public
+Thunderbird client id, so a personal account needs two commands and one
+browser consent — no Azure app registration:
+
+```bash
+# 1. Device-code login; opens a consent page in the browser
+uxc auth oauth login outlook-imap --provider outlook
+
+# 2. Subscribe over IMAP IDLE with the OAuth credential
+uxc source ensure agentinbox email:primary imaps://outlook.office365.com:993 \
+  --transport email-imap-idle \
+  --auth outlook-imap mailbox=INBOX
+```
+
+The `--provider outlook` preset fills in:
+
+| Preset default | Value |
+| --- | --- |
+| Client id | Mozilla Thunderbird public client `9e5f94bc-e8a4-4e73-b8be-63364c29d753` |
+| Issuer / tenant | `https://login.microsoftonline.com/consumers` |
+| Scopes | `https://outlook.office.com/IMAP.AccessAsUser.All`, `https://outlook.office.com/SMTP.Send`, `offline_access` |
+
+Notes:
+
+- Pass `--client-id <id>` to use your own Azure app registration instead of
+  the Thunderbird client id; organization (work/school) accounts typically
+  need their own registration and admin consent.
+- The OAuth profile's mailbox address is resolved from the profile's
+  `username`/`user`/`email` field, the `account=` argument, or finally the
+  credential id. Set a `username` field (for example
+  `uxc auth credential set outlook-imap --field username=literal:user@hotmail.com`)
+  if the credential id is not the mailbox address.
+- UXC refreshes the access token before every (re)connect and persists the
+  refreshed token, so long-lived IDLE sessions survive token expiry without
+  manual `auth oauth refresh`.
+- If the server rejects the token, the source fails with an actionable error
+  (re-consent via `uxc auth oauth login ... --provider outlook`) instead of
+  retrying forever.
+- Attachment retrieval (`uxc email attachment get`) uses the same XOAUTH2
+  path with the same credential.
 
 ### Provider Polling
 
@@ -64,6 +109,20 @@ return the provider's message-list JSON, so UXC can map it onto the same
 Microsoft Graph only returns attachment metadata when the endpoint includes
 `$expand=attachments`; see [Email Attachments](./email-attachments.md) for the
 partial-metadata semantics.
+
+### Microsoft Graph with Personal Accounts
+
+The Graph mail API (`/v1.0/me/messages`, delegated `Mail.Read`) also serves
+personal Microsoft accounts, so `provider=graph` polling works for them as a
+no-IDLE alternative to IMAP XOAUTH2:
+
+- Use an OAuth credential with Graph scopes (`Mail.Read offline_access`) —
+  note the Thunderbird client id registered IMAP/SMTP resource permissions
+  and cannot consent Graph scopes, so this path needs your own Azure app
+  registration (`--client-id`) or another client authorized for Graph.
+- Expect minute-level latency (poll interval) instead of IMAP IDLE's
+  second-level push, and keep intervals >= 60s to stay clear of Graph
+  throttling.
 
 ## Event Envelope
 
@@ -142,7 +201,24 @@ Notes:
 
 - Use `--auth` with credentials containing `username`/`user`/`account` and
   `password`/`secret` fields when SMTP AUTH is required.
-- SMTP AUTH over cleartext `smtp://` requires explicit
-  `--allow-insecure-auth`; prefer a trusted local relay until
-  STARTTLS/TLS is supported.
+- `smtps://` (implicit TLS, port 465) is supported for every auth mode; for
+  OAuth credentials, `smtp://` also upgrades to TLS via STARTTLS automatically
+  when the server advertises it.
+- Password AUTH (`AUTH PLAIN`) over `smtp://` is not auto-upgraded and requires
+  explicit `--allow-insecure-auth` (the password travels in cleartext); prefer
+  a trusted local relay, `smtps://`, or OAuth credentials.
+- OAuth credentials authenticate with `AUTH XOAUTH2`. This is how Microsoft
+  personal accounts send mail:
+
+```bash
+uxc auth oauth login outlook-imap --provider outlook   # same credential as IMAP
+
+uxc email send --smtp smtp://smtp-mail.outlook.com:587 \
+  --from user@hotmail.com --to someone@example.com \
+  --subject 'Hello' --text-body 'Hi' \
+  --auth outlook-imap
+```
+
+  OAuth tokens are never sent over cleartext: `smtp://` must offer STARTTLS
+  (Microsoft's submission endpoint does) or use `smtps://`.
 - Add `--dry-run` to preview a message without delivering it.

@@ -1,11 +1,18 @@
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use tokio_rustls::TlsConnector;
 use url::Url;
 
 use crate::auth;
+use crate::subscription_email::AsyncReadWrite;
+
+type SmtpIo = Box<dyn AsyncReadWrite>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmailReplyHandle {
@@ -58,10 +65,14 @@ pub struct EmailSendResult {
     pub accepted_recipients: usize,
 }
 
-#[derive(Debug, Clone)]
-struct SmtpAuth {
-    username: String,
-    password: String,
+/// How `send_email` authenticates against the SMTP server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SmtpAuth {
+    /// `AUTH PLAIN` with username and password.
+    Plain { username: String, password: String },
+    /// `AUTH XOAUTH2` with an OAuth access token (for example a Microsoft
+    /// personal account via `uxc auth oauth login --provider outlook`).
+    Xoauth2 { username: String, token: String },
 }
 
 pub async fn send_email(request: EmailSendRequest) -> Result<EmailSendResult> {
@@ -156,7 +167,7 @@ fn parse_smtp_url(raw: &str) -> Result<Url> {
     let url = Url::parse(raw).context("invalid SMTP endpoint URL")?;
     match url.scheme() {
         "smtp" => Ok(url),
-        "smtps" => bail!("smtps:// is not supported yet; use smtp:// with a trusted local relay"),
+        "smtps" => Ok(url),
         other => bail!("unsupported SMTP URL scheme '{}'; expected smtp://", other),
     }
 }
@@ -166,27 +177,69 @@ fn validate_smtp_auth_transport(
     auth: Option<&SmtpAuth>,
     allow_insecure_auth: bool,
 ) -> Result<()> {
-    if auth.is_some() && url.scheme() == "smtp" && !allow_insecure_auth {
-        bail!(
-            "refusing to send SMTP credentials over unencrypted smtp://; configure a trusted local relay without --auth, or pass --allow-insecure-auth to acknowledge the cleartext credential risk"
-        );
+    let Some(auth) = auth else {
+        return Ok(());
+    };
+    match (url.scheme(), auth) {
+        // Passwords over smtp:// stay opt-in: the local-relay workflow keeps
+        // working only when the operator acknowledges the cleartext risk.
+        ("smtp", SmtpAuth::Plain { .. }) if !allow_insecure_auth => bail!(
+            "refusing to send SMTP password over unencrypted smtp://; configure a trusted local relay without --auth, pass --allow-insecure-auth to acknowledge the cleartext credential risk, or use smtps://"
+        ),
+        // OAuth tokens never travel in cleartext: smtp:// upgrades via
+        // STARTTLS (enforced at send time) and smtps:// is implicit TLS.
+        ("smtp" | "smtps", SmtpAuth::Xoauth2 { .. }) => Ok(()),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 async fn resolve_smtp_auth(
     endpoint: &str,
     explicit_auth: Option<String>,
 ) -> Result<Option<SmtpAuth>> {
-    let Some(profile) = auth::resolve_auth_for_endpoint(endpoint, explicit_auth)? else {
+    let Some(mut profile) = auth::resolve_auth_for_endpoint(endpoint, explicit_auth)? else {
         return Ok(None);
     };
+    if profile.auth_type == auth::AuthType::OAuth {
+        // One-shot send: refresh a stale token up front and persist it so
+        // the next send reuses the fresh token without another login.
+        let client = reqwest::Client::new();
+        let refreshed = auth::refresh_effective_auth_profile(
+            &mut profile,
+            &client,
+            false,
+            crate::subscription_email::IMAP_XOAUTH2_REFRESH_SKEW_SECS,
+            None,
+        )
+        .await?;
+        if refreshed {
+            auth::persist_profile_if_named(&profile)?;
+        }
+        let username = first_field(&profile, &["username", "user", "email", "account"])?
+            .or_else(|| profile.name.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "SMTP OAuth auth profile requires a username/user/email/account field, or the credential id to name the mailbox address"
+                )
+            })?;
+        let token = profile
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.access_token.clone())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "SMTP OAuth auth profile has no access token; run `uxc auth oauth login` first"
+                )
+            })?;
+        return Ok(Some(SmtpAuth::Xoauth2 { username, token }));
+    }
     let username = first_field(&profile, &["username", "user", "account"])?
         .or_else(|| profile.name.clone())
         .ok_or_else(|| anyhow!("SMTP auth profile requires username/user/account field"))?;
     let password = first_field(&profile, &["password", "secret"])?
         .ok_or_else(|| anyhow!("SMTP auth profile requires password or secret field"))?;
-    Ok(Some(SmtpAuth { username, password }))
+    Ok(Some(SmtpAuth::Plain { username, password }))
 }
 
 fn first_field(profile: &auth::Profile, names: &[&str]) -> Result<Option<String>> {
@@ -282,21 +335,48 @@ async fn send_smtp(
     let host = url
         .host_str()
         .ok_or_else(|| anyhow!("SMTP URL must include a host"))?;
-    let port = url.port_or_known_default().unwrap_or(25);
-    let stream = TcpStream::connect((host, port))
+    // `Url` knows smtp but not smtps, so map the implicit-TLS port manually.
+    let default_port = if url.scheme() == "smtps" { 465 } else { 25 };
+    let port = url.port().unwrap_or(default_port);
+    let tcp = TcpStream::connect((host, port))
         .await
         .with_context(|| format!("failed to connect SMTP server {}:{}", host, port))?;
-    let mut client = SmtpClient::new(stream);
+    let mut client = match url.scheme() {
+        // smtps:// upgrades the TCP stream to TLS before the greeting.
+        "smtps" => SmtpClient::new(Box::new(tls_upgrade(host, tcp).await?)),
+        _ => SmtpClient::new(Box::new(tcp)),
+    };
     client.expect_code(&[220]).await?;
-    client
-        .command(&format!("EHLO {}\r\n", local_hostname()), &[250])
-        .await?;
+    let capabilities = client.ehlo().await?;
+    // OAuth tokens must never travel over cleartext smtp://: upgrade via
+    // STARTTLS when the server advertises it, refuse otherwise.
+    if url.scheme() == "smtp" && matches!(auth, Some(SmtpAuth::Xoauth2 { .. })) {
+        if capabilities
+            .iter()
+            .any(|cap| cap.eq_ignore_ascii_case("STARTTLS"))
+        {
+            client = client.starttls(host).await?;
+            client.ehlo().await?;
+        } else {
+            bail!(
+                "SMTP server {} does not advertise STARTTLS; refusing to send the OAuth token over unencrypted smtp://. Use smtps:// or a STARTTLS-capable submission endpoint (for Microsoft personal accounts: smtp-mail.outlook.com:587)",
+                host
+            );
+        }
+    }
     if let Some(auth) = auth {
-        let encoded = base64::engine::general_purpose::STANDARD
-            .encode(format!("\0{}\0{}", auth.username, auth.password));
-        client
-            .command(&format!("AUTH PLAIN {}\r\n", encoded), &[235])
-            .await?;
+        match auth {
+            SmtpAuth::Plain { username, password } => {
+                let encoded = base64::engine::general_purpose::STANDARD
+                    .encode(format!("\0{username}\0{password}"));
+                client
+                    .command(&format!("AUTH PLAIN {encoded}\r\n"), &[235])
+                    .await?;
+            }
+            SmtpAuth::Xoauth2 { username, token } => {
+                client.auth_xoauth2(username, token).await?;
+            }
+        }
     }
     client
         .command(&format!("MAIL FROM:<{}>\r\n", from), &[250])
@@ -312,6 +392,27 @@ async fn send_smtp(
     client.expect_code(&[250]).await?;
     let _ = client.command("QUIT\r\n", &[221]).await;
     Ok(())
+}
+
+async fn tls_upgrade<S: AsyncReadWrite>(
+    host: &str,
+    stream: S,
+) -> Result<tokio_rustls::client::TlsStream<S>> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls_config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(tls_config));
+    let server_name = ServerName::try_from(host.to_string())
+        .map_err(|_| anyhow!("invalid SMTP TLS server name"))?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        connector.connect(server_name, stream),
+    )
+    .await
+    .context("SMTP TLS handshake timed out")?
+    .context("SMTP TLS handshake failed")
 }
 
 fn local_hostname() -> String {
@@ -334,25 +435,104 @@ fn dot_stuff(message: &str) -> String {
 }
 
 struct SmtpClient {
-    reader: BufReader<TcpStream>,
+    reader: BufReader<tokio::io::ReadHalf<SmtpIo>>,
+    writer: tokio::io::WriteHalf<SmtpIo>,
 }
 
 impl SmtpClient {
-    fn new(stream: TcpStream) -> Self {
+    fn new(io: SmtpIo) -> Self {
+        let (reader, writer) = tokio::io::split(io);
         Self {
-            reader: BufReader::new(stream),
+            reader: BufReader::new(reader),
+            writer,
         }
     }
 
     async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
-        self.reader.get_mut().write_all(bytes).await?;
-        self.reader.get_mut().flush().await?;
+        self.writer.write_all(bytes).await?;
+        self.writer.flush().await?;
         Ok(())
     }
 
-    async fn command(&mut self, command: &str, expected: &[u16]) -> Result<u16> {
+    /// Write a command and return the full multiline response when the code
+    /// matches, so callers can inspect capability lines.
+    async fn command_lines(
+        &mut self,
+        command: &str,
+        expected: &[u16],
+    ) -> Result<(u16, Vec<String>)> {
         self.write_all(command.as_bytes()).await?;
-        self.expect_code(expected).await
+        let (code, lines) = self.read_response().await?;
+        if expected.contains(&code) {
+            Ok((code, lines))
+        } else {
+            bail!(
+                "SMTP server returned {}, expected {:?}: {}",
+                code,
+                expected,
+                lines.join(" | ")
+            )
+        }
+    }
+
+    /// Send EHLO and return the advertised capability keywords (upper-cased
+    /// verb per line, e.g. `STARTTLS`, `AUTH`).
+    async fn ehlo(&mut self) -> Result<Vec<String>> {
+        let (_, lines) = self
+            .command_lines(&format!("EHLO {}\r\n", local_hostname()), &[250])
+            .await?;
+        Ok(lines
+            .iter()
+            // Skip the response code prefix ("250 " or "250-") on each
+            .skip(1)
+            .filter_map(|line| line.get(4..))
+            .map(|rest| rest.split(' ').next().unwrap_or("").to_string())
+            .filter(|verb| !verb.is_empty())
+            .collect())
+    }
+
+    /// Upgrade the current plaintext connection with STARTTLS. Returns a new
+    /// client wrapping the TLS stream; the plaintext client is consumed.
+    async fn starttls(self, host: &str) -> Result<Self> {
+        let mut plaintext = self;
+        if !plaintext.reader.buffer().is_empty() {
+            bail!("SMTP STARTTLS refused: buffered plaintext data would be discarded");
+        }
+        plaintext.command("STARTTLS\r\n", &[220]).await?;
+        let read_half = plaintext.reader.into_inner();
+        // Both halves come from the same `split`, so `unsplit` cannot fail.
+        let io = read_half.unsplit(plaintext.writer);
+        let tls = tls_upgrade(host, io).await?;
+        Ok(Self::new(Box::new(tls)))
+    }
+
+    /// `AUTH XOAUTH2` with an inline initial response. On a `334` challenge
+    /// (base64 JSON error) the client aborts SASL with `*` per RFC 4954.
+    async fn auth_xoauth2(&mut self, username: &str, token: &str) -> Result<()> {
+        let sasl = crate::subscription_email::build_xoauth2_sasl_string(username, token);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(sasl);
+        self.write_all(format!("AUTH XOAUTH2 {encoded}\r\n").as_bytes())
+            .await?;
+        let (code, lines) = self.read_response().await?;
+        if code == 235 {
+            return Ok(());
+        }
+        let mut detail = lines.join(" | ");
+        if code == 334 {
+            self.write_all(b"*\r\n").await?;
+            let (_, abort_lines) = self.read_response().await?;
+            detail.push_str(" | abort: ");
+            detail.push_str(&abort_lines.join(" | "));
+        }
+        bail!(
+            "SMTP AUTH XOAUTH2 rejected ({}): the access token is missing, expired, or lacks the required SMTP scope (for Microsoft accounts: https://outlook.office.com/SMTP.Send). Re-run `uxc auth oauth login <credential> --provider outlook` to refresh the token. Server response: {}",
+            code,
+            detail
+        )
+    }
+
+    async fn command(&mut self, command: &str, expected: &[u16]) -> Result<u16> {
+        Ok(self.command_lines(command, expected).await?.0)
     }
 
     async fn expect_code(&mut self, expected: &[u16]) -> Result<u16> {
@@ -455,13 +635,126 @@ mod tests {
     #[test]
     fn rejects_plaintext_smtp_auth_without_opt_in() {
         let url = parse_smtp_url("smtp://localhost:2525").unwrap();
-        let auth = SmtpAuth {
+        let auth = SmtpAuth::Plain {
             username: "user".to_string(),
             password: "password".to_string(),
         };
         assert!(validate_smtp_auth_transport(&url, Some(&auth), false).is_err());
         assert!(validate_smtp_auth_transport(&url, Some(&auth), true).is_ok());
         assert!(validate_smtp_auth_transport(&url, None, false).is_ok());
+    }
+
+    #[test]
+    fn smtps_and_xoauth2_are_allowed_without_insecure_opt_in() {
+        let smtps = parse_smtp_url("smtps://smtp.example.com:465").unwrap();
+        let auth = SmtpAuth::Xoauth2 {
+            username: "user@hotmail.com".to_string(),
+            token: "token".to_string(),
+        };
+        // OAuth tokens ride inside TLS (STARTTLS upgrade or implicit TLS),
+        // so the cleartext opt-in flag does not apply to them.
+        assert!(validate_smtp_auth_transport(&smtps, Some(&auth), false).is_ok());
+        let smtp = parse_smtp_url("smtp://smtp-mail.outlook.com:587").unwrap();
+        assert!(validate_smtp_auth_transport(&smtp, Some(&auth), false).is_ok());
+        // Passwords still need the flag even on smtps://-shaped URLs? No:
+        // smtps is implicit TLS, so passwords are encrypted there.
+        let plain = SmtpAuth::Plain {
+            username: "user".to_string(),
+            password: "password".to_string(),
+        };
+        assert!(validate_smtp_auth_transport(&smtps, Some(&plain), false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn smtp_auth_xoauth2_accepts_235() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut smtp = SmtpClient::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let expected = base64::engine::general_purpose::STANDARD
+                .encode("user=user@hotmail.com\x01auth=Bearer token1\x01\x01");
+            assert_eq!(line, format!("AUTH XOAUTH2 {expected}\r\n"));
+            writer.write_all(b"235 2.7.0 Accepted\r\n").await.unwrap();
+        });
+
+        smtp.auth_xoauth2("user@hotmail.com", "token1")
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn smtp_auth_xoauth2_aborts_challenge_with_actionable_error() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut smtp = SmtpClient::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("AUTH XOAUTH2 "));
+            writer.write_all(b"334 ").await.unwrap();
+            let challenge = base64::engine::general_purpose::STANDARD
+                .encode(r#"{"status":"401","schemes":"XOAUTH2","scope":"https://outlook.office.com/SMTP.Send"}"#);
+            writer
+                .write_all(format!("{challenge}\r\n").as_bytes())
+                .await
+                .unwrap();
+            // Client aborts SASL with `*`, then the server reports failure.
+            let mut abort = String::new();
+            reader.read_line(&mut abort).await.unwrap();
+            assert_eq!(abort, "*\r\n");
+            writer
+                .write_all(b"500 Authentication failed\r\n")
+                .await
+                .unwrap();
+        });
+
+        let err = smtp
+            .auth_xoauth2("user@hotmail.com", "stale")
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        let message = err.to_string();
+        assert!(message.contains("SMTP AUTH XOAUTH2 rejected"));
+        assert!(message.contains("SMTP.Send"));
+        assert!(message.contains("auth oauth login"));
+    }
+
+    #[tokio::test]
+    async fn smtp_ehlo_collects_capability_verbs() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut smtp = SmtpClient::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("EHLO "));
+            writer
+                .write_all(
+                    b"250-smtp.example.com\r\n250-STARTTLS\r\n250-AUTH XOAUTH2 PLAIN\r\n250 OK\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let capabilities = smtp.ehlo().await.unwrap();
+        server.await.unwrap();
+        assert!(capabilities.iter().any(|cap| cap == "STARTTLS"));
+        assert!(capabilities.iter().any(|cap| cap == "AUTH"));
+        assert!(!capabilities.iter().any(|cap| cap == "250-smtp.example.com"));
+    }
+
+    #[test]
+    fn parse_smtp_url_accepts_smtps() {
+        let url = parse_smtp_url("smtps://smtp.example.com").unwrap();
+        assert_eq!(url.scheme(), "smtps");
+        assert_eq!(url.port(), None);
+        assert!(parse_smtp_url("smtpx://host").is_err());
     }
 
     #[test]
