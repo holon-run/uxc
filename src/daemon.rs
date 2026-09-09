@@ -11364,10 +11364,13 @@ mod tests {
                     let _ = socket
                         .write_all(b"* BYE Connection is closed. 13\r\n")
                         .await;
+                    // Generic rejection: this test exercises the bounded
+                    // ensure/stop/delete path for a source that keeps
+                    // reconnecting. The M365 "basic authentication is
+                    // disabled" marker is a permanent failure (see #445) and
+                    // must not be used here.
                     let _ = socket
-                        .write_all(
-                            format!("{tag} NO Basic authentication is disabled\r\n").as_bytes(),
-                        )
+                        .write_all(format!("{tag} NO LOGIN failed\r\n").as_bytes())
                         .await;
                     let _ = socket.shutdown().await;
                 });
