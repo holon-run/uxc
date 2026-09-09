@@ -28,6 +28,8 @@ use url::Url;
 const DEFAULT_MAILBOX: &str = "INBOX";
 const IMAP_CONNECT_TIMEOUT_SECS: u64 = 10;
 const IMAP_COMMAND_TIMEOUT_SECS: u64 = 30;
+const IMAP_LITERAL_TIMEOUT_SECS: u64 = 300;
+const IMAP_IDLE_READ_TIMEOUT_SECS: u64 = 60;
 const IMAP_IDLE_DONE_TIMEOUT_SECS: u64 = 5;
 /// Number of existing messages fetched on the first look by default.
 pub const EMAIL_IMAP_DEFAULT_INITIAL_FETCH_LIMIT: u64 = 25;
@@ -465,27 +467,45 @@ where
             return Ok(());
         }
         let idle_tag = conn.start_idle().await?;
-        tokio::select! {
-            changed = stop_rx.changed() => {
-                if changed.is_ok() && *stop_rx.borrow() {
-                    conn.done_idle(&idle_tag).await?;
-                    let _ = conn.logout().await;
-                    close_email_subscription(recorder, "stopped").await?;
-                    return Ok(());
+        // Quiet-read ticks since the last server output. During IDLE the
+        // server may legitimately stay silent; timeouts are benign and IDLE
+        // is re-issued periodically to stay inside the server-side window.
+        let mut quiet_ticks: u32 = 0;
+        loop {
+            tokio::select! {
+                changed = stop_rx.changed() => {
+                    if changed.is_ok() && *stop_rx.borrow() {
+                        conn.done_idle(&idle_tag).await?;
+                        let _ = conn.logout().await;
+                        close_email_subscription(recorder, "stopped").await?;
+                        return Ok(());
+                    }
                 }
-            }
-            line = conn.read_line() => {
-                let line = line?;
-                if line.contains(" EXISTS") || line.contains(" RECENT") {
-                    conn.done_idle(&idle_tag).await?;
-                    let messages = match last_seen_uid {
-                        Some(uid) => conn.fetch_since_uid(uid).await?,
-                        None => conn.fetch_recent(config.initial_fetch_limit).await?,
-                    };
-                    if let Some(uid) =
-                        emit_messages(config, messages, recorder, uidvalidity).await?
-                    {
-                        last_seen_uid = Some(last_seen_uid.map_or(uid, |last| last.max(uid)));
+                line = conn.read_line_idle() => {
+                    match line? {
+                        Some(line) if line.contains(" EXISTS") || line.contains(" RECENT") => {
+                            conn.done_idle(&idle_tag).await?;
+                        let messages = match last_seen_uid {
+                            Some(uid) => conn.fetch_since_uid(uid).await?,
+                            None => conn.fetch_recent(config.initial_fetch_limit).await?,
+                        };
+                        if let Some(uid) =
+                            emit_messages(config, messages, recorder, uidvalidity).await?
+                        {
+                            last_seen_uid = Some(last_seen_uid.map_or(uid, |last| last.max(uid)));
+                        }
+                            break;
+                        }
+                        Some(_) => {
+                            quiet_ticks = 0;
+                        }
+                        None => {
+                            quiet_ticks += 1;
+                            if quiet_ticks >= 10 {
+                                conn.done_idle(&idle_tag).await?;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1411,6 +1431,25 @@ impl ImapConnection {
         Ok(line.trim_end_matches(['\r', '\n']).to_string())
     }
 
+    /// Like [`ImapConnection::read_line`], but a read timeout surfaces as
+    /// `Ok(None)` instead of an error. During IMAP IDLE the server may
+    /// legitimately stay silent for long stretches, so a quiet connection must
+    /// not kill the session.
+    async fn read_line_idle(&mut self) -> Result<Option<String>> {
+        let mut line = String::new();
+        match tokio::time::timeout(
+            Duration::from_secs(IMAP_IDLE_READ_TIMEOUT_SECS),
+            self.reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(read)) if read > 0 => Ok(Some(line.trim_end_matches(['\r', '\n']).to_string())),
+            Ok(Ok(_)) => bail!("IMAP connection closed"),
+            Ok(Err(err)) => Err(anyhow!("IMAP read failed: {}", err)),
+            Err(_) => Ok(None),
+        }
+    }
+
     async fn command(&mut self, command: &str) -> Result<Vec<String>> {
         let tag = format!("A{:04}", self.next_tag);
         self.next_tag = self.next_tag.saturating_add(1);
@@ -1432,7 +1471,7 @@ impl ImapConnection {
         while let Some(len) = trailing_literal_len(&line) {
             let mut literal = vec![0u8; len];
             tokio::time::timeout(
-                Duration::from_secs(IMAP_COMMAND_TIMEOUT_SECS),
+                Duration::from_secs(IMAP_LITERAL_TIMEOUT_SECS),
                 self.reader.read_exact(&mut literal),
             )
             .await

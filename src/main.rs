@@ -1333,6 +1333,12 @@ struct LinkLauncherConfig<'a> {
 
 #[tokio::main]
 async fn main() {
+    // Install the process-level rustls CryptoProvider explicitly: the
+    // dependency graph enables both `ring` (direct rustls feature) and
+    // `aws-lc-rs` (tokio-rustls default), so provider auto-detection panics
+    // at the first TLS handshake (e.g. email-imap-idle imaps sources).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
