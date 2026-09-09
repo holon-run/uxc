@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-09
+
+### Added
+- Email OAuth: IMAP/SMTP XOAUTH2 support for Microsoft personal accounts, with device-code login, a default first-party client id overridable via `--client-id`, and OAuth SMTP send (#455).
+- Email: controllable first-look backfill depth for poll sources (#450).
+
+### Fixed
+- Email: actionable error when IMAP basic auth is disabled for Microsoft 365 personal accounts (#454).
+- Email: fixed a TLS provider panic in `email-imap-idle` and hardened IMAP IDLE silent-timeout handling (#458).
+- Auth: accept password-class fields as a usable basic-auth secret (#452).
+- Auth: warn when daemon-managed sources reference env-sourced secrets, with documented daemon resolution boundaries (#453).
+- Daemon: bounded managed-source stop/delete and added RPC timeout context (#451).
+
 ## [0.19.0] - 2026-09-08
 
 ### Added
