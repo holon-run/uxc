@@ -664,3 +664,54 @@ fn oauth_session_file_permissions_are_0600() {
         & 0o777;
     assert_eq!(mode, 0o600, "session file should be mode 0600");
 }
+
+#[test]
+fn oauth_login_outlook_preset_sends_thunderbird_client_id_and_scopes() {
+    let files = AuthFiles::new();
+    let mut server = mockito::Server::new();
+
+    let device_mock = server
+        .mock("POST", "/devicecode")
+        .match_body(mockito::Matcher::AllOf(vec![
+            mockito::Matcher::Regex("client_id=9e5f94bc-e8a4-4e73-b8be-63364c29d753".to_string()),
+            mockito::Matcher::Regex("IMAP.AccessAsUser.All".to_string()),
+            mockito::Matcher::Regex("SMTP.Send".to_string()),
+            mockito::Matcher::Regex("offline_access".to_string()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"device_code":"dc-1","user_code":"ABCDEF","verification_uri":"https://microsoft.com/devicelogin","expires_in":1,"interval":1}"#,
+        )
+        .create();
+    let _token_mock = server
+        .mock("POST", "/token")
+        .with_status(400)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"error":"authorization_pending"}"#)
+        .create();
+
+    let output = uxc_command(&files)
+        .arg("auth")
+        .arg("oauth")
+        .arg("login")
+        .arg("outlook-imap")
+        .arg("--provider")
+        .arg("outlook")
+        .arg("--device-authorization-endpoint")
+        .arg(format!("{}/devicecode", server.url()))
+        .arg("--token-endpoint")
+        .arg(format!("{}/token", server.url()))
+        .output()
+        .expect("oauth login should run");
+
+    // Nobody completes the device consent in this test, so the login times
+    // out after the 1s expiry; the important assertion is that the preset
+    // filled the Thunderbird client id and IMAP+SMTP+offline_access scopes
+    // into the device-authorization request without explicit flags.
+    device_mock.assert();
+    assert!(
+        !output.status.success(),
+        "login should fail while device code is pending"
+    );
+}

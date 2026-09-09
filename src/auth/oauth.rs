@@ -1234,6 +1234,104 @@ fn endpoint_is_matrix_client(endpoint: &str) -> bool {
         .is_some_and(|url| url.path().starts_with("/_matrix/client/"))
 }
 
+/// Public Thunderbird OAuth client id published by Mozilla for IMAP/POP/SMTP
+/// XOAUTH2 against `outlook.office365.com`. Personal Microsoft accounts can
+/// consent to it directly; organization tenants may require admin consent.
+/// `uxc auth oauth login --provider outlook` uses it as the default so users
+/// do not need their own Azure app registration; `--client-id` overrides it.
+pub const OUTLOOK_PUBLIC_CLIENT_ID: &str = "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
+
+const OUTLOOK_CONSUMERS_ISSUER: &str = "https://login.microsoftonline.com/consumers";
+const OUTLOOK_CONSUMERS_TOKEN_ENDPOINT: &str =
+    "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+const OUTLOOK_CONSUMERS_DEVICE_AUTHORIZATION_ENDPOINT: &str =
+    "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
+const OUTLOOK_IMAP_SCOPE: &str = "https://outlook.office.com/IMAP.AccessAsUser.All";
+const OUTLOOK_SMTP_SCOPE: &str = "https://outlook.office.com/SMTP.Send";
+const OUTLOOK_OFFLINE_ACCESS_SCOPE: &str = "offline_access";
+
+/// Built-in OAuth login presets for well-known providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthLoginPreset {
+    /// Microsoft personal accounts (`outlook.com`/`hotmail.com`/`live.com`)
+    /// with IMAP XOAUTH2 (`email-imap-idle`) and SMTP XOAUTH2
+    /// (`uxc email send`). Uses the `consumers` tenant; organization
+    /// accounts should register their own client and pass `--client-id`.
+    Outlook,
+}
+
+impl OAuthLoginPreset {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "outlook" | "outlook.com" | "microsoft" => Ok(Self::Outlook),
+            other => Err(UxcError::InvalidArguments(format!(
+                "unknown OAuth provider preset '{}'; expected outlook",
+                other
+            ))
+            .into()),
+        }
+    }
+}
+
+/// Login arguments after applying a provider preset: every field carries the
+/// preset default unless the caller passed an explicit value, which keeps
+/// `--client-id`/`--scope`/endpoint overrides working on top of the preset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthLoginPresetDefaults {
+    /// Fallback discovery endpoint (never requested on the wire when the
+    /// preset endpoint overrides already satisfy discovery requirements).
+    pub endpoint: String,
+    pub client_id: String,
+    pub issuer: Option<String>,
+    pub token_endpoint: Option<String>,
+    pub device_authorization_endpoint: Option<String>,
+    /// Preset scopes, used only when the caller passed no `--scope`.
+    pub default_scopes: Vec<String>,
+}
+
+/// Merge an OAuth login preset with explicit CLI arguments. Explicit values
+/// win over preset defaults so bring-your-own client ids stay possible.
+pub fn apply_oauth_login_preset(
+    preset: OAuthLoginPreset,
+    endpoint: Option<&str>,
+    client_id: Option<&str>,
+    scopes: &[String],
+    issuer: Option<&str>,
+    token_endpoint: Option<&str>,
+    device_authorization_endpoint: Option<&str>,
+) -> OAuthLoginPresetDefaults {
+    match preset {
+        OAuthLoginPreset::Outlook => OAuthLoginPresetDefaults {
+            endpoint: endpoint
+                .map(str::to_string)
+                .unwrap_or_else(|| OUTLOOK_CONSUMERS_ISSUER.to_string()),
+            client_id: client_id
+                .map(str::to_string)
+                .unwrap_or_else(|| OUTLOOK_PUBLIC_CLIENT_ID.to_string()),
+            issuer: Some(issuer.unwrap_or(OUTLOOK_CONSUMERS_ISSUER).to_string()),
+            token_endpoint: Some(
+                token_endpoint
+                    .unwrap_or(OUTLOOK_CONSUMERS_TOKEN_ENDPOINT)
+                    .to_string(),
+            ),
+            device_authorization_endpoint: Some(
+                device_authorization_endpoint
+                    .unwrap_or(OUTLOOK_CONSUMERS_DEVICE_AUTHORIZATION_ENDPOINT)
+                    .to_string(),
+            ),
+            default_scopes: if scopes.is_empty() {
+                vec![
+                    OUTLOOK_IMAP_SCOPE.to_string(),
+                    OUTLOOK_SMTP_SCOPE.to_string(),
+                    OUTLOOK_OFFLINE_ACCESS_SCOPE.to_string(),
+                ]
+            } else {
+                scopes.to_vec()
+            },
+        },
+    }
+}
+
 fn random_matrix_device_suffix(len: usize) -> Result<String> {
     const ALPHANUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut bytes = vec![0u8; len];
@@ -1797,6 +1895,75 @@ mod tests {
             parse_resource_metadata_from_www_authenticate(header).as_deref(),
             Some("https://api.example.com/.well-known/oauth-protected-resource")
         );
+    }
+
+    #[test]
+    fn login_preset_parse_accepts_known_aliases() {
+        assert_eq!(
+            OAuthLoginPreset::parse("outlook").unwrap(),
+            OAuthLoginPreset::Outlook
+        );
+        assert_eq!(
+            OAuthLoginPreset::parse("Outlook.com").unwrap(),
+            OAuthLoginPreset::Outlook
+        );
+        assert!(OAuthLoginPreset::parse("gmail").is_err());
+    }
+
+    #[test]
+    fn login_preset_outlook_fills_thunderbird_defaults() {
+        let defaults =
+            apply_oauth_login_preset(OAuthLoginPreset::Outlook, None, None, &[], None, None, None);
+        assert_eq!(defaults.client_id, OUTLOOK_PUBLIC_CLIENT_ID);
+        assert_eq!(
+            defaults.endpoint,
+            "https://login.microsoftonline.com/consumers"
+        );
+        assert_eq!(
+            defaults.issuer.as_deref(),
+            Some("https://login.microsoftonline.com/consumers")
+        );
+        assert_eq!(
+            defaults.device_authorization_endpoint.as_deref(),
+            Some("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode")
+        );
+        assert_eq!(
+            defaults.default_scopes,
+            vec![
+                "https://outlook.office.com/IMAP.AccessAsUser.All".to_string(),
+                "https://outlook.office.com/SMTP.Send".to_string(),
+                "offline_access".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn login_preset_explicit_arguments_override_defaults() {
+        let scopes = vec!["custom".to_string()];
+        let defaults = apply_oauth_login_preset(
+            OAuthLoginPreset::Outlook,
+            Some("https://example.com"),
+            Some("my-client-id"),
+            &scopes,
+            Some("https://issuer.example.com"),
+            Some("https://issuer.example.com/token"),
+            Some("https://issuer.example.com/device"),
+        );
+        assert_eq!(defaults.client_id, "my-client-id");
+        assert_eq!(defaults.endpoint, "https://example.com");
+        assert_eq!(
+            defaults.issuer.as_deref(),
+            Some("https://issuer.example.com")
+        );
+        assert_eq!(
+            defaults.token_endpoint.as_deref(),
+            Some("https://issuer.example.com/token")
+        );
+        assert_eq!(
+            defaults.device_authorization_endpoint.as_deref(),
+            Some("https://issuer.example.com/device")
+        );
+        assert_eq!(defaults.default_scopes, scopes);
     }
 
     #[test]

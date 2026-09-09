@@ -875,9 +875,14 @@ enum AuthOauthCommands {
         #[arg(value_name = "CREDENTIAL_ID")]
         credential_id: String,
 
+        /// Built-in provider preset (outlook) filling default client id,
+        /// issuer, endpoints, and scopes; explicit flags still override
+        #[arg(long)]
+        provider: Option<String>,
+
         /// Service endpoint URL used for OAuth discovery
         #[arg(long)]
-        endpoint: String,
+        endpoint: Option<String>,
 
         /// OAuth flow type
         #[arg(long, default_value = "device_code")]
@@ -2957,10 +2962,13 @@ fn help_data_for_path(path: &[&str]) -> HelpData {
         ["auth", "oauth", "login"] => HelpData {
             path: "uxc auth oauth login".to_string(),
             about: "Login with OAuth and save tokens".to_string(),
-            usage: "uxc auth oauth login <credential_id> --endpoint <url> [--flow <device_code|authorization_code|client_credentials>] [--scope <scope>] [--client-id <id>] [--client-secret <secret>] [--redirect-uri <uri>] [--authorization-code <code>] [--issuer <url>] [--authorization-endpoint <url>] [--token-endpoint <url>] [--device-authorization-endpoint <url>] [--registration-endpoint <url>] [--resource-metadata-url <url>]".to_string(),
+            usage: "uxc auth oauth login <credential_id> (--endpoint <url> | --provider <outlook>) [--flow <device_code|authorization_code|client_credentials>] [--scope <scope>] [--client-id <id>] [--client-secret <secret>] [--redirect-uri <uri>] [--authorization-code <code>] [--issuer <url>] [--authorization-endpoint <url>] [--token-endpoint <url>] [--device-authorization-endpoint <url>] [--registration-endpoint <url>] [--resource-metadata-url <url>]".to_string(),
             commands: vec![],
-            notes: vec![],
-            examples: vec!["uxc auth oauth login deepwiki --endpoint https://mcp.deepwiki.com/mcp --flow device_code --client-id <id>".to_string()],
+            notes: vec!["--provider outlook fills the Thunderbird public client id, Microsoft consumers issuer, token/device endpoints, and IMAP+SMTP XOAUTH2 scopes; explicit flags override the preset.".to_string()],
+            examples: vec![
+                "uxc auth oauth login deepwiki --endpoint https://mcp.deepwiki.com/mcp --flow device_code --client-id <id>".to_string(),
+                "uxc auth oauth login outlook-imap --provider outlook".to_string(),
+            ],
         },
         ["auth", "oauth", "refresh"] => HelpData {
             path: "uxc auth oauth refresh".to_string(),
@@ -7408,6 +7416,7 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
         }
         AuthOauthCommands::Login {
             credential_id,
+            provider,
             endpoint,
             flow,
             scope,
@@ -7423,20 +7432,59 @@ async fn handle_auth_oauth_command(command: &AuthOauthCommands) -> Result<Output
             resource_metadata_url,
         } => {
             let flow = parse_oauth_flow(flow)?;
-            let endpoint = normalize_endpoint_url(endpoint);
-            let scopes = auth::oauth::resolve_oauth_scopes_for_endpoint(
-                &endpoint,
-                &auth::oauth::parse_scopes(scope),
-            )?;
+            let raw_scopes = auth::oauth::parse_scopes(scope);
+            let (
+                endpoint,
+                client_id,
+                issuer,
+                token_endpoint,
+                device_authorization_endpoint,
+                scopes,
+            ) = if let Some(provider) = provider.as_deref() {
+                let preset = auth::oauth::OAuthLoginPreset::parse(provider)?;
+                let defaults = auth::oauth::apply_oauth_login_preset(
+                    preset,
+                    endpoint.as_deref(),
+                    client_id.as_deref(),
+                    &raw_scopes,
+                    issuer.as_deref(),
+                    token_endpoint.as_deref(),
+                    device_authorization_endpoint.as_deref(),
+                );
+                (
+                    defaults.endpoint,
+                    Some(defaults.client_id),
+                    defaults.issuer,
+                    defaults.token_endpoint,
+                    defaults.device_authorization_endpoint,
+                    defaults.default_scopes,
+                )
+            } else {
+                let endpoint = endpoint.clone().ok_or_else(|| {
+                    UxcError::InvalidArguments(
+                        "--endpoint is required without --provider".to_string(),
+                    )
+                })?;
+                (
+                    endpoint,
+                    client_id.clone(),
+                    issuer.clone(),
+                    token_endpoint.clone(),
+                    device_authorization_endpoint.clone(),
+                    raw_scopes,
+                )
+            };
+            let endpoint = normalize_endpoint_url(&endpoint);
+            let scopes = auth::oauth::resolve_oauth_scopes_for_endpoint(&endpoint, &scopes)?;
             let client = build_resilient_http_client(
                 std::time::Duration::from_secs(30),
                 "OAuth login command",
             )?;
             let discovery_overrides = build_oauth_discovery_overrides(
-                issuer,
+                &issuer,
                 authorization_endpoint,
-                token_endpoint,
-                device_authorization_endpoint,
+                &token_endpoint,
+                &device_authorization_endpoint,
                 registration_endpoint,
                 resource_metadata_url,
             );

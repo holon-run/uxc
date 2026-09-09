@@ -328,28 +328,63 @@ where
 {
     let profile_name = required_profile_name(handle, request)?;
     let profile = load_profile(&profile_name)?;
-    let username = resolve_first_profile_field(&profile, &["username", "user", "email"])
-        .ok_or_else(|| {
-            structured(
-                "auth_profile_missing",
-                format!(
-                    "auth profile '{}' has no username/user/email field for IMAP retrieval",
-                    profile_name
-                ),
-                None,
-            )
-        })?;
-    let password = resolve_first_profile_field(&profile, &["password", "app_password", "secret"])
-        .ok_or_else(|| {
-        structured(
-            "auth_profile_missing",
-            format!(
-                "auth profile '{}' has no password/app_password/secret field for IMAP retrieval",
-                profile_name
-            ),
-            None,
-        )
-    })?;
+    let mut profile = profile;
+    let auth_method = if profile.auth_type == crate::auth::AuthType::OAuth {
+        refresh_oauth_profile_for_retrieval(&mut profile).await?;
+        let username = resolve_first_profile_field(&profile, &["username", "user", "email"])
+            .or_else(|| profile.name.clone())
+            .ok_or_else(|| {
+                structured(
+                    "auth_profile_missing",
+                    format!(
+                        "auth profile '{}' has no username/user/email field for IMAP retrieval",
+                        profile_name
+                    ),
+                    None,
+                )
+            })?;
+        let token = profile
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.access_token.clone())
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                structured(
+                    "auth_profile_missing",
+                    format!(
+                        "auth profile '{}' has no OAuth access token for IMAP retrieval",
+                        profile_name
+                    ),
+                    None,
+                )
+            })?;
+        crate::subscription_email::ImapAuthMethod::Xoauth2 { username, token }
+    } else {
+        let username = resolve_first_profile_field(&profile, &["username", "user", "email"])
+            .ok_or_else(|| {
+                structured(
+                    "auth_profile_missing",
+                    format!(
+                        "auth profile '{}' has no username/user/email field for IMAP retrieval",
+                        profile_name
+                    ),
+                    None,
+                )
+            })?;
+        let password =
+            resolve_first_profile_field(&profile, &["password", "app_password", "secret"])
+                .ok_or_else(|| {
+                    structured(
+                        "auth_profile_missing",
+                        format!(
+                            "auth profile '{}' has no password/app_password/secret field for IMAP retrieval",
+                            profile_name
+                        ),
+                        None,
+                    )
+                })?;
+        crate::subscription_email::ImapAuthMethod::Basic { username, password }
+    };
     let url = Url::parse(&handle.endpoint).map_err(|err| {
         invalid_handle(&format!(
             "invalid IMAP endpoint '{}': {}",
@@ -380,8 +415,7 @@ where
         host,
         port,
         use_tls,
-        username: username.clone(),
-        password: password.clone(),
+        auth_method: auth_method.clone(),
         mailbox: mailbox.clone(),
         account: handle.account.clone(),
         auth_profile: Some(profile_name),
@@ -390,32 +424,62 @@ where
     let mut conn = connector(config)
         .await
         .map_err(|err| provider_request_failed(format!("IMAP connect failed: {err}")))?;
-    let attachment = run_imap_retrieval(&mut conn, handle, &username, &password, &mailbox).await;
+    let attachment = run_imap_retrieval(&mut conn, handle, &auth_method, &mailbox).await;
     let _ = conn.logout().await;
     attachment
+}
+
+/// Refresh the OAuth access token (when stale) before a one-shot retrieval
+/// and persist it so subsequent retrievals reuse the fresh token.
+async fn refresh_oauth_profile_for_retrieval(profile: &mut crate::auth::Profile) -> Result<()> {
+    let client = reqwest::Client::new();
+    let refreshed = crate::auth::refresh_effective_auth_profile(
+        profile,
+        &client,
+        false,
+        crate::subscription_email::IMAP_XOAUTH2_REFRESH_SKEW_SECS,
+        None,
+    )
+    .await
+    .map_err(|err| {
+        structured(
+            "auth_failed",
+            format!("OAuth token refresh failed: {err}"),
+            None,
+        )
+    })?;
+    if refreshed {
+        crate::auth::persist_profile_if_named(profile)?;
+    }
+    Ok(())
 }
 
 async fn run_imap_retrieval(
     conn: &mut ImapConnection,
     handle: &EmailAttachmentHandle,
-    username: &str,
-    password: &str,
+    auth_method: &crate::subscription_email::ImapAuthMethod,
     mailbox: &str,
 ) -> Result<FetchedAttachment> {
     conn.expect_greeting()
         .await
         .map_err(|err| provider_request_failed(format!("IMAP greeting failed: {err}")))?;
-    if let Err(err) = conn
-        .command_ok(&format!(
-            "LOGIN {} {}",
-            quote_imap_string(username),
-            quote_imap_string(password)
-        ))
-        .await
-    {
+    let auth_result = match auth_method {
+        crate::subscription_email::ImapAuthMethod::Basic { username, password } => conn
+            .command_ok(&format!(
+                "LOGIN {} {}",
+                quote_imap_string(username),
+                quote_imap_string(password)
+            ))
+            .await
+            .map(|_| ()),
+        crate::subscription_email::ImapAuthMethod::Xoauth2 { username, token } => {
+            conn.authenticate_xoauth2(username, token).await
+        }
+    };
+    if let Err(err) = auth_result {
         return Err(structured(
             "auth_failed",
-            format!("IMAP LOGIN failed: {err}"),
+            format!("IMAP auth failed: {err}"),
             None,
         ));
     }
@@ -859,6 +923,16 @@ mod tests {
                     "username": {"kind": "literal", "value": "user@example.com"},
                     "password": {"kind": "literal", "value": "app-pass"}
                 }
+            },
+            "imap-oauth-test": {
+                "auth_type": "oauth",
+                "fields": {
+                    "username": {"kind": "literal", "value": "user@hotmail.com"}
+                },
+                "oauth": {
+                    "access_token": "imap-oauth-token",
+                    "scopes": ["https://outlook.office.com/IMAP.AccessAsUser.All"]
+                }
             }
         }
     }"#;
@@ -1067,6 +1141,61 @@ mod tests {
         assert_eq!(
             std::fs::read(&result.saved_path).unwrap(),
             b"hello payload".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn imap_download_authenticates_with_xoauth2_for_oauth_profiles() {
+        let _guard = credentials_env_lock().lock().unwrap();
+        let _credentials = set_credentials_file(GMAIL_CREDENTIALS);
+        let output = test_output_dir();
+        let mime = imap_mime_headers();
+        // The MIME section advertises base64 transfer encoding, so the body
+        // literal must be the encoded payload.
+        let body = base64::engine::general_purpose::STANDARD
+            .encode("oauth payload")
+            .into_bytes();
+        let mime_entry = format!(
+            "* 1 FETCH (UID 42 BODY[2.MIME] {{{}}}\r\n{}\r\n)",
+            mime.len(),
+            String::from_utf8_lossy(&mime)
+        );
+        let body_entry = literal_response("2", &body);
+        let script = vec![
+            (
+                "A0001 AUTHENTICATE XOAUTH2".to_string(),
+                "A0001 OK Authenticated.".to_string(),
+            ),
+            (
+                "A0002 SELECT".to_string(),
+                "* OK [UIDVALIDITY 3857529045] UIDs valid\r\n* 0 EXISTS\r\nA0002 OK [READ-WRITE] SELECT done".to_string(),
+            ),
+            (
+                "A0003 UID FETCH".to_string(),
+                format!("{mime_entry}\r\nA0003 OK fetch done"),
+            ),
+            (
+                "A0004 UID FETCH".to_string(),
+                format!("{body_entry}\r\nA0004 OK fetch done"),
+            ),
+            ("A0005 LOGOUT".to_string(), "A0005 OK logout".to_string()),
+        ];
+        let connector = imap_scripted_connector(script);
+        let mut handle =
+            serde_json::from_str::<serde_json::Value>(&imap_handle(Some(3857529045))).unwrap();
+        handle["auth_profile"] = json!("imap-oauth-test");
+        let request = request(
+            handle.to_string(),
+            Some(output.join("oauth.bin").display().to_string()),
+            0,
+        );
+        let result = get_email_attachment_with(&request, connector)
+            .await
+            .unwrap();
+        assert_eq!(result.provider, "imap");
+        assert_eq!(
+            std::fs::read(&result.saved_path).unwrap(),
+            b"oauth payload".to_vec()
         );
     }
 

@@ -6118,11 +6118,13 @@ async fn run_email_imap_idle_subscription_job(
     view: Arc<Mutex<SubscriptionJobView>>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let auth_profile =
-        auth::resolve_auth_for_endpoint(&request.endpoint, request.options.auth.clone())?
-            .ok_or_else(|| {
-                anyhow!("email-imap-idle requires an auth profile with username/password fields")
-            })?;
+    let auth_profile = auth::resolve_auth_for_endpoint(
+        &request.endpoint,
+        request.options.auth.clone(),
+    )?
+    .ok_or_else(|| {
+        anyhow!("email-imap-idle requires an auth profile (password fields, or OAuth for XOAUTH2)")
+    })?;
     let config: EmailImapIdleRuntimeConfig =
         resolve_email_imap_idle_runtime_config(request, &auth_profile)?;
     let mut seq = 0u64;
