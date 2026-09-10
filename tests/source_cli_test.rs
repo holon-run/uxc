@@ -8,11 +8,9 @@ use std::time::{Duration, Instant};
 
 use common::{start_test_server, uxc_command_with_home};
 
+/// Robust daemon teardown for this test home (see common::stop_test_daemon).
 fn daemon_stop_best_effort_with_home(home: &Path) {
-    let _ = uxc_command_with_home(home)
-        .arg("daemon")
-        .arg("stop")
-        .output();
+    common::stop_test_daemon(home);
 }
 
 fn daemon_runtime_dir(home: &Path) -> PathBuf {

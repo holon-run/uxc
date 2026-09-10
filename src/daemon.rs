@@ -58,12 +58,15 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{ErrorKind, Seek, SeekFrom, Write};
 #[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 #[cfg(unix)]
@@ -87,6 +90,14 @@ const MCP_IDLE_TTL_DEFAULT_SECS: u64 = 3600;
 const MCP_IDLE_TTL_ENV: &str = "UXC_DAEMON_MCP_IDLE_TTL_SECS";
 const MCP_IDLE_TTL_MAX_SECS: u64 = 24 * 60 * 60;
 const MCP_IDLE_CLEANUP_INTERVAL_MS: u64 = 500;
+// How often the daemon watchdog verifies that its socket (and therefore its
+// state dir) still exists. A daemon whose temp state dir was removed (e.g. a
+// leaked test daemon) exits within one tick of becoming orphaned instead of
+// idling forever.
+const DAEMON_WATCHDOG_TICK_MS: u64 = 2_000;
+// Optional idle self-shutdown for daemon processes. Mainly used by test
+// harnesses that spawn short-lived daemons and may never run teardown.
+const DAEMON_IDLE_TIMEOUT_ENV: &str = "UXC_DAEMON_IDLE_TIMEOUT_SECS";
 // Five seconds is long enough for cooperative stdio servers to notice stdin EOF
 // and release external resources, while still bounding daemon-side eviction stalls.
 const MCP_STDIO_EXIT_TIMEOUT_SECS: u64 = 5;
@@ -7320,6 +7331,100 @@ pub async fn ensure_compatible_daemon_running() -> Result<EnsureDaemonOutcome> {
     bail!("uxcd daemon is not supported on this platform; run uxc inside WSL")
 }
 
+/// Outcome of one watchdog probe of the daemon socket path.
+#[cfg(unix)]
+enum DaemonSocketWatch {
+    Healthy,
+    Orphaned(&'static str),
+    TransientError,
+}
+
+/// Decide whether the daemon still owns its socket. `stat_ino` is the current
+/// inode of the socket path (if stat succeeded) and `expected_ino` is the inode
+/// recorded right after binding.
+#[cfg(unix)]
+fn classify_daemon_socket_watch(
+    stat_ino: std::io::Result<u64>,
+    expected_ino: u64,
+) -> DaemonSocketWatch {
+    match stat_ino {
+        Ok(ino) if ino == expected_ino => DaemonSocketWatch::Healthy,
+        Ok(_) => DaemonSocketWatch::Orphaned("socket path is now owned by another daemon"),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            DaemonSocketWatch::Orphaned("daemon state dir or socket no longer exists")
+        }
+        Err(_) => DaemonSocketWatch::TransientError,
+    }
+}
+
+/// Tracks external client activity so the daemon can self-terminate when idle.
+/// Internal work (managed source polling, MCP session cleanup) does not count;
+/// only accepted client connections do.
+#[cfg(unix)]
+struct DaemonActivity {
+    open_connections: AtomicUsize,
+    last_activity: std::sync::Mutex<Instant>,
+}
+
+#[cfg(unix)]
+impl DaemonActivity {
+    fn new() -> Self {
+        Self {
+            open_connections: AtomicUsize::new(0),
+            last_activity: std::sync::Mutex::new(Instant::now()),
+        }
+    }
+
+    fn open_connection(self: &Arc<Self>) -> DaemonConnectionGuard {
+        self.open_connections.fetch_add(1, Ordering::SeqCst);
+        *self
+            .last_activity
+            .lock()
+            .expect("daemon activity lock poisoned") = Instant::now();
+        DaemonConnectionGuard {
+            activity: Arc::clone(self),
+        }
+    }
+
+    fn idle_for(&self, timeout: Duration) -> bool {
+        self.open_connections.load(Ordering::SeqCst) == 0
+            && self
+                .last_activity
+                .lock()
+                .expect("daemon activity lock poisoned")
+                .elapsed()
+                >= timeout
+    }
+}
+
+/// RAII marker for one accepted daemon connection; decrements the open
+/// connection count when the connection handler finishes.
+#[cfg(unix)]
+struct DaemonConnectionGuard {
+    activity: Arc<DaemonActivity>,
+}
+
+#[cfg(unix)]
+impl Drop for DaemonConnectionGuard {
+    fn drop(&mut self) {
+        self.activity
+            .open_connections
+            .fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Optional daemon idle self-shutdown window. Mainly for test harnesses that
+/// spawn short-lived daemons and may never run teardown (e.g. an interrupted
+/// test run). Unset or non-positive values disable it.
+#[cfg(unix)]
+fn daemon_idle_timeout_secs() -> Option<Duration> {
+    std::env::var(DAEMON_IDLE_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+}
+
 #[cfg(unix)]
 pub async fn run_daemon_server() -> Result<()> {
     let dir = daemon_dir();
@@ -7341,6 +7446,15 @@ pub async fn run_daemon_server() -> Result<()> {
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("Failed to bind daemon socket at {}", socket.display()))?;
 
+    // Record the socket identity so the watchdog can distinguish "state dir
+    // deleted under us" (e.g. a test temp HOME) from "socket replaced by a
+    // newer daemon owner after this one was orphaned".
+    let socket_ino = fs::metadata(&socket)
+        .with_context(|| format!("Failed to stat daemon socket at {}", socket.display()))?
+        .ino();
+    let idle_timeout = daemon_idle_timeout_secs();
+    let activity = Arc::new(DaemonActivity::new());
+
     let runtime = Arc::new(DaemonRuntime::try_new()?);
     let resume_runtime = runtime.clone();
     tokio::spawn(async move {
@@ -7361,6 +7475,50 @@ pub async fn run_daemon_server() -> Result<()> {
             cleanup_runtime.mcp.cleanup_idle().await;
         }
     });
+    let watchdog_runtime = runtime.clone();
+    let watchdog_socket = socket.clone();
+    let watchdog_activity = activity.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(DAEMON_WATCHDOG_TICK_MS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if watchdog_runtime.should_stop().await {
+                break;
+            }
+            match classify_daemon_socket_watch(
+                fs::metadata(&watchdog_socket).map(|meta| meta.ino()),
+                socket_ino,
+            ) {
+                DaemonSocketWatch::Healthy => {}
+                DaemonSocketWatch::TransientError => {}
+                DaemonSocketWatch::Orphaned(reason) => {
+                    tracing::warn!(
+                        "Daemon is orphaned ({}); exiting. socket={} pid={}",
+                        reason,
+                        watchdog_socket.display(),
+                        std::process::id()
+                    );
+                    // The state dir (and with it the owner lock and log files)
+                    // is already gone, so there is nothing to clean up. Exit
+                    // directly instead of waiting for the accept loop.
+                    std::process::exit(0);
+                }
+            }
+            if let Some(timeout) = idle_timeout {
+                if watchdog_activity.idle_for(timeout) {
+                    tracing::warn!(
+                        "Daemon received no client connections for more than {:?}; \
+                         shutting down ({} is set)",
+                        timeout,
+                        DAEMON_IDLE_TIMEOUT_ENV
+                    );
+                    watchdog_runtime.request_stop().await;
+                    break;
+                }
+            }
+        }
+    });
 
     // Log daemon start
     runtime
@@ -7370,7 +7528,9 @@ pub async fn run_daemon_server() -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let runtime_for_conn = runtime.clone();
+        let conn_activity = activity.clone();
         tokio::spawn(async move {
+            let _open_connection = conn_activity.open_connection();
             if let Err(err) = handle_connection(stream, runtime_for_conn).await {
                 tracing::debug!("daemon connection failed: {}", err);
             }
@@ -10056,6 +10216,76 @@ mod tests {
         with_mcp_idle_ttl_env(Some("9999999999999999999"), || {
             assert_eq!(default_mcp_idle_ttl_secs(), MCP_IDLE_TTL_MAX_SECS);
         });
+    }
+
+    fn with_daemon_idle_timeout_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let previous = std::env::var_os(DAEMON_IDLE_TIMEOUT_ENV);
+        match value {
+            Some(value) => std::env::set_var(DAEMON_IDLE_TIMEOUT_ENV, value),
+            None => std::env::remove_var(DAEMON_IDLE_TIMEOUT_ENV),
+        }
+
+        let result = f();
+
+        match previous {
+            Some(previous) => std::env::set_var(DAEMON_IDLE_TIMEOUT_ENV, previous),
+            None => std::env::remove_var(DAEMON_IDLE_TIMEOUT_ENV),
+        }
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_idle_timeout_secs_is_optional_and_validated() {
+        with_daemon_idle_timeout_env(None, || {
+            assert_eq!(daemon_idle_timeout_secs(), None);
+        });
+        with_daemon_idle_timeout_env(Some("0"), || {
+            assert_eq!(daemon_idle_timeout_secs(), None);
+        });
+        with_daemon_idle_timeout_env(Some("not-a-number"), || {
+            assert_eq!(daemon_idle_timeout_secs(), None);
+        });
+        with_daemon_idle_timeout_env(Some(" 30 "), || {
+            assert_eq!(daemon_idle_timeout_secs(), Some(Duration::from_secs(30)));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_daemon_socket_watch_detects_orphan_and_replacement() {
+        assert!(matches!(
+            classify_daemon_socket_watch(Ok(42), 42),
+            DaemonSocketWatch::Healthy
+        ));
+        assert!(matches!(
+            classify_daemon_socket_watch(Ok(7), 42),
+            DaemonSocketWatch::Orphaned(_)
+        ));
+        assert!(matches!(
+            classify_daemon_socket_watch(Err(std::io::Error::from(ErrorKind::NotFound)), 42),
+            DaemonSocketWatch::Orphaned(_)
+        ));
+        assert!(matches!(
+            classify_daemon_socket_watch(
+                Err(std::io::Error::from(ErrorKind::PermissionDenied)),
+                42
+            ),
+            DaemonSocketWatch::TransientError
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_activity_counts_open_connections_for_idle_detection() {
+        let activity = Arc::new(DaemonActivity::new());
+        let guard = activity.open_connection();
+        assert!(!activity.idle_for(Duration::from_millis(1)));
+        drop(guard);
+        std::thread::sleep(Duration::from_millis(3));
+        assert!(activity.idle_for(Duration::from_millis(1)));
     }
 
     #[test]
