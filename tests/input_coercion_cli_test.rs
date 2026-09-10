@@ -3,7 +3,11 @@ use mockito::{Matcher, Server};
 use std::fs;
 
 fn uxc() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("uxc"))
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("uxc"));
+    // Bound idle lifetime of any auto-started daemon so a killed test run
+    // cannot leak `uxc daemon _serve` processes (issue #459).
+    cmd.env("UXC_DAEMON_IDLE_TIMEOUT_SECS", "120");
+    cmd
 }
 
 fn openapi_schema() -> String {

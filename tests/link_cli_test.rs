@@ -5,7 +5,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn uxc_command() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_uxc"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_uxc"));
+    // Bound idle lifetime of any auto-started daemon so a killed test run
+    // cannot leak `uxc daemon _serve` processes (issue #459).
+    cmd.env("UXC_DAEMON_IDLE_TIMEOUT_SECS", "120");
+    cmd
 }
 
 fn prepend_path(dir: &PathBuf) -> std::ffi::OsString {

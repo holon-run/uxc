@@ -27,6 +27,9 @@ impl AuthFiles {
 
 fn uxc_command(files: &AuthFiles) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_uxc"));
+    // Bound idle lifetime of any auto-started daemon so a killed test run
+    // cannot leak `uxc daemon _serve` processes (issue #459).
+    cmd.env("UXC_DAEMON_IDLE_TIMEOUT_SECS", "120");
     cmd.env("UXC_CREDENTIALS_FILE", &files.credentials_file);
     cmd.env("UXC_AUTH_BINDINGS_FILE", &files.bindings_file);
     cmd.env("HOME", files.temp_dir.path());

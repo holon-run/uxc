@@ -11,6 +11,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+/// Env var read by the daemon for idle self-shutdown; must stay in sync with
+/// `DAEMON_IDLE_TIMEOUT_ENV` in src/daemon.rs.
+pub const DAEMON_IDLE_TIMEOUT_ENV: &str = "UXC_DAEMON_IDLE_TIMEOUT_SECS";
+
+/// Idle self-shutdown window (seconds) for daemons auto-started by tests.
+/// Bounds the lifetime of daemons whose teardown never runs (e.g. an
+/// interrupted test run), while staying far above the longest gap between
+/// commands within a single test.
+pub const TEST_DAEMON_IDLE_TIMEOUT_SECS: &str = "120";
+
+const TEST_DAEMON_STOP_RETRIES: usize = 10;
+const TEST_DAEMON_STOP_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+
 fn cargo_target_dir() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
@@ -53,7 +66,9 @@ pub fn uxc_binary() -> PathBuf {
 
 #[allow(deprecated)]
 pub fn uxc_command() -> AssertCommand {
-    AssertCommand::cargo_bin("uxc").expect("uxc binary should build")
+    let mut cmd = AssertCommand::cargo_bin("uxc").expect("uxc binary should build");
+    cmd.env(DAEMON_IDLE_TIMEOUT_ENV, TEST_DAEMON_IDLE_TIMEOUT_SECS);
+    cmd
 }
 
 pub fn uxc_command_with_home(home: &std::path::Path) -> AssertCommand {
@@ -174,6 +189,7 @@ pub fn run_uxc_in_home(args: &[&str], test_home: &std::path::Path) -> Result<Str
     fs::create_dir_all(&runtime_dir).expect("Failed to create test runtime dir");
     let output = Command::new(&uxc)
         .args(args)
+        .env(DAEMON_IDLE_TIMEOUT_ENV, TEST_DAEMON_IDLE_TIMEOUT_SECS)
         .env("HOME", test_home)
         .env("USERPROFILE", test_home)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
@@ -226,16 +242,50 @@ impl AsRef<OsStr> for TestHome {
 
 impl Drop for TestHome {
     fn drop(&mut self) {
-        let runtime_dir = self.path.join("runtime");
-        let _ = fs::create_dir_all(&runtime_dir);
-        let _ = Command::new(uxc_binary())
-            .args(["daemon", "stop"])
-            .env("HOME", &self.path)
-            .env("USERPROFILE", &self.path)
-            .env("XDG_RUNTIME_DIR", &runtime_dir)
-            .output();
+        stop_test_daemon(&self.path);
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+/// Stop the daemon serving `home` and wait until it is actually down.
+///
+/// `daemon stop` is idempotent and falls back to SIGTERM/SIGKILL via the
+/// owner pid recorded in daemon.lock, but a daemon that is still mid-startup
+/// holds neither socket nor owner lock yet, so a single stop attempt can miss
+/// it and leak an orphan once the temp HOME is deleted. Retry until
+/// `daemon status` is unreachable; if the daemon still refuses to stop, rely
+/// on the daemon-side orphan watchdog instead of deleting the HOME blindly.
+pub fn stop_test_daemon(home: &Path) {
+    let runtime_dir = home.join("runtime");
+    let _ = fs::create_dir_all(&runtime_dir);
+    for _ in 0..TEST_DAEMON_STOP_RETRIES {
+        let _ = Command::new(uxc_binary())
+            .args(["daemon", "stop"])
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .output();
+        let status = Command::new(uxc_binary())
+            .args(["daemon", "status"])
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .output();
+        let daemon_down = match status {
+            Ok(output) => !output.status.success(),
+            Err(_) => true,
+        };
+        if daemon_down {
+            return;
+        }
+        std::thread::sleep(TEST_DAEMON_STOP_RETRY_INTERVAL);
+    }
+    eprintln!(
+        "WARNING: daemon for test home {} did not stop after {} attempts; \
+         relying on orphan watchdog self-termination",
+        home.display(),
+        TEST_DAEMON_STOP_RETRIES
+    );
 }
 
 /// Create a fresh HOME directory for test isolation.
