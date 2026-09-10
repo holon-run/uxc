@@ -106,13 +106,25 @@ impl OpenApiMappingRule {
 }
 
 fn builtin_openapi_rules() -> Vec<OpenApiMappingRule> {
-    vec![OpenApiMappingRule {
-        host: "api.github.com".to_string(),
-        path_prefix: Some("/".to_string()),
-        schema_url: "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json".to_string(),
-        enabled: true,
-        priority: 1000,
-    }]
+    vec![
+        OpenApiMappingRule {
+            host: "api.github.com".to_string(),
+            path_prefix: Some("/".to_string()),
+            schema_url: "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json".to_string(),
+            enabled: true,
+            priority: 1000,
+        },
+        // Telegram Bot API has no official auto-discoverable OpenAPI document.
+        // Map it to the curated schema shipped in this repository (#206) so
+        // protocol detection succeeds without per-caller schema_url overrides (#460).
+        OpenApiMappingRule {
+            host: "api.telegram.org".to_string(),
+            path_prefix: Some("/".to_string()),
+            schema_url: "https://raw.githubusercontent.com/holon-run/uxc/main/skills/telegram-openapi-skill/references/telegram-bot.openapi.json".to_string(),
+            enabled: true,
+            priority: 1000,
+        },
+    ]
 }
 
 fn resolve_user_mappings_path() -> Option<PathBuf> {
@@ -239,6 +251,22 @@ mod tests {
 
         assert_eq!(resolved.source, MappingSource::Builtin);
         assert!(resolved.schema_url.contains("api.github.com.json"));
+    }
+
+    #[test]
+    fn builtin_mapping_matches_telegram() {
+        let resolved = resolve_from_rules(
+            "https://api.telegram.org",
+            Vec::new(),
+            builtin_openapi_rules(),
+        )
+        .expect("should resolve telegram mapping");
+
+        assert_eq!(resolved.source, MappingSource::Builtin);
+        assert_eq!(
+            resolved.schema_url,
+            "https://raw.githubusercontent.com/holon-run/uxc/main/skills/telegram-openapi-skill/references/telegram-bot.openapi.json"
+        );
     }
 
     #[test]
