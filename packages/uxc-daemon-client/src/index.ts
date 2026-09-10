@@ -167,6 +167,69 @@ export interface EmailReplyArgs extends EmailSendArgs {
   replyHandle?: EmailReplyHandle | null;
 }
 
+export type EmailBodyInput =
+  | {
+      kind: "inline_mime";
+      mimeBase64: string;
+      originalBytes: number;
+      complete: boolean;
+    }
+  | {
+      kind: "legacy_mime";
+      mimeText: string;
+      sourceTruncated?: boolean;
+    }
+  | {
+      kind: "message_ref";
+      messageRef: string;
+    };
+
+export interface EmailBodyReadArgs {
+  input: EmailBodyInput;
+}
+
+export type EmailBodyCompleteness = "complete" | "partial" | "unverified";
+
+export interface EmailBodyProvenance {
+  input_kind: EmailBodyInput["kind"];
+}
+
+export interface EmailBodyResult {
+  schema_version: number;
+  parser_version: string;
+  format: "text";
+  text: string;
+  bytes: number;
+  total_bytes?: number;
+  completeness: EmailBodyCompleteness;
+  reasons: string[];
+  provenance: EmailBodyProvenance;
+}
+
+export interface EmailBodyCapability {
+  schema_version: number;
+  parser_version: string;
+  input_kinds: EmailBodyInput["kind"][];
+  providers: string[];
+  inline_mime_max_bytes: number;
+  normalized_text_max_bytes: number;
+  provider_response_max_bytes: number;
+  deadline_seconds: number;
+}
+
+export type EmailBodyErrorKind =
+  | "invalid_input"
+  | "identity_missing"
+  | "stale"
+  | "not_found"
+  | "auth_required"
+  | "capability_unavailable"
+  | "timeout"
+  | "cancelled"
+  | "parse_failed"
+  | "resource_limit"
+  | "provider_unavailable";
+
 export interface ManagedSourceView {
   namespace: string;
   source_key: string;
@@ -248,6 +311,7 @@ export interface DaemonStatus {
   managed_sources_running: number;
   managed_streams: number;
   log_file?: string | null;
+  email_body?: EmailBodyCapability | null;
 }
 
 export interface DaemonSessionKillResponse {
@@ -408,6 +472,12 @@ export class UxcDaemonClient {
     return this.request("email.reply", {
       ...emailSendParams(send),
       ...(replyHandle ? { reply_handle: emailReplyHandleParams(replyHandle) } : {}),
+    });
+  }
+
+  async emailBodyRead(args: EmailBodyReadArgs): Promise<EmailBodyResult> {
+    return this.request("email.body.read", {
+      input: emailBodyInputParams(args.input),
     });
   }
 
@@ -1043,6 +1113,31 @@ function emailReplyHandleParams(replyHandle: EmailReplyHandle): Record<string, u
   if (replyHandle.mailbox != null) params.mailbox = replyHandle.mailbox;
   if (replyHandle.uid != null) params.uid = replyHandle.uid;
   return params;
+}
+
+function emailBodyInputParams(input: EmailBodyInput): Record<string, unknown> {
+  switch (input.kind) {
+    case "inline_mime":
+      return {
+        kind: input.kind,
+        mime_base64: input.mimeBase64,
+        original_bytes: input.originalBytes,
+        complete: input.complete,
+      };
+    case "legacy_mime":
+      return {
+        kind: input.kind,
+        mime_text: input.mimeText,
+        ...(input.sourceTruncated === undefined
+          ? {}
+          : { source_truncated: input.sourceTruncated }),
+      };
+    case "message_ref":
+      return {
+        kind: input.kind,
+        message_ref: input.messageRef,
+      };
+  }
 }
 
 function bestEffortUserLabel(env: NodeJS.ProcessEnv | undefined): string {

@@ -72,6 +72,13 @@ impl DaemonClient {
         daemon::daemon_status_client().await
     }
 
+    pub async fn email_body_read(
+        &self,
+        request: &crate::email_body::EmailBodyReadRequest,
+    ) -> Result<crate::email_body::EmailBodyResult> {
+        daemon::email_body_read_client(request).await
+    }
+
     pub async fn daemon_sessions(&self) -> Result<Vec<DaemonSessionView>> {
         daemon::daemon_sessions_client().await
     }

@@ -73,10 +73,14 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, watch, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 
 const JSONRPC_VERSION: &str = "2.0";
+const EMAIL_BODY_DEADLINE: Duration = Duration::from_secs(30);
+const EMAIL_BODY_GLOBAL_LIMIT: usize = 4;
+const EMAIL_BODY_QUEUE_LIMIT: usize = 32;
+const EMAIL_BODY_SOURCE_LIMIT: usize = 2;
 const START_POLL_TRIES: usize = 30;
 const START_POLL_INTERVAL_MS: u64 = 100;
 const STOP_POLL_TRIES: usize = 50;
@@ -706,6 +710,8 @@ pub struct DaemonStatus {
     #[serde(default)]
     pub managed_streams: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub email_body: Option<crate::email_body::EmailBodyCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub log_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_lock_held: Option<bool>,
@@ -1065,6 +1071,61 @@ struct ManagedSourceEntry {
     runtime_view: Mutex<Option<Arc<Mutex<SubscriptionJobView>>>>,
     stop_tx: Mutex<watch::Sender<bool>>,
     task: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Clone)]
+struct EmailBodyLimiter {
+    global: Arc<Semaphore>,
+    queue: Arc<Semaphore>,
+    sources: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+}
+
+impl EmailBodyLimiter {
+    fn new() -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(EMAIL_BODY_GLOBAL_LIMIT)),
+            queue: Arc::new(Semaphore::new(EMAIL_BODY_QUEUE_LIMIT)),
+            sources: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn acquire_global(&self) -> Result<OwnedSemaphorePermit> {
+        if let Ok(permit) = self.global.clone().try_acquire_owned() {
+            return Ok(permit);
+        }
+        let queued = self
+            .queue
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| anyhow!("resource_limit: email body retrieval queue is full"))?;
+        let permit = self
+            .global
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("provider_unavailable: email body limiter closed"))?;
+        drop(queued);
+        Ok(permit)
+    }
+
+    async fn acquire_source(
+        &self,
+        namespace: &str,
+        source_key: &str,
+    ) -> Result<OwnedSemaphorePermit> {
+        let key = format!("{namespace}\0{source_key}");
+        let semaphore = {
+            let mut sources = self.sources.lock().await;
+            sources
+                .entry(key)
+                .or_insert_with(|| Arc::new(Semaphore::new(EMAIL_BODY_SOURCE_LIMIT)))
+                .clone()
+        };
+        semaphore
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("provider_unavailable: email body source limiter closed"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3972,6 +4033,14 @@ fn new_managed_source_run_id() -> String {
 }
 
 fn compute_managed_source_spec_key(spec: &ManagedSourceSpec) -> Result<String> {
+    let email_auth_identity = email_auth_identity_material(spec);
+    compute_managed_source_spec_key_with_identity(spec, email_auth_identity)
+}
+
+fn compute_managed_source_spec_key_with_identity(
+    spec: &ManagedSourceSpec,
+    email_auth_identity: Value,
+) -> Result<String> {
     let payload = json!({
         "endpoint": spec.endpoint,
         "operation_id": spec.operation_id,
@@ -3992,22 +4061,110 @@ fn compute_managed_source_spec_key(spec: &ManagedSourceSpec) -> Result<String> {
             .collect::<Vec<_>>(),
         "timeout_ms": spec.options.timeout_ms,
         "schema_url": spec.options.schema_url,
+        "email_auth_identity": email_auth_identity,
     });
     let bytes = serde_json::to_vec(&payload)?;
     let digest = Sha256::digest(bytes);
     Ok(format!("{:x}", digest))
 }
 
+fn email_auth_identity_material(spec: &ManagedSourceSpec) -> Value {
+    let profile = spec.options.auth.as_deref().and_then(|name| {
+        auth::Profiles::load_profiles()
+            .ok()
+            .and_then(|profiles| profiles.get_profile(name).ok().cloned())
+    });
+    email_auth_identity_material_with_profile(spec, profile.as_ref())
+}
+
+fn email_auth_identity_material_with_profile(
+    spec: &ManagedSourceSpec,
+    profile: Option<&Profile>,
+) -> Value {
+    let provider = match spec.transport_hint {
+        Some(SubscriptionTransportHint::EmailImapIdle) => "imap",
+        Some(SubscriptionTransportHint::EmailProviderPoll) => spec
+            .args
+            .as_ref()
+            .and_then(|args| args.get("provider"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        _ => return Value::Null,
+    };
+    let explicit_account = spec
+        .args
+        .as_ref()
+        .and_then(|args| args.get("account"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let resolved_account = explicit_account.or_else(|| {
+        profile.and_then(|profile| {
+            ["account", "username", "user", "email"]
+                .iter()
+                .find_map(|name| {
+                    profile
+                        .resolve_field_value(name)
+                        .ok()
+                        .flatten()
+                        .filter(|value| !value.is_empty())
+                })
+        })
+    });
+    let oauth = profile.and_then(|profile| profile.oauth.as_ref());
+    json!({
+        "provider": provider,
+        "account": resolved_account,
+        "auth_type": profile.map(|profile| profile.auth_type.to_string()),
+        "oauth_provider_issuer": oauth.and_then(|oauth| oauth.provider_issuer.as_deref()),
+        "oauth_authorization_server": oauth.and_then(|oauth| oauth.authorization_server.as_deref()),
+        "oauth_client_id": oauth.and_then(|oauth| oauth.client_id.as_deref()),
+    })
+}
+
+fn resolve_email_body_source(
+    record: Option<ManagedSourceRecord>,
+    message_ref: &crate::email_body::EmailMessageRef,
+) -> Result<ManagedSourceSpec> {
+    let record =
+        record.ok_or_else(|| anyhow!("identity_missing: email message source no longer exists"))?;
+    if record.spec_key != message_ref.source.spec_key {
+        bail!("stale: email message source configuration changed");
+    }
+    let spec: ManagedSourceSpec = serde_json::from_value(record.spec_json)
+        .map_err(|_| anyhow!("stale: email message source configuration is invalid"))?;
+    if compute_managed_source_spec_key(&spec)? != message_ref.source.spec_key {
+        bail!("stale: email message account identity changed");
+    }
+    Ok(spec)
+}
+
 fn managed_source_subscription_request(
     record: &ManagedSourceRecord,
     spec: &ManagedSourceSpec,
 ) -> SubscribeStartRequest {
+    let mut args = spec.args.clone();
+    if matches!(
+        spec.transport_hint,
+        Some(
+            SubscriptionTransportHint::EmailImapIdle | SubscriptionTransportHint::EmailProviderPoll
+        )
+    ) {
+        args.get_or_insert_with(HashMap::new).insert(
+            "_uxc_email_source_ref".to_string(),
+            json!({
+                "namespace": record.namespace,
+                "source_key": record.source_key,
+                "spec_key": record.spec_key,
+            }),
+        );
+    }
     SubscribeStartRequest {
         request_id: format!("managed-source:{}:{}", record.namespace, record.source_key),
         endpoint: spec.endpoint.clone(),
         sink: "memory:".to_string(),
         operation_id: spec.operation_id.clone(),
-        args: spec.args.clone(),
+        args,
         resource_uri: spec.resource_uri.clone(),
         read_resource: spec.read_resource,
         transport_hint: spec.transport_hint.clone(),
@@ -4263,6 +4420,7 @@ pub struct DaemonRuntime {
     managed_source_base_dir: PathBuf,
     should_stop: Arc<RwLock<bool>>,
     schema_mapping_lock: Arc<Mutex<()>>,
+    email_body_limiter: EmailBodyLimiter,
     logger: Option<DaemonLogger>,
 }
 
@@ -4289,8 +4447,39 @@ impl DaemonRuntime {
             managed_source_base_dir,
             should_stop: Arc::new(RwLock::new(false)),
             schema_mapping_lock: Arc::new(Mutex::new(())),
+            email_body_limiter: EmailBodyLimiter::new(),
             logger,
         })
+    }
+
+    async fn read_email_body(
+        &self,
+        request: crate::email_body::EmailBodyReadRequest,
+    ) -> Result<crate::email_body::EmailBodyResult> {
+        tokio::time::timeout(EMAIL_BODY_DEADLINE, async {
+            let _global = self.email_body_limiter.acquire_global().await?;
+            match request.input {
+                crate::email_body::EmailBodyInput::MessageRef { message_ref } => {
+                    let decoded = crate::email_body::decode_email_message_ref(&message_ref)?;
+                    let _source = self
+                        .email_body_limiter
+                        .acquire_source(&decoded.source.namespace, &decoded.source.source_key)
+                        .await?;
+                    let record = self
+                        .managed_sources
+                        .store
+                        .get_source(&decoded.source.namespace, &decoded.source.source_key)
+                        .await?;
+                    let spec = resolve_email_body_source(record, &decoded)?;
+                    crate::email_body_get::get_email_body(&spec, &decoded).await
+                }
+                input => {
+                    crate::email_body::read_local(crate::email_body::EmailBodyReadRequest { input })
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("timeout: email body retrieval exceeded 30 seconds"))?
     }
 
     fn initialize_logger() -> Option<DaemonLogger> {
@@ -4729,6 +4918,7 @@ impl DaemonRuntime {
             managed_sources,
             managed_sources_running,
             managed_streams,
+            email_body: Some(crate::email_body::EmailBodyCapability::default()),
             log_file,
             owner_lock_held: Some(true),
             owner_pid: Some(std::process::id()),
@@ -7005,6 +7195,23 @@ pub async fn daemon_status_client() -> Result<DaemonStatus> {
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
+pub async fn email_body_read_client(
+    request: &crate::email_body::EmailBodyReadRequest,
+) -> Result<crate::email_body::EmailBodyResult> {
+    let value = client_call("email.body.read", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub async fn email_body_read_client(
+    _request: &crate::email_body::EmailBodyReadRequest,
+) -> Result<crate::email_body::EmailBodyResult> {
+    bail!("Daemon email body reading is only supported on Unix")
+}
+
+#[cfg(unix)]
 pub async fn daemon_sessions_client() -> Result<Vec<DaemonSessionView>> {
     let value = client_call("daemon.sessions", None).await?;
     Ok(serde_json::from_value(value)?)
@@ -7709,6 +7916,41 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     id: req.id,
                     result: None,
                     error: Some(jsonrpc_error_from_anyhow(&err)),
+                },
+            }
+        }
+        "email.body.read" => {
+            let Some(params) = req.params else {
+                write_jsonrpc_error(&mut stream, req.id, -32602, "Missing params".to_string())
+                    .await?;
+                return Ok(());
+            };
+            let request: crate::email_body::EmailBodyReadRequest =
+                match serde_json::from_value(params) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        write_jsonrpc_error(
+                            &mut stream,
+                            req.id,
+                            -32602,
+                            format!("Invalid params: {err}"),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+            match runtime.read_email_body(request).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(email_body_read_jsonrpc_error(&err)),
                 },
             }
         }
@@ -9747,6 +9989,44 @@ fn jsonrpc_error_from_anyhow(err: &anyhow::Error) -> JsonRpcError {
     }
 }
 
+fn email_body_read_jsonrpc_error(err: &anyhow::Error) -> JsonRpcError {
+    const NON_RETRYABLE: &[&str] = &[
+        "invalid_input",
+        "identity_missing",
+        "stale",
+        "not_found",
+        "auth_required",
+        "capability_unavailable",
+        "parse_failed",
+        "resource_limit",
+    ];
+    const RETRYABLE: &[&str] = &["timeout", "cancelled", "provider_unavailable"];
+
+    let error_text = err.to_string();
+    let prefix = error_text
+        .split_once(':')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or_default();
+    let (code, retryable) = if NON_RETRYABLE.contains(&prefix) {
+        (prefix, false)
+    } else if RETRYABLE.contains(&prefix) {
+        (prefix, true)
+    } else {
+        ("provider_unavailable", true)
+    };
+    let payload = StructuredErrorPayload {
+        code: code.to_string(),
+        message: "Email body read failed".to_string(),
+        details: Some(json!({ "retryable": retryable })),
+    };
+
+    JsonRpcError {
+        code: ERR_RUNTIME_GENERIC,
+        message: payload.message.clone(),
+        data: serde_json::to_value(payload).ok(),
+    }
+}
+
 impl Default for DaemonRuntime {
     fn default() -> Self {
         Self::new()
@@ -9770,6 +10050,213 @@ mod tests {
     use tokio_tungstenite::accept_hdr_async;
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
     use tokio_tungstenite::tungstenite::Message;
+
+    fn email_message_ref(spec_key: &str) -> crate::email_body::EmailMessageRef {
+        crate::email_body::EmailMessageRef {
+            source: crate::email_body::EmailSourceRef {
+                namespace: "mail".into(),
+                source_key: "primary".into(),
+                spec_key: spec_key.into(),
+            },
+            locator: crate::email_body::EmailMessageLocator::Gmail {
+                message_id: "message-1".into(),
+            },
+        }
+    }
+
+    fn email_source_record(spec_key: &str, spec: Value) -> ManagedSourceRecord {
+        ManagedSourceRecord {
+            namespace: "mail".into(),
+            source_key: "primary".into(),
+            spec_json: spec,
+            spec_key: spec_key.into(),
+            run_id: "run".into(),
+            stream_id: "stream".into(),
+            status: "running".into(),
+            created_at_unix: 1,
+            updated_at_unix: 1,
+            started_at_unix: Some(1),
+            stopped_at_unix: None,
+            last_error: None,
+            last_success_at_unix: None,
+            last_event_at_unix: None,
+            reconnect_count: 0,
+            written_events: 0,
+        }
+    }
+
+    #[test]
+    fn email_body_source_lookup_requires_matching_spec_key() {
+        let spec = managed_source_spec("https://example.invalid");
+        let spec_key = compute_managed_source_spec_key(&spec).unwrap();
+        let resolved = resolve_email_body_source(
+            Some(email_source_record(
+                &spec_key,
+                serde_json::to_value(&spec).unwrap(),
+            )),
+            &email_message_ref(&spec_key),
+        )
+        .unwrap();
+        assert_eq!(resolved.endpoint, spec.endpoint);
+
+        let error = resolve_email_body_source(
+            Some(email_source_record(
+                "spec-2",
+                serde_json::to_value(&spec).unwrap(),
+            )),
+            &email_message_ref(&spec_key),
+        )
+        .unwrap_err();
+        assert!(error.to_string().starts_with("stale:"));
+
+        let error = resolve_email_body_source(None, &email_message_ref(&spec_key)).unwrap_err();
+        assert!(error.to_string().starts_with("identity_missing:"));
+    }
+
+    #[test]
+    fn email_spec_identity_changes_with_account_but_not_oauth_tokens() {
+        let mut spec =
+            managed_source_spec("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+        spec.transport_hint = Some(SubscriptionTransportHint::EmailProviderPoll);
+        spec.mode = SubscriptionMode::Poll;
+        spec.args = Some(HashMap::from([(
+            "provider".to_string(),
+            Value::String("gmail".to_string()),
+        )]));
+        spec.options.auth = Some("mail".to_string());
+
+        let mut first = Profile::new("token-one".to_string(), auth::AuthType::OAuth);
+        first
+            .set_field_source(
+                "account".to_string(),
+                auth::SecretSource::Literal {
+                    value: "first@example.com".to_string(),
+                },
+            )
+            .unwrap();
+        first.oauth = Some(auth::OAuthProfile {
+            provider_issuer: Some("https://accounts.example".to_string()),
+            client_id: Some("client".to_string()),
+            access_token: Some("token-one".to_string()),
+            refresh_token: Some("refresh-one".to_string()),
+            ..Default::default()
+        });
+        let mut refreshed = first.clone();
+        refreshed.api_key = "token-two".to_string();
+        let oauth = refreshed.oauth.as_mut().unwrap();
+        oauth.access_token = Some("token-two".to_string());
+        oauth.refresh_token = Some("refresh-two".to_string());
+        let mut replacement = refreshed.clone();
+        replacement
+            .set_field_source(
+                "account".to_string(),
+                auth::SecretSource::Literal {
+                    value: "second@example.com".to_string(),
+                },
+            )
+            .unwrap();
+
+        let first_key = compute_managed_source_spec_key_with_identity(
+            &spec,
+            email_auth_identity_material_with_profile(&spec, Some(&first)),
+        )
+        .unwrap();
+        let refreshed_key = compute_managed_source_spec_key_with_identity(
+            &spec,
+            email_auth_identity_material_with_profile(&spec, Some(&refreshed)),
+        )
+        .unwrap();
+        let replacement_key = compute_managed_source_spec_key_with_identity(
+            &spec,
+            email_auth_identity_material_with_profile(&spec, Some(&replacement)),
+        )
+        .unwrap();
+
+        assert_eq!(first_key, refreshed_key);
+        assert_ne!(first_key, replacement_key);
+    }
+
+    #[test]
+    fn email_body_read_errors_have_stable_redacted_payloads() {
+        for (code, retryable) in [
+            ("invalid_input", false),
+            ("identity_missing", false),
+            ("stale", false),
+            ("not_found", false),
+            ("auth_required", false),
+            ("capability_unavailable", false),
+            ("parse_failed", false),
+            ("resource_limit", false),
+            ("timeout", true),
+            ("cancelled", true),
+            ("provider_unavailable", true),
+        ] {
+            let secret = "secret endpoint https://user:password@example.invalid";
+            let error = email_body_read_jsonrpc_error(&anyhow!("{code}: {secret}"));
+            let payload: StructuredErrorPayload =
+                serde_json::from_value(error.data.unwrap()).unwrap();
+            assert_eq!(payload.code, code);
+            assert_eq!(payload.message, "Email body read failed");
+            assert_eq!(payload.details, Some(json!({ "retryable": retryable })));
+            assert!(!error.message.contains(secret));
+            assert!(!payload.message.contains(secret));
+        }
+    }
+
+    #[test]
+    fn email_body_read_unknown_errors_use_redacted_retryable_fallback() {
+        let error = email_body_read_jsonrpc_error(&anyhow!(
+            "unexpected failure at https://user:password@example.invalid"
+        ));
+        let payload: StructuredErrorPayload = serde_json::from_value(error.data.unwrap()).unwrap();
+        assert_eq!(payload.code, "provider_unavailable");
+        assert_eq!(payload.details, Some(json!({ "retryable": true })));
+        assert_eq!(error.message, "Email body read failed");
+    }
+
+    #[tokio::test]
+    async fn email_body_local_read_uses_shared_runtime_path() {
+        let temp = tempdir().unwrap();
+        let runtime =
+            DaemonRuntime::try_new_with_managed_source_base_dir(temp.path().to_path_buf()).unwrap();
+        let result = runtime
+            .read_email_body(crate::email_body::EmailBodyReadRequest {
+                input: crate::email_body::EmailBodyInput::LegacyMime {
+                    mime_text: "Subject: test\r\n\r\nhello".into(),
+                    source_truncated: false,
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.text, "hello");
+    }
+
+    #[tokio::test]
+    async fn email_body_limiter_enforces_global_and_per_source_limits() {
+        let limiter = EmailBodyLimiter::new();
+        let global = futures::future::join_all((0..EMAIL_BODY_GLOBAL_LIMIT).map(|_| {
+            let limiter = limiter.clone();
+            async move { limiter.acquire_global().await.unwrap() }
+        }))
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), limiter.acquire_global())
+                .await
+                .is_err()
+        );
+        drop(global);
+
+        let first = limiter.acquire_source("mail", "primary").await.unwrap();
+        let second = limiter.acquire_source("mail", "primary").await.unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(20),
+            limiter.acquire_source("mail", "primary")
+        )
+        .await
+        .is_err());
+        assert!(limiter.acquire_source("mail", "secondary").await.is_ok());
+        drop((first, second));
+    }
 
     #[test]
     fn daemon_email_reply_request_parses_flattened_params_and_reply_handle() {
@@ -12004,6 +12491,7 @@ pub fn daemon_status_from_diagnostics(diagnostics: &DaemonLocalDiagnostics) -> D
         managed_sources: 0,
         managed_sources_running: 0,
         managed_streams: 0,
+        email_body: None,
         log_file: None,
         owner_lock_held: Some(diagnostics.owner_lock_held),
         owner_pid: diagnostics.owner_pid,
