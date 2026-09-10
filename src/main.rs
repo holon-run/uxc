@@ -25,6 +25,8 @@ mod daemon_log;
 mod email;
 mod email_attachment;
 mod email_attachment_get;
+mod email_body;
+mod email_body_get;
 mod error;
 mod http_client;
 mod managed_source_streams;

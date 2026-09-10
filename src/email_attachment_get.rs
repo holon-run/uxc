@@ -420,11 +420,18 @@ where
         account: handle.account.clone(),
         auth_profile: Some(profile_name),
         initial_fetch_limit: 0,
+        source_ref: None,
     };
     let mut conn = connector(config)
         .await
         .map_err(|err| provider_request_failed(format!("IMAP connect failed: {err}")))?;
-    let attachment = run_imap_retrieval(&mut conn, handle, &auth_method, &mailbox).await;
+    let fetch_limit = if request.max_bytes == 0 {
+        usize::MAX
+    } else {
+        request.max_bytes.min(usize::MAX as u64) as usize
+    };
+    let attachment =
+        run_imap_retrieval(&mut conn, handle, &auth_method, &mailbox, fetch_limit).await;
     let _ = conn.logout().await;
     attachment
 }
@@ -459,6 +466,7 @@ async fn run_imap_retrieval(
     handle: &EmailAttachmentHandle,
     auth_method: &crate::subscription_email::ImapAuthMethod,
     mailbox: &str,
+    fetch_limit: usize,
 ) -> Result<FetchedAttachment> {
     conn.expect_greeting()
         .await
@@ -512,7 +520,7 @@ async fn run_imap_retrieval(
         ));
     };
     let mime = conn
-        .fetch_body_section_bytes(uid, &format!("{section}.MIME"))
+        .fetch_body_section_bytes(uid, &format!("{section}.MIME"), fetch_limit)
         .await
         .map_err(|err| provider_request_failed(format!("IMAP fetch failed: {err}")))?;
     let ImapSectionLiteral::Bytes(mime_bytes) = mime else {
@@ -523,7 +531,7 @@ async fn run_imap_retrieval(
         ));
     };
     let body = conn
-        .fetch_body_section_bytes(uid, section)
+        .fetch_body_section_bytes(uid, section, fetch_limit)
         .await
         .map_err(|err| provider_request_failed(format!("IMAP fetch failed: {err}")))?;
     let ImapSectionLiteral::Bytes(body_bytes) = body else {
@@ -1033,6 +1041,7 @@ mod tests {
         uidvalidity: u64,
         fetch_responses: Vec<String>,
     ) -> Vec<(String, String)> {
+        let fetch_count = fetch_responses.len();
         let mut script = vec![
             (
                 "A0001 LOGIN".to_string(),
@@ -1051,7 +1060,7 @@ mod tests {
                 format!("{}\r\nA000{:} OK fetch done", response, index + 3),
             ));
         }
-        script.push(("A0005 LOGOUT".to_string(), String::new()));
+        script.push((format!("A000{} LOGOUT", fetch_count + 3), String::new()));
         script
     }
 

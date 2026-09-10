@@ -33,6 +33,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Base64 encoding for basic auth
 base64 = "0.21"
+mailparse = "0.15"
+html2text = "0.12"
 ed25519-dalek = { version = "2.1", features = ["pkcs8", "pem"] }
 hmac = "0.12"
 jsonwebtoken = "9"

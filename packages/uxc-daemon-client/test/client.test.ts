@@ -233,6 +233,95 @@ describe("UxcDaemonClient", () => {
     ]);
   });
 
+  test.each([
+    {
+      name: "inline MIME",
+      input: {
+        kind: "inline_mime" as const,
+        mimeBase64: "SGVsbG8=",
+        originalBytes: 5,
+        complete: true,
+      },
+      wire: {
+        kind: "inline_mime",
+        mime_base64: "SGVsbG8=",
+        original_bytes: 5,
+        complete: true,
+      },
+    },
+    {
+      name: "legacy MIME",
+      input: {
+        kind: "legacy_mime" as const,
+        mimeText: "Content-Type: text/plain\r\n\r\nHello",
+        sourceTruncated: true,
+      },
+      wire: {
+        kind: "legacy_mime",
+        mime_text: "Content-Type: text/plain\r\n\r\nHello",
+        source_truncated: true,
+      },
+    },
+    {
+      name: "message reference",
+      input: {
+        kind: "message_ref" as const,
+        messageRef: "uxc-email-v1.example",
+      },
+      wire: {
+        kind: "message_ref",
+        message_ref: "uxc-email-v1.example",
+      },
+    },
+  ])("emailBodyRead serializes the $name input branch", async ({ input, wire }) => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    const calls: Array<{ method: string; params: unknown }> = [];
+    (stub as unknown as { request: (method: string, params?: unknown) => Promise<unknown> }).request = async (
+      method,
+      params,
+    ) => {
+      calls.push({ method, params });
+      return {
+        schema_version: 1,
+        parser_version: "1",
+        format: "text",
+        text: "Hello",
+        bytes: 5,
+        total_bytes: 5,
+        completeness: "complete",
+        reasons: [],
+        provenance: { input_kind: input.kind },
+      };
+    };
+
+    const response = await stub.emailBodyRead({ input });
+    expect(response.completeness).toBe("complete");
+    expect(calls).toEqual([
+      {
+        method: "email.body.read",
+        params: { input: wire },
+      },
+    ]);
+  });
+
+  test("emailBodyRead preserves structured daemon errors", async () => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    (stub as unknown as { request: () => Promise<unknown> }).request = async () => {
+      throw new DaemonRpcError("capability_unavailable", -32004, "email.body.read");
+    };
+
+    await expect(
+      stub.emailBodyRead({
+        input: { kind: "message_ref", messageRef: "uxc-email-v1.example" },
+      }),
+    ).rejects.toMatchObject({
+      name: "DaemonRpcError",
+      message: "capability_unavailable",
+      code: -32004,
+      method: "email.body.read",
+    });
+  });
+
   test("call executes OpenAPI operations without CLI envelope parsing", async () => {
     const server = createOpenApiServer();
     await server.start();

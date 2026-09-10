@@ -4,12 +4,16 @@ use crate::daemon_log::redact_endpoint;
 use crate::email_attachment::{
     imap_message_attachments, ImapAttachmentContext, MIME_MAX_DEPTH, MIME_MAX_PARTS,
 };
+use crate::email_body::{
+    encode_email_message_ref, parse_mime, EmailMessageLocator, EmailMessageRef, EmailSourceRef,
+};
 use crate::subscription_poll::{PollCheckpointState, PollFetchResult};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rustls_pki_types::ServerName;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -38,6 +42,8 @@ pub const EMAIL_IMAP_MAX_INITIAL_FETCH_LIMIT: u64 = 100;
 const IMAP_ATTACHMENT_TIMEOUT_SECS: u64 = 120;
 const EMAIL_SNIPPET_CHARS: usize = 512;
 const EMAIL_RAW_INLINE_BYTES: usize = 32 * 1024;
+const EMAIL_BODY_INLINE_BYTES: usize = 32 * 1024;
+const IMAP_FETCH_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Marker Microsoft Exchange servers return when IMAP basic auth is disabled
 /// for the account (typical for personal outlook.com/hotmail.com/live.com
 /// accounts). The server rejects LOGIN before credential validation, so no
@@ -61,6 +67,7 @@ pub struct EmailImapIdleRuntimeConfig {
     pub account: Option<String>,
     pub auth_profile: Option<String>,
     pub initial_fetch_limit: usize,
+    pub(crate) source_ref: Option<EmailSourceRef>,
 }
 
 /// How an `email-imap-idle` session authenticates against the IMAP server.
@@ -97,6 +104,7 @@ pub struct EmailProviderPollRuntimeConfig {
     pub mailbox: String,
     /// Auth profile name referenced by attachment handles (never credentials).
     pub auth_profile: Option<String>,
+    pub(crate) source_ref: Option<EmailSourceRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,7 +184,7 @@ pub fn resolve_email_imap_idle_runtime_config(
                 })?;
         ImapAuthMethod::Basic { username, password }
     };
-    Ok(EmailImapIdleRuntimeConfig {
+    let config = EmailImapIdleRuntimeConfig {
         endpoint: request.endpoint.clone(),
         host,
         port,
@@ -186,7 +194,20 @@ pub fn resolve_email_imap_idle_runtime_config(
         mailbox,
         account,
         initial_fetch_limit,
-    })
+        source_ref: resolve_email_source_ref(args)?,
+    };
+    Ok(config)
+}
+
+fn resolve_email_source_ref(
+    args: Option<&HashMap<String, Value>>,
+) -> Result<Option<EmailSourceRef>> {
+    let Some(value) = args.and_then(|args| args.get("_uxc_email_source_ref")) else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| anyhow!("invalid internal email source reference"))
 }
 
 fn resolve_first_profile_field(profile: &Profile, names: &[&str]) -> Result<Option<String>> {
@@ -621,6 +642,28 @@ fn build_email_event(
     );
     let has_attachments = !attachments.is_empty();
     let attachment_count = attachments.len();
+    let source_ref = config.source_ref.as_ref();
+    let locator = uidvalidity.map(|uidvalidity| EmailMessageLocator::Imap {
+        mailbox: config.mailbox.clone(),
+        uid: message.uid.clone(),
+        uidvalidity: Some(uidvalidity),
+    });
+    let message_ref = source_ref.and_then(|source| {
+        let locator = locator.clone()?;
+        encode_email_message_ref(&EmailMessageRef {
+            source: source.clone(),
+            locator,
+        })
+        .ok()
+    });
+    let body = parse_mime(&message.raw, true, "inline_mime", false)
+        .ok()
+        .map(limit_inline_body);
+    let stable_key = source_ref.and_then(|source| {
+        locator
+            .as_ref()
+            .map(|locator| scoped_locator_stable_key(source, locator))
+    });
     json!({
         "type": "email_event",
         "version": "v1",
@@ -628,8 +671,18 @@ fn build_email_event(
         "account": account,
         "mailbox": config.mailbox,
         "event_kind": "message_received",
+        "message_ref": message_ref,
+        "body_unavailable_reason": if body.is_none() {
+            Some("mime_parse_failed")
+        } else if message_ref.is_none() {
+            Some("reliable_provider_id_unavailable")
+        } else {
+            None
+        },
+        "body": body,
         "message": {
             "uid": message.uid,
+            "stable_key": stable_key,
             "message_id": message_id,
             "thread_id": thread_id,
             "conversation_id": null,
@@ -647,8 +700,12 @@ fn build_email_event(
         },
         "raw": {
             "mime_inline": if raw_len <= EMAIL_RAW_INLINE_BYTES { Some(raw_text.to_string()) } else { None },
+            "mime_inline_base64": if raw_len <= EMAIL_RAW_INLINE_BYTES { Some(base64::engine::general_purpose::STANDARD.encode(&message.raw)) } else { None },
             "mime_truncated": raw_len > EMAIL_RAW_INLINE_BYTES,
             "size_bytes": raw_len,
+            "original_bytes": raw_len,
+            "complete": true,
+            "representation_version": 1,
         },
         "reply_handle": {
             "type": "email_imap",
@@ -707,6 +764,7 @@ pub fn resolve_email_provider_poll_runtime_config(
         account,
         mailbox,
         auth_profile: request.options.auth.clone(),
+        source_ref: resolve_email_source_ref(args)?,
     })
 }
 
@@ -829,15 +887,21 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
         EmailProviderKind::Graph => "graph",
         EmailProviderKind::Jmap => "jmap",
     };
-    let uid = first_string(item, &["id", "blobId"]).unwrap_or_else(|| item.to_string());
+    let reliable_locator = provider_message_locator(config.provider, item);
+    let uid = reliable_locator
+        .as_ref()
+        .map(locator_display_key)
+        .or_else(|| first_string(item, &["id", "blobId"]));
     let message_id = match config.provider {
-        EmailProviderKind::Gmail => gmail_header(item, "Message-ID").unwrap_or_else(|| uid.clone()),
-        EmailProviderKind::Graph => {
-            first_string(item, &["internetMessageId"]).unwrap_or_else(|| uid.clone())
-        }
-        EmailProviderKind::Jmap => {
-            first_string(item, &["messageId"]).unwrap_or_else(|| uid.clone())
-        }
+        EmailProviderKind::Gmail => gmail_header(item, "Message-ID")
+            .or_else(|| uid.clone())
+            .unwrap_or_default(),
+        EmailProviderKind::Graph => first_string(item, &["internetMessageId"])
+            .or_else(|| uid.clone())
+            .unwrap_or_default(),
+        EmailProviderKind::Jmap => first_string(item, &["messageId"])
+            .or_else(|| uid.clone())
+            .unwrap_or_default(),
     };
     let subject = match config.provider {
         EmailProviderKind::Gmail => {
@@ -845,8 +909,27 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
         }
         _ => first_string(item, &["subject"]),
     };
-    let (attachments, has_attachments, attachment_count) =
-        provider_message_attachments(config, provider, item, &message_id, &uid);
+    let (attachments, has_attachments, attachment_count) = provider_message_attachments(
+        config,
+        provider,
+        item,
+        &message_id,
+        uid.as_deref().unwrap_or(""),
+    );
+    let message_ref = config.source_ref.as_ref().and_then(|source| {
+        reliable_locator.clone().and_then(|locator| {
+            encode_email_message_ref(&EmailMessageRef {
+                source: source.clone(),
+                locator,
+            })
+            .ok()
+        })
+    });
+    let stable_key = config.source_ref.as_ref().and_then(|source| {
+        reliable_locator
+            .as_ref()
+            .map(|locator| scoped_locator_stable_key(source, locator))
+    });
     json!({
         "type": "email_event",
         "version": "v1",
@@ -854,8 +937,12 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
         "account": account,
         "mailbox": config.mailbox,
         "event_kind": "message_received",
+        "message_ref": message_ref,
+        "body_unavailable_reason": if reliable_locator.is_some() { Value::Null } else { Value::String("reliable_provider_id_unavailable".to_string()) },
+        "body": Value::Null,
         "message": {
             "uid": uid,
+            "stable_key": stable_key,
             "message_id": message_id,
             "thread_id": first_string(item, &["threadId", "thread_id", "inReplyTo"]),
             "conversation_id": first_string(item, &["conversationId", "emailId"]),
@@ -873,6 +960,10 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
         },
         "raw": {
             "provider_payload": item,
+            "mime_inline_base64": null,
+            "original_bytes": null,
+            "complete": false,
+            "representation_version": 1,
         },
         "reply_handle": {
             "type": "email_provider",
@@ -883,6 +974,71 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
             "uid": uid,
         }
     })
+}
+
+fn provider_message_locator(
+    provider: EmailProviderKind,
+    item: &Value,
+) -> Option<EmailMessageLocator> {
+    match provider {
+        EmailProviderKind::Gmail => {
+            first_string(item, &["id"]).map(|message_id| EmailMessageLocator::Gmail { message_id })
+        }
+        EmailProviderKind::Graph => first_string(item, &["immutableId"])
+            .or_else(|| {
+                item.get("idIsImmutable")
+                    .and_then(Value::as_bool)
+                    .filter(|value| *value)
+                    .and_then(|_| first_string(item, &["id"]))
+            })
+            .map(|immutable_id| EmailMessageLocator::Graph { immutable_id }),
+        EmailProviderKind::Jmap => Some(EmailMessageLocator::Jmap {
+            account_id: first_string(item, &["accountId"])?,
+            email_id: first_string(item, &["id"])?,
+        }),
+    }
+}
+
+fn locator_display_key(locator: &EmailMessageLocator) -> String {
+    match locator {
+        EmailMessageLocator::Imap { uid, .. } => uid.clone(),
+        EmailMessageLocator::Gmail { message_id } => message_id.clone(),
+        EmailMessageLocator::Graph { immutable_id } => immutable_id.clone(),
+        EmailMessageLocator::Jmap {
+            account_id,
+            email_id,
+        } => format!("{account_id}:{email_id}"),
+    }
+}
+
+fn scoped_locator_stable_key(source: &EmailSourceRef, locator: &EmailMessageLocator) -> String {
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "source": source,
+        "locator": locator,
+    }))
+    .expect("email stable key payload must serialize");
+    format!("{:x}", Sha256::digest(payload))
+}
+
+fn limit_inline_body(
+    mut body: crate::email_body::EmailBodyResult,
+) -> crate::email_body::EmailBodyResult {
+    if body.text.len() <= EMAIL_BODY_INLINE_BYTES {
+        return body;
+    }
+    let mut end = EMAIL_BODY_INLINE_BYTES;
+    while end > 0 && !body.text.is_char_boundary(end) {
+        end -= 1;
+    }
+    body.text.truncate(end);
+    body.bytes = body.text.len();
+    body.total_bytes = None;
+    body.completeness = crate::email_body::EmailBodyCompleteness::Partial;
+    body.reasons.push("inline_limit".to_string());
+    body.reasons.sort();
+    body.reasons.dedup();
+    body
 }
 
 /// Credential-free context used to stamp opaque provider attachment handles.
@@ -1545,6 +1701,7 @@ impl ImapConnection {
         &mut self,
         uid: &str,
         section: &str,
+        max_bytes: usize,
     ) -> Result<ImapSectionLiteral> {
         let command = format!("UID FETCH {uid} (BODY.PEEK[{section}])");
         let tag = format!("A{:04}", self.next_tag);
@@ -1563,6 +1720,12 @@ impl ImapConnection {
             if !line.contains(" FETCH ") || result != ImapSectionLiteral::Missing {
                 continue;
             }
+            let response_uid = extract_imap_atom_after(&line, "UID ")
+                .filter(|response_uid| response_uid.chars().all(|ch| ch.is_ascii_digit()))
+                .ok_or_else(|| anyhow!("IMAP FETCH response missing valid UID"))?;
+            if response_uid != uid {
+                continue;
+            }
             let Some(index) = line.find(&marker) else {
                 continue;
             };
@@ -1574,6 +1737,9 @@ impl ImapConnection {
             };
             match literal_len {
                 Some(len) => {
+                    if len > max_bytes {
+                        bail!("resource_limit: IMAP FETCH literal exceeds configured limit");
+                    }
                     let mut literal = vec![0u8; len];
                     tokio::time::timeout(
                         Duration::from_secs(IMAP_ATTACHMENT_TIMEOUT_SECS),
@@ -1624,10 +1790,57 @@ impl ImapConnection {
     }
 
     async fn fetch_uid_set(&mut self, uid_set: &str) -> Result<Vec<ImapFetchedMessage>> {
-        let lines = self
-            .command_ok(&format!("UID FETCH {uid_set} (UID FLAGS BODY.PEEK[])"))
-            .await?;
-        Ok(parse_uid_fetch_messages(&lines))
+        let tag = format!("A{:04}", self.next_tag);
+        self.next_tag = self.next_tag.saturating_add(1);
+        self.write_line(&format!(
+            "{tag} UID FETCH {uid_set} (UID FLAGS BODY.PEEK[])"
+        ))
+        .await?;
+
+        let mut messages = Vec::new();
+        let mut total_literal_bytes = 0usize;
+        loop {
+            let line = self.read_line().await?;
+            if line.starts_with(&format!("{tag} ")) {
+                if !line.contains(" OK") {
+                    bail!("IMAP command failed: {}", line);
+                }
+                break;
+            }
+            if !line.starts_with('*') || !line.contains(" FETCH ") {
+                continue;
+            }
+            let uid = extract_imap_atom_after(&line, "UID ")
+                .filter(|uid| uid.chars().all(|ch| ch.is_ascii_digit()))
+                .ok_or_else(|| anyhow!("IMAP FETCH response missing valid UID"))?;
+            if !imap_uid_set_contains(uid_set, &uid) {
+                bail!("IMAP FETCH response UID does not match request");
+            }
+            let flags = extract_imap_parenthesized_after(&line, "FLAGS ")
+                .map(|raw| raw.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default();
+            let raw = if let Some(len) = trailing_literal_len(&line) {
+                total_literal_bytes = total_literal_bytes
+                    .checked_add(len)
+                    .filter(|total| *total <= IMAP_FETCH_RESPONSE_MAX_BYTES)
+                    .ok_or_else(|| anyhow!("resource_limit: IMAP FETCH response exceeds 16 MiB"))?;
+                let mut literal = vec![0u8; len];
+                tokio::time::timeout(
+                    Duration::from_secs(IMAP_LITERAL_TIMEOUT_SECS),
+                    self.reader.read_exact(&mut literal),
+                )
+                .await
+                .context("IMAP literal read timed out")??;
+                let _suffix = self.read_line().await?;
+                literal
+            } else {
+                extract_imap_literal_or_quoted_body(&line)
+                    .unwrap_or_default()
+                    .into_bytes()
+            };
+            messages.push(ImapFetchedMessage { uid, flags, raw });
+        }
+        Ok(messages)
     }
 
     async fn start_idle(&mut self) -> Result<String> {
@@ -1664,6 +1877,9 @@ impl ImapConnection {
     }
 }
 
+// Retained for compatibility and focused parser tests. Production fetching now
+// reads IMAP literals as bytes directly to avoid lossy UTF-8 round-tripping.
+#[allow(dead_code)]
 pub fn parse_uid_fetch_messages(lines: &[String]) -> Vec<ImapFetchedMessage> {
     let mut out = Vec::new();
     for line in lines {
@@ -1707,6 +1923,29 @@ fn trailing_literal_len(line: &str) -> Option<usize> {
         return None;
     }
     len.parse().ok()
+}
+
+fn imap_uid_set_contains(uid_set: &str, uid: &str) -> bool {
+    let Ok(uid) = uid.parse::<u64>() else {
+        return false;
+    };
+    uid_set.split(',').any(|part| {
+        if let Some((start, end)) = part.split_once(':') {
+            let Ok(start) = start.parse::<u64>() else {
+                return false;
+            };
+            let end = if end == "*" {
+                u64::MAX
+            } else if let Ok(end) = end.parse::<u64>() {
+                end
+            } else {
+                return false;
+            };
+            uid >= start.min(end) && uid <= start.max(end)
+        } else {
+            part.parse::<u64>().is_ok_and(|requested| requested == uid)
+        }
+    })
 }
 
 fn extract_imap_atom_after(line: &str, marker: &str) -> Option<String> {
@@ -1771,6 +2010,7 @@ mod tests {
             mailbox: "INBOX".to_string(),
             account: Some("primary".to_string()),
             initial_fetch_limit: 25,
+            source_ref: None,
         };
         let message = ImapFetchedMessage {
             uid: "42".to_string(),
@@ -1806,6 +2046,7 @@ mod tests {
             mailbox: "INBOX".to_string(),
             account: Some("primary".to_string()),
             initial_fetch_limit: 25,
+            source_ref: None,
         };
         let raw = concat!(
             "Message-ID: <m42@example.com>\r\n",
@@ -1870,6 +2111,7 @@ mod tests {
             account: Some("gmail-primary".to_string()),
             mailbox: "INBOX".to_string(),
             auth_profile: None,
+            source_ref: None,
         };
         let raw = json!({
             "messages": [{
@@ -1905,6 +2147,7 @@ mod tests {
             account: None,
             mailbox: "Inbox".to_string(),
             auth_profile: None,
+            source_ref: None,
         };
         let graph_raw = json!({
             "value": [{
@@ -1933,6 +2176,7 @@ mod tests {
             account: Some("jmap-primary".to_string()),
             mailbox: "Inbox".to_string(),
             auth_profile: None,
+            source_ref: None,
         };
         let jmap_raw = json!({
             "list": [{
@@ -1963,6 +2207,7 @@ mod tests {
             account: Some("gmail-primary".to_string()),
             mailbox: "INBOX".to_string(),
             auth_profile: Some("gmail-primary".to_string()),
+            source_ref: None,
         };
         let raw = json!({
             "messages": [{
@@ -2037,6 +2282,7 @@ mod tests {
             account: None,
             mailbox: "Inbox".to_string(),
             auth_profile: None,
+            source_ref: None,
         };
         let expanded = json!({
             "value": [{
@@ -2107,6 +2353,7 @@ mod tests {
             account: Some("jmap-primary".to_string()),
             mailbox: "INBOX".to_string(),
             auth_profile: None,
+            source_ref: None,
         };
         let raw = json!({
             "list": [{
@@ -2217,6 +2464,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn imap_fetch_preserves_non_utf8_literal_bytes() {
+        let raw = b"Subject: binary\r\n\r\n\xff\x00\x80".to_vec();
+        let (client, server) = tokio::io::duplex(2048);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let expected = raw.clone();
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            writer
+                .write_all(
+                    format!("* 1 FETCH (UID 42 FLAGS () BODY[] {{{}}}\r\n", raw.len()).as_bytes(),
+                )
+                .await
+                .unwrap();
+            writer.write_all(&raw).await.unwrap();
+            writer
+                .write_all(b")\r\nA0001 OK fetch done\r\n")
+                .await
+                .unwrap();
+        });
+
+        let messages = conn.fetch_uid_set("42").await.unwrap();
+        server.await.unwrap();
+        assert_eq!(messages[0].raw, expected);
+    }
+
+    #[tokio::test]
+    async fn imap_fetch_rejects_oversized_literal_before_allocation() {
+        let (client, server) = tokio::io::duplex(2048);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            writer
+                .write_all(
+                    format!(
+                        "* 1 FETCH (UID 42 FLAGS () BODY[] {{{}}}\r\n",
+                        IMAP_FETCH_RESPONSE_MAX_BYTES + 1
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let error = conn.fetch_uid_set("42").await.unwrap_err();
+        server.await.unwrap();
+        assert!(error.to_string().contains("exceeds 16 MiB"));
+    }
+
+    #[tokio::test]
+    async fn imap_fetch_rejects_unrequested_response_uid() {
+        let (client, server) = tokio::io::duplex(2048);
+        let mut conn = ImapConnection::new(Box::new(client));
+        let server = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            writer
+                .write_all(b"* 1 FETCH (UID 43 FLAGS () BODY[] \"body\")\r\n")
+                .await
+                .unwrap();
+        });
+
+        let error = conn.fetch_uid_set("42").await.unwrap_err();
+        server.await.unwrap();
+        assert!(error.to_string().contains("does not match request"));
+    }
+
+    #[tokio::test]
     async fn fetch_recent_searches_all_uids_and_fetches_last_limit() {
         let (client, server) = tokio::io::duplex(4096);
         let mut conn = ImapConnection::new(Box::new(client));
@@ -2303,6 +2625,7 @@ mod tests {
             mailbox: "INBOX".to_string(),
             account: None,
             initial_fetch_limit,
+            source_ref: None,
         }
     }
 
@@ -2680,6 +3003,7 @@ mod tests {
             mailbox: "INBOX".to_string(),
             account: Some("primary".to_string()),
             initial_fetch_limit: 25,
+            source_ref: None,
         };
         let mut recorder = RecordingRecorder::default();
         let (_stop_tx, mut stop_rx) = watch::channel(false);
