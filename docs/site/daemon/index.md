@@ -34,6 +34,12 @@ which does not inherit env vars exported in the invoking shell; see
 [Secret Sources](../auth/secret-sources.md) for the boundary and recommended
 alternatives.
 
+The daemon self-terminates when it detects that its state directory or socket
+has disappeared (for example, after a state cleanup), so stale daemons do not
+linger on reused sockets. Set `UXC_DAEMON_IDLE_TIMEOUT_SECS` to a positive
+number of seconds to shut the daemon down after that much idle time; this is
+mainly useful for short-lived test harnesses that may skip teardown.
+
 <!-- INDEX:START -->
 
 - [Daemon API](./api.md)
