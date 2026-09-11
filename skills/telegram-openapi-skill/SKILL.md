@@ -64,7 +64,10 @@ uxc auth binding match https://api.telegram.org/getMe
 1. Use the fixed link command by default:
    - `command -v telegram-openapi-cli`
    - If missing, create it:
-     `uxc link telegram-openapi-cli https://api.telegram.org --schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/telegram-openapi-skill/references/telegram-bot.openapi.json`
+     `uxc link telegram-openapi-cli https://api.telegram.org`
+     UXC resolves the curated Telegram Bot API schema through its builtin host
+     mapping. Pass `--schema-url https://raw.githubusercontent.com/holon-run/uxc/main/skills/telegram-openapi-skill/references/telegram-bot.openapi.json`
+     only when pinning a specific schema revision.
    - `telegram-openapi-cli -h`
 
 2. Inspect operation schema first:

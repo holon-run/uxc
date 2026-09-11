@@ -35,6 +35,20 @@ Typical fields:
 - `priority`
 - `enabled`
 
+## Builtin Mappings
+
+UXC ships builtin host-to-schema mappings that apply when neither the CLI
+override nor a user mapping matches:
+
+| Host | Schema |
+| --- | --- |
+| `api.github.com` | `github/rest-api-description` `api.github.com.json` |
+| `api.telegram.org` | curated Telegram Bot API schema from this repository's `telegram-openapi-skill` |
+
+For example, `uxc https://api.telegram.org -h` resolves the curated Telegram
+schema automatically; no `--schema-url` override is required. A user mapping
+for the same host overrides the builtin rule (see Matching Rules below).
+
 ## Matching Rules
 
 - host matching is exact and case-insensitive

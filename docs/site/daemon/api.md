@@ -16,6 +16,10 @@ UXC exposes a stable local daemon control plane over a Unix socket using
 - `stream.read`
 - `stream.info`
 - `stream.trim`
+- `email.send`
+- `email.reply`
+- `email.body.read`
+- `email.attachment.get`
 
 ## Transport
 
@@ -45,6 +49,37 @@ Typical request shape:
   "limit": 100
 }
 ```
+
+## Email RPCs
+
+Email operations share the same JSON-RPC surface. `email.send`, `email.reply`,
+and `email.attachment.get` mirror the `uxc email` CLI commands.
+`email.body.read` is daemon-only: local app integrations use it to extract
+normalized message text.
+
+- `email.send` sends a new message over SMTP. Params mirror the CLI flags:
+  `smtp_url`, `from`, `to`/`cc`/`bcc`, `subject`, `text`/`html`, plus an
+  optional `auth` profile and a caller-supplied `message_id` for outbound
+  idempotency.
+- `email.reply` flattens the same send params and accepts the `reply_handle`
+  JSON carried by an `email_event` envelope.
+- `email.body.read` takes one `input`:
+  - `inline_mime`: `mime_base64` payload with `original_bytes` and `complete`
+  - `legacy_mime`: inline `mime_text` with optional `source_truncated`
+  - `message_ref`: opaque provider message reference
+
+  Results return normalized plain text with a `completeness` value
+  (`complete`, `partial`, or `unverified`) and parser provenance. Size limits
+  and the read deadline are advertised in `daemon.status` under `email_body`.
+- `email.attachment.get` downloads an attachment referenced by an
+  `email_attachment` handle. Params: `handle` (raw handle JSON or `@file`),
+  optional `profile` override, optional `output` path (defaults to the
+  attachment cache), and `max_bytes` (`0` disables the limit). Results include
+  `saved_path`, `size_bytes`, and `sha256`.
+
+The TypeScript client exposes these as `emailSend`, `emailReply`,
+`emailBodyRead`, and `emailAttachmentGet`; see
+[Generated TypeScript Clients](../ecosystem/typescript-client.md).
 
 ## TypeScript Client
 
