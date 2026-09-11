@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-11
+
+### Added
+- Email: unified body reading with lossless inline content and reliable message references, exposed through the daemon JSON-RPC method `email.body` with typed `emailBodyRead` support in `uxc-daemon-client` (#463, #464).
+
+### Fixed
+- Daemon: orphaned daemons now self-terminate when their state directory or socket disappears, with an optional idle timeout via `UXC_DAEMON_IDLE_TIMEOUT_SECS` (#459, #462).
+- Schema mapping: built-in `api.telegram.org` OpenAPI mapping so Telegram Bot API protocol detection works out of the box (#460, #461).
+
 ## [0.20.0] - 2026-09-09
 
 ### Added
