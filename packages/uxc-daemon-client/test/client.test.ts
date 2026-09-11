@@ -322,6 +322,60 @@ describe("UxcDaemonClient", () => {
     });
   });
 
+  test("emailAttachmentGet serializes an opaque handle and controlled output path", async () => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    const calls: Array<{ method: string; params: unknown }> = [];
+    (stub as unknown as { request: (method: string, params?: unknown) => Promise<unknown> }).request = async (
+      method,
+      params,
+    ) => {
+      calls.push({ method, params });
+      return {
+        provider: "imap",
+        attachment_id: "2",
+        size_bytes: 5,
+        sha256: "abc",
+        saved_path: "/tmp/staging/attachment",
+      };
+    };
+    const handle = {
+      type: "email_attachment",
+      provider: "imap",
+      endpoint: "imaps://example.invalid",
+      part: { section: "2" },
+    };
+
+    const response = await stub.emailAttachmentGet({
+      handle,
+      outputPath: "/tmp/staging/attachment",
+      profile: "mail",
+      maxBytes: 1024,
+    });
+
+    expect(response.saved_path).toBe("/tmp/staging/attachment");
+    expect(calls).toEqual([
+      {
+        method: "email.attachment.get",
+        params: {
+          handle: JSON.stringify(handle),
+          output: "/tmp/staging/attachment",
+          profile: "mail",
+          max_bytes: 1024,
+        },
+      },
+    ]);
+  });
+
+  test("emailAttachmentGet requires a controlled output path", async () => {
+    const stub = new UxcDaemonClient({ autoStart: false });
+    await expect(
+      stub.emailAttachmentGet({
+        handle: {},
+        outputPath: "",
+      }),
+    ).rejects.toThrow("emailAttachmentGet requires outputPath");
+  });
+
   test("call executes OpenAPI operations without CLI envelope parsing", async () => {
     const server = createOpenApiServer();
     await server.start();

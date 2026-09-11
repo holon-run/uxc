@@ -206,6 +206,27 @@ export interface EmailBodyResult {
   provenance: EmailBodyProvenance;
 }
 
+export interface EmailAttachmentGetArgs {
+  handle: unknown;
+  outputPath: string;
+  profile?: string;
+  maxBytes?: number;
+}
+
+export interface EmailAttachmentGetResult {
+  provider: string;
+  account?: string | null;
+  mailbox?: string | null;
+  message_id?: string | null;
+  uid?: string | null;
+  attachment_id: string;
+  filename?: string | null;
+  content_type?: string | null;
+  size_bytes: number;
+  sha256: string;
+  saved_path: string;
+}
+
 export interface EmailBodyCapability {
   schema_version: number;
   parser_version: string;
@@ -378,6 +399,7 @@ export class DaemonRpcError extends Error {
     message: string,
     readonly code: number,
     readonly method: string,
+    readonly data?: unknown,
   ) {
     super(message);
     this.name = "DaemonRpcError";
@@ -478,6 +500,20 @@ export class UxcDaemonClient {
   async emailBodyRead(args: EmailBodyReadArgs): Promise<EmailBodyResult> {
     return this.request("email.body.read", {
       input: emailBodyInputParams(args.input),
+    });
+  }
+
+  async emailAttachmentGet(
+    args: EmailAttachmentGetArgs,
+  ): Promise<EmailAttachmentGetResult> {
+    if (args.outputPath.length === 0) {
+      throw new Error("emailAttachmentGet requires outputPath");
+    }
+    return this.request("email.attachment.get", {
+      handle: emailAttachmentHandleParam(args.handle),
+      output: args.outputPath,
+      ...(args.profile === undefined ? {} : { profile: args.profile }),
+      ...(args.maxBytes === undefined ? {} : { max_bytes: args.maxBytes }),
     });
   }
 
@@ -640,6 +676,7 @@ export class UxcDaemonClient {
               parsed.message.error.message,
               parsed.message.error.code,
               method,
+              parsed.message.error.data,
             ),
           );
           return;
@@ -1140,6 +1177,17 @@ function emailBodyInputParams(input: EmailBodyInput): Record<string, unknown> {
   }
 }
 
+function emailAttachmentHandleParam(handle: unknown): string {
+  if (typeof handle === "string") {
+    return handle;
+  }
+  const serialized = JSON.stringify(handle);
+  if (serialized === undefined) {
+    throw new Error("emailAttachmentGet handle must be JSON-serializable");
+  }
+  return serialized;
+}
+
 function bestEffortUserLabel(env: NodeJS.ProcessEnv | undefined): string {
   const raw = env?.USER ?? env?.USERNAME ?? "unknown";
   const filtered = raw.replace(/[^A-Za-z0-9_-]/g, "_");
@@ -1160,6 +1208,7 @@ function tryParseFrame(buffer: Buffer<ArrayBufferLike>): {
     error?: {
       code: number;
       message: string;
+      data?: unknown;
     };
   };
   remaining: Buffer<ArrayBufferLike>;
@@ -1184,6 +1233,7 @@ function tryParseFrame(buffer: Buffer<ArrayBufferLike>): {
     error?: {
       code: number;
       message: string;
+      data?: unknown;
     };
   };
   return {
