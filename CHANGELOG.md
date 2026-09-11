@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-09-11
+
+### Documentation
+- Sync reference docs with recent changes: daemon JSON-RPC email methods (`email.send`, `email.reply`, `email.body.read`, `email.attachment.get`), daemon lifecycle notes (orphan self-termination and `UXC_DAEMON_IDLE_TIMEOUT_SECS`), built-in schema mappings for `api.github.com` and `api.telegram.org`, and typed `uxc-daemon-client` email helpers (#466).
+- Simplify the Telegram Bot API skill to rely on the built-in schema mapping instead of requiring `--schema-url` (#466).
+
 ## [0.21.0] - 2026-09-11
 
 ### Added
