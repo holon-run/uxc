@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -34,16 +34,23 @@ const ATTACHMENT_CACHE_DIR: &str = "email-attachments";
 const JMAP_MAIL_CAPABILITY: &str = "urn:ietf:params:jmap:mail";
 
 /// CLI request for lazy attachment retrieval.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailAttachmentGetRequest {
     /// Raw JSON handle (or `@path` to read the handle from a file).
     pub handle: String,
     /// Auth profile override; takes precedence over the handle reference.
+    #[serde(default)]
     pub profile: Option<String>,
     /// Explicit output path; defaults to a cache path.
+    #[serde(default)]
     pub output: Option<String>,
     /// Reject attachments larger than this many bytes; 0 disables the limit.
+    #[serde(default = "default_max_attachment_bytes")]
     pub max_bytes: u64,
+}
+
+const fn default_max_attachment_bytes() -> u64 {
+    DEFAULT_MAX_ATTACHMENT_BYTES
 }
 
 /// Parsed and validated `email_attachment` handle.
@@ -101,7 +108,7 @@ impl AttachmentPart {
 }
 
 /// Successful retrieval result (mirrors the JSON envelope data payload).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmailAttachmentGetResult {
     pub provider: String,
     pub account: Option<String>,

@@ -78,6 +78,7 @@ use tokio::task::JoinHandle;
 
 const JSONRPC_VERSION: &str = "2.0";
 const EMAIL_BODY_DEADLINE: Duration = Duration::from_secs(30);
+const EMAIL_ATTACHMENT_DEADLINE: Duration = Duration::from_secs(30);
 const EMAIL_BODY_GLOBAL_LIMIT: usize = 4;
 const EMAIL_BODY_QUEUE_LIMIT: usize = 32;
 const EMAIL_BODY_SOURCE_LIMIT: usize = 2;
@@ -4482,6 +4483,37 @@ impl DaemonRuntime {
         .map_err(|_| anyhow!("timeout: email body retrieval exceeded 30 seconds"))?
     }
 
+    async fn get_email_attachment(
+        &self,
+        request: crate::email_attachment_get::EmailAttachmentGetRequest,
+    ) -> Result<crate::email_attachment_get::EmailAttachmentGetResult> {
+        let output = request
+            .output
+            .as_deref()
+            .filter(|output| !output.is_empty())
+            .ok_or_else(|| {
+                StructuredError::new(
+                    "invalid_output",
+                    "daemon attachment retrieval requires an output path",
+                    None,
+                )
+            })?;
+        if !Path::new(output).is_absolute() {
+            return Err(StructuredError::new(
+                "invalid_output",
+                "daemon attachment output path must be absolute",
+                None,
+            )
+            .into());
+        }
+        tokio::time::timeout(
+            EMAIL_ATTACHMENT_DEADLINE,
+            crate::email_attachment_get::get_email_attachment(&request),
+        )
+        .await
+        .map_err(|_| anyhow!("timeout: email attachment retrieval exceeded 30 seconds"))?
+    }
+
     fn initialize_logger() -> Option<DaemonLogger> {
         let dir = daemon_dir();
         match DaemonLogger::new(&dir) {
@@ -7212,6 +7244,23 @@ pub async fn email_body_read_client(
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
+pub async fn email_attachment_get_client(
+    request: &crate::email_attachment_get::EmailAttachmentGetRequest,
+) -> Result<crate::email_attachment_get::EmailAttachmentGetResult> {
+    let value = client_call("email.attachment.get", Some(serde_json::to_value(request)?)).await?;
+    Ok(serde_json::from_value(value)?)
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub async fn email_attachment_get_client(
+    _request: &crate::email_attachment_get::EmailAttachmentGetRequest,
+) -> Result<crate::email_attachment_get::EmailAttachmentGetResult> {
+    bail!("Daemon email attachment retrieval is only supported on Unix")
+}
+
+#[cfg(unix)]
 pub async fn daemon_sessions_client() -> Result<Vec<DaemonSessionView>> {
     let value = client_call("daemon.sessions", None).await?;
     Ok(serde_json::from_value(value)?)
@@ -7951,6 +8000,41 @@ async fn handle_connection(mut stream: UnixStream, runtime: Arc<DaemonRuntime>) 
                     id: req.id,
                     result: None,
                     error: Some(email_body_read_jsonrpc_error(&err)),
+                },
+            }
+        }
+        "email.attachment.get" => {
+            let Some(params) = req.params else {
+                write_jsonrpc_error(&mut stream, req.id, -32602, "Missing params".to_string())
+                    .await?;
+                return Ok(());
+            };
+            let request: crate::email_attachment_get::EmailAttachmentGetRequest =
+                match serde_json::from_value(params) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        write_jsonrpc_error(
+                            &mut stream,
+                            req.id,
+                            -32602,
+                            format!("Invalid params: {err}"),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+            match runtime.get_email_attachment(request).await {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: Some(serde_json::to_value(result)?),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(email_attachment_get_jsonrpc_error(&err)),
                 },
             }
         }
@@ -10027,6 +10111,48 @@ fn email_body_read_jsonrpc_error(err: &anyhow::Error) -> JsonRpcError {
     }
 }
 
+fn email_attachment_get_jsonrpc_error(err: &anyhow::Error) -> JsonRpcError {
+    const NON_RETRYABLE: &[&str] = &[
+        "invalid_attachment_handle",
+        "invalid_output",
+        "auth_profile_missing",
+        "auth_failed",
+        "attachment_not_found",
+        "message_not_found",
+        "uid_invalid",
+        "size_limit_exceeded",
+    ];
+    const RETRYABLE: &[&str] = &["provider_request_failed", "timeout"];
+
+    let structured = structured_error_from_anyhow(err);
+    let structured_code = structured.as_ref().map(|payload| payload.code.as_str());
+    let error_text = err.to_string();
+    let prefix = error_text.split_once(':').map(|(prefix, _)| prefix);
+    let candidate = structured_code.or(prefix);
+    let (code, retryable) = if let Some(code) = candidate {
+        if NON_RETRYABLE.contains(&code) {
+            (code, false)
+        } else if RETRYABLE.contains(&code) {
+            (code, true)
+        } else {
+            ("provider_request_failed", true)
+        }
+    } else {
+        ("provider_request_failed", true)
+    };
+    let payload = StructuredErrorPayload {
+        code: code.to_string(),
+        message: "Email attachment retrieval failed".to_string(),
+        details: Some(json!({ "retryable": retryable })),
+    };
+
+    JsonRpcError {
+        code: ERR_RUNTIME_GENERIC,
+        message: payload.message.clone(),
+        data: serde_json::to_value(payload).ok(),
+    }
+}
+
 impl Default for DaemonRuntime {
     fn default() -> Self {
         Self::new()
@@ -10212,6 +10338,52 @@ mod tests {
         assert_eq!(payload.code, "provider_unavailable");
         assert_eq!(payload.details, Some(json!({ "retryable": true })));
         assert_eq!(error.message, "Email body read failed");
+    }
+
+    #[test]
+    fn email_attachment_get_errors_have_stable_redacted_payloads() {
+        for (code, retryable) in [
+            ("invalid_attachment_handle", false),
+            ("invalid_output", false),
+            ("auth_profile_missing", false),
+            ("auth_failed", false),
+            ("attachment_not_found", false),
+            ("message_not_found", false),
+            ("uid_invalid", false),
+            ("size_limit_exceeded", false),
+            ("provider_request_failed", true),
+            ("timeout", true),
+        ] {
+            let secret = "secret endpoint https://user:password@example.invalid";
+            let error = email_attachment_get_jsonrpc_error(&anyhow!("{code}: {secret}"));
+            let payload: StructuredErrorPayload =
+                serde_json::from_value(error.data.unwrap()).unwrap();
+            assert_eq!(payload.code, code);
+            assert_eq!(payload.message, "Email attachment retrieval failed");
+            assert_eq!(payload.details, Some(json!({ "retryable": retryable })));
+            assert!(!error.message.contains(secret));
+            assert!(!payload.message.contains(secret));
+        }
+    }
+
+    #[tokio::test]
+    async fn email_attachment_get_requires_an_absolute_output_path() {
+        let temp = tempdir().unwrap();
+        let runtime =
+            DaemonRuntime::try_new_with_managed_source_base_dir(temp.path().to_path_buf()).unwrap();
+        for output in [None, Some("relative/path".to_string())] {
+            let err = runtime
+                .get_email_attachment(crate::email_attachment_get::EmailAttachmentGetRequest {
+                    handle: "{}".to_string(),
+                    profile: None,
+                    output,
+                    max_bytes: crate::email_attachment_get::DEFAULT_MAX_ATTACHMENT_BYTES,
+                })
+                .await
+                .unwrap_err();
+            let payload = structured_error_from_anyhow(&err).unwrap();
+            assert_eq!(payload.code, "invalid_output");
+        }
     }
 
     #[tokio::test]
