@@ -96,12 +96,34 @@ pub enum EmailProviderKind {
     Jmap,
 }
 
+/// HTTP method used by `email-provider-poll` list requests. GET is the
+/// historical default; POST covers POST-only APIs such as standard JMAP
+/// endpoints that only accept `methodCalls` request envelopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmailPollHttpMethod {
+    Get,
+    Post,
+}
+
+impl EmailPollHttpMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EmailProviderPollRuntimeConfig {
     pub endpoint: String,
     pub provider: EmailProviderKind,
     pub account: Option<String>,
     pub mailbox: String,
+    /// HTTP method for list requests; defaults to GET.
+    pub method: EmailPollHttpMethod,
+    /// JSON request body sent with POST list requests (from the `body` arg).
+    pub request_body: Option<Value>,
     /// Auth profile name referenced by attachment handles (never credentials).
     pub auth_profile: Option<String>,
     pub(crate) source_ref: Option<EmailSourceRef>,
@@ -744,6 +766,26 @@ pub fn resolve_email_provider_poll_runtime_config(
             other
         ),
     };
+    let method = match args
+        .and_then(|args| args.get("method"))
+        .and_then(Value::as_str)
+    {
+        None => EmailPollHttpMethod::Get,
+        Some(raw) => match raw.to_ascii_lowercase().as_str() {
+            "get" => EmailPollHttpMethod::Get,
+            "post" => EmailPollHttpMethod::Post,
+            other => bail!(
+                "email-provider-poll method must be get or post, got '{}'",
+                other
+            ),
+        },
+    };
+    let request_body = args.and_then(|args| args.get("body")).cloned();
+    if request_body.is_some() && method == EmailPollHttpMethod::Get {
+        bail!(
+            "email-provider-poll body requires method=post; GET list requests cannot carry a JSON body"
+        );
+    }
     let mailbox = args
         .and_then(|args| args.get("mailbox"))
         .and_then(Value::as_str)
@@ -763,6 +805,8 @@ pub fn resolve_email_provider_poll_runtime_config(
         provider,
         account,
         mailbox,
+        method,
+        request_body,
         auth_profile: request.options.auth.clone(),
         source_ref: resolve_email_source_ref(args)?,
     })
@@ -775,7 +819,8 @@ pub async fn fetch_email_provider_poll(
 ) -> Result<PollFetchResult> {
     let started = std::time::Instant::now();
     let client = reqwest::Client::new();
-    let request_context = crate::auth::AuthRequestContext::new("GET", &config.endpoint);
+    let request_context =
+        crate::auth::AuthRequestContext::new(config.method.as_str(), &config.endpoint);
     let resolved_auth = match auth_profile {
         Some(profile) => Some(crate::auth::resolve_profile_request_auth_with_context(
             &request_context,
@@ -787,12 +832,22 @@ pub async fn fetch_email_provider_poll(
         .as_ref()
         .map(|auth| auth.url.as_str())
         .unwrap_or(config.endpoint.as_str());
-    let mut builder = client.get(url);
+    let mut builder = match config.method {
+        EmailPollHttpMethod::Get => {
+            let mut builder = client.get(url);
+            // Conditional GET only: POST list APIs do not use ETags.
+            if let Some(etag) = checkpoint.etag.as_ref() {
+                builder = builder.header("if-none-match", etag);
+            }
+            builder
+        }
+        EmailPollHttpMethod::Post => {
+            let body = config.request_body.clone().unwrap_or_else(|| json!({}));
+            client.post(url).json(&body)
+        }
+    };
     if let Some(auth) = resolved_auth.as_ref() {
         builder = builder.headers(header_map_from_pairs(&auth.headers)?);
-    }
-    if let Some(etag) = checkpoint.etag.as_ref() {
-        builder = builder.header("if-none-match", etag);
     }
     let response = builder
         .send()
@@ -855,6 +910,7 @@ pub fn normalize_email_provider_items(
     config: &EmailProviderPollRuntimeConfig,
     raw: &Value,
 ) -> Result<Vec<Value>> {
+    let mut envelope_account_id: Option<String> = None;
     let items = match config.provider {
         EmailProviderKind::Gmail => raw
             .get("messages")
@@ -868,26 +924,80 @@ pub fn normalize_email_provider_items(
             .ok_or_else(|| {
                 anyhow!("Microsoft Graph provider response requires value/items array")
             })?,
-        EmailProviderKind::Jmap => raw
-            .get("list")
-            .or_else(|| raw.get("items"))
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("JMAP provider response requires list/items array"))?,
+        EmailProviderKind::Jmap => {
+            let items = jmap_provider_list_items(raw, &mut envelope_account_id)?;
+            if envelope_account_id.is_none() {
+                envelope_account_id = top_level_jmap_account_id(raw);
+            }
+            items
+        }
     };
     Ok(items
         .iter()
-        .map(|item| build_provider_email_event(config, item))
+        .map(|item| build_provider_email_event(config, item, envelope_account_id.as_deref()))
         .collect())
 }
 
-fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Value) -> Value {
+/// Extract JMAP list items from a provider response. Standard JMAP endpoints
+/// answer with a `methodResponses` envelope (take the `Email/get` response's
+/// `list` and `accountId`); gateway-style responses expose `list`/`items`
+/// directly at the top level.
+fn jmap_provider_list_items<'a>(
+    raw: &'a Value,
+    envelope_account_id: &mut Option<String>,
+) -> Result<&'a Vec<Value>> {
+    if let Some(responses) = raw.get("methodResponses").and_then(Value::as_array) {
+        let response = responses
+            .iter()
+            .find(|response| response.get(0).and_then(Value::as_str) == Some("Email/get"))
+            .ok_or_else(|| {
+                anyhow!("JMAP methodResponses envelope requires an Email/get response")
+            })?;
+        let args = response.get(1).ok_or_else(|| {
+            anyhow!("JMAP methodResponses Email/get entry is missing its arguments object")
+        })?;
+        *envelope_account_id = args
+            .get("accountId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        return args
+            .get("list")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("JMAP Email/get response requires a list array"));
+    }
+    raw.get("list")
+        .or_else(|| raw.get("items"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("JMAP provider response requires list/items array"))
+}
+
+/// Fallback accountId for JMAP items that do not carry their own: the
+/// top-level `accountId` string, then `accountIds[0]`.
+fn top_level_jmap_account_id(raw: &Value) -> Option<String> {
+    raw.get("accountId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            raw.get("accountIds")
+                .and_then(Value::as_array)
+                .and_then(|ids| ids.first())
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+fn build_provider_email_event(
+    config: &EmailProviderPollRuntimeConfig,
+    item: &Value,
+    envelope_account_id: Option<&str>,
+) -> Value {
     let account = config.account.as_deref().unwrap_or("default");
     let provider = match config.provider {
         EmailProviderKind::Gmail => "gmail",
         EmailProviderKind::Graph => "graph",
         EmailProviderKind::Jmap => "jmap",
     };
-    let reliable_locator = provider_message_locator(config.provider, item);
+    let reliable_locator = provider_message_locator(config.provider, item, envelope_account_id);
     let uid = reliable_locator
         .as_ref()
         .map(locator_display_key)
@@ -908,6 +1018,18 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
             gmail_header(item, "Subject").or_else(|| first_string(item, &["subject"]))
         }
         _ => first_string(item, &["subject"]),
+    };
+    let date = match config.provider {
+        EmailProviderKind::Jmap => jmap_received_at_date(item).or_else(|| {
+            first_string(
+                item,
+                &["receivedDateTime", "receivedAt", "internalDate", "date"],
+            )
+        }),
+        _ => first_string(
+            item,
+            &["receivedDateTime", "receivedAt", "internalDate", "date"],
+        ),
     };
     let (attachments, has_attachments, attachment_count) = provider_message_attachments(
         config,
@@ -951,7 +1073,7 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
             "cc": provider_address_list(config.provider, item, "cc"),
             "bcc": provider_address_list(config.provider, item, "bcc"),
             "subject": subject,
-            "date": first_string(item, &["receivedDateTime", "receivedAt", "internalDate", "date"]),
+            "date": date,
             "snippet": first_string(item, &["snippet", "bodyPreview", "preview"]),
             "attachments": attachments,
             "has_attachments": has_attachments,
@@ -979,6 +1101,7 @@ fn build_provider_email_event(config: &EmailProviderPollRuntimeConfig, item: &Va
 fn provider_message_locator(
     provider: EmailProviderKind,
     item: &Value,
+    envelope_account_id: Option<&str>,
 ) -> Option<EmailMessageLocator> {
     match provider {
         EmailProviderKind::Gmail => {
@@ -993,10 +1116,43 @@ fn provider_message_locator(
             })
             .map(|immutable_id| EmailMessageLocator::Graph { immutable_id }),
         EmailProviderKind::Jmap => Some(EmailMessageLocator::Jmap {
-            account_id: first_string(item, &["accountId"])?,
+            account_id: first_string(item, &["accountId"])
+                .or_else(|| envelope_account_id.map(str::to_string))?,
             email_id: first_string(item, &["id"])?,
         }),
     }
+}
+
+/// JMAP `receivedAt` is an epoch-milliseconds number; map it onto the RFC
+/// 3339 UTC string shape used by the neutral event envelope.
+fn jmap_received_at_date(item: &Value) -> Option<String> {
+    let millis = item.get("receivedAt").and_then(Value::as_i64)?;
+    let secs = millis.div_euclid(1000);
+    let subsec = millis.rem_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{subsec:03}Z",
+        secs_of_day / 3_600,
+        (secs_of_day % 3_600) / 60,
+        secs_of_day % 60
+    ))
+}
+
+/// Howard Hinnant's `civil_from_days` algorithm: days since the Unix epoch
+/// to a proleptic Gregorian (year, month, day) triple.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
 }
 
 fn locator_display_key(locator: &EmailMessageLocator) -> String {
@@ -2110,6 +2266,8 @@ mod tests {
             provider: EmailProviderKind::Gmail,
             account: Some("gmail-primary".to_string()),
             mailbox: "INBOX".to_string(),
+            method: EmailPollHttpMethod::Get,
+            request_body: None,
             auth_profile: None,
             source_ref: None,
         };
@@ -2146,6 +2304,8 @@ mod tests {
             provider: EmailProviderKind::Graph,
             account: None,
             mailbox: "Inbox".to_string(),
+            method: EmailPollHttpMethod::Get,
+            request_body: None,
             auth_profile: None,
             source_ref: None,
         };
@@ -2175,6 +2335,8 @@ mod tests {
             provider: EmailProviderKind::Jmap,
             account: Some("jmap-primary".to_string()),
             mailbox: "Inbox".to_string(),
+            method: EmailPollHttpMethod::Get,
+            request_body: None,
             auth_profile: None,
             source_ref: None,
         };
@@ -2199,6 +2361,329 @@ mod tests {
         assert_eq!(jmap_events[0]["message"]["flags"], json!(["$seen"]));
     }
 
+    fn subscribe_request_for_provider_poll(
+        endpoint: &str,
+        args: Value,
+    ) -> crate::daemon::SubscribeStartRequest {
+        let mut request = subscribe_request_for_resolve(endpoint);
+        request.args = Some(serde_json::from_value(args).unwrap());
+        request
+    }
+
+    #[test]
+    fn resolves_email_provider_poll_method_and_body() {
+        let request = subscribe_request_for_provider_poll(
+            "https://jmap.example.com/jmap/api",
+            json!({"provider": "jmap", "method": "POST", "body": {"methodCalls": []}}),
+        );
+        let config = resolve_email_provider_poll_runtime_config(&request, None).unwrap();
+        assert_eq!(config.method, EmailPollHttpMethod::Post);
+        assert_eq!(config.request_body, Some(json!({"methodCalls": []})));
+
+        let request = subscribe_request_for_provider_poll(
+            "https://api.example.com/list",
+            json!({"provider": "gmail"}),
+        );
+        let config = resolve_email_provider_poll_runtime_config(&request, None).unwrap();
+        assert_eq!(config.method, EmailPollHttpMethod::Get);
+        assert_eq!(config.request_body, None);
+
+        // Method matching is case-insensitive, and POST without a body is
+        // allowed for APIs that accept an empty JSON document.
+        let request = subscribe_request_for_provider_poll(
+            "https://api.example.com/list",
+            json!({"provider": "gmail", "method": "post"}),
+        );
+        let config = resolve_email_provider_poll_runtime_config(&request, None).unwrap();
+        assert_eq!(config.method, EmailPollHttpMethod::Post);
+        assert_eq!(config.request_body, None);
+    }
+
+    #[test]
+    fn rejects_invalid_provider_poll_method_combinations() {
+        let request = subscribe_request_for_provider_poll(
+            "https://api.example.com/list",
+            json!({"provider": "gmail", "method": "DELETE"}),
+        );
+        let error = resolve_email_provider_poll_runtime_config(&request, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("method must be get or post"), "{error}");
+
+        let request = subscribe_request_for_provider_poll(
+            "https://api.example.com/list",
+            json!({"provider": "gmail", "body": {"page": 1}}),
+        );
+        let error = resolve_email_provider_poll_runtime_config(&request, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("body requires method=post"), "{error}");
+    }
+
+    #[test]
+    fn normalizes_jmap_method_responses_envelope() {
+        let config = EmailProviderPollRuntimeConfig {
+            endpoint: "https://jmap.example.com/jmap/api".to_string(),
+            provider: EmailProviderKind::Jmap,
+            account: Some("jmap-primary".to_string()),
+            mailbox: "INBOX".to_string(),
+            method: EmailPollHttpMethod::Post,
+            request_body: None,
+            auth_profile: None,
+            source_ref: None,
+        };
+        let raw = json!({
+            "sessionState": "s1",
+            "methodResponses": [
+                ["Email/query", {"accountId": "acct-1", "ids": ["M1"]}, "q0"],
+                ["Email/get", {
+                    "accountId": "acct-1",
+                    "state": "st-1",
+                    "list": [{
+                        "id": "M1",
+                        "subject": "Standard JMAP",
+                        "preview": "envelope preview",
+                        "from": [{"email": "sender@example.com"}],
+                        "to": [{"email": "agent@example.com"}],
+                        "receivedAt": 1760000000123_i64,
+                        "keywords": {"$seen": true}
+                    }],
+                    "notFound": []
+                }, "g0"]
+            ]
+        });
+        let events = normalize_email_provider_items(&config, &raw).unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event["provider"], "jmap");
+        assert_eq!(event["message"]["uid"], "acct-1:M1");
+        assert_eq!(event["message"]["message_id"], "acct-1:M1");
+        assert_eq!(event["message"]["date"], "2025-10-09T08:53:20.123Z");
+        assert_eq!(event["message"]["snippet"], "envelope preview");
+        assert_eq!(event["message"]["subject"], "Standard JMAP");
+        assert_eq!(
+            event["message"]["from"],
+            json!({"email": "sender@example.com"})
+        );
+        // The envelope accountId makes the locator reliable: body retrieval
+        // via message_ref becomes possible instead of unavailable.
+        assert_eq!(event["body_unavailable_reason"], Value::Null);
+    }
+
+    #[test]
+    fn jmap_locator_falls_back_to_top_level_account_ids() {
+        let config = EmailProviderPollRuntimeConfig {
+            endpoint: "https://jmap.example.com/jmap/api".to_string(),
+            provider: EmailProviderKind::Jmap,
+            account: None,
+            mailbox: "INBOX".to_string(),
+            method: EmailPollHttpMethod::Get,
+            request_body: None,
+            auth_profile: None,
+            source_ref: None,
+        };
+        let with_account_id = json!({
+            "accountId": "top-acct",
+            "list": [{"id": "M1", "subject": "s"}]
+        });
+        let events = normalize_email_provider_items(&config, &with_account_id).unwrap();
+        assert_eq!(events[0]["message"]["uid"], "top-acct:M1");
+
+        let with_account_ids = json!({
+            "accountIds": ["first-acct", "second-acct"],
+            "list": [{"id": "M1", "subject": "s"}]
+        });
+        let events = normalize_email_provider_items(&config, &with_account_ids).unwrap();
+        assert_eq!(events[0]["message"]["uid"], "first-acct:M1");
+    }
+
+    #[test]
+    fn jmap_item_account_id_takes_precedence_over_envelope() {
+        let config = EmailProviderPollRuntimeConfig {
+            endpoint: "https://jmap.example.com/jmap/api".to_string(),
+            provider: EmailProviderKind::Jmap,
+            account: None,
+            mailbox: "INBOX".to_string(),
+            method: EmailPollHttpMethod::Post,
+            request_body: None,
+            auth_profile: None,
+            source_ref: None,
+        };
+        let raw = json!({
+            "methodResponses": [
+                ["Email/get", {
+                    "accountId": "envelope-acct",
+                    "list": [{"id": "M1", "accountId": "item-acct"}]
+                }, "g0"]
+            ]
+        });
+        let events = normalize_email_provider_items(&config, &raw).unwrap();
+        assert_eq!(events[0]["message"]["uid"], "item-acct:M1");
+    }
+
+    #[test]
+    fn jmap_envelope_errors_are_actionable() {
+        let config = EmailProviderPollRuntimeConfig {
+            endpoint: "https://jmap.example.com/jmap/api".to_string(),
+            provider: EmailProviderKind::Jmap,
+            account: None,
+            mailbox: "INBOX".to_string(),
+            method: EmailPollHttpMethod::Post,
+            request_body: None,
+            auth_profile: None,
+            source_ref: None,
+        };
+        let no_email_get = json!({"methodResponses": [["Email/query", {"ids": []}, "q0"]]});
+        let error = normalize_email_provider_items(&config, &no_email_get)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires an Email/get response"), "{error}");
+
+        let missing_list = json!({
+            "methodResponses": [["Email/get", {"accountId": "a1"}, "g0"]]
+        });
+        let error = normalize_email_provider_items(&config, &missing_list)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires a list array"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn provider_poll_post_sends_jmap_envelope_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                socket.read_exact(&mut byte).await.unwrap();
+                head.push(byte[0]);
+                if head.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&head).to_string();
+            let content_length: usize = head
+                .lines()
+                .find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+                .and_then(|line| line.split(':').nth(1))
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(0);
+            let mut body_bytes = vec![0u8; content_length];
+            socket.read_exact(&mut body_bytes).await.unwrap();
+            let body: Value = serde_json::from_slice(&body_bytes).unwrap();
+            let response = json!({
+                "methodResponses": [
+                    ["Email/get", {
+                        "accountId": "acct-9",
+                        "list": [
+                            {"id": "M1", "subject": "Polled", "preview": "p", "receivedAt": 1760000000123_i64}
+                        ]
+                    }, "g0"]
+                ]
+            });
+            let payload = serde_json::to_vec(&response).unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket.write_all(&payload).await.unwrap();
+            (head, body)
+        });
+
+        let config = EmailProviderPollRuntimeConfig {
+            endpoint: format!("http://{address}/jmap/api"),
+            provider: EmailProviderKind::Jmap,
+            account: None,
+            mailbox: "INBOX".to_string(),
+            method: EmailPollHttpMethod::Post,
+            request_body: Some(json!({
+                "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                "methodCalls": [["Email/query", {"accountId": null, "limit": 20}, "q0"]]
+            })),
+            auth_profile: None,
+            source_ref: None,
+        };
+        let result = fetch_email_provider_poll(&config, None, &PollCheckpointState::default())
+            .await
+            .unwrap();
+        let (head, body) = server.await.unwrap();
+        assert!(head.starts_with("POST /jmap/api"), "{head}");
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "{head}"
+        );
+        assert_eq!(body["methodCalls"][0][0], "Email/query");
+        assert_eq!(body["using"][0], "urn:ietf:params:jmap:core");
+        let items = result.data["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["message"]["uid"], "acct-9:M1");
+        assert_eq!(items[0]["body_unavailable_reason"], Value::Null);
+        assert_eq!(result.status_code, Some(200));
+    }
+
+    #[tokio::test]
+    async fn provider_poll_get_sends_if_none_match_and_honors_304() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                socket.read_exact(&mut byte).await.unwrap();
+                head.push(byte[0]);
+                if head.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&head).to_string();
+            socket
+                .write_all(
+                    b"HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            head
+        });
+
+        let config = EmailProviderPollRuntimeConfig {
+            endpoint: format!("http://{address}/list"),
+            provider: EmailProviderKind::Gmail,
+            account: None,
+            mailbox: "INBOX".to_string(),
+            method: EmailPollHttpMethod::Get,
+            request_body: None,
+            auth_profile: None,
+            source_ref: None,
+        };
+        let checkpoint = PollCheckpointState {
+            etag: Some("etag-42".to_string()),
+            ..Default::default()
+        };
+        let result = fetch_email_provider_poll(&config, None, &checkpoint)
+            .await
+            .unwrap();
+        let head = server.await.unwrap();
+        assert!(head.starts_with("GET /list"), "{head}");
+        assert!(
+            head.to_ascii_lowercase().contains("if-none-match: etag-42"),
+            "{head}"
+        );
+        assert_eq!(result.status_code, Some(304));
+        assert_eq!(result.data["items"].as_array().unwrap().len(), 0);
+    }
+
     #[test]
     fn maps_gmail_attachment_metadata_from_payload_parts() {
         let config = EmailProviderPollRuntimeConfig {
@@ -2206,6 +2691,8 @@ mod tests {
             provider: EmailProviderKind::Gmail,
             account: Some("gmail-primary".to_string()),
             mailbox: "INBOX".to_string(),
+            method: EmailPollHttpMethod::Get,
+            request_body: None,
             auth_profile: Some("gmail-primary".to_string()),
             source_ref: None,
         };
@@ -2281,6 +2768,8 @@ mod tests {
             provider: EmailProviderKind::Graph,
             account: None,
             mailbox: "Inbox".to_string(),
+            method: EmailPollHttpMethod::Get,
+            request_body: None,
             auth_profile: None,
             source_ref: None,
         };
@@ -2352,6 +2841,8 @@ mod tests {
             provider: EmailProviderKind::Jmap,
             account: Some("jmap-primary".to_string()),
             mailbox: "INBOX".to_string(),
+            method: EmailPollHttpMethod::Get,
+            request_body: None,
             auth_profile: None,
             source_ref: None,
         };

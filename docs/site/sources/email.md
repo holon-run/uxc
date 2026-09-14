@@ -104,11 +104,41 @@ return the provider's message-list JSON, so UXC can map it onto the same
 | --- | --- | --- |
 | Gmail | `https://gmail.googleapis.com/gmail/v1/users/me/messages` | `messages` array |
 | Microsoft Graph | `https://graph.microsoft.com/v1.0/me/messages?$expand=attachments` | `value` array |
-| JMAP | JMAP API endpoint returning `Email/get` results | `list` array |
+| JMAP | JMAP API endpoint returning `Email/get` results | `Email/get` list (POST envelope) or `list` array (GET gateway) |
 
 Microsoft Graph only returns attachment metadata when the endpoint includes
 `$expand=attachments`; see [Email Attachments](./email-attachments.md) for the
 partial-metadata semantics.
+
+#### POST-only JMAP endpoints
+
+Standard JMAP servers expose a single POST-only API URL and express requests
+as `methodCalls` envelopes. Pass `method=post` with a `body` argument holding
+the JMAP request document; UXC POSTs it each poll cycle and reads the
+`Email/get` response from the returned `methodResponses` envelope:
+
+```bash
+uxc source ensure agentinbox email:jmap https://jmap.example.com/jmap/api \
+  --transport email-provider-poll --mode poll --auth jmap-primary \
+  --input-json '{"provider":"jmap","mailbox":"INBOX","method":"POST","body":{
+    "using":["urn:ietf:params:jmap:core","urn:ietf:params:jmap:mail"],
+    "methodCalls":[
+      ["Email/query",{"accountId":null,"sort":[{"property":"receivedAt","isAscending":false}],"position":0,"limit":20},"q0"],
+      ["Email/get",{"#ids":{"resultOf":"q0","name":"Email/query","path":"/ids"},
+        "properties":["id","blobId","threadId","from","to","subject","preview","receivedAt","keywords","attachments"]},"g0"]
+    ]}}' \
+  --poll-config '{"interval_secs":60,"extract_items_pointer":"/items","checkpoint_strategy":{"type":"item_key","item_key_pointer":"/message/uid"},"initial_items_limit":0}'
+```
+
+Notes:
+
+- Each event's `accountId` resolves from the item itself, the `Email/get`
+  response envelope, or a top-level `accountId`/`accountIds[0]`, so events
+  carry a reliable `message_ref` (uid `accountId:emailId`) that
+  `uxc email body get` and attachment reads consume directly.
+- `initial_items_limit:0` baselines the item-key checkpoint without replaying
+  historical mail; raise it to backfill on first run.
+- GET gateways that return `list`/`items` directly keep working unchanged.
 
 ### Microsoft Graph with Personal Accounts
 
