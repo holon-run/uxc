@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-15
+
+### Added
+- Email: `email-provider-poll` sources can now use `method=POST` with a custom `body`, enabling standard POST-only JMAP services; JMAP account IDs are resolved from poll envelopes with a top-level fallback (#467, #468).
+
 ## [0.21.1] - 2026-09-11
 
 ### Documentation
