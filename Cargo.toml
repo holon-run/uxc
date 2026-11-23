@@ -78,19 +78,17 @@ openapiv3 = "1.0"
 graphql_client = "0.13"
 
 # gRPC Support
-tonic = "0.10"
-prost = "0.12"
-tonic-reflection = "0.10"
-tower = "0.4"
-http = "0.2"
-http-body = "0.4"
-hyper = "0.14"
-prost-types = "0.12"
+tonic = "0.14"
+prost = "0.14"
+tonic-reflection = { version = "0.14", default-features = false, features = ["server"] }
+tonic-prost = { version = "0.14", optional = true }
+prost-types = "0.14"
 
 # MCP Support (placeholder - adjust as needed)
 # mcp-sdk = "0.1"
 
 [dev-dependencies]
+hyper = { version = "0.14", features = ["http1", "server", "stream", "tcp"] }
 tokio-test = "0.4"
 mockito = "1.2"
 # tempfile 3.10 has issues with this project's pinned getrandom 0.2, use older version
@@ -131,7 +129,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-test-server = ["axum"]
+test-server = ["axum", "tonic-prost"]
 
 
 [profile.release]

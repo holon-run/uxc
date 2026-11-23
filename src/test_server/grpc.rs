@@ -70,7 +70,7 @@ pub async fn run(scenario: Scenario) -> Result<ServerHandle> {
     } else {
         let reflection = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(addsvc::FILE_DESCRIPTOR_SET)
-            .build()?;
+            .build_v1alpha()?;
         server.add_service(reflection)
     };
 
