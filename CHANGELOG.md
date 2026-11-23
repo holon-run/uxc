@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-23
+
+### Added
+- Rust applications can use `uxc::mcp` in process over stdio or Streamable HTTP to discover capabilities, list and call tools, and read or poll Events without the UXC CLI or daemon. Applications own event scheduling and checkpoints (#471, #476).
+- MCP endpoints that advertise the SEP-3415 Events extension expose `events/list` and `events/poll` in the CLI, including opaque cursors and server-reported replay gaps (#472).
+- Managed polling sources can opt into bounded page-index pagination and report possible gaps in source status and logs. A failed page leaves the checkpoint unchanged so the next round can retry (#469, #475).
+
+### Fixed
+- Upgraded the gRPC transport to tonic 0.14 and removed h2 0.3 and its audit exception while preserving `v1alpha` reflection (#438, #474).
+- Updated Cargo dependencies to address audit findings (#473).
+
 ## [0.22.0] - 2026-09-15
 
 ### Added
@@ -554,7 +565,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.15.8...HEAD
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/holon-run/uxc/compare/v0.22.0...v0.23.0
 [0.15.8]: https://github.com/holon-run/uxc/releases/tag/v0.15.8
 [0.15.7]: https://github.com/holon-run/uxc/releases/tag/v0.15.7
 [0.15.6]: https://github.com/holon-run/uxc/releases/tag/v0.15.6
