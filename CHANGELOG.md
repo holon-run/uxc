@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.23.0] - 2026-11-23
+## [0.23.1] - 2026-11-23
+
+This is the first published release in the 0.23 series. The 0.23.0 tag was retained, but its release workflow did not publish artifacts or packages.
 
 ### Added
 - Rust applications can use `uxc::mcp` in process over stdio or Streamable HTTP to discover capabilities, list and call tools, and read or poll Events without the UXC CLI or daemon. Applications own event scheduling and checkpoints (#471, #476).
@@ -15,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Managed polling sources can opt into bounded page-index pagination and report possible gaps in source status and logs. A failed page leaves the checkpoint unchanged so the next round can retry (#469, #475).
 
 ### Fixed
+- Build macOS release archives on `macos-15` after retirement of the `macos-14` runner (#479).
 - Upgraded the gRPC transport to tonic 0.14 and removed h2 0.3 and its audit exception while preserving `v1alpha` reflection (#438, #474).
 - Updated Cargo dependencies to address audit findings (#473).
 
