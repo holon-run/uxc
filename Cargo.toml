@@ -29,7 +29,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 json5 = "0.4"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 
 # Base64 encoding for basic auth
 base64 = "0.21"
@@ -38,7 +38,7 @@ html2text = "0.12"
 ed25519-dalek = { version = "2.1", features = ["pkcs8", "pem"] }
 hmac = "0.12"
 jsonwebtoken = "9"
-p256 = { version = "0.13", features = ["pem", "pkcs8"] }
+p256 = { version = "0.14", features = ["pem", "pkcs8"] }
 percent-encoding = "2.3"
 sha2 = "0.10"
 
