@@ -28,6 +28,24 @@ pub use transport::StdioSpawnOptions;
 pub const MCP_CAPABILITIES_ARG: &str = "__uxc_mcp_capabilities";
 pub const MCP_CONTINUATION_ARG: &str = "__uxc_mcp_continuation";
 
+// Internal markers preserve the information the embedded API needs without
+// parsing adapter diagnostics or exposing their contents to callers.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TransportFailure {
+    #[error("MCP authentication failed")]
+    Authentication,
+    #[error("MCP stdio request timed out after {0}ms: {1}")]
+    StdioTimeout(u128, String),
+    #[error("{0}")]
+    StdioDisconnected(String),
+    #[error("MCP HTTP status {0}")]
+    HttpStatus(reqwest::StatusCode),
+    #[error("MCP session expired")]
+    SessionExpired,
+    #[error("MCP JSON-RPC error {0}")]
+    Rpc(i64),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct McpExecutionOptions {
     pub capabilities: Option<Value>,

@@ -1,8 +1,8 @@
 //! MCP stdio client implementation
 
 use super::transport::{
-    DefaultStdioProcessExecutor, McpStdioTransport, StdioLongLivedRequest, StdioProcessExecutor,
-    StdioSpawnOptions,
+    DefaultStdioProcessExecutor, LiteralStdioProcessExecutor, McpStdioTransport,
+    StdioLongLivedRequest, StdioProcessExecutor, StdioSpawnOptions,
 };
 use super::types::*;
 use super::McpExecutionOptions;
@@ -68,6 +68,24 @@ impl McpStdioClient {
             args,
             options,
             Arc::new(DefaultStdioProcessExecutor),
+            timeout,
+        )
+        .await
+    }
+
+    // Used by the library's `mcp` module; the binary crate compiles its own copy.
+    #[allow(dead_code)]
+    pub(crate) async fn connect_embedded(
+        program: &str,
+        args: &[String],
+        options: StdioSpawnOptions,
+        timeout: Duration,
+    ) -> Result<Self> {
+        Self::connect_with_executor(
+            program,
+            args,
+            options,
+            Arc::new(LiteralStdioProcessExecutor),
             timeout,
         )
         .await
@@ -226,7 +244,7 @@ impl McpStdioClient {
         &self.protocol_context.version
     }
 
-    pub(super) fn server_capabilities(&self) -> Option<&ServerCapabilities> {
+    pub(crate) fn server_capabilities(&self) -> Option<&ServerCapabilities> {
         self.server_capabilities.as_ref()
     }
 

@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use super::types::*;
-use super::McpExecutionOptions;
+use super::{McpExecutionOptions, TransportFailure};
 use crate::auth::{self, oauth, AuthType, Profile, Profiles};
 use crate::error::UxcError;
 use crate::error::{
@@ -104,6 +104,7 @@ pub struct McpHttpTransport {
     session_id: Arc<Mutex<Option<String>>>,
     /// Negotiated MCP protocol context.
     protocol_context: Box<McpProtocolContext>,
+    embedded: bool,
     /// Validated custom HTTP header mappings keyed by tool name.
     tool_headers: Arc<Mutex<HashMap<String, Vec<ToolHeaderMapping>>>>,
     /// Whether the tool catalog has been loaded for custom header mappings.
@@ -256,6 +257,7 @@ impl McpHttpTransport {
                 },
                 server_info: None,
             }),
+            embedded: false,
             tool_headers: Arc::new(Mutex::new(HashMap::new())),
             tool_catalog_loaded: Arc::new(Mutex::new(false)),
             auth_profile: Arc::new(Mutex::new(auth_profile)),
@@ -265,6 +267,73 @@ impl McpHttpTransport {
             event_stream_error: Arc::new(Mutex::new(None)),
             subscription_id: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub(crate) fn embedded(
+        url: String,
+        profile: Option<Profile>,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let mut transport =
+            Self::with_auth_timeout_and_era(url, profile, timeout, McpProtocolEra::Modern)?;
+        transport.client = Client::builder()
+            .timeout(timeout)
+            .user_agent(concat!("uxc/", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .build()?;
+        transport.embedded = true;
+        Ok(transport)
+    }
+
+    pub(crate) async fn initialize_embedded(&mut self) -> Result<InitializeResult> {
+        // Keep the successful handshake instead of allocating a second session.
+        match self.initialize().await {
+            Ok(result) => return Ok(result),
+            Err(err) => match err.downcast_ref::<TransportFailure>() {
+                Some(TransportFailure::Rpc(-32601)) => {}
+                Some(TransportFailure::HttpStatus(status))
+                    if matches!(status.as_u16(), 400 | 404 | 405 | 406 | 415 | 501) => {}
+                _ => return Err(err),
+            },
+        }
+        self.protocol_context.era = McpProtocolEra::Legacy;
+        self.protocol_context.version = MCP_PROTOCOL_VERSION.into();
+        let result = self.initialize().await?;
+        if !matches!(
+            result.protocolVersion.as_str(),
+            "2024-11-05" | "2025-03-26" | "2025-06-18" | "2025-11-25"
+        ) {
+            bail!("Unsupported MCP protocol version");
+        }
+        self.protocol_context
+            .version
+            .clone_from(&result.protocolVersion);
+        self.initialized().await?;
+        Ok(result)
+    }
+
+    pub(crate) async fn close_embedded(&self) -> Result<()> {
+        let Some(session) = self.session_id.lock().await.take() else {
+            return Ok(());
+        };
+        self.maybe_refresh_auth_token().await?;
+        let profile = self.auth_profile.lock().await.clone();
+        let resolved = self.request_auth("DELETE", profile.as_ref())?;
+        let req = self
+            .client
+            .delete(&resolved.url)
+            .header("Mcp-Session-Id", session)
+            .header("MCP-Protocol-Version", &self.protocol_context.version);
+        let status = Self::apply_resolved_request_auth(req, &resolved)
+            .send()
+            .await?
+            .status();
+        if status.is_success() || matches!(status.as_u16(), 404 | 405) {
+            Ok(()) // Already gone, or server opts out of client termination.
+        } else {
+            Err(TransportFailure::HttpStatus(status).into())
+        }
     }
 
     /// Send a request and wait for response
@@ -315,18 +384,21 @@ impl McpHttpTransport {
             id: RequestId::Number(id),
         };
 
-        tracing::debug!(
-            "Sending MCP HTTP request: {} to {}",
-            method,
-            self.server_url
-        );
+        if !self.embedded {
+            tracing::debug!(
+                "Sending MCP HTTP request: {} to {}",
+                method,
+                self.server_url
+            );
+        }
 
         let mut response = self
             .send_jsonrpc_request(&request, custom_headers)
             .await
             .context("Failed to send HTTP request to MCP server")?;
 
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+        if !self.embedded
+            && response.status() == reqwest::StatusCode::UNAUTHORIZED
             && self.is_refreshable_profile().await
         {
             self.force_refresh_auth_token().await?;
@@ -337,7 +409,17 @@ impl McpHttpTransport {
         }
 
         let status = response.status();
-        if self.protocol_context.era == McpProtocolEra::Legacy {
+        if self.embedded {
+            if matches!(status.as_u16(), 401 | 403) {
+                return Err(TransportFailure::Authentication.into());
+            }
+            if status == reqwest::StatusCode::NOT_FOUND && self.session_id.lock().await.is_some() {
+                return Err(TransportFailure::SessionExpired.into());
+            }
+        }
+        if self.protocol_context.era == McpProtocolEra::Legacy
+            && (!self.embedded || (method == "initialize" && status.is_success()))
+        {
             if let Some(session_id) = response
                 .headers()
                 .get("mcp-session-id")
@@ -357,9 +439,28 @@ impl McpHttpTransport {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let body = Self::read_response_body(&mut response, content_type.as_deref())
-            .await
-            .unwrap_or_else(|_| "Unable to read response body".to_string());
+        let body = Self::read_response_body(&mut response, content_type.as_deref()).await;
+        if self.embedded {
+            let body = body?;
+            let parsed = Self::parse_jsonrpc_response(content_type.as_deref(), &body);
+            if !status.is_success() && parsed.is_err() {
+                return Err(TransportFailure::HttpStatus(status).into());
+            }
+            let reply = parsed?;
+            if reply.jsonrpc != "2.0" || reply.id != request.id {
+                bail!("Invalid MCP JSON-RPC response envelope");
+            }
+            if let Some(error) = reply.error {
+                return Err(TransportFailure::Rpc(error.code).into());
+            }
+            if !status.is_success() {
+                return Err(TransportFailure::HttpStatus(status).into());
+            }
+            return reply
+                .result
+                .context("MCP server response missing result field");
+        }
+        let body = body.unwrap_or_else(|_| "Unable to read response body".to_string());
 
         // Check HTTP status
         if !status.is_success() {
@@ -410,7 +511,7 @@ impl McpHttpTransport {
         } else {
             None
         };
-        let resolved = Self::resolve_request_auth("POST", &self.server_url, profile.as_ref())?;
+        let resolved = self.request_auth("POST", profile.as_ref())?;
 
         let mut req = self
             .client
@@ -430,6 +531,8 @@ impl McpHttpTransport {
             for (name, value) in custom_headers {
                 req = req.header(name, value);
             }
+        } else if self.embedded && request.method != "initialize" {
+            req = req.header("MCP-Protocol-Version", &self.protocol_context.version);
         }
         req = Self::apply_resolved_request_auth(req, &resolved);
 
@@ -488,9 +591,12 @@ impl McpHttpTransport {
                 60,
                 Some(&self.server_url),
             )
-            .await?;
+            .await
+            .map_err(|err| self.auth_error(err))?;
             if refreshed {
-                persist_profile_update(active).await?;
+                persist_profile_update(active)
+                    .await
+                    .map_err(|err| self.auth_error(err))?;
                 *self.auth_profile.lock().await = Some(active.clone());
             }
         }
@@ -526,6 +632,23 @@ impl McpHttpTransport {
             }
         }
         profile.clone()
+    }
+
+    fn auth_error(&self, err: anyhow::Error) -> anyhow::Error {
+        if self.embedded {
+            TransportFailure::Authentication.into()
+        } else {
+            err
+        }
+    }
+
+    fn request_auth(
+        &self,
+        method: &str,
+        profile: Option<&Profile>,
+    ) -> Result<crate::auth::ResolvedRequestAuth> {
+        Self::resolve_request_auth(method, &self.server_url, profile)
+            .map_err(|err| self.auth_error(err))
     }
 
     fn resolve_request_auth(
@@ -1325,8 +1448,9 @@ impl McpHttpTransport {
                 instructions: discover.instructions,
             });
         }
-        tracing::info!("Initializing MCP HTTP session with {}", self.server_url);
-
+        if !self.embedded {
+            tracing::info!("Initializing MCP HTTP session with {}", self.server_url);
+        }
         let params = serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {
@@ -1363,11 +1487,13 @@ impl McpHttpTransport {
             params: None,
         };
 
-        tracing::debug!(
-            "Sending MCP HTTP notification: {} to {}",
-            notification.method,
-            self.server_url
-        );
+        if !self.embedded {
+            tracing::debug!(
+                "Sending MCP HTTP notification: {} to {}",
+                notification.method,
+                self.server_url
+            );
+        }
 
         let response = self
             .send_jsonrpc_notification(&notification)
@@ -1376,6 +1502,9 @@ impl McpHttpTransport {
 
         let status = response.status();
         if !status.is_success() {
+            if self.embedded {
+                return Err(TransportFailure::HttpStatus(status).into());
+            }
             let www_authenticate = response
                 .headers()
                 .get(reqwest::header::WWW_AUTHENTICATE)
@@ -1397,7 +1526,7 @@ impl McpHttpTransport {
     ) -> Result<reqwest::Response> {
         let profile = self.auth_profile.lock().await.clone();
         let session_id = self.session_id.lock().await.clone();
-        let resolved = Self::resolve_request_auth("POST", &self.server_url, profile.as_ref())?;
+        let resolved = self.request_auth("POST", profile.as_ref())?;
 
         let mut req = self
             .client
@@ -1409,6 +1538,9 @@ impl McpHttpTransport {
         }
         req = Self::apply_resolved_request_auth(req, &resolved);
 
+        if self.embedded {
+            req = req.header("MCP-Protocol-Version", &self.protocol_context.version);
+        }
         req.json(notification).send().await.map_err(Into::into)
     }
 
@@ -1535,7 +1667,7 @@ impl McpHttpTransport {
             == Some(-32020)
     }
 
-    async fn call_events(
+    pub(crate) async fn call_events(
         &self,
         method: super::events::EventMethod,
         params: JsonValue,

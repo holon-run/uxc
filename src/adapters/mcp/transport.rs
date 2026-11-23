@@ -96,33 +96,56 @@ impl StdioProcessExecutor for DefaultStdioProcessExecutor {
             );
         }
 
-        // Spawn the process
-        let mut command = Command::new(cmd);
-        command
-            .args(&full_args)
-            .envs(options.env_overrides.iter().cloned())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(cwd) = options.cwd.as_ref() {
-            command.current_dir(cwd);
-        }
-        let mut child = command
-            .spawn()
-            .context("Failed to spawn MCP server process")?;
-
-        // Get stdin and stdout handles
-        let stdin = child.stdin.take().context("Failed to get stdin handle")?;
-        let stdout = child.stdout.take().context("Failed to get stdout handle")?;
-        let stderr = child.stderr.take().context("Failed to get stderr handle")?;
-
-        Ok(SpawnedProcess {
-            child,
-            stdin,
-            stdout,
-            stderr,
-        })
+        spawn_program(cmd, &full_args, options)
     }
+}
+
+// Used by the library's embedded `mcp` module; the binary crate compiles its own copy.
+#[allow(dead_code)]
+pub(super) struct LiteralStdioProcessExecutor;
+
+#[async_trait]
+impl StdioProcessExecutor for LiteralStdioProcessExecutor {
+    async fn spawn(
+        &self,
+        program: &str,
+        args: &[String],
+        options: &StdioSpawnOptions,
+    ) -> Result<SpawnedProcess> {
+        spawn_program(program, args, options)
+    }
+}
+
+fn spawn_program(
+    cmd: &str,
+    args: &[String],
+    options: &StdioSpawnOptions,
+) -> Result<SpawnedProcess> {
+    let mut command = Command::new(cmd);
+    command
+        .args(args)
+        .envs(options.env_overrides.iter().cloned())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = options.cwd.as_ref() {
+        command.current_dir(cwd);
+    }
+    let mut child = command
+        .spawn()
+        .context("Failed to spawn MCP server process")?;
+
+    // Get stdin and stdout handles
+    let stdin = child.stdin.take().context("Failed to get stdin handle")?;
+    let stdout = child.stdout.take().context("Failed to get stdout handle")?;
+    let stderr = child.stderr.take().context("Failed to get stderr handle")?;
+
+    Ok(SpawnedProcess {
+        child,
+        stdin,
+        stdout,
+        stderr,
+    })
 }
 
 /// Mock executor for testing (must be public for use in other test modules)
@@ -533,7 +556,10 @@ impl McpStdioTransport {
         } {
             StdioRequestOutcome::Response(Ok(response)) => response,
             StdioRequestOutcome::Response(Err(_)) => {
-                return Err(anyhow!("Response channel closed"))
+                return Err(super::TransportFailure::StdioDisconnected(
+                    "Response channel closed".into(),
+                )
+                .into())
             }
             StdioRequestOutcome::ChildExited(Ok(status)) => {
                 match self
@@ -544,30 +570,30 @@ impl McpStdioTransport {
                     None => {
                         let mut channels = self.response_channels.lock().await;
                         channels.remove(&id);
-                        return Err(anyhow!(
-                            "{}",
-                            self.child_exit_error(method, status.code()).await
-                        ));
+                        return Err(super::TransportFailure::StdioDisconnected(
+                            self.child_exit_error(method, status.code()).await,
+                        )
+                        .into());
                     }
                 }
             }
             StdioRequestOutcome::ChildExited(Err(err)) => {
                 let mut channels = self.response_channels.lock().await;
                 channels.remove(&id);
-                return Err(anyhow!(
+                return Err(super::TransportFailure::StdioDisconnected(format!(
                     "Failed waiting for MCP stdio child process while handling {}: {}",
-                    method,
-                    err
-                ));
+                    method, err
+                ))
+                .into());
             }
             StdioRequestOutcome::TimedOut => {
                 let mut channels = self.response_channels.lock().await;
                 channels.remove(&id);
-                return Err(anyhow!(
-                    "MCP stdio request timed out after {}ms: {}",
+                return Err(super::TransportFailure::StdioTimeout(
                     timeout.as_millis(),
-                    method
-                ));
+                    method.into(),
+                )
+                .into());
             }
         };
 
@@ -593,11 +619,9 @@ impl McpStdioTransport {
         };
         let request_json = serde_json::to_string(&request)?;
         tracing::debug!("Sending request: {}", request_json);
-        let request_tx = self
-            .request_tx
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| anyhow!("Request channel closed"))?;
+        let request_tx = self.request_tx.as_ref().cloned().ok_or_else(|| {
+            super::TransportFailure::StdioDisconnected("Request channel closed".into())
+        })?;
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         self.response_channels
             .lock()
@@ -611,7 +635,10 @@ impl McpStdioTransport {
             .is_err()
         {
             self.response_channels.lock().await.remove(&id);
-            return Err(anyhow!("Request channel closed"));
+            return Err(super::TransportFailure::StdioDisconnected(
+                "Request channel closed".into(),
+            )
+            .into());
         }
         Ok(StdioLongLivedRequest {
             request_id: id,

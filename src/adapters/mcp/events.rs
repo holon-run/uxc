@@ -76,7 +76,7 @@ impl EventMethod {
         }
     }
 
-    pub(super) fn params(self, args: HashMap<String, Value>) -> Result<Value> {
+    pub(crate) fn params(self, args: HashMap<String, Value>) -> Result<Value> {
         let invalid = |message: &str| UxcError::InvalidArguments(message.to_string());
         for (key, value) in &args {
             let valid = match (self, key.as_str()) {
@@ -160,6 +160,6 @@ impl EventMethod {
     }
 }
 
-pub(super) fn client_capabilities() -> Value {
+pub(crate) fn client_capabilities() -> Value {
     json!({"extensions": { (EXTENSION): {} }})
 }
