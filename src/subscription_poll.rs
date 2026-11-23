@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+const MAX_INDEX_POLL_PAGES: usize = 20;
+const DEFAULT_SEEN_WINDOW: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PollSubscriptionConfig {
@@ -27,7 +30,26 @@ pub struct PollSubscriptionConfig {
     /// content_hash checkpoint strategy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_items_limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_pagination: Option<PollIndexPaginationConfig>,
     pub checkpoint_strategy: PollCheckpointStrategy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PollIndexPaginationConfig {
+    pub page_size_arg: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_arg: Option<String>,
+    pub max_pages: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PollPossibleGapReason {
+    SinglePageFull,
+    PageBudgetExhausted,
+    FeedTailWithoutOverlap,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,10 +96,16 @@ pub struct PollCheckpointState {
     pub etag_set_at_unix: Option<u64>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub consecutive_304_count: u32,
-    /// Set once the first-look backfill policy (`initial_items_limit`) has
-    /// been applied, so an empty first page does not re-trigger the baseline.
+    /// Set once an initial-items or index-pagination baseline has completed,
+    /// so an empty first page does not re-trigger the baseline.
     #[serde(default, skip_serializing_if = "is_false")]
     pub baseline_done: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub possible_gap_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_possible_gap_reason: Option<PollPossibleGapReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_possible_gap_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +131,24 @@ pub struct PollCycleOutput {
 pub struct PollSubscriptionRunner {
     config: PollSubscriptionConfig,
     checkpoint: PollCheckpointState,
+}
+
+/// In-memory state for a single attempt; dropping it has no checkpoint effects.
+pub(crate) struct IndexPollRound<'a> {
+    pagination: &'a PollIndexPaginationConfig,
+    items_pointer: &'a str,
+    item_key_pointer: &'a str,
+    seen_window: usize,
+    page_size: usize,
+    start: &'a PollCheckpointState,
+    start_keys: HashSet<&'a str>,
+    first_look: bool,
+    initial_items_limit: Option<usize>,
+    keys: HashSet<String>,
+    new_items: Vec<Value>,
+    new_keys_in_order: Vec<String>,
+    pages_fetched: usize,
+    gap_reason: Option<PollPossibleGapReason>,
 }
 
 impl PollSubscriptionConfig {
@@ -180,7 +226,165 @@ impl PollSubscriptionConfig {
             PollCheckpointStrategy::ContentHash { .. } => {}
         }
 
+        if let Some(pagination) = &self.index_pagination {
+            if !matches!(
+                self.checkpoint_strategy,
+                PollCheckpointStrategy::ItemKey { .. }
+            ) {
+                bail!("poll index_pagination requires item_key checkpoint strategy");
+            }
+            if self.request_cursor_arg.is_some()
+                || self.response_cursor_pointer.is_some()
+                || self.cursor_from_item_pointer.is_some()
+                || self.cursor_transform.is_some()
+            {
+                bail!("poll index_pagination cannot be combined with cursor settings");
+            }
+            if self.missing_extract_items_pointer_as_empty {
+                bail!("poll index_pagination requires an explicit items array on every page");
+            }
+            let valid_arg = |arg: &str| !arg.is_empty() && arg.trim() == arg;
+            if !valid_arg(&pagination.page_size_arg) {
+                bail!("poll index_pagination needs a nonempty page_size_arg without surrounding whitespace");
+            }
+            if let Some(page_arg) = pagination.page_arg.as_deref() {
+                if !valid_arg(page_arg) || page_arg == pagination.page_size_arg {
+                    bail!("poll index_pagination page_arg must be nonempty, without surrounding whitespace, and different from page_size_arg");
+                }
+            } else if pagination.max_pages != 1 {
+                bail!("poll index_pagination without page_arg requires max_pages = 1");
+            }
+            if !(1..=MAX_INDEX_POLL_PAGES).contains(&pagination.max_pages) {
+                bail!("poll index_pagination max_pages must be in 1..={MAX_INDEX_POLL_PAGES}");
+            }
+        }
         Ok(())
+    }
+
+    pub(crate) fn validate_request_args(&self, args: &HashMap<String, Value>) -> Result<()> {
+        let Some(pagination) = &self.index_pagination else {
+            return Ok(());
+        };
+        let page_size = pagination.page_size(args)?;
+        if let Some(page_arg) = pagination.page_arg.as_deref() {
+            if args.contains_key(page_arg) {
+                bail!("poll index_pagination manages page_arg '{page_arg}'; remove it from source arguments");
+            }
+            let max_items = page_size.checked_mul(pagination.max_pages);
+            if !max_items.is_some_and(|max_items| max_items <= self.index_seen_window()) {
+                bail!("poll index_pagination requires seen_window >= page_size * max_pages");
+            }
+        }
+        Ok(())
+    }
+
+    fn index_seen_window(&self) -> usize {
+        match self.checkpoint_strategy {
+            PollCheckpointStrategy::ItemKey { seen_window, .. } => {
+                seen_window.unwrap_or(DEFAULT_SEEN_WINDOW)
+            }
+            _ => unreachable!("index_pagination requires the item_key strategy"),
+        }
+    }
+}
+
+impl PollIndexPaginationConfig {
+    fn page_size(&self, args: &HashMap<String, Value>) -> Result<usize> {
+        args.get(&self.page_size_arg)
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                anyhow!(
+                    "poll index_pagination page_size_arg '{}' must be a positive integer in source arguments",
+                    self.page_size_arg
+                )
+            })
+    }
+}
+
+impl IndexPollRound<'_> {
+    pub(crate) fn request_args(
+        &self,
+        base_args: &HashMap<String, Value>,
+    ) -> HashMap<String, Value> {
+        let mut args = base_args.clone();
+        if let Some(page_arg) = &self.pagination.page_arg {
+            args.insert(page_arg.clone(), json!(self.pages_fetched + 1));
+        }
+        args
+    }
+
+    /// Returns true if another page is necessary. A duplicate read earlier
+    /// in this attempt is not an anchor; scan the whole page either way.
+    pub(crate) fn accept_page(&mut self, response: Value) -> Result<bool> {
+        let items = response
+            .pointer(self.items_pointer)
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                anyhow!(
+                    "poll extract_items_pointer '{}' must resolve to an array",
+                    self.items_pointer
+                )
+            })?;
+        if items.len() > self.page_size {
+            bail!(
+                "poll received more items than the configured page size {}",
+                self.page_size
+            );
+        }
+        self.pages_fetched += 1;
+        let mut overlap = false;
+        for item in items {
+            let key = item_key(item, self.item_key_pointer)?;
+            if self.start_keys.contains(key.as_str()) {
+                overlap = true;
+            } else if self.keys.insert(key.clone()) {
+                self.new_keys_in_order.push(key);
+                self.new_items.push(item.clone());
+            }
+        }
+
+        let short = items.len() < self.page_size;
+        self.gap_reason = match (self.first_look, overlap, short, self.pages_fetched) {
+            (true, _, _, _) | (_, true, _, _) | (_, _, true, 1) => return Ok(false),
+            (_, _, true, _) => Some(PollPossibleGapReason::FeedTailWithoutOverlap),
+            (_, _, false, _) if self.pagination.page_arg.is_none() => {
+                Some(PollPossibleGapReason::SinglePageFull)
+            }
+            (_, _, false, n) if n == self.pagination.max_pages => {
+                Some(PollPossibleGapReason::PageBudgetExhausted)
+            }
+            _ => return Ok(true),
+        };
+        Ok(false)
+    }
+
+    pub(crate) fn finish(
+        mut self,
+        now_unix: u64,
+    ) -> (
+        Vec<Value>,
+        PollCheckpointState,
+        Option<PollPossibleGapReason>,
+    ) {
+        let mut checkpoint = self.start.clone();
+        // Keep the newest keys longest without reversing the emitted order.
+        for key in self.new_keys_in_order.into_iter().rev() {
+            push_seen_key(&mut checkpoint.seen_keys, key, self.seen_window);
+        }
+        if self.first_look {
+            if let Some(limit) = self.initial_items_limit {
+                self.new_items.truncate(limit);
+            }
+        }
+        checkpoint.baseline_done = true;
+        if let Some(reason) = self.gap_reason {
+            checkpoint.possible_gap_count = checkpoint.possible_gap_count.saturating_add(1);
+            checkpoint.last_possible_gap_reason = Some(reason);
+            checkpoint.last_possible_gap_at_unix = Some(now_unix);
+        }
+        (self.new_items, checkpoint, self.gap_reason)
     }
 }
 
@@ -199,6 +403,43 @@ impl PollSubscriptionRunner {
 
     pub fn restore_checkpoint(&mut self, checkpoint: PollCheckpointState) {
         self.checkpoint = checkpoint;
+    }
+
+    pub(crate) fn start_index_round(
+        &self,
+        args: &HashMap<String, Value>,
+        has_checkpoint: bool,
+    ) -> Result<Option<IndexPollRound<'_>>> {
+        let Some(pagination) = &self.config.index_pagination else {
+            return Ok(None);
+        };
+        let PollCheckpointStrategy::ItemKey {
+            item_key_pointer, ..
+        } = &self.config.checkpoint_strategy
+        else {
+            unreachable!("index_pagination requires the item_key strategy");
+        };
+        Ok(Some(IndexPollRound {
+            pagination,
+            items_pointer: &self.config.extract_items_pointer,
+            item_key_pointer,
+            seen_window: self.config.index_seen_window(),
+            page_size: pagination.page_size(args)?,
+            start: &self.checkpoint,
+            start_keys: self
+                .checkpoint
+                .seen_keys
+                .iter()
+                .map(String::as_str)
+                .collect(),
+            first_look: !has_checkpoint,
+            initial_items_limit: self.config.initial_items_limit,
+            keys: HashSet::new(),
+            new_items: Vec::new(),
+            new_keys_in_order: Vec::new(),
+            pages_fetched: 0,
+            gap_reason: None,
+        }))
     }
 
     pub fn build_request_args(&self, base_args: &HashMap<String, Value>) -> HashMap<String, Value> {
@@ -248,7 +489,7 @@ impl PollSubscriptionRunner {
             } => self.filter_by_item_key(
                 items,
                 &item_key_pointer,
-                seen_window.unwrap_or(1024),
+                seen_window.unwrap_or(DEFAULT_SEEN_WINDOW),
                 baseline_limit,
             )?,
             PollCheckpointStrategy::Watermark {
@@ -325,9 +566,7 @@ impl PollSubscriptionRunner {
     ) -> Result<Vec<Value>> {
         let mut emitted = Vec::new();
         for item in items {
-            let key = canonical_key(pointer_required(item, pointer).with_context(|| {
-                format!("poll item_key_pointer '{}' did not resolve", pointer)
-            })?)?;
+            let key = item_key(item, pointer)?;
             if self.checkpoint.seen_keys.contains(&key) {
                 continue;
             }
@@ -507,6 +746,13 @@ fn increment_cursor_value(value: Value) -> Result<Value> {
     }
 }
 
+fn item_key(item: &Value, pointer: &str) -> Result<String> {
+    canonical_key(
+        pointer_required(item, pointer)
+            .with_context(|| format!("poll item_key_pointer '{pointer}' did not resolve"))?,
+    )
+}
+
 fn push_seen_key(buffer: &mut VecDeque<String>, key: String, seen_window: usize) {
     buffer.push_back(key);
     while buffer.len() > seen_window {
@@ -637,6 +883,10 @@ fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 fn is_false(v: &bool) -> bool {
     !*v
 }
@@ -670,11 +920,154 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/id".to_string(),
                 seen_window: Some(4),
             },
         }
+    }
+
+    fn index_config() -> PollSubscriptionConfig {
+        let mut config = item_key_config();
+        config.checkpoint_strategy = PollCheckpointStrategy::ItemKey {
+            item_key_pointer: "/id".into(),
+            seen_window: None,
+        };
+        config.index_pagination = Some(PollIndexPaginationConfig {
+            page_size_arg: "per_page".into(),
+            page_arg: Some("page".into()),
+            max_pages: 3,
+        });
+        config
+    }
+
+    #[test]
+    fn index_pagination_validates_configuration_and_source_arguments() {
+        let config = index_config();
+        assert!(config.validate().is_ok());
+        let args = |value| HashMap::from([("per_page".into(), value)]);
+        assert!(config.validate_request_args(&args(json!(10))).is_ok());
+        for value in [json!(0), json!(-1), json!("10"), json!(2.5), Value::Null] {
+            assert!(config.validate_request_args(&args(value)).is_err());
+        }
+        assert!(config.validate_request_args(&HashMap::new()).is_err());
+        assert!(config
+            .validate_request_args(&args(json!(u64::MAX)))
+            .is_err());
+        assert!(config.validate_request_args(&args(json!(342))).is_err());
+        let mut conflicting_args = args(json!(10));
+        conflicting_args.insert("page".into(), json!(1));
+        assert!(config.validate_request_args(&conflicting_args).is_err());
+
+        for (size_arg, page_arg, max_pages) in [
+            ("", Some("page"), 3),
+            ("per_page", Some("per_page"), 3),
+            ("per_page", Some(" "), 3),
+            ("per_page", Some("page"), 0),
+            ("per_page", Some("page"), MAX_INDEX_POLL_PAGES + 1),
+            ("per_page", None, 2),
+        ] {
+            let mut config = config.clone();
+            config.index_pagination = Some(PollIndexPaginationConfig {
+                page_size_arg: size_arg.into(),
+                page_arg: page_arg.map(str::to_owned),
+                max_pages,
+            });
+            assert!(config.validate().is_err());
+        }
+        let mut cursor = config.clone();
+        cursor.request_cursor_arg = Some("cursor".into());
+        assert!(cursor.validate().is_err());
+        cursor.request_cursor_arg = None;
+        cursor.response_cursor_pointer = Some("/cursor".into());
+        assert!(cursor.validate().is_err());
+        let mut non_key = config;
+        non_key.checkpoint_strategy = PollCheckpointStrategy::ContentHash { seen_window: None };
+        assert!(non_key.validate().is_err());
+    }
+
+    #[test]
+    fn index_pagination_scans_whole_pages_and_only_stops_on_previous_round_keys() {
+        let mut config = index_config();
+        config.initial_items_limit = Some(0);
+        let mut runner = PollSubscriptionRunner::new(config).unwrap();
+        let args = HashMap::from([("per_page".into(), json!(2))]);
+        let mut first = runner.start_index_round(&args, false).unwrap().unwrap();
+        assert!(!first
+            .accept_page(json!({"items":[{"id":5},{"id":4}]}))
+            .unwrap());
+        let (items, checkpoint, gap) = first.finish(1);
+        assert!(items.is_empty());
+        assert_eq!(checkpoint.seen_keys.len(), 2);
+        assert_eq!(gap, None);
+        runner.restore_checkpoint(checkpoint);
+
+        let mut round = runner.start_index_round(&args, true).unwrap().unwrap();
+        assert_eq!(round.request_args(&args)["page"], 1);
+        assert!(round
+            .accept_page(json!({"items":[{"id":10},{"id":9}]}))
+            .unwrap());
+        assert_eq!(round.request_args(&args)["page"], 2);
+        assert!(round
+            .accept_page(json!({"items":[{"id":9},{"id":8}]}))
+            .unwrap());
+        assert!(!round
+            .accept_page(json!({"items":[{"id":5},{"id":7}]}))
+            .unwrap());
+        let (items, checkpoint, gap) = round.finish(2);
+        assert_eq!(
+            items,
+            json!([{"id":10},{"id":9},{"id":8},{"id":7}])
+                .as_array()
+                .unwrap()
+                .to_vec()
+        );
+        assert_eq!(gap, None);
+        assert_eq!(checkpoint.possible_gap_count, 0);
+    }
+
+    #[test]
+    fn index_pagination_distinguishes_short_homepage_tail_and_single_page_gap() {
+        let mut config = index_config();
+        let args = HashMap::from([("per_page".into(), json!(2))]);
+        let mut runner = PollSubscriptionRunner::new(config.clone()).unwrap();
+        let old: PollCheckpointState =
+            serde_json::from_value(json!({"seen_keys":["1"],"etag":"old"})).unwrap();
+        assert_eq!(old.possible_gap_count, 0);
+        assert_eq!(old.last_possible_gap_reason, None);
+        assert_eq!(old.last_possible_gap_at_unix, None);
+        runner.restore_checkpoint(old.clone());
+
+        let mut short = runner.start_index_round(&args, true).unwrap().unwrap();
+        assert!(!short.accept_page(json!({"items":[{"id":9}]})).unwrap());
+        assert_eq!(short.finish(1).2, None);
+        for tail in [json!([]), json!([{"id":7}])] {
+            let mut round = runner.start_index_round(&args, true).unwrap().unwrap();
+            assert!(round
+                .accept_page(json!({"items":[{"id":9},{"id":8}]}))
+                .unwrap());
+            assert!(!round.accept_page(json!({"items":tail})).unwrap());
+            let (_, checkpoint, gap) = round.finish(2);
+            assert_eq!(gap, Some(PollPossibleGapReason::FeedTailWithoutOverlap));
+            assert_eq!(checkpoint.possible_gap_count, 1);
+            assert_eq!(checkpoint.last_possible_gap_at_unix, Some(2));
+        }
+
+        let pagination = config.index_pagination.as_mut().unwrap();
+        pagination.page_arg = None;
+        pagination.max_pages = 1;
+        let mut runner = PollSubscriptionRunner::new(config).unwrap();
+        runner.restore_checkpoint(old);
+        let mut round = runner.start_index_round(&args, true).unwrap().unwrap();
+        assert_eq!(round.request_args(&args), args);
+        assert!(!round
+            .accept_page(json!({"items":[{"id":9},{"id":8}]}))
+            .unwrap());
+        assert_eq!(
+            round.finish(3).2,
+            Some(PollPossibleGapReason::SinglePageFull)
+        );
     }
 
     #[test]
@@ -688,6 +1081,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         }
         .validate()
@@ -767,6 +1161,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: Some(1),
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::Watermark {
                 item_watermark_pointer: "/ts".to_string(),
                 item_tiebreaker_pointer: None,
@@ -796,6 +1191,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: Some(5),
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         }
         .validate()
@@ -815,6 +1211,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::Watermark {
                 item_watermark_pointer: "/updated_at".to_string(),
                 item_tiebreaker_pointer: Some("/id".to_string()),
@@ -864,6 +1261,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::ContentHash {
                 seen_window: Some(4),
             },
@@ -887,6 +1285,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         })
         .unwrap();
@@ -909,6 +1308,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::Watermark {
                 item_watermark_pointer: "/updated_at".to_string(),
                 item_tiebreaker_pointer: Some("/id".to_string()),
@@ -948,6 +1348,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: Some(PollCursorTransform::Increment),
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/id".to_string(),
                 seen_window: Some(4),
@@ -972,6 +1373,7 @@ mod tests {
             cursor_from_item_pointer: Some("/update_id".to_string()),
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         }
         .validate()
@@ -991,6 +1393,7 @@ mod tests {
             cursor_from_item_pointer: Some("/update_id".to_string()),
             cursor_transform: Some(PollCursorTransform::Increment),
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/update_id".to_string(),
                 seen_window: Some(8),
@@ -1023,6 +1426,7 @@ mod tests {
             cursor_from_item_pointer: Some("/update_id".to_string()),
             cursor_transform: Some(PollCursorTransform::Increment),
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/update_id".to_string(),
                 seen_window: Some(8),
@@ -1057,6 +1461,7 @@ mod tests {
             cursor_from_item_pointer: Some("/update_id".to_string()),
             cursor_transform: Some(PollCursorTransform::Increment),
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/update_id".to_string(),
                 seen_window: Some(8),
@@ -1097,6 +1502,7 @@ mod tests {
             cursor_from_item_pointer: Some("/update_id".to_string()),
             cursor_transform: Some(PollCursorTransform::Increment),
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/update_id".to_string(),
                 seen_window: Some(8),
@@ -1122,6 +1528,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         })
         .unwrap();
@@ -1146,6 +1553,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::CursorOnly,
         })
         .unwrap();
@@ -1170,6 +1578,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::ItemKey {
                 item_key_pointer: "/id".to_string(),
                 seen_window: Some(8),
@@ -1202,6 +1611,7 @@ mod tests {
             cursor_from_item_pointer: None,
             cursor_transform: None,
             initial_items_limit: None,
+            index_pagination: None,
             checkpoint_strategy: PollCheckpointStrategy::ContentHash {
                 seen_window: Some(8),
             },

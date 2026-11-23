@@ -8,6 +8,7 @@ and scripts consume one stable shape per system.
 
 - [Email](./email.md) — IMAP IDLE and Gmail, Microsoft Graph, and JMAP provider polling, plus SMTP send and reply
 - [Email Attachments](./email-attachments.md) — provider-neutral attachment metadata and lazy downloads
+- [Managed poll pagination](./managed-poll-pagination.md) — bounded page-number polling and possible-gap warnings
 
 <!-- INDEX:START -->
 
@@ -17,6 +18,10 @@ and scripts consume one stable shape per system.
 
 - [Email Attachments](./email-attachments.md)
   `email_event` messages expose provider-neutral attachment metadata plus an opaque retrieval handle. Events never inline attachment bytes; use `uxc email attachment get` to download content on demand.
+  <!-- mdorigin:index kind=article -->
+
+- [Managed poll pagination](./managed-poll-pagination.md)
+  Configure bounded page-number polling and detect possible gaps in newest-first feeds.
   <!-- mdorigin:index kind=article -->
 
 <!-- INDEX:END -->
