@@ -40,7 +40,10 @@ use crate::subscription_graphql::{
 use crate::subscription_jsonrpc::{
     resolve_jsonrpc_unsubscribe_operation, JsonRpcSubscriptionConfig, JsonRpcSubscriptionHandler,
 };
-use crate::subscription_poll::PollSubscriptionConfig;
+use crate::subscription_poll::{
+    PollCheckpointState, PollFetchResult, PollPossibleGapReason, PollSubscriptionConfig,
+    PollSubscriptionRunner,
+};
 use crate::subscription_slack::{
     derive_socket_mode_open_endpoint, parse_socket_mode_open_response, SlackSocketModeHandler,
 };
@@ -439,6 +442,12 @@ pub struct ManagedSourceCheckpointSummary {
     pub etag_set_at_unix: Option<u64>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub consecutive_304_count: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub possible_gap_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_possible_gap_reason: Option<PollPossibleGapReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_possible_gap_at_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2764,6 +2773,19 @@ impl ManagedSourceManager {
         request: ManagedSourceEnsureRequest,
     ) -> Result<ManagedSourceEnsureResponse> {
         validate_managed_source_identity(&request.namespace, &request.source_key)?;
+        if let Some(raw) = request.spec.poll_config.as_ref().filter(|config| {
+            config
+                .get("index_pagination")
+                .is_some_and(|value| !value.is_null())
+        }) {
+            // Reject invalid settings before ensure can stop or replace a running source.
+            validate_index_poll_source(
+                raw,
+                request.spec.mode,
+                request.spec.transport_hint.as_ref(),
+                request.spec.args.as_ref(),
+            )?;
+        }
         let spec_key = compute_managed_source_spec_key(&request.spec)?;
         let existing = self
             .store
@@ -3447,28 +3469,35 @@ impl ManagedSourceManager {
                 return;
             }
         };
-        let mut runner = match crate::subscription_poll::PollSubscriptionRunner::new(config.clone())
-        {
+        let default_interval_secs = config.interval_secs;
+        let mut runner = match PollSubscriptionRunner::new(config) {
             Ok(runner) => runner,
             Err(err) => {
                 self.fail_managed_source(entry, err.to_string()).await;
                 return;
             }
         };
-        match self
+        let mut has_baseline = match self
             .load_or_import_legacy_managed_source_checkpoint(runtime, record)
             .await
         {
-            Ok(Some(checkpoint)) => runner.restore_checkpoint(checkpoint),
-            Ok(None) => {}
+            Ok(Some(checkpoint)) => {
+                // A checkpoint containing only unsolicited 304s is not a baseline.
+                let has_baseline = checkpoint.baseline_done
+                    || checkpoint.consecutive_304_count == 0
+                    || checkpoint.etag.is_some()
+                    || !checkpoint.seen_keys.is_empty();
+                runner.restore_checkpoint(checkpoint);
+                has_baseline
+            }
+            Ok(None) => false,
             Err(err) => {
                 self.fail_managed_source(entry, err.to_string()).await;
                 return;
             }
-        }
+        };
         update_subscription_view(runtime_view, Some("running"), None, false).await;
 
-        let default_interval_secs = config.interval_secs.max(1);
         let base_args = request.args.clone().unwrap_or_default();
         let initial_delay = managed_source_initial_poll_delay_duration(
             &entry.namespace,
@@ -3486,37 +3515,33 @@ impl ManagedSourceManager {
         loop {
             let poll_started = Instant::now();
             if *stop_rx.borrow() {
-                update_subscription_view(runtime_view, Some("stopped"), None, false).await;
-                let snapshot = runtime_view.lock().await.clone();
-                let _ =
-                    sync_managed_source_state(&self.store, entry, runtime_view, &snapshot.status)
-                        .await;
-                return;
+                break;
             }
 
-            let args = runner.build_request_args(&base_args);
-
-            // ETag invalidation: clear stale ETag before fetch so the poll is unconditional.
+            let previous_checkpoint = runner.checkpoint().clone();
+            let mut request_checkpoint = previous_checkpoint.clone();
+            // Invalidate for the request only. Persist changes only on a successful round.
             if crate::subscription_poll::should_invalidate_etag(
-                runner.checkpoint(),
+                &request_checkpoint,
                 now_unix_secs(),
             )
             .is_some()
             {
-                let mut checkpoint = runner.checkpoint().clone();
-                checkpoint.etag = None;
-                checkpoint.etag_set_at_unix = None;
-                runner.restore_checkpoint(checkpoint);
+                request_checkpoint.etag = None;
+                request_checkpoint.etag_set_at_unix = None;
             }
 
-            let previous_checkpoint = runner.checkpoint().clone();
-            let fetch =
-                fetch_managed_source_poll_dispatch(runtime, request, args, runner.checkpoint())
-                    .await;
+            let fetch = tokio::select! {
+                biased;
+                _ = stop_rx.changed() => break,
+                fetch = fetch_managed_source_poll_cycle(
+                    runtime, request, &runner, &base_args, &request_checkpoint, has_baseline,
+                ) => fetch,
+            };
             let next_interval_secs;
 
             match fetch {
-                Ok(result) => {
+                Ok((result, indexed)) => {
                     let fetch_duration_ms = result.duration_ms;
                     let status_code = result.status_code;
                     next_interval_secs = crate::subscription_poll::parse_poll_interval_secs(
@@ -3526,7 +3551,7 @@ impl ManagedSourceManager {
 
                     if result.status_code == Some(304) {
                         {
-                            let mut checkpoint = runner.checkpoint().clone();
+                            let mut checkpoint = request_checkpoint;
                             checkpoint.consecutive_304_count =
                                 checkpoint.consecutive_304_count.saturating_add(1);
                             runner.restore_checkpoint(checkpoint);
@@ -3570,6 +3595,25 @@ impl ManagedSourceManager {
                         )
                         .await;
                     } else {
+                        let process_started = Instant::now();
+                        let (items, gap, process_duration_ms) = if let Some(indexed) = indexed {
+                            runner.restore_checkpoint(indexed.checkpoint);
+                            (indexed.items, indexed.gap, indexed.process_duration_ms)
+                        } else {
+                            let output =
+                                match runner.process_response(result.data, result.duration_ms) {
+                                    Ok(output) => output,
+                                    Err(err) => {
+                                        self.fail_managed_source(entry, err.to_string()).await;
+                                        return;
+                                    }
+                                };
+                            (
+                                output.emitted_items,
+                                None,
+                                process_started.elapsed().as_millis() as u64,
+                            )
+                        };
                         {
                             let now = now_unix_secs();
                             let mut checkpoint = runner.checkpoint().clone();
@@ -3586,21 +3630,10 @@ impl ManagedSourceManager {
                             }
                             runner.restore_checkpoint(checkpoint);
                         }
-                        let process_started = Instant::now();
-                        let output = match runner.process_response(result.data, result.duration_ms)
-                        {
-                            Ok(output) => output,
-                            Err(err) => {
-                                self.fail_managed_source(entry, err.to_string()).await;
-                                return;
-                            }
-                        };
-                        let process_duration_ms = process_started.elapsed().as_millis() as u64;
                         let ingested_at_unix = now_unix_secs();
                         note_subscription_success(runtime_view, ingested_at_unix).await;
                         update_subscription_view(runtime_view, Some("running"), None, false).await;
-                        let events = output
-                            .emitted_items
+                        let events = items
                             .into_iter()
                             .map(|payload| PendingStreamEvent {
                                 ingested_at_unix,
@@ -3635,6 +3668,20 @@ impl ManagedSourceManager {
                                 )
                                 .await;
                             }
+                        }
+                        has_baseline = true;
+                        if let Some(reason) = gap {
+                            runtime
+                                .log(DaemonLogEntry::new(DaemonEventType::ManagedSourcePossibleGap)
+                                    .with_meta(json!({
+                                        "level": "warning",
+                                        "namespace": entry.namespace,
+                                        "source_key": entry.source_key,
+                                        "stream_id": entry.stream_id,
+                                        "possible_gap_count": runner.checkpoint().possible_gap_count,
+                                        "reason": reason,
+                                    })))
+                                .await;
                         }
                         log_managed_source_poll_summary(
                             runtime,
@@ -3739,6 +3786,9 @@ impl ManagedSourceManager {
             }
             poll_round = poll_round.wrapping_add(1);
         }
+        update_subscription_view(runtime_view, Some("stopped"), None, false).await;
+        let snapshot = runtime_view.lock().await.clone();
+        let _ = sync_managed_source_state(&self.store, entry, runtime_view, &snapshot.status).await;
     }
 
     async fn load_or_import_legacy_managed_source_checkpoint(
@@ -3886,6 +3936,10 @@ fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 async fn log_managed_source_poll_summary(
     runtime: &DaemonRuntime,
     entry: &ManagedSourceEntry,
@@ -3974,6 +4028,9 @@ fn checkpoint_summary_from_state(
         etag: checkpoint.etag,
         etag_set_at_unix: checkpoint.etag_set_at_unix,
         consecutive_304_count: checkpoint.consecutive_304_count,
+        possible_gap_count: checkpoint.possible_gap_count,
+        last_possible_gap_reason: checkpoint.last_possible_gap_reason,
+        last_possible_gap_at_unix: checkpoint.last_possible_gap_at_unix,
     }
 }
 
@@ -6638,12 +6695,108 @@ fn resolve_poll_subscription_config(
     }
     let raw = request
         .poll_config
-        .clone()
+        .as_ref()
         .ok_or_else(|| anyhow!("poll subscriptions require --poll-config"))?;
+    validate_index_poll_source(
+        raw,
+        request.mode,
+        request.transport_hint.as_ref(),
+        request.args.as_ref(),
+    )
+}
+
+fn validate_index_poll_source(
+    raw: &Value,
+    mode: SubscriptionMode,
+    transport_hint: Option<&SubscriptionTransportHint>,
+    args: Option<&HashMap<String, Value>>,
+) -> Result<PollSubscriptionConfig> {
     let config: PollSubscriptionConfig =
-        serde_json::from_value(raw).context("invalid poll subscription config")?;
+        serde_json::from_value(raw.clone()).context("invalid poll subscription config")?;
     config.validate()?;
+    if config.index_pagination.is_some() {
+        if mode != SubscriptionMode::Poll
+            || matches!(
+                transport_hint,
+                Some(SubscriptionTransportHint::EmailProviderPoll)
+            )
+        {
+            bail!("index_pagination requires an operation-based poll source");
+        }
+        config.validate_request_args(args.unwrap_or(&HashMap::new()))?;
+    }
     Ok(config)
+}
+
+struct ManagedSourceIndexedPollOutput {
+    items: Vec<Value>,
+    checkpoint: PollCheckpointState,
+    gap: Option<PollPossibleGapReason>,
+    process_duration_ms: u64,
+}
+
+async fn fetch_managed_source_poll_cycle(
+    runtime: &DaemonRuntime,
+    request: &SubscribeStartRequest,
+    runner: &PollSubscriptionRunner,
+    base_args: &HashMap<String, Value>,
+    request_checkpoint: &PollCheckpointState,
+    has_baseline: bool,
+) -> Result<(PollFetchResult, Option<ManagedSourceIndexedPollOutput>)> {
+    let Some(mut round) = runner.start_index_round(base_args, has_baseline)? else {
+        let args = runner.build_request_args(base_args);
+        let response =
+            fetch_managed_source_poll_dispatch(runtime, request, args, request_checkpoint).await?;
+        return Ok((response, None));
+    };
+
+    let mut first = fetch_managed_source_poll_dispatch(
+        runtime,
+        request,
+        round.request_args(base_args),
+        request_checkpoint,
+    )
+    .await?;
+    if first.status_code == Some(304) {
+        return Ok((first, None));
+    }
+    let mut page = 1;
+    let process_started = Instant::now();
+    let mut more = round
+        .accept_page(std::mem::take(&mut first.data))
+        .map_err(|err| anyhow!("poll page {page}: {err:#}"))?;
+    let mut process_duration = process_started.elapsed();
+    while more {
+        page += 1;
+        // No configured or cached first-page validators are sent on later pages.
+        let fetched =
+            fetch_managed_source_poll(runtime, request, round.request_args(base_args), None)
+                .await
+                .map_err(|err| anyhow!("poll page {page}: {err:#}"))?;
+        if fetched.status_code == Some(304) {
+            bail!("poll page {page}: unexpected HTTP 304 on an unconditional request");
+        }
+        if let Some(ms) = fetched.duration_ms {
+            first.duration_ms = Some(first.duration_ms.unwrap_or_default().saturating_add(ms));
+        }
+        let process_started = Instant::now();
+        more = round
+            .accept_page(fetched.data)
+            .map_err(|err| anyhow!("poll page {page}: {err:#}"))?;
+        process_duration += process_started.elapsed();
+    }
+    let process_started = Instant::now();
+    let (items, checkpoint, gap) = round.finish(now_unix_secs());
+    process_duration += process_started.elapsed();
+    Ok((
+        first,
+        Some(ManagedSourceIndexedPollOutput {
+            items,
+            checkpoint,
+            gap,
+            process_duration_ms: process_duration.as_millis() as u64,
+        }),
+    ))
 }
 
 async fn fetch_managed_source_poll_dispatch(
@@ -6662,7 +6815,7 @@ async fn fetch_managed_source_poll_dispatch(
         return fetch_email_provider_poll(&config, auth_profile.as_ref(), checkpoint).await;
     }
 
-    fetch_managed_source_poll(runtime, request, args, checkpoint).await
+    fetch_managed_source_poll(runtime, request, args, Some(checkpoint)).await
 }
 
 async fn resolve_graphql_subscription_prepared_operation(
@@ -6952,13 +7105,19 @@ async fn fetch_managed_source_poll(
     runtime: &DaemonRuntime,
     request: &SubscribeStartRequest,
     args: HashMap<String, Value>,
-    checkpoint: &crate::subscription_poll::PollCheckpointState,
+    checkpoint: Option<&PollCheckpointState>,
 ) -> Result<crate::subscription_poll::PollFetchResult> {
     let mut options = request.options.clone();
-    if let Some(etag) = checkpoint.etag.as_ref() {
+    if let Some(etag) = checkpoint.and_then(|checkpoint| checkpoint.etag.as_ref()) {
         options
             .request_headers
             .insert("if-none-match".to_string(), etag.clone());
+    }
+    if checkpoint.is_none() {
+        options.request_headers.retain(|name, _| {
+            !name.eq_ignore_ascii_case("if-none-match")
+                && !name.eq_ignore_ascii_case("if-modified-since")
+        });
     }
     let response = runtime
         .invoke(RuntimeInvokeRequest {
@@ -11792,9 +11951,7 @@ mod tests {
             tie_breaker: None,
             seen_keys: VecDeque::from([json!("event-123").to_string()]),
             etag: Some("\"etag-v1\"".to_string()),
-            etag_set_at_unix: None,
-            consecutive_304_count: 0,
-            baseline_done: false,
+            ..Default::default()
         };
         let checkpoint_path = runtime.managed_source_checkpoint_path(&record.run_id);
         fs::create_dir_all(checkpoint_path.parent().unwrap()).unwrap();
@@ -11836,9 +11993,7 @@ mod tests {
             tie_breaker: Some(json!("event-789")),
             seen_keys: VecDeque::from([json!("event-789").to_string()]),
             etag: Some("\"etag-v2\"".to_string()),
-            etag_set_at_unix: None,
-            consecutive_304_count: 0,
-            baseline_done: false,
+            ..Default::default()
         };
         let offsets = runtime
             .managed_sources
