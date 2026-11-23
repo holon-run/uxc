@@ -26,7 +26,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Endpoint;
 use tonic::Status;
-use tonic_reflection::pb as reflection;
+use tonic_reflection::pb::v1alpha as reflection;
 use tracing::{debug, info};
 
 /// Trait for executing grpcurl commands (abstracted for testing)
