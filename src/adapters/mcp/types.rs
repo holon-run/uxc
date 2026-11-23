@@ -239,6 +239,14 @@ pub struct ServerCapabilities {
     pub additional: HashMap<String, JsonValue>,
 }
 
+impl ServerCapabilities {
+    pub(crate) fn supports_events(&self) -> bool {
+        self.extensions
+            .as_ref()
+            .is_some_and(|extensions| extensions.contains_key(super::events::EXTENSION))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolsCapability {
     #[serde(skip_serializing_if = "Option::is_none")]

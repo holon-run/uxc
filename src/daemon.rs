@@ -980,6 +980,7 @@ struct McpStdioSessionSnapshot {
 
 struct McpHttpSession {
     transport: adapters::mcp::McpRemoteTransport,
+    capabilities: adapters::mcp::types::ServerCapabilities,
     notifications: Mutex<SessionNotificationFanout>,
     resource_subscriptions: Mutex<HashMap<String, usize>>,
     resource_subscription_ops: Mutex<()>,
@@ -2431,10 +2432,11 @@ impl McpSessionManager {
             auth_profile,
             request_timeout.unwrap_or_else(|| Duration::from_secs(30)),
         )?;
-        transport.initialize().await?;
+        let capabilities = transport.initialize().await?.capabilities;
         transport.initialized().await?;
         let session = Arc::new(McpHttpSession {
             transport,
+            capabilities,
             notifications: Mutex::new(SessionNotificationFanout::default()),
             resource_subscriptions: Mutex::new(HashMap::new()),
             resource_subscription_ops: Mutex::new(()),
@@ -4413,6 +4415,13 @@ struct ServiceSummary {
     description: Option<String>,
 }
 
+struct McpCallOutcome {
+    operation: String,
+    data: Value,
+    reused: bool,
+    is_event: bool,
+}
+
 #[derive(Clone)]
 pub struct DaemonRuntime {
     state: Arc<Mutex<ServerState>>,
@@ -4600,7 +4609,12 @@ impl DaemonRuntime {
             request_timeout: request_timeout_duration(request.options.timeout_ms),
         };
 
-        if let Some((kind, operation, data, reused)) = self
+        if let Some(McpCallOutcome {
+            operation,
+            data,
+            reused,
+            is_event,
+        }) = self
             .try_invoke_existing_mcp_execute_without_detection(
                 &request,
                 root_auth_profile.clone(),
@@ -4635,17 +4649,18 @@ impl DaemonRuntime {
                 ..Default::default()
             };
             let mut response_data = data;
+            let kind = "call_result".to_string();
             apply_runtime_artifact_compaction(
                 &kind,
                 &mut response_data,
                 &mut response_meta,
-                request.options.artifact_compaction.unwrap_or(true),
+                !is_event && request.options.artifact_compaction.unwrap_or(true),
             )?;
             return Ok(RuntimeInvokeResponse {
                 protocol: "mcp".to_string(),
                 endpoint: request.endpoint,
                 kind,
-                operation,
+                operation: Some(operation),
                 data: response_data,
                 duration_ms: Some(duration_ms),
                 meta: response_meta,
@@ -4738,6 +4753,8 @@ impl DaemonRuntime {
             meta.schema_involved = Some(true);
         }
 
+        // An Events page and its opaque cursor must reach the caller together, unmodified.
+        let mut compact_result = request.options.artifact_compaction.unwrap_or(true);
         let mut result: Result<(
             String,
             Option<String>,
@@ -4751,7 +4768,7 @@ impl DaemonRuntime {
             };
             // Clone the pre-computed stdio_spawn_options to avoid duplicate secret resolution
             let stdio_options = stdio_spawn_options.clone();
-            let (kind, operation, data, reused) = self
+            let outcome = self
                 .invoke_mcp_execute(
                     &request,
                     prepared_args,
@@ -4760,9 +4777,10 @@ impl DaemonRuntime {
                     cache_for_mcp.clone(),
                 )
                 .await?;
-            meta.daemon_session_reused = Some(reused);
+            meta.daemon_session_reused = Some(outcome.reused);
+            compact_result &= !outcome.is_event;
 
-            if reused && log_routine_events {
+            if outcome.reused && log_routine_events {
                 self.log(
                     DaemonLogEntry::new(DaemonEventType::DaemonSessionReused)
                         .with_request_id(request.request_id.clone())
@@ -4771,7 +4789,12 @@ impl DaemonRuntime {
                 .await;
             }
 
-            Ok((kind, operation, data, None))
+            Ok((
+                "call_result".to_string(),
+                Some(outcome.operation),
+                outcome.data,
+                None,
+            ))
         } else if protocol == "mcp" {
             if let Some(live_result) = invoke_live_stdio_mcp_help(
                 self,
@@ -4849,7 +4872,7 @@ impl DaemonRuntime {
                                 };
                             // For cache fallback, recompute stdio_spawn_options since we don't have
                             // the original detection_options available
-                            let (kind, operation, data, reused) = self
+                            let outcome = self
                                 .invoke_mcp_execute(
                                     &request,
                                     prepared_args,
@@ -4858,8 +4881,14 @@ impl DaemonRuntime {
                                     cache_for_fallback.clone(),
                                 )
                                 .await?;
-                            meta.daemon_session_reused = Some(reused);
-                            Ok((kind, operation, data, None))
+                            meta.daemon_session_reused = Some(outcome.reused);
+                            compact_result &= !outcome.is_event;
+                            Ok((
+                                "call_result".to_string(),
+                                Some(outcome.operation),
+                                outcome.data,
+                                None,
+                            ))
                         } else {
                             invoke_with_adapter(&adapter, &request).await
                         };
@@ -4877,12 +4906,7 @@ impl DaemonRuntime {
                         meta.response_headers = Some(execution_meta.response_headers);
                     }
                 }
-                apply_runtime_artifact_compaction(
-                    &kind,
-                    &mut data,
-                    &mut meta,
-                    request.options.artifact_compaction.unwrap_or(true),
-                )?;
+                apply_runtime_artifact_compaction(&kind, &mut data, &mut meta, compact_result)?;
                 if log_routine_events {
                     self.log(
                         DaemonLogEntry::new(DaemonEventType::RuntimeInvokeSuccess)
@@ -5084,7 +5108,7 @@ impl DaemonRuntime {
         auth_profile: Option<Profile>,
         precomputed_stdio_spawn_options: Option<adapters::mcp::StdioSpawnOptions>,
         cache: Arc<dyn Cache>,
-    ) -> Result<Option<(String, Option<String>, Value, bool)>> {
+    ) -> Result<Option<McpCallOutcome>> {
         if !matches!(request.action, RuntimeAction::Execute) {
             return Ok(None);
         }
@@ -5129,7 +5153,8 @@ impl DaemonRuntime {
         auth_profile: Option<Profile>,
         precomputed_stdio_spawn_options: Option<adapters::mcp::StdioSpawnOptions>,
         cache: Arc<dyn Cache>,
-    ) -> Result<(String, Option<String>, Value, bool)> {
+    ) -> Result<McpCallOutcome> {
+        use adapters::mcp::events::EventMethod;
         let endpoint = &request.endpoint;
         let op = request
             .operation_id
@@ -5138,6 +5163,7 @@ impl DaemonRuntime {
         let (raw_args, execution_options) =
             adapters::mcp::McpAdapter::split_execution_options(raw_args)?;
 
+        let event_method = EventMethod::from_name(op);
         if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
             let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;
             // Use pre-computed spawn options if available (from detection phase),
@@ -5185,15 +5211,43 @@ impl DaemonRuntime {
             let timeout = request_timeout_duration(request.options.timeout_ms).unwrap_or_else(
                 adapters::mcp::transport::McpStdioTransport::default_request_timeout,
             );
-            let args = prepare_live_stdio_mcp_execute_args(
-                &mut guard, endpoint, &cache, op, raw_args, timeout,
-            )
-            .await?;
-            let arguments = Some(Value::Object(args.into_iter().collect()));
-            let result = guard
-                .client
-                .call_tool_with_options_and_timeout(op, arguments, &execution_options, timeout)
-                .await;
+            let result = async {
+                if let Some(method) = event_method {
+                    let has_tool = if guard.client.supports_tools() {
+                        let _ = guard
+                            .mark_tools_dirty_from_notifications(endpoint, &cache)
+                            .await;
+                        guard
+                            .refresh_tools_if_needed(endpoint, &cache, timeout)
+                            .await
+                            .is_ok_and(|tools| tools.iter().any(|tool| tool.name == *op))
+                    } else {
+                        false
+                    };
+                    if !has_tool {
+                        let (params, capabilities) =
+                            prepare_mcp_event_request(method, op, raw_args, execution_options)?;
+                        let name = params["name"].as_str().unwrap_or_default().to_owned();
+                        return guard
+                            .client
+                            .call_events(method, params, &capabilities, timeout)
+                            .await
+                            .map(|data| (data, true))
+                            .map_err(|err| method.call_error(&name, err));
+                    }
+                }
+                let args = prepare_live_stdio_mcp_execute_args(
+                    &mut guard, endpoint, &cache, op, raw_args, timeout,
+                )
+                .await?;
+                let arguments = Some(Value::Object(args.into_iter().collect()));
+                guard
+                    .client
+                    .call_tool_with_options_and_timeout(op, arguments, &execution_options, timeout)
+                    .await
+                    .map(|result| (adapters::mcp::convert_tool_result_to_value(&result), false))
+            }
+            .await;
             let _ = guard
                 .mark_tools_dirty_from_notifications(endpoint, &cache)
                 .await;
@@ -5201,16 +5255,16 @@ impl DaemonRuntime {
             let child_exited = guard.client.child_has_exited().unwrap_or(false);
             drop(guard);
             match result {
-                Ok(result) => {
+                Ok((data, is_event)) => {
                     self.mcp
                         .mark_stdio_request_finished(&key, None, recent_stderr, child_exited)
                         .await;
-                    Ok((
-                        "call_result".to_string(),
-                        Some(op.clone()),
-                        adapters::mcp::convert_tool_result_to_value(&result),
+                    Ok(McpCallOutcome {
+                        operation: op.clone(),
+                        data,
                         reused,
-                    ))
+                        is_event,
+                    })
                 }
                 Err(err) => {
                     self.mcp
@@ -5245,20 +5299,58 @@ impl DaemonRuntime {
                     .await?
             };
             session.mark_used().await;
+            if let Some(method) = event_method {
+                let has_tool = session.capabilities.tools.is_some()
+                    && session
+                        .transport
+                        .list_tools()
+                        .await
+                        .is_ok_and(|tools| tools.iter().any(|tool| tool.name == *op));
+                if !has_tool {
+                    if !session.capabilities.supports_events() {
+                        return Err(method.unsupported());
+                    }
+                    let (params, capabilities) =
+                        prepare_mcp_event_request(method, op, raw_args, execution_options)?;
+                    let name = params["name"].as_str().unwrap_or_default().to_owned();
+                    let data = session
+                        .transport
+                        .call_events(method, params, &capabilities)
+                        .await
+                        .map_err(|err| method.call_error(&name, err))?;
+                    return Ok(McpCallOutcome {
+                        operation: op.clone(),
+                        data,
+                        reused,
+                        is_event: true,
+                    });
+                }
+            }
             let arguments = Some(Value::Object(raw_args.into_iter().collect()));
             let result = session
                 .transport
                 .call_tool_with_options(op, arguments, &execution_options)
                 .await?;
             let _ = session.collect_pending_notifications().await;
-            Ok((
-                "call_result".to_string(),
-                Some(op.clone()),
-                adapters::mcp::convert_tool_result_to_value(&result),
+            Ok(McpCallOutcome {
+                operation: op.clone(),
+                data: adapters::mcp::convert_tool_result_to_value(&result),
                 reused,
-            ))
+                is_event: false,
+            })
         }
     }
+}
+
+fn prepare_mcp_event_request(
+    method: adapters::mcp::events::EventMethod,
+    operation: &str,
+    raw_args: HashMap<String, Value>,
+    options: adapters::mcp::McpExecutionOptions,
+) -> Result<(Value, Value)> {
+    let args =
+        prepare_execute_args_from_detail(ProtocolType::Mcp, operation, &method.detail(), raw_args)?;
+    method.request(args, options)
 }
 
 enum SubscriptionRunError {
@@ -9619,28 +9711,44 @@ async fn invoke_live_stdio_mcp_help(
     });
     guard.last_used = Instant::now();
     guard.last_used_at_unix = now_unix_secs();
-    let _ = guard
-        .mark_tools_dirty_from_notifications(&request.endpoint, &cache)
-        .await;
-    let tools = guard
-        .refresh_tools_if_needed(
-            &request.endpoint,
-            &cache,
-            request_timeout_duration(request.options.timeout_ms).unwrap_or_else(
-                adapters::mcp::transport::McpStdioTransport::default_request_timeout,
-            ),
-        )
-        .await;
+    let supports_events = guard.client.supports_events();
+    let tools = if supports_events && !guard.client.supports_tools() {
+        Ok(Vec::new())
+    } else {
+        let _ = guard
+            .mark_tools_dirty_from_notifications(&request.endpoint, &cache)
+            .await;
+        guard
+            .refresh_tools_if_needed(
+                &request.endpoint,
+                &cache,
+                request_timeout_duration(request.options.timeout_ms).unwrap_or_else(
+                    adapters::mcp::transport::McpStdioTransport::default_request_timeout,
+                ),
+            )
+            .await
+    };
     let recent_stderr = guard.client.recent_stderr_lines(5).await;
     let child_exited = guard.client.child_has_exited().unwrap_or(false);
     let service = live_stdio_service_summary(&guard.client);
 
+    use adapters::mcp::events::EventMethod;
+    let available_events = EventMethod::ALL
+        .into_iter()
+        .filter(|method| {
+            supports_events
+                && tools
+                    .as_ref()
+                    .is_ok_and(|tools| !tools.iter().any(|tool| tool.name == method.name()))
+        })
+        .collect::<Vec<_>>();
     let response = match tools {
         Ok(tools) => match request.action {
             RuntimeAction::HostHelp => {
                 let operations = tools
                     .iter()
                     .map(operation_from_mcp_tool)
+                    .chain(available_events.iter().copied().map(EventMethod::operation))
                     .collect::<Vec<_>>();
                 let summaries = operations
                     .iter()
@@ -9672,10 +9780,16 @@ async fn invoke_live_stdio_mcp_help(
                 let operations = tools
                     .iter()
                     .map(operation_from_mcp_tool)
+                    .chain(available_events.iter().copied().map(EventMethod::operation))
                     .collect::<Vec<_>>();
                 let details = tools
                     .iter()
                     .map(|tool| (tool.name.clone(), operation_detail_from_mcp_tool(tool)))
+                    .chain(
+                        available_events
+                            .iter()
+                            .map(|method| (method.name().to_owned(), method.detail())),
+                    )
                     .collect::<HashMap<_, _>>();
                 let schema = build_codegen_host_schema(
                     &request.endpoint,
@@ -9696,14 +9810,21 @@ async fn invoke_live_stdio_mcp_help(
                     .operation_id
                     .as_ref()
                     .ok_or_else(|| anyhow!("operation_id is required"))?;
-                let tool = tools
+                let detail = tools
                     .iter()
                     .find(|tool| tool.name == *op)
+                    .map(operation_detail_from_mcp_tool)
+                    .or_else(|| {
+                        available_events
+                            .iter()
+                            .find(|method| method.name() == op)
+                            .map(|method| method.detail())
+                    })
                     .ok_or_else(|| UxcError::OperationNotFound(op.clone()))?;
                 Ok(Some((
                     "operation_detail".to_string(),
                     Some(op.clone()),
-                    serde_json::to_value(operation_detail_from_mcp_tool(tool))?,
+                    serde_json::to_value(detail)?,
                 )))
             }
             RuntimeAction::Execute => Ok(None),
