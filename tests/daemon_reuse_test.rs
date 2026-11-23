@@ -387,7 +387,10 @@ fn daemon_start_preserves_request_cwd_for_relative_stdio_endpoint_commands() {
     daemon_stop_best_effort_with_home(&home);
 
     let workdir = tempfile::tempdir().expect("tempdir should be created");
-    let server = test_server_binary("mcp-stdio");
+    // The helper can return a relative path, but the symlink resolves it from workdir.
+    let server = test_server_binary("mcp-stdio")
+        .canonicalize()
+        .expect("test server should resolve to an absolute path");
     let relative_server = workdir.path().join("mcp-stdio-rel");
     std::os::unix::fs::symlink(&server, &relative_server).expect("symlink should be created");
     let endpoint = "./mcp-stdio-rel ok";
