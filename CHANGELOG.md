@@ -568,8 +568,8 @@ This is the first published release in the 0.23 series. The 0.23.0 tag was retai
 
 ---
 
-[Unreleased]: https://github.com/holon-run/uxc/compare/v0.23.0...HEAD
-[0.23.0]: https://github.com/holon-run/uxc/compare/v0.22.0...v0.23.0
+[Unreleased]: https://github.com/holon-run/uxc/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/holon-run/uxc/compare/v0.22.0...v0.23.1
 [0.15.8]: https://github.com/holon-run/uxc/releases/tag/v0.15.8
 [0.15.7]: https://github.com/holon-run/uxc/releases/tag/v0.15.7
 [0.15.6]: https://github.com/holon-run/uxc/releases/tag/v0.15.6
