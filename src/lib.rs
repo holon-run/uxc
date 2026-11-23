@@ -22,6 +22,7 @@ pub mod email_body_get;
 pub mod error;
 pub mod http_client;
 pub mod managed_source_streams;
+pub mod mcp;
 pub mod output;
 pub mod protocol;
 pub mod schema_mapping;

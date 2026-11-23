@@ -1,5 +1,7 @@
 # MCP
 
+For an in-process Rust integration, see the [embedded MCP client](./embedded-mcp.md).
+
 UXC supports MCP servers over Streamable HTTP and stdio while preserving
 compatibility across the stateful and stateless protocol eras.
 

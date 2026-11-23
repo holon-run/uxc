@@ -37,6 +37,7 @@ jobs:
             rust:
               - 'src/**'
               - 'tests/**'
+              - 'examples/embedded-mcp/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
@@ -154,6 +155,15 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Verify the external embedded MCP example
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          cargo build --locked --features test-server --bin uxc-test-mcp-stdio-server
+          cargo check --manifest-path examples/embedded-mcp/Cargo.toml
+          cargo run --manifest-path examples/embedded-mcp/Cargo.toml -- \
+            "$CARGO_TARGET_DIR/debug/uxc-test-mcp-stdio-server"
 
   test:
     name: Test (${{ matrix.rust }})

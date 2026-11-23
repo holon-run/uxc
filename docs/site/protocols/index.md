@@ -35,8 +35,12 @@ feel consistent across them.
 
 <!-- INDEX:START -->
 
+- [Embedded Rust MCP client](./embedded-mcp.md)
+  Rust applications can depend on `uxc` and use `uxc::mcp` in process on a Tokio runtime. No UXC CLI executable or UXC daemon is needed. `uxc::mcp` is the supported embedding surface; existing adapter, CLI and daemon exports are not part of that compatibility promise.
+  <!-- mdorigin:index kind=article -->
+
 - [MCP](./mcp.md)
-  UXC supports MCP servers over Streamable HTTP and stdio while preserving compatibility across the stateful and stateless protocol eras.
+  For an in-process Rust integration, see the [embedded MCP client](./embedded-mcp.md).
   <!-- mdorigin:index kind=article -->
 
 <!-- INDEX:END -->
