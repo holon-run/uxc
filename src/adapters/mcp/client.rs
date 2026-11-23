@@ -237,10 +237,7 @@ impl McpStdioClient {
         capabilities: &JsonValue,
         timeout: Duration,
     ) -> Result<JsonValue> {
-        if !self
-            .server_capabilities()
-            .is_some_and(ServerCapabilities::supports_events)
-        {
+        if !self.supports_events() {
             return Err(method.unsupported());
         }
         self.send_request_with_timeout_and_capabilities(
@@ -250,6 +247,11 @@ impl McpStdioClient {
             timeout,
         )
         .await
+    }
+
+    pub(crate) fn supports_events(&self) -> bool {
+        self.server_capabilities()
+            .is_some_and(ServerCapabilities::supports_events)
     }
 
     /// Check if the server supports tools

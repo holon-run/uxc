@@ -668,14 +668,7 @@ impl Adapter for McpAdapter {
                     );
                     continue;
                 }
-                let detail = method.detail();
-                operations.push(Operation {
-                    operation_id: detail.operation_id,
-                    display_name: detail.display_name,
-                    description: detail.description,
-                    parameters: detail.parameters,
-                    return_type: detail.return_type,
-                });
+                operations.push(method.operation());
             }
         }
         Ok(operations)

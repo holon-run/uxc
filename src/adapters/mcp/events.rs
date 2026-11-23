@@ -1,7 +1,7 @@
 //! One-shot calls to the SEP-3415 Events extension.
 
 use super::parse_schema_to_parameters_for_daemon;
-use crate::adapters::OperationDetail;
+use crate::adapters::{Operation, OperationDetail};
 use crate::error::{structured_error_from_anyhow, StructuredError, UxcError};
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -16,9 +16,9 @@ pub(crate) enum EventMethod {
 }
 
 impl EventMethod {
-    pub(super) const ALL: [Self; 2] = [Self::List, Self::Poll];
+    pub(crate) const ALL: [Self; 2] = [Self::List, Self::Poll];
 
-    pub(super) fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::List => "events/list",
             Self::Poll => "events/poll",
@@ -27,6 +27,17 @@ impl EventMethod {
 
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|method| method.name() == name)
+    }
+
+    pub(crate) fn operation(self) -> Operation {
+        let detail = self.detail();
+        Operation {
+            operation_id: detail.operation_id,
+            display_name: detail.display_name,
+            description: detail.description,
+            parameters: detail.parameters,
+            return_type: detail.return_type,
+        }
     }
 
     pub(crate) fn detail(self) -> OperationDetail {

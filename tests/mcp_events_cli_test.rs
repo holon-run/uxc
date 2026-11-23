@@ -15,6 +15,7 @@ const PAGE_TWO: &str = "catalog:2+/=";
 const INITIAL: &str = "reading:0+/=";
 const NEXT: &str = "reading:1+/=";
 const EARLIEST: &str = "reading:100+/=";
+const LARGE_PAGE: &str = "large-page";
 
 fn list_page(cursor: &Value) -> Value {
     if cursor == PAGE_TWO {
@@ -80,6 +81,24 @@ fn poll_result(cursor: &str) -> Value {
     })
 }
 
+fn large_poll_result() -> Value {
+    let cursor = "opaque+/=".repeat(100);
+    let events: Vec<_> = (0..32)
+        .map(|index| {
+            json!({
+                "eventId": format!("reading-{index}"),
+                "name": EVENT,
+                "data": {"reading": {"encoded": "station-data".repeat(235)}},
+                "cursor": format!("{cursor}:{index}")
+            })
+        })
+        .collect();
+    json!({
+        "resultType": "complete", "events": events, "cursor": cursor,
+        "truncated": false, "hasMore": true, "nextPollMs": 2500
+    })
+}
+
 #[derive(Debug)]
 struct EventRequest {
     body: Value,
@@ -132,6 +151,7 @@ fn rpc_reply(
                     ("result", poll_result(INITIAL))
                 }
                 Some(INITIAL) => ("result", poll_result(NEXT)),
+                Some(LARGE_PAGE) => ("result", large_poll_result()),
                 Some("expired-cursor") => ("result", poll_result(EARLIEST)),
                 _ => error(
                     -32602,
@@ -215,11 +235,11 @@ impl Cli {
     }
 
     fn run(&self, fixture: &Fixture, args: &[&str]) -> Output {
-        self.command()
-            .arg(&fixture.endpoint)
-            .args(args)
-            .output()
-            .unwrap()
+        self.run_endpoint(&fixture.endpoint, args)
+    }
+
+    fn run_endpoint(&self, endpoint: &str, args: &[&str]) -> Output {
+        self.command().arg(endpoint).args(args).output().unwrap()
     }
 
     fn call(&self, fixture: &Fixture, args: &[&str]) -> Value {
@@ -470,4 +490,132 @@ fn preserves_webhook_only_and_invalid_cursor_jsonrpc_errors() {
     assert_eq!(polls[0].headers["name"], WEBHOOK_ONLY);
     assert_eq!(polls[1].headers["name"], EVENT);
     cli.assert_no_delivery_state();
+}
+
+#[test]
+fn cold_and_reused_daemon_calls_preserve_large_poll_pages() {
+    let fixture = Fixture::new(true);
+    let cli = Cli::new();
+    let expected = large_poll_result();
+    assert!(expected.to_string().len() > 64 * 1024);
+    assert!(expected["cursor"].as_str().unwrap().len() > 512);
+    for reused in [false, true] {
+        let result = envelope(
+            cli.run(
+                &fixture,
+                &["events/poll", "name=weather.reading", "cursor=large-page"],
+            ),
+            true,
+        );
+        assert_eq!(result["kind"], "call_result");
+        assert_eq!(result["meta"]["daemon_session_reused"], reused);
+        assert!(result["data"] == expected, "Events page was modified");
+    }
+}
+
+#[cfg(unix)]
+const STDIO_EVENTS_FIXTURE: &str = r#"#!/usr/bin/env python3
+import json
+import sys
+
+has_tools = sys.argv[1] == "with-tools"
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    reply = {"jsonrpc": "2.0", "id": request["id"]}
+    method = request["method"]
+    if method == "initialize":
+        capabilities = {"extensions": {"io.modelcontextprotocol/events": {}}}
+        if has_tools:
+            capabilities["tools"] = {}
+        reply["result"] = {
+            "protocolVersion": "2025-11-25", "capabilities": capabilities,
+            "serverInfo": {"name": "events-fixture", "version": "1.0"},
+        }
+    elif method == "tools/list" and has_tools:
+        reply["result"] = {"tools": [{
+            "name": "events/list", "description": "A colliding tool",
+            "inputSchema": {"type": "object"},
+        }]}
+    elif method == "tools/call" and has_tools and request["params"]["name"] == "events/list":
+        reply["result"] = {"content": [{"type": "text", "text": "colliding tool called"}]}
+    elif method == "events/poll":
+        if request["params"]["name"] == "weather.alert":
+            reply["error"] = {
+                "code": -32026, "message": "Unsupported",
+                "data": {"feature": "deliveryMode", "value": "poll"},
+            }
+        else:
+            reply["result"] = {"events": [], "cursor": "opaque+/=", "hasMore": False}
+    else:
+        reply["error"] = {"code": -32601, "message": "Method not found"}
+    print(json.dumps(reply), flush=True)
+"#;
+
+#[cfg(unix)]
+#[test]
+fn live_stdio_discovers_events_and_preserves_tool_precedence_and_poll_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for mode in ["events-only", "with-tools"] {
+        let cli = Cli::new();
+        let script = cli.0.path().join("mcp-events.py");
+        std::fs::write(&script, STDIO_EVENTS_FIXTURE).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = format!("'{}' {mode}", script.display());
+        let run = |args: &[&str]| cli.run_endpoint(&endpoint, args);
+
+        let initial = envelope(run(&["events/poll", "name=weather.reading"]), true);
+        assert_eq!(initial["data"]["cursor"], "opaque+/=");
+        assert_eq!(
+            envelope(run(&["events/poll", "name=weather.reading"]), true)["meta"]
+                ["daemon_session_reused"],
+            true
+        );
+        let help = run(&["-h"]);
+        assert!(help.status.success(), "{help:?}");
+        let help = String::from_utf8_lossy(&help.stdout);
+        for name in ["events/list", "events/poll"] {
+            assert!(help.contains(name), "{mode}: {help}");
+        }
+        let schema = envelope(run(&["--codegen-schema"]), true);
+        let operations = schema["data"]["operations"].as_array().unwrap();
+        assert_eq!(operations.len(), 2, "{mode}: {schema}");
+        let list = operations
+            .iter()
+            .find(|op| op["id"] == "events/list")
+            .unwrap();
+        assert_eq!(
+            list["description"],
+            if mode == "with-tools" {
+                "A colliding tool"
+            } else {
+                "List one page of MCP event descriptors"
+            }
+        );
+        let poll_help = run(&["events/poll", "-h"]);
+        assert!(poll_help.status.success(), "{poll_help:?}");
+        assert!(
+            String::from_utf8_lossy(&poll_help.stdout).contains("Poll once for events"),
+            "{poll_help:?}"
+        );
+        if mode == "with-tools" {
+            let list_help = run(&["events/list", "-h"]);
+            assert!(list_help.status.success(), "{list_help:?}");
+            assert!(String::from_utf8_lossy(&list_help.stdout).contains("A colliding tool"));
+            let called = envelope(run(&["events/list"]), true);
+            assert!(called["data"].to_string().contains("colliding tool called"));
+        }
+        let unsupported = envelope(run(&["events/poll", "name=weather.alert"]), false);
+        let error = &unsupported["error"];
+        assert_eq!(error["details"]["jsonrpc_code"], -32026, "{unsupported}");
+        assert_eq!(error["details"]["feature"], "deliveryMode");
+        assert_eq!(error["details"]["value"], "poll");
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.contains("weather.alert") && message.contains("polling"),
+            "{error}"
+        );
+    }
 }
