@@ -14,6 +14,52 @@ const SECRET: &str = "sensitive-fixture-value";
 const SESSION: &str = "fixture-session";
 const EXTENSION: &str = "io.modelcontextprotocol/events";
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn stdio_passes_literal_args_and_reaps_a_child_that_ignores_eof() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    // After EOF, replace the shell with a long sleep under the same PID so
+    // close must kill and reap it, not just wait for a cooperative server.
+    let script = r#"
+        [ "$1" = 'two words; not shell code' ] || exit 2
+        printf '%s\n' "$$" > "$FIXTURE_PID_FILE" || exit 3
+        IFS= read -r request || exit 4
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"stdio-fixture","version":"1"}}}'
+        while IFS= read -r request; do :; done
+        exec sleep 60
+    "#;
+    let mut options = McpConnectOptions::new(McpEndpoint::Stdio {
+        program: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            script.into(),
+            "stdio-fixture".into(),
+            "two words; not shell code".into(),
+        ],
+        env_overrides: [(
+            "FIXTURE_PID_FILE".into(),
+            pid_file
+                .to_str()
+                .expect("fixture path must be UTF-8")
+                .into(),
+        )]
+        .into(),
+    });
+    options.timeouts.close = Duration::from_secs(1);
+    let mut client = McpClient::connect(options).await.unwrap();
+    let pid = std::fs::read_to_string(pid_file).unwrap();
+    let proc_path = std::path::Path::new("/proc").join(pid.trim());
+    assert!(proc_path.is_dir());
+    let discovery = client.discover().await.unwrap();
+    assert_eq!(discovery.server_info.unwrap().name, "stdio-fixture");
+    client.close().await.unwrap();
+    assert!(
+        !proc_path.exists(),
+        "the direct child must have been reaped"
+    );
+}
+
 struct Fixture {
     url: String,
     seen: Arc<Mutex<Vec<String>>>,

@@ -124,6 +124,9 @@ impl McpError {
     }
 
     fn from_transport(err: anyhow::Error) -> Self {
+        if err.is::<tokio::time::error::Elapsed>() {
+            return Self::Timeout;
+        }
         if let Some(failure) = err.downcast_ref::<TransportFailure>() {
             return match failure {
                 TransportFailure::Authentication => Self::Authentication,
