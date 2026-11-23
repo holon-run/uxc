@@ -226,6 +226,32 @@ impl McpStdioClient {
         &self.protocol_context.version
     }
 
+    pub(super) fn server_capabilities(&self) -> Option<&ServerCapabilities> {
+        self.server_capabilities.as_ref()
+    }
+
+    pub(crate) async fn call_events(
+        &mut self,
+        method: super::events::EventMethod,
+        params: JsonValue,
+        capabilities: &JsonValue,
+        timeout: Duration,
+    ) -> Result<JsonValue> {
+        if !self
+            .server_capabilities()
+            .is_some_and(ServerCapabilities::supports_events)
+        {
+            return Err(method.unsupported());
+        }
+        self.send_request_with_timeout_and_capabilities(
+            method.name(),
+            Some(params),
+            Some(capabilities),
+            timeout,
+        )
+        .await
+    }
+
     /// Check if the server supports tools
     pub fn supports_tools(&self) -> bool {
         self.server_capabilities

@@ -3,6 +3,7 @@
 //! This module provides support for MCP servers via both stdio and HTTP transports.
 
 pub mod client;
+pub(crate) mod events;
 pub mod http_transport;
 pub mod transport;
 pub mod types;
@@ -13,6 +14,7 @@ use crate::error::UxcError;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 pub use client::{LifecycleReapPolicy, McpStdioClient};
+use events::EventMethod;
 pub use http_transport::{McpHttpTransport, McpRemoteTransport, ResolvedMcpHttpTransport};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -129,7 +131,7 @@ impl McpAdapter {
             hasher.update(b"anonymous");
         }
         format!(
-            "{}#uxc-mcp-schema=dual-era-2026&auth={:x}",
+            "{}#uxc-mcp-schema=dual-era-2026-events&auth={:x}",
             url,
             hasher.finalize()
         )
@@ -396,16 +398,22 @@ impl McpAdapter {
         Self::validate_required_args(operation, tool.inputSchema.as_ref(), args)
     }
 
-    async fn tools_from_schema_or_refresh(&self, url: &str) -> Result<Vec<types::Tool>> {
+    fn schema_supports_events(schema: &Value) -> bool {
+        schema["capabilities"]["extensions"]
+            .get(events::EXTENSION)
+            .is_some()
+    }
+
+    async fn operation_schema(&self, url: &str) -> Result<Value> {
         let schema = self.fetch_schema(url).await?;
-        if let Some(tools) = Self::tools_from_schema(&schema) {
-            return Ok(tools);
+        if schema["tools"].is_array() || Self::schema_supports_events(&schema) {
+            return Ok(schema);
         }
 
         if !self.force_refresh_schema {
             let schema = self.fetch_schema_internal(url, false).await?;
-            if let Some(tools) = Self::tools_from_schema(&schema) {
-                return Ok(tools);
+            if schema["tools"].is_array() || Self::schema_supports_events(&schema) {
+                return Ok(schema);
             }
         }
 
@@ -413,6 +421,56 @@ impl McpAdapter {
             "MCP tool catalog unavailable for endpoint '{}'; retry with --refresh-schema",
             url
         )
+    }
+
+    async fn execute_events(
+        &self,
+        url: &str,
+        method: EventMethod,
+        args: HashMap<String, Value>,
+        options: McpExecutionOptions,
+        start: std::time::Instant,
+    ) -> Result<ExecutionResult> {
+        let (params, capabilities) = method.request(args, options)?;
+        let name = params["name"].as_str().unwrap_or_default().to_owned();
+        let result = if Self::is_stdio_command(url) {
+            let (cmd, args) = Self::parse_stdio_command(url)?;
+            let timeout = self.request_timeout_or_default();
+            let mut client = McpStdioClient::connect_with_options_and_timeout(
+                &cmd,
+                &args,
+                self.stdio_spawn_options.clone(),
+                timeout,
+            )
+            .await?;
+            client
+                .call_events(method, params, &capabilities, timeout)
+                .await
+        } else {
+            let resolved = self.resolve_http_transport(url).await?.ok_or_else(|| {
+                anyhow::anyhow!("Unable to discover MCP HTTP endpoint for {}", url)
+            })?;
+            let transport = McpRemoteTransport::with_auth_and_timeout(
+                resolved,
+                self.auth_profile.clone(),
+                self.request_timeout_or_default(),
+            )?;
+            if !transport.initialize().await?.capabilities.supports_events() {
+                return Err(method.unsupported());
+            }
+            transport.initialized().await?;
+            transport.call_events(method, params, &capabilities).await
+        };
+        let data = result.map_err(|err| method.call_error(&name, err))?;
+        Ok(ExecutionResult {
+            data,
+            metadata: super::ExecutionMetadata {
+                duration_ms: start.elapsed().as_millis() as u64,
+                operation: method.name().to_string(),
+                response_status_code: None,
+                response_headers: HashMap::new(),
+            },
+        })
     }
 
     async fn fetch_schema_internal(&self, url: &str, allow_cache_read: bool) -> Result<Value> {
@@ -471,6 +529,7 @@ impl McpAdapter {
                     "tools": client.supports_tools(),
                     "resources": client.supports_resources(),
                     "prompts": client.supports_prompts(),
+                    "extensions": client.server_capabilities().and_then(|capabilities| capabilities.extensions.as_ref()),
                 }
             });
             if let Some(catalog) = &tools {
@@ -580,8 +639,9 @@ impl Adapter for McpAdapter {
     }
 
     async fn list_operations(&self, url: &str) -> Result<Vec<Operation>> {
-        let tools = self.tools_from_schema_or_refresh(url).await?;
-        let operations = tools
+        let schema = self.operation_schema(url).await?;
+        let mut operations: Vec<_> = Self::tools_from_schema(&schema)
+            .unwrap_or_default()
             .into_iter()
             .map(|tool| {
                 let parameters = if let Some(schema) = tool.inputSchema.as_ref() {
@@ -599,11 +659,36 @@ impl Adapter for McpAdapter {
                 }
             })
             .collect();
+        if Self::schema_supports_events(&schema) {
+            for method in EventMethod::ALL {
+                if operations.iter().any(|op| op.operation_id == method.name()) {
+                    debug!(
+                        "MCP tool '{}' takes precedence over the Events method",
+                        method.name()
+                    );
+                    continue;
+                }
+                let detail = method.detail();
+                operations.push(Operation {
+                    operation_id: detail.operation_id,
+                    display_name: detail.display_name,
+                    description: detail.description,
+                    parameters: detail.parameters,
+                    return_type: detail.return_type,
+                });
+            }
+        }
         Ok(operations)
     }
 
     async fn describe_operation(&self, url: &str, operation: &str) -> Result<OperationDetail> {
-        let tools = self.tools_from_schema_or_refresh(url).await?;
+        let method = EventMethod::from_name(operation);
+        let schema = if method.is_some() {
+            self.fetch_schema(url).await?
+        } else {
+            self.operation_schema(url).await?
+        };
+        let tools = Self::tools_from_schema(&schema).unwrap_or_default();
 
         for tool in tools {
             if tool.name == operation {
@@ -622,6 +707,12 @@ impl Adapter for McpAdapter {
             }
         }
 
+        if let Some(method) = method {
+            if Self::schema_supports_events(&schema) {
+                return Ok(method.detail());
+            }
+            return Err(method.unsupported());
+        }
         bail!("Tool '{}' not found", operation);
     }
 
@@ -633,7 +724,22 @@ impl Adapter for McpAdapter {
     ) -> Result<ExecutionResult> {
         let start = std::time::Instant::now();
         let (args, execution_options) = Self::split_execution_options(args)?;
-        self.validate_tool_call(url, operation, &args).await?;
+        if let Some(method) = EventMethod::from_name(operation) {
+            let schema = self.fetch_schema(url).await?;
+            let tools = Self::tools_from_schema(&schema).unwrap_or_default();
+            if let Some(tool) = tools.iter().find(|tool| tool.name == operation) {
+                Self::validate_required_args(operation, tool.inputSchema.as_ref(), &args)?;
+            } else {
+                if !Self::schema_supports_events(&schema) {
+                    return Err(method.unsupported());
+                }
+                return self
+                    .execute_events(url, method, args, execution_options, start)
+                    .await;
+            }
+        } else {
+            self.validate_tool_call(url, operation, &args).await?;
+        }
 
         if Self::is_stdio_command(url) {
             let (cmd, args_list) = Self::parse_stdio_command(url)?;

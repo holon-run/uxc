@@ -980,6 +980,7 @@ struct McpStdioSessionSnapshot {
 
 struct McpHttpSession {
     transport: adapters::mcp::McpRemoteTransport,
+    capabilities: adapters::mcp::types::ServerCapabilities,
     notifications: Mutex<SessionNotificationFanout>,
     resource_subscriptions: Mutex<HashMap<String, usize>>,
     resource_subscription_ops: Mutex<()>,
@@ -2431,10 +2432,11 @@ impl McpSessionManager {
             auth_profile,
             request_timeout.unwrap_or_else(|| Duration::from_secs(30)),
         )?;
-        transport.initialize().await?;
+        let capabilities = transport.initialize().await?.capabilities;
         transport.initialized().await?;
         let session = Arc::new(McpHttpSession {
             transport,
+            capabilities,
             notifications: Mutex::new(SessionNotificationFanout::default()),
             resource_subscriptions: Mutex::new(HashMap::new()),
             resource_subscription_ops: Mutex::new(()),
@@ -5130,6 +5132,7 @@ impl DaemonRuntime {
         precomputed_stdio_spawn_options: Option<adapters::mcp::StdioSpawnOptions>,
         cache: Arc<dyn Cache>,
     ) -> Result<(String, Option<String>, Value, bool)> {
+        use adapters::mcp::events::EventMethod;
         let endpoint = &request.endpoint;
         let op = request
             .operation_id
@@ -5138,6 +5141,7 @@ impl DaemonRuntime {
         let (raw_args, execution_options) =
             adapters::mcp::McpAdapter::split_execution_options(raw_args)?;
 
+        let event_method = EventMethod::from_name(op);
         if adapters::mcp::McpAdapter::is_stdio_command(endpoint) {
             let (cmd, cmd_args) = adapters::mcp::McpAdapter::parse_stdio_command(endpoint)?;
             // Use pre-computed spawn options if available (from detection phase),
@@ -5185,15 +5189,40 @@ impl DaemonRuntime {
             let timeout = request_timeout_duration(request.options.timeout_ms).unwrap_or_else(
                 adapters::mcp::transport::McpStdioTransport::default_request_timeout,
             );
-            let args = prepare_live_stdio_mcp_execute_args(
-                &mut guard, endpoint, &cache, op, raw_args, timeout,
-            )
-            .await?;
-            let arguments = Some(Value::Object(args.into_iter().collect()));
-            let result = guard
-                .client
-                .call_tool_with_options_and_timeout(op, arguments, &execution_options, timeout)
-                .await;
+            let result = async {
+                if let Some(method) = event_method {
+                    let has_tool = if guard.client.supports_tools() {
+                        let _ = guard
+                            .mark_tools_dirty_from_notifications(endpoint, &cache)
+                            .await;
+                        guard
+                            .refresh_tools_if_needed(endpoint, &cache, timeout)
+                            .await
+                            .is_ok_and(|tools| tools.iter().any(|tool| tool.name == *op))
+                    } else {
+                        false
+                    };
+                    if !has_tool {
+                        let (params, capabilities) =
+                            prepare_mcp_event_request(method, op, raw_args, execution_options)?;
+                        return guard
+                            .client
+                            .call_events(method, params, &capabilities, timeout)
+                            .await;
+                    }
+                }
+                let args = prepare_live_stdio_mcp_execute_args(
+                    &mut guard, endpoint, &cache, op, raw_args, timeout,
+                )
+                .await?;
+                let arguments = Some(Value::Object(args.into_iter().collect()));
+                guard
+                    .client
+                    .call_tool_with_options_and_timeout(op, arguments, &execution_options, timeout)
+                    .await
+                    .map(|result| adapters::mcp::convert_tool_result_to_value(&result))
+            }
+            .await;
             let _ = guard
                 .mark_tools_dirty_from_notifications(endpoint, &cache)
                 .await;
@@ -5205,12 +5234,7 @@ impl DaemonRuntime {
                     self.mcp
                         .mark_stdio_request_finished(&key, None, recent_stderr, child_exited)
                         .await;
-                    Ok((
-                        "call_result".to_string(),
-                        Some(op.clone()),
-                        adapters::mcp::convert_tool_result_to_value(&result),
-                        reused,
-                    ))
+                    Ok(("call_result".to_string(), Some(op.clone()), result, reused))
                 }
                 Err(err) => {
                     self.mcp
@@ -5245,6 +5269,28 @@ impl DaemonRuntime {
                     .await?
             };
             session.mark_used().await;
+            if let Some(method) = event_method {
+                let has_tool = session.capabilities.tools.is_some()
+                    && session
+                        .transport
+                        .list_tools()
+                        .await
+                        .is_ok_and(|tools| tools.iter().any(|tool| tool.name == *op));
+                if !has_tool {
+                    if !session.capabilities.supports_events() {
+                        return Err(method.unsupported());
+                    }
+                    let (params, capabilities) =
+                        prepare_mcp_event_request(method, op, raw_args, execution_options)?;
+                    let name = params["name"].as_str().unwrap_or_default().to_owned();
+                    let data = session
+                        .transport
+                        .call_events(method, params, &capabilities)
+                        .await
+                        .map_err(|err| method.call_error(&name, err))?;
+                    return Ok(("call_result".to_string(), Some(op.clone()), data, reused));
+                }
+            }
             let arguments = Some(Value::Object(raw_args.into_iter().collect()));
             let result = session
                 .transport
@@ -5259,6 +5305,17 @@ impl DaemonRuntime {
             ))
         }
     }
+}
+
+fn prepare_mcp_event_request(
+    method: adapters::mcp::events::EventMethod,
+    operation: &str,
+    raw_args: HashMap<String, Value>,
+    options: adapters::mcp::McpExecutionOptions,
+) -> Result<(Value, Value)> {
+    let args =
+        prepare_execute_args_from_detail(ProtocolType::Mcp, operation, &method.detail(), raw_args)?;
+    method.request(args, options)
 }
 
 enum SubscriptionRunError {

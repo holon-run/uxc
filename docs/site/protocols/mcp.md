@@ -25,6 +25,7 @@ GET event stream.
 | Pagination and cache hints | Supported | Existing UXC cache policy |
 | Custom MCP request headers | Supported | Not injected into legacy requests |
 | `subscriptions/listen` | Supported through daemon-backed flows | Legacy resource subscriptions retained |
+| MCP Events discovery and polling (SEP-3415) | Supported when advertised | Only if advertised by the server |
 | Multi-round tool results | Explicit capabilities and continuation input | Results normalized as complete |
 | OAuth for MCP HTTP | Supported | Supported |
 
@@ -35,9 +36,9 @@ For `2026-07-28`, UXC sends the negotiated protocol version in both:
 - `MCP-Protocol-Version`
 - `params._meta["io.modelcontextprotocol/protocolVersion"]`
 
-Each request also includes client information and client capabilities. UXC
-declares only capabilities supplied by the caller instead of claiming roots,
-sampling, or elicitation support by default.
+Each request also includes client information and client capabilities. UXC does
+not claim roots, sampling, or elicitation support by default. For Events calls,
+it declares the Events extension unless the caller provides `--mcp-capabilities`.
 
 ## Multi-Round Tool Results
 
@@ -83,6 +84,43 @@ UXC keeps the `2024-11-05` path for existing servers, so users do not need to
 change commands when a server upgrades.
 
 ## Optional Extensions
+
+### MCP Events (SEP-3415)
+
+When the server advertises `io.modelcontextprotocol/events`, UXC exposes
+`events/list` and `events/poll` as endpoint operations. Use the event descriptor
+to check that `delivery` includes `poll` and to find the accepted arguments
+(`inputSchema`) and payload shape (`payloadSchema`).
+
+```bash
+uxc "$MCP_ENDPOINT" events/list
+uxc "$MCP_ENDPOINT" events/list "cursor=$NEXT_PAGE_CURSOR"
+
+uxc "$MCP_ENDPOINT" events/poll name=weather.reading arguments.station=sfo cursor:=null
+uxc "$MCP_ENDPOINT" events/poll name=weather.reading arguments.station=sfo "cursor=$POLL_CURSOR"
+```
+
+- `events/list` returns one page. Pass `data.nextCursor` as the `cursor` for
+  the next page if it is present.
+- Omit the poll cursor or pass `cursor:=null` to start from the server's
+  current position. To resume, pass the previous `data.cursor` unchanged with
+  the same event name and arguments, even in a new CLI process. List and poll
+  cursors are distinct and opaque.
+- Each call sends a single `events/poll` request. UXC does not schedule another
+  poll or save a checkpoint. The caller decides what to do with `hasMore` and
+  `nextPollMs`. If `truncated` is `true`, the server reports a gap in replay;
+  UXC returns the flag and the updated cursor along with the server's event
+  payloads and metadata.
+- On modern Streamable HTTP, UXC sends `Mcp-Name` and any `Mcp-Param-*` headers
+  defined by the event's `x-mcp-header` annotations. UXC may read the event
+  catalog before polling to find these annotations.
+
+UXC reports an error if the extension is not advertised. If a server rejects
+polling for a webhook-only event, the CLI retains the server's `-32026` JSON-RPC
+error details. This support does not include push streams or webhook
+subscriptions and is separate from `subscriptions/listen`.
+
+### Other extensions
 
 UXC does not currently implement Tasks, Client ID Metadata Documents, or
 automatic roots, sampling, and elicitation providers. Unknown metadata and

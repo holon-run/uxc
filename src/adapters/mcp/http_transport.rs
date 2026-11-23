@@ -438,7 +438,7 @@ impl McpHttpTransport {
 
     fn request_name(request: &JsonRpcRequest) -> Result<Option<&str>> {
         let key = match request.method.as_str() {
-            "tools/call" | "prompts/get" => "name",
+            "tools/call" | "prompts/get" | "events/poll" => "name",
             "resources/read" => "uri",
             _ => return Ok(None),
         };
@@ -1535,6 +1535,90 @@ impl McpHttpTransport {
             == Some(-32020)
     }
 
+    async fn call_events(
+        &self,
+        method: super::events::EventMethod,
+        params: JsonValue,
+        capabilities: &JsonValue,
+    ) -> Result<JsonValue> {
+        use super::events::EventMethod;
+        let modern = self.protocol_context.era == McpProtocolEra::Modern;
+        let mut headers = Vec::new();
+        if modern
+            && method == EventMethod::Poll
+            && params["arguments"]
+                .as_object()
+                .is_some_and(|obj| !obj.is_empty())
+        {
+            let name = params["name"].as_str().context("Missing event name")?;
+            let mappings = self.event_header_mappings(name, capabilities).await?;
+            headers = Self::argument_headers(mappings, params.get("arguments"))?;
+        }
+        let mut result = self
+            .send_request_with_custom_headers_and_capabilities(
+                method.name(),
+                Some(params),
+                &headers,
+                Some(capabilities),
+            )
+            .await?;
+        if modern && method == EventMethod::List {
+            if let Some(events) = result.get_mut("events").and_then(JsonValue::as_array_mut) {
+                events.retain(|event| {
+                    match Self::schema_header_mappings(event.get("inputSchema")) {
+                        Ok(_) => true,
+                        Err(err) => {
+                            tracing::warn!(name = ?event.get("name"), %err, "Skipping MCP event with invalid x-mcp-header annotations");
+                            false
+                        }
+                    }
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    // Fetch descriptors only when there are arguments that could require routing
+    // headers. Do not persist descriptors across authentication contexts or retry polls.
+    async fn event_header_mappings(
+        &self,
+        name: &str,
+        capabilities: &JsonValue,
+    ) -> Result<Vec<ToolHeaderMapping>> {
+        use super::events::EventMethod;
+        let mut params = None;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..super::types::MCP_LIST_MAX_PAGES {
+            let page = self
+                .send_request_with_custom_headers_and_capabilities(
+                    EventMethod::List.name(),
+                    params,
+                    &[],
+                    Some(capabilities),
+                )
+                .await?;
+            let events = page["events"]
+                .as_array()
+                .context("Missing events/list events array")?;
+            if let Some(event) = events
+                .iter()
+                .find(|event| event["name"].as_str() == Some(name))
+            {
+                return Self::schema_header_mappings(event.get("inputSchema"))
+                    .context("Invalid MCP event routing header annotations");
+            }
+            let Some(cursor) = page["nextCursor"].as_str() else {
+                // Let the server return the protocol error for the event name.
+                return Ok(Vec::new());
+            };
+            if !seen.insert(cursor.to_string()) {
+                bail!("MCP events/list pagination detected a cursor cycle");
+            }
+            params = Some(serde_json::json!({"cursor": cursor}));
+        }
+        bail!("MCP events/list pagination exceeded the maximum page count")
+    }
+
     async fn custom_tool_headers(
         &self,
         name: &str,
@@ -1550,6 +1634,13 @@ impl McpHttpTransport {
             .get(name)
             .cloned()
             .unwrap_or_default();
+        Self::argument_headers(mappings, arguments)
+    }
+
+    fn argument_headers(
+        mappings: Vec<ToolHeaderMapping>,
+        arguments: Option<&JsonValue>,
+    ) -> Result<Vec<(HeaderName, HeaderValue)>> {
         let Some(arguments) = arguments else {
             return Ok(Vec::new());
         };
@@ -1588,7 +1679,11 @@ impl McpHttpTransport {
     }
 
     fn tool_header_mappings(tool: &Tool) -> Result<Vec<ToolHeaderMapping>> {
-        let Some(schema) = tool.inputSchema.as_ref() else {
+        Self::schema_header_mappings(tool.inputSchema.as_ref())
+    }
+
+    fn schema_header_mappings(schema: Option<&JsonValue>) -> Result<Vec<ToolHeaderMapping>> {
+        let Some(schema) = schema else {
             return Ok(Vec::new());
         };
         let mut mappings = Vec::new();
@@ -2721,6 +2816,20 @@ impl McpRemoteTransport {
         match self {
             Self::Streamable(transport) => transport.list_tools_catalog().await,
             Self::Legacy(transport) => transport.list_tools_catalog().await,
+        }
+    }
+
+    pub(crate) async fn call_events(
+        &self,
+        method: super::events::EventMethod,
+        params: JsonValue,
+        capabilities: &JsonValue,
+    ) -> Result<JsonValue> {
+        match self {
+            Self::Streamable(transport) => {
+                transport.call_events(method, params, capabilities).await
+            }
+            Self::Legacy(transport) => transport.send_request(method.name(), Some(params)).await,
         }
     }
 
